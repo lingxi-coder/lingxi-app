@@ -298,6 +298,42 @@ test('owned resume loads the restored model provider credential before becoming 
   assert.equal((commands[3] as { credential: string }).credential, 'or-resumed-secret');
 });
 
+test('a restored model whose credential cannot be read still opens the chat and refuses the prompt', async () => {
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const sent: string[] = [];
+  const diagnostics = new DiagnosticBuffer();
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void; sendPrompt(): void };
+  client.sendCommand = (command) => {
+    const record = command as Record<string, unknown>;
+    sent.push(String(record['type']));
+    if (record['type'] === 'refresh_listings') queueMicrotask(() => client.emit('event', { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}' }));
+  };
+  client.sendPrompt = () => { sent.push('prompt'); };
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    sessionResumeTimeoutMs: 100,
+    diagnostics,
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+    resolveProviderCredential: async () => { throw new Error('A keychain cannot be found to store "openrouter".'); },
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).state = { status: 'connected' };
+  (runtime as any).generation = 1;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 1);
+
+  const resume = runtime.resumeOwnedSession();
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', { type: 'model_changed', model: 'openrouter/cohere/north-mini-code:free' });
+  await resume;
+  assert.match(JSON.stringify(diagnostics.snapshot()), /failed to load model provider credential/);
+
+  await assert.rejects(Promise.resolve(runtime.sendPrompt('hello')), /A keychain cannot be found/);
+  assert.equal(sent.includes('prompt'), false);
+});
+
 test('owned resume resolves a cold custom routing alias before becoming ready', async () => {
   const sessionId = '11111111-2222-4333-8444-555555555555';
   const commands: unknown[] = [];
@@ -2546,10 +2582,10 @@ test('switching to Codex restarts with private OAuth then restores history befor
   runtime.restoreOwnedSessionIfNeeded = async () => { calls.push('restore'); };
   client.sendCommand = command => {
     calls.push(command.type);
-    queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+    if (command.type === 'set_model') queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
   };
   await runtime.dispatchCommand({ type: 'set_model', model: 'openai-chatgpt/gpt-5.6-sol' });
-  assert.deepEqual(calls, ['restart', 'restore', 'set_model']);
+  assert.deepEqual(calls, ['restart', 'restore', 'set_model', 'get_audio_session_context']);
   assert.equal((runtime as any).launchOAuthOverride, undefined);
 });
 
@@ -2588,7 +2624,7 @@ test('a listing that races Codex activation reaches the engine that replaces it'
   gate.resolve();
   await switching;
   await listing;
-  assert.deepEqual(sent, ['set_model', 'list_models']);
+  assert.deepEqual(sent, ['set_model', 'list_models', 'get_audio_session_context']);
 });
 
 test('a failed Codex activation fails only the switch that started it', async () => {
@@ -2640,6 +2676,175 @@ test('Codex launch ownership rejects an owner whose token resolution has not com
   await (manager as any).claimCodexRuntime(runtime.sessionId);
   await assert.rejects((manager as any).claimCodexRuntime('second'), /other Codex chat/);
   await assert.rejects(manager.withCodexAuthMutation(async () => undefined), /other Codex chat/);
+});
+
+test('a connected engine takes the Codex session in place and lets go only after a rotation is persisted', async () => {
+  const commands: any[] = [];
+  const persisted: unknown[] = [];
+  const persistence = deferred();
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    onOpenAiOAuthUpdated: async (session) => { await persistence.promise; persisted.push(session); },
+  });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.sendCommand = (command) => { commands.push(command); };
+  const status = (operationId: number, configured: string[]) => client.emit('event', {
+    type: 'provider_credential_status', operation_id: operationId, configured_provider_ids: configured, storage_encrypted: true, credential_previews: {},
+  });
+  const session = { access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 123, fedramp: false };
+
+  const installing = runtime.installOpenAiOAuth(session);
+  assert.equal(commands[0].type, 'set_provider_credential');
+  assert.equal(commands[0].provider_id, 'openai-chatgpt');
+  assert.deepEqual(JSON.parse(commands[0].credential), session);
+  status(commands[0].operation_id, ['openai-chatgpt']);
+  await installing;
+  assert.equal(runtime.hasOpenAiOAuth, true);
+
+  const releasing = runtime.releaseOpenAiOAuth();
+  assert.equal(commands[1].type, 'delete_provider_credential');
+  assert.equal(commands[1].provider_id, 'openai-chatgpt');
+  // The engine reports a rotation it finished while letting go before it answers.
+  const rotated = { ...session, access_token: 'rotated-access' };
+  client.emit('event', { type: 'openai_oauth_updated', session: rotated });
+  status(commands[1].operation_id, []);
+  let released = false;
+  void releasing.then(() => { released = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(released, false, 'the next holder must not read the session before the rotation is saved');
+  persistence.resolve();
+  await releasing;
+  assert.deepEqual(persisted, [rotated]);
+  assert.equal(runtime.hasOpenAiOAuth, false);
+});
+
+test('an engine that cannot confirm letting go of the Codex session is stopped', async () => {
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  (runtime as any).openAiOAuthActive = true;
+  client.sendCommand = (command) => {
+    queueMicrotask(() => client.emit('event', {
+      type: 'provider_credential_status', operation_id: command.operation_id, configured_provider_ids: [], storage_encrypted: true, credential_previews: {}, error: 'engine refused',
+    }));
+  };
+  let stops = 0;
+  runtime.stop = async () => { stops++; (runtime as any).openAiOAuthActive = false; };
+  await runtime.releaseOpenAiOAuth();
+  assert.equal(stops, 1);
+  assert.equal(runtime.hasOpenAiOAuth, false);
+});
+
+test('an unconfirmed Codex install makes the engine let go before the claim fails', async () => {
+  const commands: any[] = [];
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.sendCommand = (command) => {
+    commands.push(command.type);
+    queueMicrotask(() => client.emit('event', {
+      type: 'provider_credential_status', operation_id: command.operation_id, configured_provider_ids: [], storage_encrypted: true, credential_previews: {},
+      ...(command.type === 'set_provider_credential' ? { error: 'install not confirmed' } : {}),
+    }));
+  };
+  let stops = 0;
+  runtime.stop = async () => { stops++; };
+  await assert.rejects(runtime.installOpenAiOAuth({ access_token: 'private-access', expires_at: 123, fedramp: false }), /install not confirmed/);
+  assert.deepEqual(commands, ['set_provider_credential', 'delete_provider_credential']);
+  assert.equal(stops, 0);
+  assert.equal(runtime.hasOpenAiOAuth, false);
+});
+
+test('a Codex prompt moves the Codex session in first, or fails saying sign-in is required', async () => {
+  for (const model of ['openai-chatgpt/gpt-5.6-sol', 'deepseek/deepseek-chat']) for (const signedIn of [true, false]) {
+    const sent: string[] = [];
+    const runtime = new SessionRuntime({
+      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+      isPackaged: true,
+      claimOpenAiOAuth: async () => { sent.push('claim'); if (signedIn) (runtime as any).openAiOAuthActive = true; },
+    });
+    const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; sendPrompt(): void };
+    (runtime as any).activeWorkspace = '/workspace';
+    (runtime as any).activeWorkspaceTrusted = true;
+    (runtime as any).client = client;
+    (runtime as any).wireClient(client, 0);
+    (runtime as any).child = {};
+    (runtime as any).state = { status: 'connected' };
+    (runtime as any).credentialRoutingSettings = {};
+    (runtime as any).selectedModelReference = model;
+    client.sendCommand = (command) => { sent.push(command.type); };
+    client.sendPrompt = () => { sent.push('prompt'); };
+    const prompt = runtime.sendPrompt('hello');
+    if (!model.startsWith('openai-chatgpt/')) {
+      // Other models never wait on the Codex session.
+      assert.equal(prompt, undefined);
+      assert.deepEqual(sent, ['prompt']);
+    } else if (signedIn) {
+      await prompt;
+      assert.deepEqual(sent, ['claim', 'prompt']);
+    } else {
+      await assert.rejects(Promise.resolve(prompt), /^Error: Codex authentication is unavailable\. Sign in again\.$/);
+      assert.deepEqual(sent, ['claim']);
+      assert.equal(runtime.turnActive, false);
+    }
+  }
+});
+
+test('claiming Codex lets the holder go in place before the claimant takes the session', async () => {
+  const session = { access_token: 'private-access', expires_at: 123, fedramp: false };
+  const events: string[] = [];
+  const manager = new SessionRuntimeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveOpenAiOAuth: async () => { events.push('resolve'); return session; },
+  });
+  const holder = {
+    sessionId: 'holder', hasOpenAiOAuth: true, movesOpenAiOAuthInPlace: true, isStarting: false, turnActive: false,
+    hasActiveAgents: false, pendingInteractions: 0, connectionState: { status: 'connected' },
+    assertNoBackgroundTasks: async () => { events.push('holder:tasks'); },
+    releaseOpenAiOAuth: async () => { events.push('holder:release'); holder.hasOpenAiOAuth = false; },
+    stop: async () => { events.push('holder:stop'); },
+  };
+  const claimant = {
+    sessionId: 'claimant', hasOpenAiOAuth: false, movesOpenAiOAuthInPlace: true,
+    installOpenAiOAuth: async (value: unknown) => { assert.equal(value, session); events.push('claimant:install'); claimant.hasOpenAiOAuth = true; },
+  };
+  (manager as any).runtimes.set('holder', holder);
+  (manager as any).runtimes.set('claimant', claimant);
+  (manager as any).oauthOwner = 'holder';
+
+  holder.turnActive = true;
+  await assert.rejects((manager as any).claimOpenAiOAuth('claimant'), /Wait for the other Codex chat/);
+  assert.deepEqual(events, []);
+  holder.turnActive = false;
+
+  await (manager as any).claimOpenAiOAuth('claimant');
+  assert.deepEqual(events, ['holder:tasks', 'holder:release', 'resolve', 'claimant:install']);
+  assert.equal((manager as any).oauthOwner, 'claimant');
+  await (manager as any).claimOpenAiOAuth('claimant');
+  assert.equal(events.length, 4, 'a holder claims nothing again');
+});
+
+test('a Codex claim refuses an engine that must reconnect, and reports a missing sign-in', async () => {
+  for (const inPlace of [false, true]) {
+    let installs = 0;
+    const manager = new SessionRuntimeManager({
+      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+      resolveOpenAiOAuth: async () => undefined,
+    });
+    (manager as any).runtimes.set('claimant', {
+      sessionId: 'claimant', hasOpenAiOAuth: false, movesOpenAiOAuthInPlace: inPlace,
+      installOpenAiOAuth: async () => { installs++; },
+    });
+    await assert.rejects(
+      (manager as any).claimOpenAiOAuth('claimant'),
+      inPlace ? /^Error: Codex authentication is unavailable\. Sign in again\.$/ : /must reconnect/,
+    );
+    assert.equal(installs, 0);
+  }
 });
 
 test('an externally owned Codex runtime cannot be adopted or killed', async () => {

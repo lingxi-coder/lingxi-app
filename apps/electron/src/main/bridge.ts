@@ -105,6 +105,7 @@ import {
   sanitizeDiagnostic,
 } from './host-utils.js';
 import type { OpenAiOAuthSession } from './host-utils.js';
+import { CODEX_PROVIDER_ID } from './codex-auth.js';
 import { isSessionId } from './sessionIdentity.js';
 import { parseVisualizationReference, type VisualizationReference } from '../shared/visualization.js';
 import {
@@ -123,6 +124,12 @@ import {
 } from './validation.js';
 
 type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credential_status' }>;
+
+const CODEX_SIGN_IN_REQUIRED = 'Codex authentication is unavailable. Sign in again.';
+
+function isCodexModel(model: string | undefined): boolean {
+  return model?.startsWith(`${CODEX_PROVIDER_ID}/`) === true;
+}
 
 interface PendingCredentialOperation {
   providerIds: readonly string[];
@@ -580,6 +587,10 @@ export class SessionRuntime {
       try { await this.ensureModelProviderCredential(config.model); }
       catch (error) { assertPreparing(); throw new Error(`paused: ${error instanceof Error ? error.message : String(error)}`); }
       assertPreparing();
+      if (isCodexModel(config.model)) {
+        await this.ensureOpenAiOAuth();
+        assertPreparing();
+      }
       const catalog = await this.scheduledModelCatalog();
       assertPreparing();
       const model = catalog.details?.find((item) => item.reference === config.model);
@@ -652,6 +663,16 @@ export class SessionRuntime {
   get recoveredLiveConnection(): boolean { return this.liveConnectionRecovered; }
 
   get hasOpenAiOAuth(): boolean { return this.openAiOAuthActive; }
+  /**
+   * A packaged engine this host spawned takes and releases the Codex session
+   * while it runs. An adopted one may predate that, and an unpackaged one
+   * keeps credentials itself, so either restarts to change Codex
+   * authentication instead.
+   */
+  get movesOpenAiOAuthInPlace(): boolean {
+    return this.opts.isPackaged === true && this.child !== null && this.adoptedPid === null
+      && this.state.status === 'connected';
+  }
   get isStarting(): boolean { return this.startPromise !== null; }
 
   get activeCredentialProviderIds(): readonly string[] {
@@ -1142,7 +1163,7 @@ export class SessionRuntime {
       // The previous owner may have rotated credentials while it was stopping.
       if (this.opts.resolveOpenAiOAuth) {
         launch.openaiOAuth = await this.opts.resolveOpenAiOAuth();
-        if (!launch.openaiOAuth) throw new Error('Codex authentication is unavailable. Sign in again.');
+        if (!launch.openaiOAuth) throw new Error(CODEX_SIGN_IN_REQUIRED);
       }
       this.openAiOAuthActive = true;
       this.startupDiagnostic('bridge_start_phase', {
@@ -2088,7 +2109,9 @@ export class SessionRuntime {
     const context = visualizationContext === undefined || visualizationContext === null
       ? undefined
       : parseVisualizationReference(visualizationContext);
-    if (this.opts.resolveProviderCredential) {
+    const mayNeedCodex = this.opts.claimOpenAiOAuth !== undefined
+      && (isCodexModel(this.selectedModelReference) || isCodexModel(this.pendingModelSwitch?.model));
+    if (this.opts.resolveProviderCredential || mayNeedCodex) {
       const generation = this.generation;
       const client = this.requireClient();
       const token = Symbol('prompt hydration');
@@ -2099,6 +2122,9 @@ export class SessionRuntime {
           if (this.pendingModelSwitch) await this.pendingModelSwitch.promise;
           if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
           if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
+          // A chat opens without the Codex session; it moves here with the
+          // first prompt that needs it, or the prompt fails saying why not.
+          if (isCodexModel(this.selectedModelReference)) await this.ensureOpenAiOAuth();
           // Optional Fusion routes must not gate a turn using a healthy main
           // model. Explicit /fusion still awaits these same cached loads.
           void this.ensureFusionProviderCredentials(false).catch(() => {
@@ -2440,32 +2466,21 @@ export class SessionRuntime {
       }
     }
     if (validated.type === 'set_model' && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth || this.opts.onModelSelected)) {
-      if (validated.model.startsWith('openai-chatgpt/') && !this.openAiOAuthActive && this.opts.resolveOpenAiOAuth) {
-        if (this.activeTurn) throw new Error('Cancel the active turn before activating Codex authentication; this requires restarting the session engine.');
-        this.preparingOpenAiOAuth = true;
-        // Published BEFORE the first await so a command that arrives during the
-        // restart finds something to wait on rather than a closed door.
-        let preparation!: Promise<void>;
-        preparation = (async () => {
-          try {
-            const session = await this.opts.resolveOpenAiOAuth!();
-            if (session) {
-              this.launchOAuthOverride = session;
-              this.launchOAuthModel = validated.model;
-              await this.restart();
-              await this.restoreOwnedSessionIfNeeded();
-            }
-          } finally {
-            this.launchOAuthOverride = undefined;
-            this.launchOAuthModel = undefined;
-            this.preparingOpenAiOAuth = false;
-            if (this.openAiOAuthPreparation === preparation) this.openAiOAuthPreparation = null;
-          }
-        })();
-        this.openAiOAuthPreparation = preparation;
-        await preparation;
+      // An engine that takes the Codex session in place receives it with the
+      // first Codex request instead.
+      if (isCodexModel(validated.model) && !this.openAiOAuthActive && this.opts.resolveOpenAiOAuth
+        && !this.movesOpenAiOAuthInPlace) {
+        await this.activateOpenAiOAuthByRestart(validated.model);
       }
       return this.switchModel(validated.model);
+    }
+    // Other slash commands may run a Codex turn. Moving the session here is
+    // best effort: a command that never needs it must still run.
+    if (validated.type === 'run_slash_command' && isCodexModel(this.selectedModelReference)
+      && !this.openAiOAuthActive && this.movesOpenAiOAuthInPlace && this.opts.claimOpenAiOAuth) {
+      await this.ensureOpenAiOAuth().catch((error) => {
+        this.diagnostics.add('warn', 'bridge', `Codex authentication was not moved for a slash command: ${sanitizeDiagnostic(error)}`);
+      });
     }
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
       return this.applyPermissionMode(validated.mode, true);
@@ -2519,7 +2534,12 @@ export class SessionRuntime {
     if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
     assertCurrent();
     if (this.openAiOAuthActive || !resolveFusionCredentialProviderIds(this.credentialRoutingSettings, true).includes('openai-chatgpt')) return;
-    if (!this.opts.resolveOpenAiOAuth) throw new Error('Codex authentication is unavailable. Sign in again.');
+    if (this.movesOpenAiOAuthInPlace && this.opts.claimOpenAiOAuth) {
+      await this.ensureOpenAiOAuth();
+      assertCurrent();
+      return;
+    }
+    if (!this.opts.resolveOpenAiOAuth) throw new Error(CODEX_SIGN_IN_REQUIRED);
     if (this.activeTurn || this.hasActiveAgents) throw new Error('Wait for active work to finish before activating Codex for Fusion; this requires restarting the session engine.');
     const model = this.selectedModelReference;
     this.preparingOpenAiOAuth = true;
@@ -2528,7 +2548,7 @@ export class SessionRuntime {
       try {
         const session = await this.opts.resolveOpenAiOAuth!();
         assertCurrent();
-        if (!session) throw new Error('Codex authentication is unavailable. Sign in again.');
+        if (!session) throw new Error(CODEX_SIGN_IN_REQUIRED);
         this.launchOAuthOverride = session;
         // OAuth is an additional Fusion provider; preserve the conversation model.
         this.launchOAuthModel = model;
@@ -2601,6 +2621,89 @@ export class SessionRuntime {
     if (generation !== this.generation || client !== this.client) throw new Error('Provider credential loading was interrupted.');
     await Promise.all(resolveModelCredentialProviderIds(model, this.credentialRoutingSettings)
       .map((providerId) => this.ensureProviderCredentialCached(providerId)));
+  }
+
+  /**
+   * Make this engine serve the Codex session before Codex work. Rejects with
+   * the reason it cannot: another chat is busy with the session, or nobody is
+   * signed in.
+   */
+  private async ensureOpenAiOAuth(): Promise<void> {
+    if (this.openAiOAuthActive) return;
+    if (this.movesOpenAiOAuthInPlace && this.opts.claimOpenAiOAuth) await this.opts.claimOpenAiOAuth();
+    else if (this.opts.resolveOpenAiOAuth) await this.activateOpenAiOAuthByRestart(this.selectedModelReference);
+    if (!this.openAiOAuthActive) throw new Error(CODEX_SIGN_IN_REQUIRED);
+  }
+
+  /**
+   * Restart an engine that cannot take the Codex session in place with it.
+   * Returns the preparation itself, not a wrapper: commands queued behind it
+   * resume in the order they were sent.
+   */
+  private activateOpenAiOAuthByRestart(model: string | undefined): Promise<void> {
+    if (this.activeTurn) throw new Error('Cancel the active turn before activating Codex authentication; this requires restarting the session engine.');
+    this.preparingOpenAiOAuth = true;
+    // Published BEFORE the first await so a command that arrives during the
+    // restart finds something to wait on rather than a closed door.
+    let preparation!: Promise<void>;
+    preparation = (async () => {
+      try {
+        const session = await this.opts.resolveOpenAiOAuth!();
+        if (session) {
+          this.launchOAuthOverride = session;
+          this.launchOAuthModel = model;
+          await this.restart();
+          await this.restoreOwnedSessionIfNeeded();
+        }
+      } finally {
+        this.launchOAuthOverride = undefined;
+        this.launchOAuthModel = undefined;
+        this.preparingOpenAiOAuth = false;
+        if (this.openAiOAuthPreparation === preparation) this.openAiOAuthPreparation = null;
+      }
+    })();
+    this.openAiOAuthPreparation = preparation;
+    return preparation;
+  }
+
+  /** Serve the host's Codex session from this engine from now on. */
+  async installOpenAiOAuth(session: OpenAiOAuthSession): Promise<void> {
+    const credential = JSON.stringify(session);
+    try {
+      await this.requestCredentialOperation([CODEX_PROVIDER_ID], (operationId) => ({
+        type: 'set_provider_credential',
+        operation_id: operationId,
+        provider_id: CODEX_PROVIDER_ID,
+        credential,
+      }));
+    } catch (error) {
+      // An install that was never confirmed may still have taken effect; the
+      // engine lets go before the session can be given to another one.
+      await this.letGoOfOpenAiOAuth();
+      throw error;
+    }
+    this.openAiOAuthActive = true;
+  }
+
+  /**
+   * Stop serving the Codex session. Resolves once a rotation that was in
+   * flight has been persisted, so the next holder starts from it. An engine
+   * that cannot confirm the release is stopped instead.
+   */
+  async releaseOpenAiOAuth(): Promise<void> {
+    if (this.openAiOAuthActive) await this.letGoOfOpenAiOAuth();
+  }
+
+  private async letGoOfOpenAiOAuth(): Promise<void> {
+    try {
+      await this.deleteProviderCredential(CODEX_PROVIDER_ID);
+    } catch (error) {
+      this.diagnostics.add('warn', 'bridge', `Codex authentication release failed; stopping the engine: ${sanitizeDiagnostic(error)}`);
+      await this.stop();
+      return;
+    }
+    await this.oauthPersistence;
+    this.openAiOAuthActive = false;
   }
 
   hasCachedProviderCredential(providerId: string): boolean {
@@ -2676,12 +2779,11 @@ export class SessionRuntime {
     const pending = this.pendingSessionResume;
     if (!pending?.sessionResumed || !pending.model || pending.hydrationStarted) return;
     pending.hydrationStarted = true;
-    void this.ensureModelProviderCredential(pending.model).then(
-      () => this.resolvePendingSessionResume(pending),
-      (error: unknown) => this.rejectPendingSessionResume(
-        error instanceof Error ? error : new Error(String(error)), pending,
-      ),
-    );
+    // A credential that cannot be read does not keep the chat closed: the
+    // next prompt that needs it loads it again or fails saying why.
+    void this.ensureModelProviderCredential(pending.model).catch((error: unknown) => {
+      this.diagnostics.add('warn', 'host', `failed to load model provider credential: ${sanitizeDiagnostic(error)}`);
+    }).then(() => this.resolvePendingSessionResume(pending));
   }
 
   async restoreOwnedSessionIfNeeded(): Promise<void> {

@@ -107,6 +107,11 @@ export interface BridgeManagerOptions {
   resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
   onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
   beforeOpenAiOAuthLaunch?: () => Promise<void>;
+  /**
+   * Move the host's one Codex session into this runtime's engine, releasing
+   * it from whichever engine holds it. Rejects with the reason it cannot move.
+   */
+  claimOpenAiOAuth?: () => Promise<void>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
@@ -145,7 +150,7 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc' | 'claimOpenAiOAuth'> {
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;

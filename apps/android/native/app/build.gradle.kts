@@ -206,7 +206,7 @@ dependencies {
 
     // Inline-visualization WebView security boundary: document-start bridge
     // injection and origin-scoped, main-frame-only WebMessageListener delivery.
-    implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.webkit:webkit:1.17.1")
 
     // Activity + Compose
     implementation("androidx.activity:activity-compose:1.13.0")

@@ -56,13 +56,108 @@ function builtinCommandNames(): string[] {
     .flatMap((line) => [...line.matchAll(/"([a-z0-9-]+)"/g)].map((match) => match[1]!));
 }
 
+// Source-backed 2.1.295 builtin table, in the order exported by the engine.
+// The five names that caused the old 87-row expectation are not builtin rows:
+// `commit` and `doctor` are bundled prompt entries; `commit-push-pr`, `files`,
+// and `init-verifiers` have no reachable default command-pool producer. See
+// `crates/command-api/src/builtin_support/names.rs` and the fixed-source
+// bindings in `acceptance/source-alignment-295-r31/native-command-source-order.md`.
+const NATIVE_295_BUILTIN_COMMAND_NAMES = [
+  'add-dir',
+  'advisor',
+  'agents',
+  'auto-mode-setup',
+  'autocompact',
+  'autofix-pr',
+  'background',
+  'branch',
+  'brief',
+  'btw',
+  'bug',
+  'cd',
+  'chrome',
+  'clear',
+  'color',
+  'compact',
+  'config',
+  'context',
+  'copy',
+  'desktop',
+  'diff',
+  'effort',
+  'exit',
+  'export',
+  'extra-usage',
+  'fast',
+  'feedback',
+  'focus',
+  'fork',
+  'goal',
+  'help',
+  'hooks',
+  'ide',
+  'init',
+  'insights',
+  'install',
+  'install-github-app',
+  'install-slack-app',
+  'keybindings',
+  'login',
+  'logout',
+  'mcp',
+  'memory',
+  'mobile',
+  'model',
+  'output-style',
+  'passes',
+  'permissions',
+  'plan',
+  'plugin',
+  'powerup',
+  'privacy-settings',
+  'rate-limit-options',
+  'recap',
+  'release-notes',
+  'reload-plugins',
+  'reload-skills',
+  'remote-env',
+  'rename',
+  'resume',
+  'rewind',
+  'security-review',
+  'session',
+  'skill-doctor',
+  'skills',
+  'status',
+  'statusline',
+  'stickers',
+  'stop',
+  'subtask',
+  'tasks',
+  'teleport',
+  'terminal-setup',
+  'theme',
+  'tui',
+  'ultraplan',
+  'upgrade',
+  'usage',
+  'usage-credits',
+  'version',
+  'voice',
+  'workflows',
+] as const;
+
 test('the extraction actually reads the engine registry', () => {
   // interactiveOnlyNames() carries its own red-proof assertions now (length
   // + anchors), so calling it here still catches a broken extraction; this
   // test additionally proves the builtin-table reader works.
   interactiveOnlyNames();
   const builtins = builtinCommandNames();
-  assert.equal(builtins.length, 87, `expected the 87-name builtin table, got ${builtins.length}`);
+  assert.deepEqual(
+    builtins,
+    NATIVE_295_BUILTIN_COMMAND_NAMES,
+    'the builtin table must match the complete ordered 2.1.295 source-backed set',
+  );
 });
 
 test('every interactive-only engine command has a Desktop execution disposition', () => {

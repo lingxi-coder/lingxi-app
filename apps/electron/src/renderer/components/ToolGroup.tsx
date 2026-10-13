@@ -1,7 +1,7 @@
 import { questionAnswers } from './AskUserQuestionSummary';
 import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
-import { toolDisplayHeader } from '../model/runItem';
+import { toolDisplayHeader, toolHasBody } from '../model/runItem';
 import { Disclosure } from './Disclosure';
 import { ToolCall, toolIconName } from './ToolCall';
 import { ToolActivityIcon } from './ToolActivityIcon';
@@ -31,7 +31,9 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
   const singleTool = group.tools.length === 1 ? group.tools[0] : undefined;
   if (singleTool) {
     const singleView = toolDisplayHeader(singleTool);
-    if (/permission/i.test(`${singleTool.tool} ${singleView.label} ${singleView.title}`)) {
+    // A lone summary-only call has nothing more to reveal. Let the tool row
+    // carry its headline and status without a duplicate group disclosure.
+    if (!toolHasBody(singleTool) || /permission/i.test(`${singleTool.tool} ${singleView.label} ${singleView.title}`)) {
       return <div className="transcript-tool-group">
         <ToolCall item={singleTool} modUiSessionId={modUiSessionId} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
       </div>;

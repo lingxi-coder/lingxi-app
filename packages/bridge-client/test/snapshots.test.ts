@@ -937,6 +937,19 @@ function validateCommand(name: string, v: unknown): void {
       validateSettingsDestination(o['destination']);
       assert.ok(isString(o['patch_json']));
       break;
+    case 'update_prompt_suggestion_context':
+      exactObjectKeys(o, ['type', 'session_id', 'focus', 'input_empty', 'pending_permission', 'elicitation_active'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['session_id']) && isString(o['focus']));
+      assert.ok(isBool(o['input_empty']) && isBool(o['pending_permission']) && isBool(o['elicitation_active']));
+      break;
+    case 'prompt_suggestion_feedback':
+      exactObjectKeys(o, ['type', 'session_id', 'uuid', 'action'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['session_id']) && isString(o['uuid']) && isString(o['action']));
+      break;
+    case 'record_prompt_suggestion_submission':
+      exactObjectKeys(o, ['type', 'text'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['text']));
+      break;
     case 'update_permission_rules':
       validateSettingsDestination(o['destination']);
       validatePermissionBehavior(o['behavior']);
@@ -1123,10 +1136,14 @@ function validateEvent(name: string, v: unknown): void {
       );
       break;
     case 'prompt_suggestion_state':
+      exactObjectKeys(o, ['type', 'enabled', 'notice'], [], `event snapshot ${name}`);
       assert.ok(typeof o['enabled'] === 'boolean' && (o['notice'] === null || isString(o['notice'])));
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'prompt_suggestion':
+      exactObjectKeys(o, ['type', 'suggestion', 'uuid', 'session_id'], [], `event snapshot ${name}`);
       assert.ok(isString(o['suggestion']) && isString(o['session_id']) && isString(o['uuid']));
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'turn_ended':
       assert.ok(['end_turn', 'max_turns', 'cancelled'].includes(rec(o['outcome'])['type'] as string));

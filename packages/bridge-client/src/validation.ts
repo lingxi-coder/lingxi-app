@@ -1070,6 +1070,24 @@ export function validateClientEvent(value: unknown): ClientEvent {
         ...(reference === undefined ? {} : { reference }),
       };
     }
+    case 'prompt_suggestion':
+      exactKeys(input, ['type', 'suggestion', 'uuid', 'session_id'], 'client event');
+      return {
+        type,
+        suggestion: string(input['suggestion'], 'prompt suggestion'),
+        uuid: string(input['uuid'], 'prompt suggestion UUID'),
+        session_id: string(input['session_id'], 'prompt suggestion session id'),
+      };
+    case 'prompt_suggestion_state':
+      exactKeys(input, ['type', 'enabled', 'notice'], 'client event');
+      if (input['notice'] !== null && typeof input['notice'] !== 'string') {
+        throw new Error('invalid prompt suggestion notice');
+      }
+      return {
+        type,
+        enabled: boolean(input['enabled'], 'prompt suggestion enabled'),
+        notice: input['notice'] as string | null,
+      };
     case 'ui_invalidate':
       exactKeys(input, ['type', 'instances_json', 'uuid', 'session_id'], 'client event');
       if (input['instances_json'] !== undefined) parseUiInvalidateInstances(input['instances_json']);

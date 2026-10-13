@@ -709,8 +709,8 @@ export type ClientCommand =
   | { type: 'request_exit' }
   // ── Settings (persisted) ─────────────────────────────────────────────────────
   | { type: 'update_settings'; destination: WritableScopeDto; patch_json: string }
-  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
-  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: 'shown' | 'accepted' | 'dismissed' }
+  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: string; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
+  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: string }
   | { type: 'record_prompt_suggestion_submission'; text: string }
   // ── Permissions (persisted) ──────────────────────────────────────────────────
   | {

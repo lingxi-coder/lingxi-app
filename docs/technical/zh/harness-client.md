@@ -50,10 +50,10 @@ SendPrompt 携带 text、可选 prompt_mode 与 turn_id，以及 images 数组�
 ### CLIENT_PROTOCOL_VERSION
 
 ```text
-pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "24.0.0";
 ```
 
-所检查工作区中的协议号。原生客户端生成绑定的布局需要与实际构建的宿主版本一致。
+此检查源码树声明的协议版本。原生客户端生成绑定的布局应与实际构建的宿主版本一致。
 
 这些 JSON 示例表示命令载荷，不包含传输封装。桥接帧与原生绑定入口由各自宿主定义。
 

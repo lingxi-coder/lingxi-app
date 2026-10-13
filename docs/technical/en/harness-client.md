@@ -50,10 +50,10 @@ SendPrompt carries text, optional prompt_mode and turn_id, and an images vector.
 ### CLIENT_PROTOCOL_VERSION
 
 ```text
-pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "24.0.0";
 ```
 
-Protocol version in the inspected workspace. Native clients must version-lock generated binding layouts with the host they actually build.
+Protocol version declared in this inspected source tree. Native clients must version-lock generated binding layouts with the host they actually build.
 
 These JSON examples show the command payload, not a transport envelope. Bridge frames and native binding entrypoints are defined by their respective hosts.
 

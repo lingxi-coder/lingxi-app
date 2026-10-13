@@ -113,11 +113,15 @@ fun SettingsHost(
     val backEntry by navController.currentBackStackEntryAsState()
     val route = backEntry?.destination?.route
     val atRoot = route == null || route == SettingsRoutes.MAIN
+    // The scheduled-task pages are opened from the drawer, not from settings:
+    // they take the place of the settings home so back closes the surface.
+    val standalone = SettingsRoutes.isStandalone(initialRoute)
 
     LaunchedEffect(navController, initialRoute) {
         if (initialRoute != SettingsRoutes.MAIN) {
             navController.navigate(initialRoute) {
                 launchSingleTop = true
+                if (standalone) popUpTo(SettingsRoutes.MAIN) { inclusive = true }
             }
         }
     }
@@ -125,10 +129,13 @@ fun SettingsHost(
         resolvedStore.setVoiceCapability(probedVoiceCapability)
     }
 
-    // System back: pop one page, or close the whole surface at the root.
-    BackHandler(enabled = true) {
-        if (!navController.popBackStack()) onClose()
+    // Pop one page, or close the whole surface when there is no page below.
+    // Checked before popping so the host never empties its own back stack.
+    val goBack: () -> Unit = {
+        if (navController.previousBackStackEntry != null) navController.popBackStack() else onClose()
     }
+    // System back.
+    BackHandler(enabled = true) { goBack() }
 
     androidx.compose.material3.Surface(
         color = t.windowBg,
@@ -160,16 +167,17 @@ fun SettingsHost(
             SettingsTopBar(
                 title = titleFor(backEntry, state),
                 atRoot = atRoot,
-                onBack = { if (!navController.popBackStack()) onClose() },
+                onBack = goBack,
                 onClose = onClose,
-                onReset = { navController.popBackStack(SettingsRoutes.MAIN, inclusive = false) },
+                // 完成: back to the settings home, or close when it is not underneath.
+                onReset = { if (!navController.popBackStack(SettingsRoutes.MAIN, inclusive = false)) onClose() },
             )
 
             SettingsConnectionBanner(engineSettingsState, reconnectSafely)
             BoxWithConstraints(Modifier.fillMaxSize()) {
             val wide = maxWidth >= 840.dp
             Row(Modifier.fillMaxSize()) {
-            if (wide) Box(Modifier.width(280.dp).verticalScroll(rememberScrollState()).padding(16.dp)) {
+            if (wide && !standalone) Box(Modifier.width(280.dp).verticalScroll(rememberScrollState()).padding(16.dp)) {
                 DesktopSettingsNavigation(onNavigate = { navController.navigate(it) { launchSingleTop = true } }, selected = route)
             }
             NavHost(
@@ -179,7 +187,16 @@ fun SettingsHost(
             ) {
                 page(SettingsRoutes.MAIN) {
                     if (wide) GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding)
-                    else DesktopSettingsNavigation(onNavigate = { navController.navigate(it) })
+                    else SettingsHomePage(onNavigate = { navController.navigate(it) })
+                }
+                page(SettingsRoutes.GROUP) { entry ->
+                    SettingsGroup.fromKey(entry.arguments?.getString("group"))?.let { group ->
+                        SettingsGroupPage(
+                            group = group,
+                            onNavigate = { navController.navigate(it) },
+                            onReplayOnboarding = onReplayOnboarding,
+                        )
+                    }
                 }
                 page(SettingsRoutes.FUSION) { Text(stringResource(R.string.settings_parity_fusion_unavailable)) }
                 page(SettingsRoutes.GENERAL) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
@@ -377,6 +394,12 @@ fun SettingsHost(
                         initialRunId = entry.arguments?.getString("run"),
                     )
                 }
+                page(SettingsRoutes.CRON_NEW) { entry ->
+                    com.lingxi.code.cron.CronScreen(
+                        engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession,
+                        initialPrompt = entry.arguments?.getString("prompt"),
+                    )
+                }
             }
             }
             }
@@ -431,7 +454,12 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.CRON,
         SettingsRoutes.CRON_TASK,
         SettingsRoutes.CRON_RUN,
+        SettingsRoutes.CRON_NEW,
         -> stringResource(SettingsTitles.CRON)
+        SettingsRoutes.GROUP ->
+            SettingsGroup.fromKey(entry.arguments?.getString("group"))
+                ?.let { stringResource(it.title) }
+                ?: stringResource(SettingsTitles.MAIN)
         SettingsRoutes.PROVIDER_LIST -> stringResource(providerKindArg(entry).titleRes)
         SettingsRoutes.PROVIDER_PICKER ->
             stringResource(R.string.provider_add_kind_fmt, stringResource(providerKindArg(entry).titleRes))

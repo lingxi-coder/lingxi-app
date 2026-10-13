@@ -10,6 +10,7 @@ struct SettingsPages: View {
         switch page {
         case .main:                       MainSettingsPage(store: store, host: host)
         case .account:                    DesktopAccountPage(host: host)
+        case .group(let group):           SettingsGroupPage(group: group, host: host)
         case .providerList(let b):
             VStack {
                 ProviderListPage(store: store, host: host, kind: b.kind)

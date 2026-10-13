@@ -7,6 +7,8 @@ import Foundation
 struct ProjectScopedPreferences {
     private let defaults: UserDefaults
     private static let workspacePinnedAtKey = "conversation.workspace.pinned-at"
+    private static let sessionPinnedAtKey = "conversation.session.pinned-at"
+    private static let cronResultsSeenAtKey = "conversation.cron.results-seen-at"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -96,6 +98,37 @@ struct ProjectScopedPreferences {
         }
         defaults.set(current.mapValues(\.timeIntervalSince1970), forKey: Self.workspacePinnedAtKey)
         return current
+    }
+
+    /// Session pins are a client-side presentation choice, like workspace pins:
+    /// the engine catalog has no notion of them.
+    func sessionPinnedAt() -> [String: Date] {
+        guard let raw = defaults.dictionary(forKey: Self.sessionPinnedAtKey) as? [String: TimeInterval] else {
+            return [:]
+        }
+        return raw.mapValues(Date.init(timeIntervalSince1970:))
+    }
+
+    func setSessionPinned(_ pinned: Bool, sessionID: String, now: Date = Date()) -> [String: Date] {
+        var current = sessionPinnedAt()
+        if pinned {
+            current[sessionID] = now
+        } else {
+            current.removeValue(forKey: sessionID)
+        }
+        defaults.set(current.mapValues(\.timeIntervalSince1970), forKey: Self.sessionPinnedAtKey)
+        return current
+    }
+
+    /// When the user last looked at the scheduled-task page; results that
+    /// finished after it count as new on the sidebar entry.
+    func cronResultsSeenAt() -> Date? {
+        let value = defaults.double(forKey: Self.cronResultsSeenAtKey)
+        return value > 0 ? Date(timeIntervalSince1970: value) : nil
+    }
+
+    func setCronResultsSeenAt(_ date: Date) {
+        defaults.set(date.timeIntervalSince1970, forKey: Self.cronResultsSeenAtKey)
     }
 
     func workspaceCollapsedKeys(mode: SessionMode) -> Set<String> {

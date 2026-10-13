@@ -85,6 +85,8 @@ private fun schedulePresets(): List<SchedulePreset> = listOf(
 fun CronScreen(
     initialTaskKey: String? = null,
     initialRunId: String? = null,
+    // Opens the new-task form with this prompt filled in ("设为定时" on a chat).
+    initialPrompt: String? = null,
     engineSource: com.lingxi.code.conversation.ConversationSource? = null,
     projectStore: com.lingxi.code.project.ProjectStore? = null,
     onOpenSession: (CronRunRecord) -> Unit = {},
@@ -97,7 +99,7 @@ fun CronScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("all") }
-    var detail by rememberSaveable(initialTaskKey) { mutableStateOf(initialTaskKey != null) }
+    var detail by rememberSaveable(initialTaskKey, initialPrompt) { mutableStateOf(initialTaskKey != null || initialPrompt != null) }
     var prompt by rememberSaveable { mutableStateOf("") }
     var cronExpr by rememberSaveable { mutableStateOf("0 9 * * *") }
     var recurring by rememberSaveable { mutableStateOf(true) }
@@ -111,6 +113,7 @@ fun CronScreen(
     var formError by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     var appliedInitialTask by rememberSaveable(initialTaskKey) { mutableStateOf(false) }
+    var appliedInitialPrompt by rememberSaveable(initialPrompt) { mutableStateOf(false) }
     fun change(value: CronAutomation) { metadata = value.json; dirty = true }
     fun navigate(action: () -> Unit) { if (dirty) discardAction = action else action() }
     fun select(task: AndroidCronTask) {
@@ -134,6 +137,20 @@ fun CronScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(initialPrompt) {
+        if (!appliedInitialPrompt && initialPrompt != null) {
+            create()
+            prompt = initialPrompt
+            appliedInitialPrompt = true
+        }
+    }
+    // A new task needs a model; fill it in once the engine reports the active one.
+    val activeModel = modelState?.active.orEmpty()
+    LaunchedEffect(activeModel, detail, editingTaskId) {
+        if (detail && editingTaskId == null && activeModel.isNotBlank() && automation.model.isBlank()) {
+            metadata = automation.change("model", activeModel).json
+        }
     }
     LaunchedEffect(initialTaskKey, state.tasks) {
         if (!appliedInitialTask && initialTaskKey != null) {
@@ -222,7 +239,7 @@ fun CronScreen(
                         change(automation.change("model", model).withReasoning(com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic))
                     }
                     val reasoningOptions = modelState?.details?.get(automation.model)?.reasoningOptions.orEmpty().filter { it.persistable }
-                    val choices = listOf("{\"type\":\"automatic\"}" to "Automatic") + reasoningOptions.map { reasoningJson(it.selection).toString() to it.label }
+                    val choices = reasoningOptions.map { reasoningJson(it.selection).toString() to it.label }
                     CronChoice("Reasoning", automation.reasoningJson, choices.distinctBy { it.first }, fallbackLabel = automation.reasoningLabel) { change(automation.change("reasoning", org.json.JSONObject(it))) }
                     CronChoice("Notifications", automation.notificationPolicy, listOf("all" to "All runs", "failed" to "Failures only", "none" to "Off"), divider = false) { change(automation.change("notificationPolicy", it)) }
                     }

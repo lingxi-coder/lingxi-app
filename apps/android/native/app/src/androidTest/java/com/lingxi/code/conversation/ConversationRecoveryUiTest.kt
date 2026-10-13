@@ -38,7 +38,6 @@ class ConversationRecoveryUiTest {
                     onNewChat = {},
                     onSelectModel = {},
                     isDark = false,
-                    onToggleTheme = {},
                     onDiscardRecoveredTurn = { discarded.set(true) },
                 )
             }

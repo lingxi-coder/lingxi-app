@@ -36,7 +36,11 @@ enum AppRoute: Hashable {
     )
     case cron(scopeID: String?, taskID: String?)
     case cronRun(runID: String)
+    /// The new-task form, opened with a prompt already filled in.
+    case cronNew(prompt: String)
     case sessionDetails(sessionID: String)
+    case projects
+    case project(id: String)
 }
 
 extension AppRoute: Identifiable {
@@ -48,8 +52,14 @@ extension AppRoute: Identifiable {
             return "cron:\(scopeID ?? "global"):\(taskID ?? "list")"
         case .cronRun(let runID):
             return "cron-run:\(runID)"
+        case .cronNew:
+            return "cron-new"
         case .sessionDetails(let sessionID):
             return "session-details:\(sessionID)"
+        case .projects:
+            return "projects"
+        case .project(let id):
+            return "project:\(id)"
         }
     }
 }
@@ -58,9 +68,9 @@ extension AppRoute: Identifiable {
 @MainActor
 final class AppNavigationModel {
     var path: [AppRoute] = []
-    var presentedRoute: AppRoute?
-    /// The root owns the sidebar selection.
-    var drawerSection: DrawerSection = .chat
+    /// The sidebar's recents filter chip. A list filter only — it never decides
+    /// which mode the live conversation is in.
+    var drawerFilter: RecentsFilter = .all
     /// Sidebar visibility in a regular-width (iPad) split layout. Ignored while
     /// the split view is collapsed.
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -151,16 +161,39 @@ final class AppNavigationModel {
         )
     }
 
+    /// Scheduled tasks are a page of their own, pushed like the terminal — not
+    /// a sheet over the chat and not a settings sub-page.
     func openCron(scopeID: String? = nil, taskID: String? = nil) {
-        closeSidebar()
-        settingsOpen = false
-        presentedRoute = .cron(scopeID: scopeID, taskID: taskID)
+        pushPage(.cron(scopeID: scopeID, taskID: taskID))
     }
 
     func openCronRun(_ runID: String) {
+        pushPage(.cronRun(runID: runID))
+    }
+
+    func openCronCreate(prompt: String) {
+        pushPage(.cronNew(prompt: prompt))
+    }
+
+    func openProjects() {
+        pushPage(.projects)
+    }
+
+    func openProject(_ projectID: String) {
+        pushPage(.project(id: projectID))
+    }
+
+    /// Replace a page of the same family at the top instead of stacking
+    /// duplicates (a second notification for the same task, re-opening the
+    /// projects list from a project page).
+    private func pushPage(_ route: AppRoute) {
         closeSidebar()
         settingsOpen = false
-        presentedRoute = .cronRun(runID: runID)
+        if let last = path.last, last.isSamePage(as: route) {
+            path[path.count - 1] = route
+        } else {
+            path.append(route)
+        }
     }
 
     func openSessionDetails(sessionID: String) {
@@ -169,5 +202,18 @@ final class AppNavigationModel {
         path.append(.sessionDetails(sessionID: sessionID))
     }
 
-    func closePresentedRoute() { presentedRoute = nil }
+}
+
+private extension AppRoute {
+    /// Pages that replace one another when pushed twice in a row.
+    func isSamePage(as other: AppRoute) -> Bool {
+        switch (self, other) {
+        case (.cron, .cron), (.cron, .cronRun), (.cronRun, .cron), (.cronRun, .cronRun),
+             (.cronNew, .cronNew), (.cronNew, .cron), (.cron, .cronNew),
+             (.projects, .projects), (.project, .project):
+            true
+        default:
+            false
+        }
+    }
 }

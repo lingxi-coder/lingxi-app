@@ -283,10 +283,9 @@ class MainActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize()) {
                     RootScreen(
                         isDark = darkTheme,
-                        onToggleTheme = {
-                            scope.launch {
-                                store.setThemeMode(if (darkTheme) ThemeMode.Light else ThemeMode.Dark)
-                            }
+                        onOpenPermissionSettings = {
+                            settingsInitialRoute = SettingsRoutes.PERMISSION_MODE
+                            settingsOpen = true
                         },
                         onOpenSettings = {
                             settingsInitialRoute = SettingsRoutes.MAIN
@@ -308,6 +307,10 @@ class MainActivity : ComponentActivity() {
                         },
                         onOpenCronSettings = { taskKey ->
                             settingsInitialRoute = SettingsRoutes.cron(taskKey)
+                            settingsOpen = true
+                        },
+                        onOpenCronCreate = { prompt ->
+                            settingsInitialRoute = SettingsRoutes.cronNew(prompt)
                             settingsOpen = true
                         },
                         onOpenTerminal = openTerminal,

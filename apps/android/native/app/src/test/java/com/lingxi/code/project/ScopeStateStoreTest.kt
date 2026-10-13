@@ -60,6 +60,30 @@ class ScopeStateStoreTest {
     }
 
     @Test
+    fun `session pins and the scheduled-task seen marker persist and unpin cleanly`() = runTest {
+        val first = store()
+        first.persistSessionPinned("s1", 11L)
+        first.persistSessionPinned("s2", 22L)
+        first.persistSessionPinned("s1", null)
+        first.persistCronResultsSeenAt(1_000L)
+
+        val second = store()
+        assertEquals(mapOf("s2" to 22L), second.readPinnedSessions())
+        assertEquals(1_000L, second.readCronResultsSeenAt())
+    }
+
+    @Test
+    fun `a file written before pins existed reads as no pins and never seen`() = runTest {
+        File(temp.root, "scope-state.json")
+            .writeText("""{"version":1,"activeMode":"chat","scopes":{}}""")
+        val store = store()
+
+        assertEquals(emptyMap<String, Long>(), store.readPinnedSessions())
+        assertEquals(0L, store.readCronResultsSeenAt())
+        assertEquals(SessionMode.Chat, store.readActiveMode())
+    }
+
+    @Test
     fun `a corrupt file reads as empty instead of crashing scope restore`() = runTest {
         val file = File(temp.root, "scope-state.json")
         file.writeText("{ not json")

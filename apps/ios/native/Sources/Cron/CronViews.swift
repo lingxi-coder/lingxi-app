@@ -3,6 +3,8 @@ import SwiftUI
 struct CronRootView: View {
     @State private var repository: CronRepository
     let initialRoute: CronRoute?
+    /// Opens the new-task form with these instructions already filled in.
+    let initialPrompt: String?
     let onDismiss: (() -> Void)?
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var closeAlert = false
@@ -10,10 +12,12 @@ struct CronRootView: View {
     init(
         repository: CronRepository,
         initialRoute: CronRoute? = nil,
+        initialPrompt: String? = nil,
         onDismiss: (() -> Void)? = nil
     ) {
         _repository = State(initialValue: repository)
         self.initialRoute = initialRoute
+        self.initialPrompt = initialPrompt
         self.onDismiss = onDismiss
     }
 
@@ -46,7 +50,7 @@ struct CronRootView: View {
             switch initialRoute {
             case .task(let scopeID, let taskID):
                 if let taskID { repository.beginEdit(scopeID: scopeID, taskID: taskID) }
-                else { repository.beginCreate(scopeID: scopeID) }
+                else { repository.beginCreate(scopeID: scopeID, prompt: initialPrompt ?? "") }
             case .run(let runID): repository.openRun(runID)
             case .list, .none: break
             }
@@ -195,7 +199,14 @@ private struct CronTaskEditorView: View {
     @State private var saving = false
 
     private var reasoningOptions: [ReasoningSelectionDto] {
-        repository.modelDetails[repository.draft.automation.model ?? ""]?.reasoning.options.map(\.selection) ?? [.automatic]
+        (repository.modelDetails[repository.draft.automation.model ?? ""]?.reasoning.options ?? [])
+            .filter { option in
+                switch option.selection {
+                case .automatic, .disabled: return false
+                default: return true
+                }
+            }
+            .map(\.selection)
     }
     private var taskHistory: [CronRunRecord] {
         repository.state.history.filter { $0.scopeID == repository.draft.scopeID && $0.taskID == repository.draft.taskID }

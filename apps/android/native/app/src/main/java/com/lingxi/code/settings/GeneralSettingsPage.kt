@@ -26,7 +26,6 @@ internal fun GeneralSettingsPage(onNavigate: (String) -> Unit, onReplayOnboardin
         "TypeScript language server" to SettingsRoutes.TYPESCRIPT_LSP,
         "Linux runtime" to SettingsRoutes.LINUX_RUNTIME,
         "Computer use" to SettingsRoutes.COMPUTER_USE,
-        "Scheduled tasks" to SettingsRoutes.CRON,
         "Skills" to SettingsRoutes.SKILLS,
     )
     SettingsSection(label = settingsLabel("Device & mobile capabilities")) {

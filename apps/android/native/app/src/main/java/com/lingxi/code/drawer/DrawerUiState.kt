@@ -10,36 +10,31 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import com.lingxi.code.model.SessionMode
 
-/** The three top-level mobile drawers: Chat / Code / Cron. */
-enum class DrawerSection(val key: String) {
-    Chat("chat"),
-    Code("code"),
-    Cron("cron"),
-}
-
 /**
  * Hoisted UI state for the drawer panel — the Compose analog of the iOS
- * `Drawer`'s `@Binding activeWs / activeSession` plus its local `@State section`
- * and expanded workspace set.
+ * `Drawer`'s `@Binding activeWs / activeSession` plus its local filter and pins.
  *
  * Held by [rememberDrawerUiState] so a config change / process death restores
- * the active workspace, selected session, current tab and expanded projects.
+ * the active workspace, selected session, mode filter and pins.
  * The conversation lives in its own `ChatViewModel`; the drawer only tracks
  * which session is *highlighted* and hands the selection back to the caller.
+ * [filter] is a pure list filter — it never decides the conversation's mode.
  */
 @Stable
 class DrawerUiState(
     activeWs: String,
     activeSession: String,
-    section: DrawerSection,
+    filter: RecentsFilter,
     collapsedWorkspaces: Set<String>,
     pinnedWorkspaces: Map<String, Long>,
+    pinnedSessions: Map<String, Long> = emptyMap(),
 ) {
     var activeWs by mutableStateOf(activeWs)
     var activeSession by mutableStateOf(activeSession)
-    var section by mutableStateOf(section)
+    var filter by mutableStateOf(filter)
     var collapsedWorkspaces by mutableStateOf(collapsedWorkspaces)
     var pinnedWorkspaces by mutableStateOf(pinnedWorkspaces)
+    var pinnedSessions by mutableStateOf(pinnedSessions)
 
     fun selectWorkspace(id: String) {
         activeWs = id
@@ -92,6 +87,23 @@ class DrawerUiState(
         pinnedWorkspaces = pinned
     }
 
+    fun sessionPinnedAt(sessionId: String): Long? = pinnedSessions[sessionId]
+
+    fun toggleSessionPinned(
+        sessionId: String,
+        nowEpochMillis: Long = System.currentTimeMillis(),
+    ) {
+        pinnedSessions = if (sessionId in pinnedSessions) {
+            pinnedSessions - sessionId
+        } else {
+            pinnedSessions + (sessionId to nowEpochMillis)
+        }
+    }
+
+    fun replaceSessionPins(pinned: Map<String, Long>) {
+        pinnedSessions = pinned
+    }
+
     companion object {
         /** Production defaults contain no prototype workspace/session/project identifiers. */
         val Saver: Saver<DrawerUiState, *> = listSaver(
@@ -99,31 +111,40 @@ class DrawerUiState(
                 listOf(
                     it.activeWs,
                     it.activeSession,
-                    it.section.key,
+                    it.filter.key,
                     it.collapsedWorkspaces.joinToString(","),
-                    it.pinnedWorkspaces.entries.joinToString(",") { entry -> "${entry.key}:${entry.value}" },
+                    it.pinnedWorkspaces.encodePins(),
+                    it.pinnedSessions.encodePins(),
                 )
             },
             restore = {
                 DrawerUiState(
                     activeWs = it[0],
                     activeSession = it[1],
-                    section = DrawerSection.entries.firstOrNull { s -> s.key == it[2] } ?: DrawerSection.Chat,
+                    // A key saved by the old Chat/Code/Cron tabs maps to the
+                    // nearest filter ("chat"/"code") or to "all" ("cron").
+                    filter = RecentsFilter.fromKey(it[2]),
                     collapsedWorkspaces = it.getOrNull(3)?.split(",")?.filter(String::isNotEmpty)?.toSet().orEmpty(),
-                    pinnedWorkspaces = it.getOrNull(4)
-                        ?.split(",")
-                        ?.mapNotNull { entry ->
-                            val index = entry.lastIndexOf(':')
-                            if (index <= 0) return@mapNotNull null
-                            val key = entry.substring(0, index)
-                            val value = entry.substring(index + 1).toLongOrNull() ?: return@mapNotNull null
-                            key to value
-                        }
-                        ?.toMap()
-                        .orEmpty(),
+                    pinnedWorkspaces = it.getOrNull(4).decodePins(),
+                    pinnedSessions = it.getOrNull(5).decodePins(),
                 )
             },
         )
+
+        private fun Map<String, Long>.encodePins(): String =
+            entries.joinToString(",") { entry -> "${entry.key}:${entry.value}" }
+
+        private fun String?.decodePins(): Map<String, Long> = this
+            ?.split(",")
+            ?.mapNotNull { entry ->
+                val index = entry.lastIndexOf(':')
+                if (index <= 0) return@mapNotNull null
+                val key = entry.substring(0, index)
+                val value = entry.substring(index + 1).toLongOrNull() ?: return@mapNotNull null
+                key to value
+            }
+            ?.toMap()
+            .orEmpty()
     }
 }
 
@@ -132,11 +153,12 @@ class DrawerUiState(
 fun rememberDrawerUiState(
     activeWs: String = "",
     activeSession: String = "",
-    section: DrawerSection = DrawerSection.Chat,
+    filter: RecentsFilter = RecentsFilter.All,
     collapsedWorkspaces: Set<String> = emptySet(),
     pinnedWorkspaces: Map<String, Long> = emptyMap(),
+    pinnedSessions: Map<String, Long> = emptyMap(),
 ): DrawerUiState = rememberSaveable(saver = DrawerUiState.Saver) {
-    DrawerUiState(activeWs, activeSession, section, collapsedWorkspaces, pinnedWorkspaces)
+    DrawerUiState(activeWs, activeSession, filter, collapsedWorkspaces, pinnedWorkspaces, pinnedSessions)
 }
 
 /** Legacy mock-chat grouping order retained for the still-compiled fallback section. */

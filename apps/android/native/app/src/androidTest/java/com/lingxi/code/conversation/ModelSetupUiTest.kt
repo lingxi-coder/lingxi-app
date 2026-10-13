@@ -42,7 +42,6 @@ class ModelSetupUiTest {
                     onNewChat = {},
                     onSelectModel = {},
                     isDark = false,
-                    onToggleTheme = {},
                     modelSetupRequired = true,
                     onOpenModelSettings = { settingsOpened.set(true) },
                 )

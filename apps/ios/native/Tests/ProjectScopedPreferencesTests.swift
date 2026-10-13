@@ -110,154 +110,37 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "conversation.proj-a.code.active-session"), "code-session")
     }
 
-    func testWorkspaceGroupBuilderSortsGlobalPinnedAndRecentGroupsDeterministically() {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let groups = WorkspaceGroupBuilder.seededConversationGroups(
-            section: .code,
-            query: "",
-            groups: [
-                WorkspaceGroupSeed(
-                    scope: .project("older"),
-                    kind: .project,
-                    title: "Older",
-                    subtitle: nil,
-                    updatedAt: now.addingTimeInterval(-500),
-                    sessions: [
-                        WorkspaceSessionRow(
-                            id: "older-code",
-                            title: "Older code",
-                            mode: .code,
-                            modifiedAt: now.addingTimeInterval(-400),
-                            relativeTime: "earlier",
-                            messageCount: 1
-                        )
-                    ]
-                ),
-                WorkspaceGroupSeed(
-                    scope: .global,
-                    kind: .global,
-                    title: "Global",
-                    subtitle: nil,
-                    updatedAt: nil,
-                    sessions: []
-                ),
-                WorkspaceGroupSeed(
-                    scope: .project("pinned"),
-                    kind: .project,
-                    title: "Pinned",
-                    subtitle: nil,
-                    updatedAt: now.addingTimeInterval(-700),
-                    sessions: [
-                        WorkspaceSessionRow(
-                            id: "pinned-code",
-                            title: "Pinned code",
-                            mode: .code,
-                            modifiedAt: now.addingTimeInterval(-800),
-                            relativeTime: "old",
-                            messageCount: 1
-                        )
-                    ]
-                )
-            ],
-            pinnedAt: ["project.pinned": now.addingTimeInterval(-10)]
-        )
+    func testSessionPinsPersistAndUnpinRemovesThem() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        let stamp = Date(timeIntervalSince1970: 1_000_000)
 
-        XCTAssertEqual(groups.map(\.key), ["global", "project.pinned", "project.older"])
+        XCTAssertTrue(preferences.sessionPinnedAt().isEmpty)
+
+        let pinned = preferences.setSessionPinned(true, sessionID: "s1", now: stamp)
+        XCTAssertEqual(pinned["s1"], stamp)
+        XCTAssertEqual(preferences.sessionPinnedAt()["s1"], stamp)
+        // Session pins are separate from workspace pins.
+        XCTAssertTrue(preferences.workspacePinnedAt().isEmpty)
+
+        let unpinned = preferences.setSessionPinned(false, sessionID: "s1")
+        XCTAssertTrue(unpinned.isEmpty)
+        XCTAssertTrue(preferences.sessionPinnedAt().isEmpty)
     }
 
-    func testWorkspaceGroupBuilderFiltersByModeAndSearch() {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let groups = WorkspaceGroupBuilder.seededConversationGroups(
-            section: .chat,
-            query: "spec",
-            groups: [
-                WorkspaceGroupSeed(
-                    scope: .project("alpha"),
-                    kind: .project,
-                    title: "Alpha",
-                    subtitle: nil,
-                    updatedAt: now,
-                    sessions: [
-                        WorkspaceSessionRow(
-                            id: "code-1",
-                            title: "Build spec",
-                            mode: .code,
-                            modifiedAt: now,
-                            relativeTime: "now",
-                            messageCount: 2
-                        ),
-                        WorkspaceSessionRow(
-                            id: "chat-1",
-                            title: "Review spec",
-                            mode: .chat,
-                            modifiedAt: now.addingTimeInterval(-5),
-                            relativeTime: "now",
-                            messageCount: 3
-                        ),
-                        WorkspaceSessionRow(
-                            id: "chat-2",
-                            title: "Unrelated notes",
-                            mode: .chat,
-                            modifiedAt: now.addingTimeInterval(-6),
-                            relativeTime: "now",
-                            messageCount: 1
-                        )
-                    ]
-                ),
-                WorkspaceGroupSeed(
-                    scope: .project("beta"),
-                    kind: .project,
-                    title: "Beta",
-                    subtitle: nil,
-                    updatedAt: now.addingTimeInterval(-20),
-                    sessions: [
-                        WorkspaceSessionRow(
-                            id: "beta-chat",
-                            title: "Notes",
-                            mode: .chat,
-                            modifiedAt: now.addingTimeInterval(-10),
-                            relativeTime: "now",
-                            messageCount: 1
-                        )
-                    ]
-                )
-            ]
-        )
+    func testCronResultsSeenAtIsAbsentUntilSet() {
+        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ProjectScopedPreferences(defaults: defaults)
+        let stamp = Date(timeIntervalSince1970: 2_000_000)
 
-        XCTAssertEqual(groups.map(\.key), ["project.alpha"])
-        XCTAssertEqual(groups.first?.sessions.map(\.id), ["chat-1"])
+        XCTAssertNil(preferences.cronResultsSeenAt())
 
-        let workspaceMatch = WorkspaceGroupBuilder.seededConversationGroups(
-            section: .chat,
-            query: "Alpha",
-            groups: [
-                WorkspaceGroupSeed(
-                    scope: .project("alpha"),
-                    kind: .project,
-                    title: "Alpha",
-                    subtitle: nil,
-                    updatedAt: now,
-                    sessions: [
-                        WorkspaceSessionRow(
-                            id: "chat-1",
-                            title: "Review spec",
-                            mode: .chat,
-                            modifiedAt: now,
-                            relativeTime: "now",
-                            messageCount: 3
-                        ),
-                        WorkspaceSessionRow(
-                            id: "chat-2",
-                            title: "Unrelated notes",
-                            mode: .chat,
-                            modifiedAt: now.addingTimeInterval(-1),
-                            relativeTime: "now",
-                            messageCount: 1
-                        )
-                    ]
-                )
-            ]
-        )
-        XCTAssertEqual(workspaceMatch.first?.sessions.map(\.id), ["chat-1", "chat-2"])
+        preferences.setCronResultsSeenAt(stamp)
+
+        XCTAssertEqual(preferences.cronResultsSeenAt(), stamp)
     }
 }

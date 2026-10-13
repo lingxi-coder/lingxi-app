@@ -5228,7 +5228,7 @@ impl ChatWidget {
         self.run_core_command(
             "effort",
             args,
-            &command_api::builtins::effort::EffortHandler::new(handle),
+            &crate::effort_command::EffortHandler::new(handle),
         )
     }
 

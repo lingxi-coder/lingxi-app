@@ -69,8 +69,6 @@ function recordingContext() {
     knownModel: (m: string) => m === 'opus',
     setPermissionMode: async (m: string) => { calls.push(`setPermissionMode:${m}`); },
     setReasoningLevel: async (l: string) => { calls.push(`setReasoningLevel:${l}`); },
-    setReasoningAutomatic: async () => { calls.push('setReasoningAutomatic'); },
-    setReasoningDisabled: async () => { calls.push('setReasoningDisabled'); },
     setFastMode: async (e: boolean) => { calls.push(`setFastMode:${e}`); },
     fastMode: () => false,
     setTheme: (t: string) => { calls.push(`setTheme:${t}`); },
@@ -116,7 +114,7 @@ test('arguments apply directly', async () => {
   assert.deepEqual(await run('/theme dark'), ['setTheme:dark']);
   assert.deepEqual(await run('/fast on'), ['setFastMode:true']);
   assert.deepEqual(await run('/effort high'), ['setReasoningLevel:high']);
-  assert.deepEqual(await run('/effort auto'), ['setReasoningAutomatic']);
+  assert.deepEqual(await run('/effort auto'), ['emit:error:/effort requires a model-supported effort level']);
 });
 
 test('a bad argument reports itself instead of silently doing nothing', async () => {
@@ -132,8 +130,8 @@ test('bare /fast toggles from the live state', async () => {
   assert.deepEqual(await run('/fast'), ['setFastMode:true']);
 });
 
-test('/effort off disables reasoning outright, distinct from automatic', async () => {
-  assert.deepEqual(await run('/effort off'), ['setReasoningDisabled']);
+test('/effort off rejects the removed reasoning selection', async () => {
+  assert.deepEqual(await run('/effort off'), ['emit:error:/effort requires a model-supported effort level']);
 });
 
 test('/fast off turns fast mode off explicitly, not just toggling it', async () => {

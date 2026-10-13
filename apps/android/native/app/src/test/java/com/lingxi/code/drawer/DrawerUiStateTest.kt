@@ -13,7 +13,7 @@ class DrawerUiStateTest {
         val state = DrawerUiState(
             activeWs = "global",
             activeSession = "",
-            section = DrawerSection.Chat,
+            filter = RecentsFilter.All,
             collapsedWorkspaces = emptySet(),
             pinnedWorkspaces = emptyMap(),
         )
@@ -34,7 +34,7 @@ class DrawerUiStateTest {
         val state = DrawerUiState(
             activeWs = "global",
             activeSession = "",
-            section = DrawerSection.Code,
+            filter = RecentsFilter.Code,
             collapsedWorkspaces = setOf("chat:global"),
             pinnedWorkspaces = mapOf("global" to 1L),
         )
@@ -48,5 +48,30 @@ class DrawerUiStateTest {
         assertTrue(state.isWorkspaceCollapsed(SessionMode.Code, "project.demo"))
         assertEquals(42L, state.pinnedAt(SessionMode.Code, "project.demo"))
         assertEquals(42L, state.pinnedAt(SessionMode.Chat, "project.demo"))
+    }
+
+    @Test
+    fun `session pins toggle on and off independent of workspace pins`() {
+        val state = DrawerUiState(
+            activeWs = "global",
+            activeSession = "",
+            filter = RecentsFilter.All,
+            collapsedWorkspaces = emptySet(),
+            pinnedWorkspaces = mapOf("global" to 1L),
+        )
+
+        state.toggleSessionPinned("s1", nowEpochMillis = 50L)
+        assertEquals(50L, state.sessionPinnedAt("s1"))
+        assertEquals(1L, state.pinnedAt(SessionMode.Chat, "global"))
+
+        state.toggleSessionPinned("s1", nowEpochMillis = 60L)
+        assertEquals(null, state.sessionPinnedAt("s1"))
+    }
+
+    @Test
+    fun `filter keys saved by the old three tabs restore to the nearest filter`() {
+        assertEquals(RecentsFilter.Chat, RecentsFilter.fromKey("chat"))
+        assertEquals(RecentsFilter.Code, RecentsFilter.fromKey("code"))
+        assertEquals(RecentsFilter.All, RecentsFilter.fromKey("cron"))
     }
 }

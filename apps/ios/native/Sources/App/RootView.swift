@@ -138,6 +138,7 @@ struct RootView: View {
     @State private var workspaceWidth: CGFloat = 0
     @State private var sessionInspectorOpen = false
     @State private var sessionDetailsSheetOpen = false
+    @State private var workspacePickerOpen = false
     @State private var openTerminalAfterSessionDetails = false
     @State private var selectedPlanDocument: PlanDocument?
     @State private var providerCatalogBootstrapped = false
@@ -170,7 +171,8 @@ struct RootView: View {
     /// bound; only the newest few taps are worth replaying.
     private static let maxDeferredAppActions = 8
     @State private var workspacePinnedAt: [String: Date]
-    @State private var collapsedWorkspaceKeys: Set<String>
+    @State private var sessionPinnedAt: [String: Date]
+    @State private var cronResultsSeenAt: Date?
     @State private var pendingSessionFork: PendingSessionFork?
     @State private var pendingConversationSelectionRestore: PendingConversationSelectionRestore?
 
@@ -254,6 +256,9 @@ struct RootView: View {
         }
         cron.defaultModel = snapshot.defaultModelID
         let preferences = ProjectScopedPreferences()
+        if preferences.cronResultsSeenAt() == nil {
+            preferences.setCronResultsSeenAt(Date())
+        }
         let projectID = projects.activeProjectId
         _settingsStore = State(initialValue: settings)
         _navigation = State(initialValue: AppNavigationModel())
@@ -269,9 +274,8 @@ struct RootView: View {
         _activeScope = State(initialValue: initialScope)
         _activeMode = State(initialValue: initialMode)
         _workspacePinnedAt = State(initialValue: preferences.workspacePinnedAt())
-        _collapsedWorkspaceKeys = State(
-            initialValue: preferences.workspaceCollapsedKeys(mode: initialMode)
-        )
+        _sessionPinnedAt = State(initialValue: preferences.sessionPinnedAt())
+        _cronResultsSeenAt = State(initialValue: preferences.cronResultsSeenAt())
         _pendingSessionFork = State(initialValue: nil)
         let storedSessionID = ConversationModeRestorePolicy.sessionID(
             mode: initialMode,
@@ -670,38 +674,37 @@ struct RootView: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
             }
-            .fullScreenCover(
-                item: Binding(
-                    get: { navigation.presentedRoute },
-                    set: { if $0 == nil { navigation.closePresentedRoute() } }
-                )
-            ) { route in
-                modalDestination(route)
-            }
     }
 
     private var sidebar: some View {
         @Bindable var navigation = navigation
+        let account = FirebaseAccount.shared.user.map {
+            DrawerAccountSummary(
+                displayName: $0.displayName.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+                    ?? $0.email
+                    ?? String(localized: "settings_title_account"),
+                email: $0.email
+            )
+        }
         return Drawer(
             projectStore: projectStore,
             activeScope: activeScope,
             activeSession: $activeSession,
             source: source,
             cronState: cronRepository.state,
-            activeMode: activeMode,
-            section: $navigation.drawerSection,
-            workspacePinnedAt: workspacePinnedAt,
-            collapsedWorkspaceKeys: collapsedWorkspaceKeys,
+            filter: $navigation.drawerFilter,
+            sessionPinnedAt: sessionPinnedAt,
+            newCronResults: newCronResultCount,
+            account: account,
             openSettings: { navigation.showSettings() },
+            openAccount: { navigation.showSettings(.account) },
             openTerminal: openCurrentWorkspaceTerminal,
             openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
+            openProjects: { navigation.openProjects() },
+            openProject: { navigation.openProject($0) },
             closeSidebar: { navigation.closeSidebar() },
-            onSelectProject: { switchProject(to: $0) },
-            onSelectSession: { switchProject(to: $0, resumeSessionID: $1) },
-            onNewChat: { switchProject(to: $0, startNew: true) },
-            onModeChanged: { _ = switchMode(to: $0) },
-            onToggleWorkspacePinned: toggleWorkspacePinned,
-            onSetWorkspaceCollapsed: setWorkspaceCollapsed,
+            onOpenSession: openRecentSession,
+            onToggleSessionPinned: toggleSessionPinned,
             onContinueInMode: requestContinueInMode
         )
         .id(sourceGeneration)
@@ -716,7 +719,17 @@ struct RootView: View {
                 voiceInteraction: voiceInteraction,
                 source: source,
                 projectName: projectStore.activeProject?.record.name,
-                projectPath: currentWorkspaceGuestPath,
+                sessionMode: activeMode,
+                workspaceName: currentWorkspaceName,
+                isPinned: !activeSession.isEmpty && sessionPinnedAt[activeSession] != nil,
+                canArchive: !activeSession.isEmpty && activeScope != .scheduled,
+                onSelectNewChatMode: { startNewChat(in: activeScope, mode: $0) },
+                onPickWorkspace: { workspacePickerOpen = true },
+                onContinueInOtherMode: continueCurrentSessionInOtherMode,
+                onTogglePinned: { toggleSessionPinned(activeSession) },
+                onMakeScheduled: scheduleCurrentSession,
+                onOpenTerminal: openCurrentWorkspaceTerminal,
+                onArchive: archiveCurrentSession,
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
                     sessionDetailsSheetOpen = true
@@ -737,7 +750,6 @@ struct RootView: View {
                 sessionMode: activeMode,
                 pendingRestoreID: pendingSessionRestoreID,
                 onSessionChanged: adoptEngineSession,
-                onFirstMessageRecorded: { setWorkspaceCollapsed(false, workspaceKey: activeScope.workspaceKey) },
                 onUnavailableSession: clearUnavailableSession,
                 onSessionTransitionFailed: rollbackFailedSession,
                 onRefreshSessions: { source.listSessions() }
@@ -780,9 +792,88 @@ struct RootView: View {
             .presentationDragIndicator(.visible)
             .accessibilityIdentifier("conversation.session-details-sheet")
         }
+        .sheet(isPresented: $workspacePickerOpen) {
+            WorkspacePickerSheet(
+                projects: RecentSessionsBuilder.sortedProjects(
+                    projectStore.projects,
+                    pinnedAt: workspacePinnedAt
+                ),
+                activeScope: activeScope,
+                onSelect: { scope in startNewChat(in: scope, mode: activeMode) }
+            )
+            .environment(\.theme, theme)
+        }
         .onChange(of: session.id) { _, _ in
             openTerminalAfterSessionDetails = false
             sessionDetailsSheetOpen = false
+        }
+    }
+
+    /// The workspace's display name for the top bar and the new-chat strip.
+    private var currentWorkspaceName: String {
+        switch activeScope {
+        case .global:
+            return String(localized: "common_global")
+        case .scheduled:
+            return String(localized: "settings_title_cron")
+        case let .project(id):
+            return projectStore.projects.first { $0.id == id }?.record.name
+                ?? String(localized: "common_global")
+        }
+    }
+
+    /// Start a fresh conversation in `scope` as `mode`, carrying what has been
+    /// typed. The target (scope, mode) restores its own saved draft on a
+    /// switch, so the carried text is written there first and cleared from the
+    /// place it came from.
+    private func startNewChat(in scope: ConversationScope, mode: SessionMode) {
+        guard scope != activeScope || mode != activeMode else {
+            switchScope(to: scope, mode: mode, startNew: true)
+            return
+        }
+        let carried = draft
+        scopedPreferences.setDraft(carried, scope: scope, mode: mode)
+        scopedPreferences.setDraft("", scope: activeScope, mode: activeMode)
+        switchScope(to: scope, mode: mode, startNew: true)
+    }
+
+    private func continueCurrentSessionInOtherMode() {
+        let target: SessionMode = activeMode == .chat ? .code : .chat
+        let sessionID = confirmedSession.isEmpty ? activeSession : confirmedSession
+        if sessionID.isEmpty {
+            startNewChat(in: activeScope, mode: target)
+        } else {
+            requestContinueInMode(
+                scope: activeScope,
+                sessionID: sessionID,
+                sourceMode: activeMode,
+                targetMode: target
+            )
+        }
+    }
+
+    /// "Make it a scheduled task": the first request of this conversation
+    /// becomes the new task's instructions.
+    private func scheduleCurrentSession() {
+        let first = source.model.messages.first { $0.role == .user }?.text ?? ""
+        navigation.openCronCreate(prompt: String(first.prefix(500)))
+    }
+
+    private func archiveCurrentSession() {
+        let sessionID = activeSession
+        let projectID = activeScope.projectID
+        guard !sessionID.isEmpty else { return }
+        Task { @MainActor in
+            do {
+                try await projectStore.setSessionArchived(
+                    projectId: projectID,
+                    sessionId: sessionID,
+                    archived: true
+                )
+                switchScope(to: activeScope, mode: activeMode, startNew: true)
+            } catch {
+                projectStore.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -790,8 +881,7 @@ struct RootView: View {
         Task { @MainActor in
             await VoicePreviewPlayback.shared.stop()
             guard !navigation.settingsOpen,
-                  navigation.path.isEmpty,
-                  navigation.presentedRoute == nil
+                  navigation.path.isEmpty
             else { return }
             voiceInteraction.reloadConfigurationAndResumeIfPossible()
         }
@@ -816,13 +906,65 @@ struct RootView: View {
             )
         case .cron(let scopeID, let taskID):
             let route = scopeID.map { CronRoute.task(scopeID: $0, taskID: taskID) }
-            CronRootView(repository: cronRepository, initialRoute: route)
-                .onAppear { configureCronEditor() }
-            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+            CronRootView(repository: cronRepository, initialRoute: route, onDismiss: { popRoute() })
+                .onAppear {
+                    configureCronEditor()
+                    markCronResultsSeen()
+                }
+                .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+                .toolbar(.hidden, for: .navigationBar)
         case .cronRun(let runID):
-            CronRootView(repository: cronRepository, initialRoute: .run(runID: runID))
-                .onAppear { configureCronEditor() }
+            CronRootView(repository: cronRepository, initialRoute: .run(runID: runID), onDismiss: { popRoute() })
+                .onAppear {
+                    configureCronEditor()
+                    markCronResultsSeen()
+                }
+                .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+                .toolbar(.hidden, for: .navigationBar)
+        case .cronNew(let prompt):
+            CronRootView(
+                repository: cronRepository,
+                initialRoute: .task(scopeID: activeScope.projectID ?? globalCronScopeID, taskID: nil),
+                initialPrompt: prompt,
+                onDismiss: { popRoute() }
+            )
+            .onAppear {
+                configureCronEditor()
+                markCronResultsSeen()
+            }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
+            .toolbar(.hidden, for: .navigationBar)
+        case .projects:
+            ProjectsPage(
+                projectStore: projectStore,
+                workspacePinnedAt: workspacePinnedAt,
+                onOpenProject: { navigation.openProject($0) }
+            )
+        case .project(let projectID):
+            ProjectPage(
+                projectStore: projectStore,
+                projectID: projectID,
+                activeScope: activeScope,
+                source: source,
+                cronState: cronRepository.state,
+                isPinned: workspacePinnedAt[ConversationScope.project(projectID).workspaceKey] != nil,
+                activeSession: activeSession,
+                onTogglePinned: { toggleWorkspacePinned(ConversationScope.project(projectID).workspaceKey) },
+                onNewSession: { mode in
+                    switchScope(to: .project(projectID), mode: mode, startNew: true)
+                },
+                onOpenSession: { mode, sessionID in
+                    switchScope(to: .project(projectID), mode: mode, resumeSessionID: sessionID)
+                },
+                onOpenCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
+                onOpenTerminal: {
+                    navigation.openTerminal(
+                        projectID: projectID,
+                        requestedCwd: projectStore.projects.first { $0.id == projectID }
+                            .map { .guestPath($0.workspace.guestPath) }
+                    )
+                }
+            )
         case .sessionDetails(let sessionID):
             SessionDetailsView(
                 session: session.id == sessionID ? session : SessionRef(id: sessionID, title: session.title),
@@ -830,33 +972,6 @@ struct RootView: View {
                 workspacePath: currentWorkspaceGuestPath,
                 onOpenTerminal: openCurrentWorkspaceTerminal
             )
-        }
-    }
-
-    @ViewBuilder
-    private func modalDestination(_ route: AppRoute) -> some View {
-        switch route {
-        case .cron(let scopeID, let taskID):
-            let initialRoute = scopeID.map { CronRoute.task(scopeID: $0, taskID: taskID) }
-            CronRootView(
-                repository: cronRepository,
-                initialRoute: initialRoute,
-                onDismiss: { navigation.closePresentedRoute() }
-            )
-            .onAppear { configureCronEditor() }
-            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
-        case .cronRun(let runID):
-            CronRootView(
-                repository: cronRepository,
-                initialRoute: .run(runID: runID),
-                onDismiss: { navigation.closePresentedRoute() }
-            )
-            .onAppear { configureCronEditor() }
-            .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
-        case .terminal:
-            EmptyView()
-        case .sessionDetails:
-            EmptyView()
         }
     }
 
@@ -955,7 +1070,6 @@ struct RootView: View {
             }
         }
         cronRepository.onOpenSession = { projectID, sessionID in
-            navigation.closePresentedRoute()
             let mode = projectStore.projects.first(where: { $0.record.id == projectID })?
                 .sessions.first(where: { $0.sessionId == sessionID })?.mode ?? .code
             switchScope(to: projectID.map(ConversationScope.project) ?? .scheduled, mode: mode, resumeSessionID: sessionID)
@@ -1201,6 +1315,9 @@ struct RootView: View {
             }
         }
         voiceInteraction.handleContextChange()
+        // Pushed pages (scheduled tasks, projects) sit above the chat; picking a
+        // conversation must land on it.
+        navigation.path.removeAll()
         if scope == activeScope && targetMode == activeMode {
             navigation.closeSidebar()
             if let resumeSessionID {
@@ -1251,7 +1368,6 @@ struct RootView: View {
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 activeScope = scope
                 activeMode = targetMode
-                collapsedWorkspaceKeys = scopedPreferences.workspaceCollapsedKeys(mode: targetMode)
                 draft = scopedPreferences.draft(scope: scope, mode: targetMode)
                 let restoredSession = restoredSessionID(scope: scope, mode: targetMode)
                 confirmedSession = restoredSession
@@ -1379,12 +1495,39 @@ struct RootView: View {
         )
     }
 
-    private func setWorkspaceCollapsed(_ collapsed: Bool, workspaceKey: String) {
-        collapsedWorkspaceKeys = scopedPreferences.setWorkspaceCollapsed(
-            collapsed,
-            workspaceKey: workspaceKey,
-            mode: activeMode
+    private func toggleSessionPinned(_ sessionID: String) {
+        sessionPinnedAt = scopedPreferences.setSessionPinned(
+            sessionPinnedAt[sessionID] == nil,
+            sessionID: sessionID
         )
+    }
+
+    /// A recents row carries its own workspace and mode, so one switch lands on
+    /// the right engine binding — no mode change first, session pick second.
+    private func openRecentSession(scope: ConversationScope, mode: SessionMode, sessionID: String) {
+        let scheduled = scope == .global && cronRepository.state.generatedSessions.contains {
+            $0.projectID == nil && $0.id == sessionID
+        }
+        switchScope(
+            to: scheduled ? .scheduled : scope,
+            mode: scheduled ? .code : mode,
+            resumeSessionID: sessionID
+        )
+    }
+
+    /// Scheduled results that finished after the user last opened the page.
+    private var newCronResultCount: Int {
+        let seen = cronResultsSeenAt ?? .distantPast
+        return cronRepository.state.history.filter { run in
+            guard run.sessionID != nil, let finished = run.finishedAtMs else { return false }
+            return Date(timeIntervalSince1970: TimeInterval(finished) / 1_000) > seen
+        }.count
+    }
+
+    private func markCronResultsSeen() {
+        let now = Date()
+        cronResultsSeenAt = now
+        scopedPreferences.setCronResultsSeenAt(now)
     }
 
     private func requestContinueInMode(
@@ -1663,7 +1806,6 @@ struct RootView: View {
     private func applyAppAction(_ action: LingxiAppAction) -> Bool {
         navigation.closeSidebar()
         navigation.closeSettings()
-        navigation.closePresentedRoute()
         navigation.path.removeAll()
 
         switch action {
@@ -1963,7 +2105,6 @@ private struct ConversationProjectBridge: View {
     let sessionMode: SessionMode
     let pendingRestoreID: String?
     let onSessionChanged: (String) -> Bool
-    let onFirstMessageRecorded: () -> Void
     let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
     let onRefreshSessions: () -> Void
@@ -2048,7 +2189,6 @@ private struct ConversationProjectBridge: View {
                         mode: sessionMode,
                         initialMessageCount: 1
                     )
-                    if model.activeSessionId == sessionID { onFirstMessageRecorded() }
                 } catch {
                     if model.activeSessionId == sessionID {
                         model.error = ConversationError(kind: .host, message: String(format: String(localized: "session_index_save_new_failed_fmt"), error.localizedDescription))

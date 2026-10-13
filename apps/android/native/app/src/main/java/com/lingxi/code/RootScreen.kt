@@ -18,11 +18,15 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -68,10 +72,17 @@ import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.cron.AndroidCronRepository
 import com.lingxi.code.cron.CronRunStatus
 import com.lingxi.code.cron.CronSchedulingMode
+import com.lingxi.code.account.AccountViewModel
+import com.lingxi.code.drawer.DrawerAccount
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.DrawerProductionData
-import com.lingxi.code.drawer.DrawerSection
 import com.lingxi.code.drawer.rememberDrawerUiState
+import com.lingxi.code.conversation.SessionPanel
+import com.lingxi.code.conversation.SessionPanelModel
+import com.lingxi.code.conversation.WorkspacePickerSheet
+import com.lingxi.code.conversation.permissionModeLabel
+import com.lingxi.code.project.ProjectPage
+import com.lingxi.code.project.ProjectsPage
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.CatalogModelDetails
@@ -214,13 +225,16 @@ internal fun isBoundToScopeMode(
 @OptIn(ExperimentalCoroutinesApi::class)
 fun RootScreen(
     isDark: Boolean,
-    onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
+    /** Open the scheduled-task page on a new task prefilled with the given prompt. */
+    onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
+    /** Open the permission-mode settings page. */
+    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
@@ -382,20 +396,10 @@ fun RootScreen(
     val scope = rememberCoroutineScope()
     var drawerBootstrapComplete by rememberSaveable { mutableStateOf(false) }
 
-    fun drawerSectionFor(mode: SessionMode): DrawerSection = when (mode) {
-        SessionMode.Chat -> DrawerSection.Chat
-        SessionMode.Code -> DrawerSection.Code
-    }
-
-    fun conversationModeFor(section: DrawerSection): SessionMode? = when (section) {
-        DrawerSection.Chat -> SessionMode.Chat
-        DrawerSection.Code -> SessionMode.Code
-        DrawerSection.Cron -> null
-    }
-
+    // The conversation mode follows the session the user opens or starts; the
+    // drawer's Chat/Code chips are only a list filter and never decide it.
     fun setConversationMode(mode: SessionMode) {
         activeSessionMode = mode
-        drawerUi.section = drawerSectionFor(mode)
     }
 
     fun projectSnapshotForScope(scope: ConversationScope): ProjectSnapshot? = when (scope) {
@@ -517,10 +521,14 @@ fun RootScreen(
     // stays with ProjectStore; this store records which scope was active
     // across process death.
 
+    var cronResultsSeenAt by remember { mutableLongStateOf(0L) }
     LaunchedEffect(scopeStore) {
         val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
         activeSessionMode = restoredMode
-        drawerUi.section = drawerSectionFor(restoredMode)
+        drawerUi.replaceSessionPins(scopeStore.readPinnedSessions())
+        // Results that already exist when this first runs are not "new".
+        cronResultsSeenAt = scopeStore.readCronResultsSeenAt().takeIf { it > 0L }
+            ?: System.currentTimeMillis().also { scopeStore.persistCronResultsSeenAt(it) }
         val presentation = scopeStore.readWorkspacePresentation()
         drawerUi.replaceWorkspacePresentation(
             collapsed = presentation.filterValues { it.collapsed }.keys,
@@ -531,12 +539,9 @@ fun RootScreen(
         drawerBootstrapComplete = true
     }
 
-    LaunchedEffect(drawerUi.section, drawerBootstrapComplete) {
+    LaunchedEffect(activeSessionMode, drawerBootstrapComplete) {
         if (!drawerBootstrapComplete) return@LaunchedEffect
-        conversationModeFor(drawerUi.section)?.let { nextMode ->
-            if (activeSessionMode != nextMode) activeSessionMode = nextMode
-            scopeStore.persistActiveMode(nextMode)
-        }
+        scopeStore.persistActiveMode(activeSessionMode)
     }
 
     LaunchedEffect(sourceScope) {
@@ -1223,11 +1228,6 @@ fun RootScreen(
                     mode = activeSessionMode,
                     initialMessageCount = 1,
                 )
-                val key = sourceScope.persistenceKey()
-                if (drawerUi.isWorkspaceCollapsed(activeSessionMode, key)) {
-                    drawerUi.toggleWorkspaceCollapsed(activeSessionMode, key)
-                    scopeStore.persistWorkspaceCollapsed("${activeSessionMode.wireKey}:$key", false)
-                }
             }.onFailure {
                 chatViewModel.reportHostError(resources.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
             }
@@ -1471,6 +1471,129 @@ fun RootScreen(
         }
     }
 
+    // Scheduled-task runs are reached from the scheduled-task page, never from
+    // the recents list.
+    val drawerEngineSessions = globalDrawerSessions.let { catalog ->
+        val scheduledIds = scheduledSessionRows.mapTo(mutableSetOf()) { it.uuid }
+        catalog.copy(rows = catalog.rows.filterNot { it.uuid in scheduledIds })
+    }
+    val newCronResults = cronState.generatedSessions.count { run ->
+        run.sessionId != null && (run.finishedAtMs ?: 0L) > cronResultsSeenAt
+    }
+    fun markCronResultsSeen() {
+        val now = System.currentTimeMillis()
+        cronResultsSeenAt = now
+        scope.launch { scopeStore.persistCronResultsSeenAt(now) }
+    }
+    val accountModel: AccountViewModel = viewModel()
+    val accountState by accountModel.state.collectAsStateWithLifecycle()
+    val accountFallbackName = stringResource(R.string.settings_title_account)
+    val drawerAccount = accountState.user?.let { user ->
+        DrawerAccount(
+            displayName = user.name ?: user.email ?: accountFallbackName,
+            email = user.email,
+        )
+    }
+    var projectsPageOpen by rememberSaveable { mutableStateOf(false) }
+    var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
+    var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
+    // A scheduled-task workspace is not a place to start chatting: new chats from
+    // there go to the global workspace.
+    val newChatScope = if (sourceScope == ConversationScope.Scheduled) ConversationScope.Global else sourceScope
+    val currentWorkspaceName = when (val current = newChatScope) {
+        ConversationScope.Global, ConversationScope.Scheduled -> stringResource(R.string.common_global)
+        is ConversationScope.Project ->
+            drawerProductionData.projects.orEmpty().firstOrNull { it.id == current.projectId }?.name
+                ?: stringResource(R.string.drawer_entry_projects)
+    }
+    fun closeProjectPages() {
+        projectPageId = null
+        projectsPageOpen = false
+    }
+
+    /**
+     * Open an existing project session. The recents list and the project page
+     * mix modes, so the opened session decides the conversation mode: after a
+     * rebind the mode is set explicitly, or the mode effect would bounce the
+     * engine back to the previous mode.
+     */
+    fun openProjectSession(projectId: String, ref: SessionRef) {
+        val project = projectState.projects.firstOrNull { it.record.id == projectId } ?: return
+        val session = project.sessions.firstOrNull { it.sessionId == ref.id } ?: return
+        val resumeTarget = SessionRef(session.sessionId, session.title)
+        val targetScope = ConversationScope.Project(projectId)
+        if (sourceMatches(targetScope, session.mode)) {
+            drawerUi.selectSession(resumeTarget.id)
+            chatViewModel.openSession(resumeTarget, empty = session.messageCount == 0)
+            closeDrawer()
+            closeProjectPages()
+        } else {
+            scope.launch {
+                if (
+                    switchEngineScope(
+                        project = project,
+                        target = resumeTarget,
+                        newSession = false,
+                        resumeEmpty = session.messageCount == 0,
+                        replacePendingTransition = true,
+                        sessionModeOverride = session.mode,
+                    )
+                ) {
+                    setConversationMode(session.mode)
+                    closeDrawer()
+                    closeProjectPages()
+                }
+            }
+        }
+    }
+
+    /**
+     * Start a new conversation in [target] in [mode]. The mode is part of the
+     * engine binding, so a different mode (or workspace) rebinds the engine, and
+     * the conversation mode is then set explicitly. [carryDraft] moves what the
+     * user already typed into the destination's draft slot, which is keyed per
+     * (workspace, mode), so picking a mode on the new-chat page keeps the text.
+     */
+    fun startNewSessionIn(
+        target: ConversationScope,
+        mode: SessionMode = activeSessionMode,
+        carryDraft: Boolean = false,
+    ) {
+        val project = projectSnapshotForScope(target)
+        if (target is ConversationScope.Project && project == null) return
+        val carried = draft
+        if (sourceMatches(target, mode)) {
+            chatViewModel.startNewSession()
+            closeDrawer()
+            closeProjectPages()
+        } else {
+            scope.launch {
+                if (carryDraft && carried.isNotEmpty()) {
+                    scopeStore.persistDraft(target.sessionStateKey(mode), carried)
+                }
+                if (
+                    switchEngineScope(
+                        engineScope = target,
+                        project = project,
+                        target = null,
+                        newSession = true,
+                        replacePendingTransition = true,
+                        sessionModeOverride = mode,
+                    )
+                ) {
+                    setConversationMode(mode)
+                    closeDrawer()
+                    closeProjectPages()
+                }
+            }
+        }
+    }
+
+    /** Start a new conversation in a project, in [mode] (default: the current mode). */
+    fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) =
+        startNewSessionIn(ConversationScope.Project(projectId), mode)
+
     Box(modifier = modifier.fillMaxSize()) {
         AdaptiveConversationDrawer(
             modifier = Modifier.fillMaxSize(),
@@ -1505,6 +1628,7 @@ fun RootScreen(
                                             sessionModeOverride = targetMode,
                                         )
                                     ) {
+                                        setConversationMode(targetMode)
                                         closeDrawer()
                                     }
                                 }
@@ -1521,27 +1645,7 @@ fun RootScreen(
                             onOpenTerminal("interactive", null)
                         },
                         onClose = { closeDrawer() },
-                        engineSessions = globalDrawerSessions,
-                        onNewGlobalSession = {
-                            if (sourceMatches(ConversationScope.Global, activeSessionMode)) {
-                                chatViewModel.startNewSession()
-                                closeDrawer()
-                            } else {
-                                scope.launch {
-                                    if (
-                                        switchEngineScope(
-                                            project = null,
-                                            target = null,
-                                            newSession = true,
-                                            replacePendingTransition = true,
-                                            sessionModeOverride = activeSessionMode,
-                                        )
-                                    ) {
-                                        closeDrawer()
-                                    }
-                                }
-                            }
-                        },
+                        engineSessions = drawerEngineSessions,
                         onResumeSession = { uuid ->
                             globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
                                 val targetScope = if (scheduledSessionRows.any { it.uuid == uuid }) ConversationScope.Scheduled else ConversationScope.Global
@@ -1566,6 +1670,9 @@ fun RootScreen(
                                                 sessionModeOverride = row.mode,
                                             )
                                         ) {
+                                            // The recents list mixes modes: the
+                                            // opened session decides the mode.
+                                            setConversationMode(row.mode)
                                             closeDrawer()
                                         }
                                     }
@@ -1578,113 +1685,38 @@ fun RootScreen(
                             } else sessionScope
                             scope.launch { continueSessionInMode(targetScope, row, targetMode) }
                         },
-                        onSelectSection = { section ->
-                            drawerUi.section = section
-                            conversationModeFor(section)?.let(::setConversationMode)
-                        },
-                        isWorkspaceCollapsed = { mode, workspaceKey -> drawerUi.isWorkspaceCollapsed(mode, workspaceKey) },
-                        onToggleWorkspaceCollapsed = { mode, workspaceKey ->
-                            drawerUi.toggleWorkspaceCollapsed(mode, workspaceKey)
+                        onToggleSessionPinned = { sessionId ->
+                            drawerUi.toggleSessionPinned(sessionId)
                             scope.launch {
-                                scopeStore.persistWorkspaceCollapsed(
-                                    "${mode.wireKey}:$workspaceKey",
-                                    drawerUi.isWorkspaceCollapsed(mode, workspaceKey),
-                                )
-                            }
-                        },
-                        pinnedAtEpochMillis = { mode, workspaceKey -> drawerUi.pinnedAt(mode, workspaceKey) },
-                        onToggleWorkspacePinned = { mode, workspaceKey ->
-                            drawerUi.toggleWorkspacePinned(mode, workspaceKey)
-                            scope.launch {
-                                scopeStore.persistWorkspacePinned(
-                                    workspaceKey,
-                                    drawerUi.pinnedAt(mode, workspaceKey),
-                                )
+                                scopeStore.persistSessionPinned(sessionId, drawerUi.sessionPinnedAt(sessionId))
                             }
                         },
                         productionData = drawerProductionData,
-                        onCreateProject = { showCreateProject = true },
-                        onSelectProjectSession = { projectId, ref ->
-                            val project = projectState.projects.firstOrNull {
-                                it.record.id == projectId
-                            } ?: return@DrawerContent
-                            val session = project.sessions
-                                .firstOrNull { it.sessionId == ref.id }
-                                ?: return@DrawerContent
-                            val resumeTarget = SessionRef(session.sessionId, session.title)
-                            val targetScope = ConversationScope.Project(projectId)
-                            val switched = if (sourceMatches(targetScope, session.mode)) {
-                                drawerUi.selectSession(resumeTarget.id)
-                                chatViewModel.openSession(
-                                    resumeTarget,
-                                    empty = session.messageCount == 0,
-                                )
-                                true
-                            } else {
-                                scope.launch {
-                                    if (
-                                        switchEngineScope(
-                                            project = project,
-                                            target = resumeTarget,
-                                            newSession = false,
-                                            resumeEmpty = session.messageCount == 0,
-                                            replacePendingTransition = true,
-                                            sessionModeOverride = session.mode,
-                                        )
-                                    ) {
-                                        closeDrawer()
-                                    }
-                                }
-                                false
-                            }
-                            if (switched) closeDrawer()
-                        },
-                        onNewProjectSession = { projectId ->
-                            val project = projectState.projects.firstOrNull {
-                                it.record.id == projectId
-                            } ?: return@DrawerContent
-                            val targetScope = ConversationScope.Project(projectId)
-                            val switched = if (sourceMatches(targetScope, activeSessionMode)) {
-                                chatViewModel.startNewSession()
-                                true
-                            } else {
-                                scope.launch {
-                                    if (
-                                        switchEngineScope(
-                                            project = project,
-                                            target = null,
-                                            newSession = true,
-                                            replacePendingTransition = true,
-                                            sessionModeOverride = activeSessionMode,
-                                        )
-                                    ) {
-                                        closeDrawer()
-                                    }
-                                }
-                                false
-                            }
-                            if (switched) closeDrawer()
-                        },
-                        onReimportProject = { projectId ->
-                            runProjectSync(projectId) { projectStore.reimport(projectId) }
-                        },
-                        onExportProject = { projectId ->
-                            runProjectSync(projectId) { projectStore.export(projectId) }
-                        },
-                        onReauthorizeProject = { projectId ->
-                            runProjectSync(projectId) {
-                                pendingReauthorizeProjectId = projectId
-                                importProjectLauncher.launch(null)
-                            }
-                        },
+                        onSelectProjectSession = ::openProjectSession,
                         onOpenCron = { taskKey ->
+                            markCronResultsSeen()
                             closeDrawer()
                             onOpenCronSettings(taskKey)
                         },
-                        onCreateCron = {
+                        onOpenCronList = {
+                            markCronResultsSeen()
                             closeDrawer()
                             onOpenCronSettings(null)
                         },
+                        onOpenProjects = {
+                            closeDrawer()
+                            projectsPageOpen = true
+                        },
+                        onOpenProject = { projectId ->
+                            closeDrawer()
+                            projectPageId = projectId
+                        },
+                        runningSessionId = state.session.id.takeIf { it != "new" && state.isStreaming },
+                        awaitingSessionId = state.session.id.takeIf {
+                            it != "new" && (pendingPermission != null || state.pendingQuestions.isNotEmpty())
+                        },
+                        newCronResults = newCronResults,
+                        account = drawerAccount,
                     )
                 }
             },
@@ -1726,7 +1758,15 @@ fun RootScreen(
                     },
                     onSelectModel = chatViewModel::selectModel,
                     isDark = isDark,
-                    onToggleTheme = onToggleTheme,
+                    sessionMode = activeSessionMode,
+                    workspaceName = currentWorkspaceName,
+                    onOpenSessionPanel = { sessionPanelOpen = true },
+                    onSelectNewChatMode = { mode ->
+                        if (mode != activeSessionMode) {
+                            startNewSessionIn(newChatScope, mode, carryDraft = true)
+                        }
+                    },
+                    onPickWorkspace = { workspacePickerOpen = true },
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     // Ordinary mic and Flow Mode are separate controls.
                     onMicClick = {
@@ -1869,6 +1909,137 @@ fun RootScreen(
             onResolve = ComputerUseFeatureProvider::resolveApproval,
         )
 
+        AnimatedVisibility(
+            visible = projectsPageOpen && projectPageId == null,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+        ) {
+            BackHandler { projectsPageOpen = false }
+            ProjectsPage(
+                projects = drawerProductionData.projects.orEmpty(),
+                pinnedAtEpochMillis = { key -> drawerUi.pinnedWorkspaces[key] },
+                statusMessage = drawerProductionData.projectStatusMessage,
+                onBack = { projectsPageOpen = false },
+                onOpenProject = { projectPageId = it },
+                onTogglePinned = { projectId ->
+                    val key = "project.$projectId"
+                    drawerUi.toggleWorkspacePinned(activeSessionMode, key)
+                    scope.launch { scopeStore.persistWorkspacePinned(key, drawerUi.pinnedWorkspaces[key]) }
+                },
+                onCreateProject = { showCreateProject = true },
+            )
+        }
+        val openedProject = projectPageId?.let { id ->
+            drawerProductionData.projects.orEmpty().firstOrNull { it.id == id }
+        }
+        AnimatedVisibility(
+            visible = openedProject != null,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+        ) {
+            // Keep the last project while the exit animation runs.
+            val shown = remember(openedProject) { openedProject }
+            if (shown != null) {
+                BackHandler { projectPageId = null }
+                ProjectPage(
+                    project = shown,
+                    crons = drawerProductionData.crons.orEmpty().filter { it.id.startsWith("${shown.id}:") },
+                    activeSession = drawerUi.activeSession,
+                    onBack = { projectPageId = null },
+                    onNewSession = { mode -> startProjectSession(shown.id, mode ?: activeSessionMode) },
+                    onOpenSession = { ref -> openProjectSession(shown.id, ref) },
+                    onOpenCron = { taskKey ->
+                        markCronResultsSeen()
+                        closeProjectPages()
+                        onOpenCronSettings(taskKey)
+                    },
+                    onReimport = { runProjectSync(shown.id) { projectStore.reimport(shown.id) } },
+                    onExport = { runProjectSync(shown.id) { projectStore.export(shown.id) } },
+                    onReauthorize = {
+                        runProjectSync(shown.id) {
+                            pendingReauthorizeProjectId = shown.id
+                            importProjectLauncher.launch(null)
+                        }
+                    },
+                )
+            }
+        }
+        if (sessionPanelOpen) {
+            val panelRow = SessionRow(
+                uuid = state.session.id,
+                title = state.session.title,
+                messageCount = state.messages.size,
+                relativeTime = "",
+                mode = activeSessionMode,
+            )
+            val otherMode = when (activeSessionMode) {
+                SessionMode.Chat -> SessionMode.Code
+                SessionMode.Code -> SessionMode.Chat
+            }
+            SessionPanel(
+                model = SessionPanelModel(
+                    title = state.session.title,
+                    mode = activeSessionMode,
+                    workspaceName = currentWorkspaceName,
+                    modelName = state.model.name,
+                    permissionLabel = permissionModeLabel(settingsState.effectivePermissionMode),
+                    pinned = drawerUi.sessionPinnedAt(state.session.id) != null,
+                    canArchive = sourceScope != ConversationScope.Scheduled,
+                ),
+                onDismiss = { sessionPanelOpen = false },
+                // Changing a conversation's mode forks it into a new session.
+                onContinueInOtherMode = {
+                    sessionPanelOpen = false
+                    scope.launch { continueSessionInMode(sourceScope, panelRow, otherMode) }
+                },
+                onOpenPermissionSettings = {
+                    sessionPanelOpen = false
+                    onOpenPermissionSettings()
+                },
+                onTogglePinned = {
+                    sessionPanelOpen = false
+                    val id = state.session.id
+                    drawerUi.toggleSessionPinned(id)
+                    scope.launch { scopeStore.persistSessionPinned(id, drawerUi.sessionPinnedAt(id)) }
+                },
+                onMakeScheduled = {
+                    sessionPanelOpen = false
+                    onOpenCronCreate(
+                        state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }
+                            ?.text.orEmpty().take(500),
+                    )
+                },
+                onOpenTerminal = {
+                    sessionPanelOpen = false
+                    onOpenTerminal("interactive", null)
+                },
+                onArchive = {
+                    sessionPanelOpen = false
+                    val id = state.session.id
+                    val projectId = (sourceScope as? ConversationScope.Project)?.projectId
+                    scope.launch {
+                        runCatching { projectStore.setSessionArchived(projectId, id, true) }
+                            .onSuccess { chatViewModel.startNewSession() }
+                            .onFailure {
+                                chatViewModel.reportHostError(
+                                    resources.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty()),
+                                )
+                            }
+                    }
+                },
+            )
+        }
+        if (workspacePickerOpen) {
+            WorkspacePickerSheet(
+                projects = drawerProductionData.projects.orEmpty(),
+                currentScope = newChatScope,
+                onDismiss = { workspacePickerOpen = false },
+                onPick = { target ->
+                    workspacePickerOpen = false
+                    if (target != newChatScope) startNewSessionIn(target, activeSessionMode, carryDraft = true)
+                },
+            )
+        }
         CreateProjectDialog(
             visible = showCreateProject,
             onDismiss = { showCreateProject = false },
@@ -2005,6 +2176,6 @@ internal fun appendVoiceTranscript(base: String, transcript: String): String = w
 @Composable
 private fun RootScreenPreview() {
     LingXiTheme {
-        RootScreen(isDark = true, onToggleTheme = {})
+        RootScreen(isDark = true)
     }
 }

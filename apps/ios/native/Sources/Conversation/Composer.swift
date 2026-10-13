@@ -100,8 +100,12 @@ struct Composer: View {
     var voiceCapturePhase: VoiceCapturePhase = .idle
     var voiceInteractionMode: VoiceInteractionMode? = nil
 
-    @State private var modelOpen = false
-    @State private var controlsOpen = false
+    /// Owned by the chat so the session panel can open the same pickers.
+    @Binding var modelOpen: Bool
+    @Binding var controlsOpen: Bool
+    /// A Chat session has no file permissions to ask about, so only Code
+    /// sessions get the permission chip.
+    var showsPermissionChip: Bool = true
     @State private var holding = false
     @State private var cancellingHold = false
     @State private var suppressMicTap = false
@@ -160,9 +164,15 @@ struct Composer: View {
         onMicTap: @escaping () -> Void = {},
         onFlowModeTap: @escaping () -> Void = {},
         voiceCapturePhase: VoiceCapturePhase = .idle,
-        voiceInteractionMode: VoiceInteractionMode? = nil
+        voiceInteractionMode: VoiceInteractionMode? = nil,
+        modelOpen: Binding<Bool>,
+        controlsOpen: Binding<Bool>,
+        showsPermissionChip: Bool = true
     ) {
         self._model = model
+        self._modelOpen = modelOpen
+        self._controlsOpen = controlsOpen
+        self.showsPermissionChip = showsPermissionChip
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
@@ -664,12 +674,12 @@ struct Composer: View {
     private var configurationSummary: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 0) {
-                permissionChip
+                if showsPermissionChip { permissionChip }
                 Spacer(minLength: 8)
                 modelChip
             }
             VStack(alignment: .leading, spacing: 0) {
-                permissionChip
+                if showsPermissionChip { permissionChip }
                 modelChip
             }
         }

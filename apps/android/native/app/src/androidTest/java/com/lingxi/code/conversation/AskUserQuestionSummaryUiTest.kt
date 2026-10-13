@@ -55,7 +55,7 @@ class AskUserQuestionSummaryUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = dark.value) {
                 ChatScreen(state = state.value, onSend = {}, onNewChat = {}, onSelectModel = {},
-                    isDark = dark.value, onToggleTheme = {}, onToggleToolCall = { id ->
+                    isDark = dark.value, onToggleToolCall = { id ->
                         val expanded = state.value.expandedToolCalls
                         state.value = state.value.copy(expandedToolCalls = if (id in expanded) expanded - id else expanded + id)
                     })

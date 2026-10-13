@@ -64,11 +64,19 @@ test('a no-argument command with supplied arguments still resolves, so its run c
 
 function recordingContext() {
   const calls: string[] = [];
+  let reasoningSelection: unknown;
   const ctx = {
     setModel: async (m: string) => { calls.push(`setModel:${m}`); },
     knownModel: (m: string) => m === 'opus',
     setPermissionMode: async (m: string) => { calls.push(`setPermissionMode:${m}`); },
-    setReasoningLevel: async (l: string) => { calls.push(`setReasoningLevel:${l}`); },
+    setReasoningLevel: async (l: string) => {
+      reasoningSelection = { type: 'level', id: l };
+      calls.push(`setReasoningLevel:${l}`);
+    },
+    setReasoningAutomatic: async () => {
+      reasoningSelection = { type: 'automatic' };
+      calls.push('setReasoningAutomatic');
+    },
     setFastMode: async (e: boolean) => { calls.push(`setFastMode:${e}`); },
     fastMode: () => false,
     setTheme: (t: string) => { calls.push(`setTheme:${t}`); },
@@ -89,14 +97,18 @@ function recordingContext() {
     showHelp: () => { calls.push('showHelp'); },
     emit: (output: string, isError?: boolean) => { calls.push(`emit:${isError ? 'error' : 'ok'}:${output}`); },
   };
-  return { ctx, calls };
+  return { ctx, calls, reasoningSelection: () => reasoningSelection };
+}
+
+async function dispatch(raw: string, ctx: ReturnType<typeof recordingContext>['ctx']) {
+  const resolved = resolveDesktopCommand(raw, DESKTOP_COMMANDS);
+  assert.ok(resolved, `${raw} should be handled locally`);
+  await resolved.command.run(resolved.args, ctx as never);
 }
 
 async function run(raw: string) {
   const { ctx, calls } = recordingContext();
-  const resolved = resolveDesktopCommand(raw, DESKTOP_COMMANDS);
-  assert.ok(resolved, `${raw} should be handled locally`);
-  await resolved.command.run(resolved.args, ctx as never);
+  await dispatch(raw, ctx);
   return calls;
 }
 
@@ -114,7 +126,17 @@ test('arguments apply directly', async () => {
   assert.deepEqual(await run('/theme dark'), ['setTheme:dark']);
   assert.deepEqual(await run('/fast on'), ['setFastMode:true']);
   assert.deepEqual(await run('/effort high'), ['setReasoningLevel:high']);
-  assert.deepEqual(await run('/effort auto'), ['emit:error:/effort requires a model-supported effort level']);
+  assert.deepEqual(await run('/effort auto'), ['setReasoningAutomatic']);
+});
+
+test('/effort auto clears a previously selected level through the automatic selection', async () => {
+  const { ctx, calls, reasoningSelection } = recordingContext();
+  await dispatch('/effort high', ctx);
+  assert.deepEqual(reasoningSelection(), { type: 'level', id: 'high' });
+
+  await dispatch('/effort auto', ctx);
+  assert.deepEqual(reasoningSelection(), { type: 'automatic' });
+  assert.deepEqual(calls, ['setReasoningLevel:high', 'setReasoningAutomatic']);
 });
 
 test('a bad argument reports itself instead of silently doing nothing', async () => {
@@ -130,8 +152,13 @@ test('bare /fast toggles from the live state', async () => {
   assert.deepEqual(await run('/fast'), ['setFastMode:true']);
 });
 
-test('/effort off rejects the removed reasoning selection', async () => {
-  assert.deepEqual(await run('/effort off'), ['emit:error:/effort requires a model-supported effort level']);
+test('/effort off and removed aliases are rejected', async () => {
+  for (const value of ['off', 'automatic', 'disabled', 'unset']) {
+    assert.deepEqual(
+      await run(`/effort ${value}`),
+      ['emit:error:/effort requires a model-supported effort level'],
+    );
+  }
 });
 
 test('/fast off turns fast mode off explicitly, not just toggling it', async () => {

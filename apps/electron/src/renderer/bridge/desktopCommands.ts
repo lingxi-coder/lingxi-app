@@ -127,7 +127,8 @@ export const DESKTOP_COMMANDS: readonly DesktopCommand[] = [
     args: 'optional',
     async run(args, ctx) {
       if (!args) return ctx.openModelPicker('effort');
-      if (['auto', 'off', 'automatic', 'disabled', 'unset'].includes(args.toLowerCase())) {
+      if (args.toLowerCase() === 'auto') return ctx.setReasoningAutomatic();
+      if (['off', 'automatic', 'disabled', 'unset'].includes(args.toLowerCase())) {
         return ctx.emit('/effort requires a model-supported effort level', true);
       }
       await ctx.setReasoningLevel(args);

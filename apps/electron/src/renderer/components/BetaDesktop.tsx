@@ -1776,6 +1776,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     knownModel: (model) => bridge.desktop.models.includes(model),
     setPermissionMode: (mode) => bridge.setPermissionMode(mode),
     setReasoningLevel: (id) => bridge.setReasoningSelection({ type: 'level', id }),
+    setReasoningAutomatic: () => bridge.setReasoningSelection({ type: 'automatic' }),
     setFastMode: (enabled) => bridge.setFastMode(enabled),
     fastMode: () => bridge.desktop.fastMode,
     setTheme: (theme) => onSetTheme(theme),

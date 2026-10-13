@@ -47,9 +47,11 @@ impl BuiltinCommandHandler for EffortHandler {
             && snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.capabilities.xhigh);
+        // Native keeps `auto` available even when this model has no named levels.
         let choices = format!(
-            "{}{}",
+            "{}{}auto{}",
             levels.join("|"),
+            if levels.is_empty() { "" } else { "|" },
             if ultra_available {
                 "|ultracode [on|off]"
             } else {
@@ -57,11 +59,7 @@ impl BuiltinCommandHandler for EffortHandler {
             }
         );
         let display = if matches!(value.as_str(), "" | "help" | "-h" | "--help") {
-            if levels.is_empty() {
-                "Effort levels are unavailable for the active model".into()
-            } else {
-                format!("Usage: /effort <{choices}>")
-            }
+            format!("Usage: /effort <{choices}>")
         } else if matches!(value.as_str(), "current" | "status") {
             let environment = std::env::var(branding::EFFORT_LEVEL_ENV).ok();
             let current = match snapshot {
@@ -73,7 +71,8 @@ impl BuiltinCommandHandler for EffortHandler {
                     .unwrap_or_else(|| "Model default".into()),
             };
             format!("Current effort level: {current}")
-        } else if levels.contains(&value.as_str())
+        } else if value == "auto"
+            || levels.contains(&value.as_str())
             || (value == "med" && levels.contains(&"medium"))
             || (ultra_available
                 && matches!(
@@ -102,6 +101,108 @@ impl BuiltinCommandHandler for EffortHandler {
         "Set the model effort level"
     }
     fn argument_hint(&self) -> Option<&str> {
-        Some("<level>")
+        Some("<level|auto>")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lingxi_core::host::effort::{EffortCapabilities, EffortCommandSnapshot, EffortState};
+    use lingxi_core::host::effort_table::SessionEffort;
+    use lingxi_core::host::{
+        ConversationControls, PermissionControlState, ReasoningControlSpec, StatusSnapshot,
+    };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use orchestrator::test_support::MockOrchestratorHandle;
+
+    fn parsed(args: &str) -> ParsedSlashCommand {
+        command_api::parser::parse_slash_command(&Utf16JsonProjection::from(format!(
+            "/effort {args}"
+        )))
+        .expect("valid effort command")
+    }
+
+    #[tokio::test]
+    async fn auto_clears_a_previously_selected_effort_level() {
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        let model = "anthropic/claude-sonnet-4-5";
+        handle.set_status_snapshot(StatusSnapshot {
+            model: model.into(),
+            ..StatusSnapshot::default()
+        });
+        handle.set_conversation_controls(ConversationControls {
+            model_reference: model.into(),
+            permission: PermissionControlState {
+                requested: "default".into(),
+                effective: "default".into(),
+                modes: Vec::new(),
+            },
+            requested_reasoning_selection: ReasoningSelection::Automatic,
+            effective_reasoning_selection: ReasoningSelection::Automatic,
+            reasoning_spec: ReasoningControlSpec {
+                available: LEVELS
+                    .into_iter()
+                    .map(|id| ReasoningSelection::Level { id: id.into() })
+                    .collect(),
+                selections_persistable: true,
+                budget_range: None,
+                provider_default: ReasoningSelection::Automatic,
+                forced: false,
+                modifiable: true,
+                disabled_reason: None,
+            },
+        });
+
+        let base = EffortCommandSnapshot {
+            model: model.into(),
+            settings_key: "claude-sonnet-4-5".into(),
+            session: SessionEffort::Default,
+            primary: None,
+            capabilities: EffortCapabilities {
+                supported: true,
+                max: true,
+                xhigh: true,
+                thinking_disabled_cap: false,
+            },
+            state: EffortState::default(),
+            user_settings_path: None,
+            save_default: false,
+            organization_start_effort: None,
+        };
+        handle.set_effort_command_source(move |active_model, session| {
+            let mut snapshot = base.clone();
+            snapshot.model = active_model.into();
+            snapshot.primary = match &session {
+                SessionEffort::Level(value) => Some(value.clone()),
+                SessionEffort::Inherit | SessionEffort::Default => None,
+            };
+            snapshot.session = session;
+            Ok(Some(snapshot))
+        });
+
+        let handler = EffortHandler::new(handle.clone());
+        handler.handle(&parsed("high")).await;
+        assert_eq!(
+            handle
+                .effort_command_snapshot()
+                .await
+                .unwrap()
+                .unwrap()
+                .session,
+            SessionEffort::Level(serde_json::Value::String("high".into()))
+        );
+
+        handler.handle(&parsed("auto")).await;
+        assert_eq!(
+            handle
+                .effort_command_snapshot()
+                .await
+                .unwrap()
+                .unwrap()
+                .session,
+            SessionEffort::Default
+        );
+        assert_eq!(handle.current_effort().await, None);
     }
 }

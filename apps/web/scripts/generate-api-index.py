@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Build a source declaration catalog from committed SDK source snapshots.
+"""Build a source declaration catalog from the four SDK repositories.
 
 This is a source index, not rustdoc or a resolved export graph. It lists public
 declarations in the selected first-party contract/facade sources, with comments
 and source signatures. It does not expand macros, resolve aliases/re-exports,
-evaluate platform/feature cfg, or include generated native bindings. Committed
-blobs are used so every source link identifies exactly the indexed declaration.
+evaluate platform/feature cfg, or include generated native bindings. The default
+committed mode uses HEAD blobs; the bridge repository is anchored to the latest
+bridge-client source commit so committing this catalog does not stale itself.
+Working-tree mode also includes local changes. Only declarations from files
+byte-identical to their committed source bytes receive committed links.
 
 Run from any directory: python3 apps/web/scripts/generate-api-index.py
 Use --workspace /path/to/lingxi when the sibling checkout directory differs.
@@ -17,10 +20,12 @@ import argparse
 import bisect
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
+import tomllib
 from urllib.parse import quote
 
 
@@ -36,6 +41,10 @@ class Scope:
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True)
+
+
+def git_bytes(repo: Path, *args: str) -> bytes:
+    return subprocess.check_output(["git", "-C", str(repo), *args])
 
 
 def source_url(repo: Path) -> str:
@@ -322,20 +331,87 @@ def source_revision(repo: Path, sdk: str) -> str:
     return revision or head
 
 
-def build(workspace: Path) -> dict:
+def source_files(repo: Path, sdk: str, revision: str, source_mode: str) -> dict[str, bytes]:
+    """Read selected UTF-8 sources without consulting index contents or timestamps."""
+    if source_mode == "committed":
+        files = git_bytes(repo, "ls-tree", "-r", "--name-only", "-z", revision).decode().split("\0")
+    else:
+        files = git_bytes(repo, "ls-files", "--cached", "--others", "--exclude-standard", "-z").decode().split("\0")
+    sources = {}
+    for file in sorted(set(files)):
+        if not file or not selected(sdk, file):
+            continue
+        if source_mode == "committed":
+            content = git_bytes(repo, "show", f"{revision}:{file}")
+        else:
+            path = repo / file
+            # Deleted tracked files have no working-tree input. Never follow a
+            # symlink into a different checkout when collecting source files.
+            if not path.is_file() or path.is_symlink():
+                continue
+            content = path.read_bytes()
+        try:
+            content.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        sources[file] = content
+    return sources
+
+
+def tree_fingerprint(sources: dict[str, bytes]) -> str:
+    inputs = [[file, hashlib.sha256(content).hexdigest()] for file, content in sorted(sources.items())]
+    payload = json.dumps(inputs, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def product_pins(workspace: Path) -> dict[str, str]:
+    """Record current product dependency pins independently of SDK HEADs."""
+    manifest = workspace / "lingxi-app" / "Cargo.toml"
+    if not manifest.is_file():
+        return {}
+    data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    pins: dict[str, set[str]] = {}
+
+    def visit(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        remote, revision = value.get("git"), value.get("rev")
+        if isinstance(remote, str) and isinstance(revision, str):
+            name = remote.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+            pins.setdefault(name, set()).add(revision)
+        for child in value.values():
+            visit(child)
+
+    visit(data)
+    result = {}
+    for name, revisions in pins.items():
+        if len(revisions) != 1:
+            raise ValueError(f"Product manifest has inconsistent revision pins for {name}: {sorted(revisions)}")
+        result[name] = next(iter(revisions))
+    return result
+
+
+def build(workspace: Path, source_mode: str = "committed") -> dict:
+    if source_mode not in ("committed", "working-tree"):
+        raise ValueError(f"Unknown source mode: {source_mode}")
     repositories = []
     entries = []
     timestamps = []
+    pins = product_pins(workspace)
     for sdk, dirname in (("harness", "harness-runtime"), ("llm", "llm-client"), ("mobile", "mobile-linux-runtime"), ("bridge", "lingxi-app")):
         repo = workspace / dirname
         revision = source_revision(repo, sdk)
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise ValueError(f"Invalid Git revision for {repo}")
         base = source_url(repo)
-        repositories.append({"sdk": sdk, "revision": revision, "sourceUrl": base})
+        committed_sources = source_files(repo, sdk, revision, "committed")
+        source_bytes = committed_sources if source_mode == "committed" else source_files(repo, sdk, revision, source_mode)
+        repository = {"sdk": sdk, "revision": revision, "sourceUrl": base, "dirty": source_bytes != committed_sources, "treeFingerprint": tree_fingerprint(source_bytes)}
+        if dirname in pins:
+            repository["productPinnedRevision"] = pins[dirname]
+        repositories.append(repository)
         timestamps.append(datetime.fromisoformat(git(repo, "show", "-s", "--format=%cI", revision).strip()))
-        files = sorted(git(repo, "ls-tree", "-r", "--name-only", revision).splitlines())
-        sources = {file: git(repo, "show", f"{revision}:{file}") for file in files if selected(sdk, file)}
+        sources = {file: content.decode("utf-8") for file, content in source_bytes.items()}
         # Inherent methods are often implemented in another facade file.
         public_types = {match.group(1) for file, source in sources.items() if file.endswith(".rs") for match in re.finditer(r"\bpub\s+(?:struct|enum|trait)\s+([A-Za-z_]\w*)", masked(source))}
         for file, source in sources.items():
@@ -344,25 +420,30 @@ def build(workspace: Path) -> dict:
             newlines = [pos for pos, char in enumerate(source) if char == "\n"]
             for name, kind, signature, docs, pos in declarations:
                 line = bisect.bisect_left(newlines, pos) + 1
-                entries.append({"sdk": sdk, "name": name, "kind": kind, "signature": signature, "summary": docs, "file": file, "line": line, "url": f"{base}/blob/{revision}/{quote(file, safe='/')}#L{line}"})
+                source_state = "committed" if committed_sources.get(file) == source_bytes[file] else "working-tree"
+                entry = {"sdk": sdk, "name": name, "kind": kind, "signature": signature, "summary": docs, "file": file, "line": line, "sourceState": source_state}
+                if source_state == "committed":
+                    entry["url"] = f"{base}/blob/{revision}/{quote(file, safe='/')}#L{line}"
+                entries.append(entry)
     entries.sort(key=lambda item: (item["sdk"], item["name"].casefold(), item["file"], item["line"]))
     unique = {(item["sdk"], item["file"], item["line"], item["name"]): item for item in entries}
-    return {"generatedAt": max(timestamps).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"), "repositories": repositories, "entries": list(unique.values())}
+    return {"generatedAt": max(timestamps).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"), "sourceMode": source_mode, "repositories": repositories, "entries": list(unique.values())}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[4])
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parents[1] / "public" / "api-index.json")
-    parser.add_argument("--check", action="store_true", help="Fail if the saved catalog differs from committed source snapshots.")
+    parser.add_argument("--source-mode", choices=("committed", "working-tree"), default="committed", help="Read HEAD blobs (default) or selected nonignored working-tree files.")
+    parser.add_argument("--check", action="store_true", help="Fail if the saved catalog differs from the selected source snapshots.")
     args = parser.parse_args()
-    content = json.dumps(build(args.workspace.resolve()), ensure_ascii=False, indent=2) + "\n"
+    content = json.dumps(build(args.workspace.resolve(), args.source_mode), ensure_ascii=False, indent=2) + "\n"
     if args.check:
-        if not args.output.is_file() or args.output.read_text() != content:
-            raise SystemExit("API catalog is stale; run generate-api-index.py")
+        if not args.output.is_file() or args.output.read_text(encoding="utf-8") != content:
+            raise SystemExit(f"API catalog is stale; run generate-api-index.py --source-mode {args.source_mode}")
     else:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(content)
+        args.output.write_text(content, encoding="utf-8")
     data = json.loads(content)
     counts = {repo["sdk"]: sum(item["sdk"] == repo["sdk"] for item in data["entries"]) for repo in data["repositories"]}
     print(json.dumps({"output": str(args.output), "declarations": counts}, ensure_ascii=False))

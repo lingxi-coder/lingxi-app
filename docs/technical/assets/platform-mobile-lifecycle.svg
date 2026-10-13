@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="320" viewBox="0 0 1040 320" role="img" aria-labelledby="title desc">
+  <title id="title">Mobile Linux lifecycle · 移动 Linux 生命周期</title>
+  <desc id="desc">Pinned platform resources are verified and staged, then booted for command, PTY and raw stdio execution. Sessions close before shutdown; repair targets the managed image and iOS kernel changes may require restart.</desc>
+  <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="none" stroke="#566477" stroke-width="1.5"/></marker></defs>
+  <rect width="1040" height="320" rx="20" fill="#f3f5f7"/>
+  <g font-family="system-ui,-apple-system,sans-serif" text-anchor="middle" fill="#182536">
+    <text x="520" y="38" font-size="18" font-weight="650">Verified resources → owned sessions · 经过验证的资源 → 有归属的会话</text>
+    <g stroke="#c5ced8" fill="#ffffff" stroke-width="1.2">
+      <rect x="24" y="80" width="206" height="106" rx="12"/><rect x="286" y="80" width="206" height="106" rx="12"/>
+      <rect x="548" y="80" width="206" height="106" rx="12"/><rect x="810" y="80" width="206" height="106" rx="12"/>
+    </g>
+    <g font-size="16" font-weight="600"><text x="127" y="110">Pin resource identity</text><text x="389" y="110">Verify &amp; stage</text><text x="651" y="110">Boot runtime</text><text x="913" y="110">Own execution</text></g>
+    <g font-size="14"><text x="127" y="134">固定资源身份</text><text x="389" y="134">验证与暂存</text><text x="651" y="134">启动运行时</text><text x="913" y="134">拥有执行会话</text></g>
+    <g font-size="12" fill="#566477"><text x="127" y="161">ABI · SHA-256 · manifest</text><text x="389" y="161">inventory · SBOM · activation</text><text x="651" y="161">capability · ready · mounts</text><text x="913" y="161">command · PTY · raw stdio</text></g>
+    <rect x="286" y="228" width="730" height="58" rx="12" fill="#e5ebf1" stroke="#c5ced8"/>
+    <text x="651" y="252" font-size="14" font-weight="600">Close handles → reap process tree → shutdown session</text>
+    <text x="651" y="274" font-size="13">关闭句柄 → 回收进程树 → 停止会话；iOS 内核变更可能要求重启</text>
+    <text x="127" y="251" font-size="13">Repair managed image</text><text x="127" y="274" font-size="13">修复托管镜像</text>
+  </g>
+  <g stroke="#566477" stroke-width="1.5" fill="none" marker-end="url(#arrow)"><path d="M230 133 H278"/><path d="M492 133 H540"/><path d="M754 133 H802"/><path d="M913 186 V220"/><path d="M286 258 H232"/></g>
+</svg>

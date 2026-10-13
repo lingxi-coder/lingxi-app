@@ -2,17 +2,19 @@
 
 ## Current product and runtime boundary
 
-LingXi retains eight Rust workspace members in the root Cargo workspace: CLI host,
+Current detailed architecture is maintained in the generated [technical handbook](technical/en/system-overview.md) ([中文](technical/zh/system-overview.md)). The website and handbook share one editable source; dated notes below retain their original evidence scope.
+
+LingXi retains nine Rust workspace members in the root Cargo workspace: CLI host,
 TUI and TUI core under `apps/cli/`, Bridge under `apps/bridge-server/`,
 iOS/Android wrappers under `apps/{ios,android}/ffi/`, configuration requirements
-under `packages/config-requirements/`, and the host adapter under `tools/ios-use/`.
+under `packages/config-requirements/`, the product audio provider under `apps/audio-provider/`, and the host adapter under `tools/ios-use/`.
 Native mobile interfaces and platform build scripts live in the sibling `native/`
 directories. Shared TypeScript client code lives in `packages/bridge-client/`,
 while translations and voice configuration live in `resources/`.
 Shared runtime crates live in the pinned `harness-runtime` Git dependency.
 
 ```text
-Electron / Web / iOS / Android / CLI + TUI
+Electron / iOS / Android / CLI + TUI
                  ↓
        Bridge / native FFI / CLI host
                  ↓

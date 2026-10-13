@@ -1,0 +1,10 @@
+[package]
+name = "handbook-mobile-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+mobile-linux-api = { path = "../mobile-linux-runtime/crates/mobile-linux-api" }

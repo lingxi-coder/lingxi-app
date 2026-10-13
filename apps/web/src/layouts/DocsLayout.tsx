@@ -103,7 +103,7 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
       <header className="developer-header">
         <RouteLink href="/" className="developer-wordmark"><Brand compact /><span className="developer-brand-divider" /><span>{t('Developer Docs', '开发者文档')}</span></RouteLink>
         <nav className="developer-topnav" aria-label={t('SDK navigation', 'SDK 导航')}>
-          <RouteLink href="/docs" className={activeGroup === 'start' ? 'selected' : ''}>{t('Overview', '概览')}</RouteLink>
+          <RouteLink href="/docs" className={['start', 'system', 'operations'].includes(activeGroup) ? 'selected' : ''}>{t('Overview', '概览')}</RouteLink>
           <RouteLink href="/docs/harness" className={activeGroup === 'harness' ? 'selected' : ''}>Harness</RouteLink>
           <RouteLink href="/docs/llm-client" className={activeGroup === 'llm' ? 'selected' : ''}>LLM Client</RouteLink>
           <RouteLink href="/docs/mobile-linux" className={activeGroup === 'mobile' ? 'selected' : ''}>Mobile Linux</RouteLink>

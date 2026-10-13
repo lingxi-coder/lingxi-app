@@ -37,15 +37,14 @@ final class DesktopSettingsUITests: XCTestCase {
         attach("Settings-Providers-disconnected")
     }
 
+    /// The settings home is an account card and six groups — it fits one screen.
     func testSettingsGroupsInLightAndDark() {
         for theme in ["light", "dark"] {
             let app = launch(theme: theme)
-            XCTAssertTrue(app.staticTexts["个人"].exists)
-            attach("Settings-\(theme)-top")
-            app.scrollViews.firstMatch.swipeUp()
-            XCTAssertTrue(app.staticTexts["模型与服务"].exists || app.staticTexts["编码"].exists)
-            app.scrollViews.firstMatch.swipeUp()
-            XCTAssertTrue(app.staticTexts["高级"].exists)
+            XCTAssertTrue(app.buttons["settings.page.account"].exists, app.debugDescription)
+            for group in ["models", "modes", "phone", "general", "data", "about"] {
+                XCTAssertTrue(app.buttons["settings.group.\(group)"].exists, "\(group): \(app.debugDescription)")
+            }
             attach("Settings-\(theme)")
             app.terminate()
         }

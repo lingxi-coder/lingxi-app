@@ -3,6 +3,7 @@ import SwiftUI
 // MARK: - Settings page identity (the prototype's `stack` of `{id, ...}`)
 enum SettingsPage: Hashable {
     case main, account
+    case group(SettingsGroup)
     case general, customProviders, fusion, permissions, toolsAgent, hooks, plugins, diagnostics, about, archivedChats, projectsTrust
     case providerList(ProviderKindBox)
     case providerPicker(ProviderKindBox)
@@ -247,7 +248,7 @@ struct SettingsHost: View {
 
     private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
         switch page {
-        case .main, .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .diagnostics, .projectsTrust, .account:
+        case .main, .group, .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .diagnostics, .projectsTrust, .account:
             true
         case .providerList(let kind): kind.kind == .llm
         default: false
@@ -374,6 +375,7 @@ struct SettingsHost: View {
         switch page {
         case .main: return String(localized: "settings_title_main")
         case .account: return String(localized: "settings_title_account")
+        case .group(let group): return group.title
         case .general: return String(localized: "settings_parity_general")
         case .customProviders: return String(localized: "settings_parity_custom_providers")
         case .fusion: return String(localized: "settings_parity_fusion")

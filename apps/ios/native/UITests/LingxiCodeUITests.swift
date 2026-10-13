@@ -208,6 +208,10 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["drawer.settings"].tap()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
 
+        // Voice lives in the 模型与语音 group of the grouped settings home.
+        let modelsGroup = app.buttons["settings.group.models"]
+        XCTAssertTrue(modelsGroup.waitForExistence(timeout: 5), app.debugDescription)
+        modelsGroup.tap()
         let voiceSettings = app.buttons["settings.page.voice"]
         XCTAssertTrue(voiceSettings.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(voiceSettings, timeout: 5), app.debugDescription)
@@ -711,6 +715,9 @@ final class LingxiCodeUITests: XCTestCase {
         // targeting a control at the same screen coordinates.
         Thread.sleep(forTimeInterval: 1)
 
+        let modelsGroup = app.buttons["settings.group.models"]
+        XCTAssertTrue(modelsGroup.waitForExistence(timeout: 5))
+        modelsGroup.tap()
         let llmProvider = app.buttons["settings.provider.llm"]
         XCTAssertTrue(llmProvider.waitForExistence(timeout: 5))
         XCTAssertTrue(waitUntilHittable(llmProvider, timeout: 5))
@@ -864,9 +871,9 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 1)
 
-        let general = app.buttons["settings.page.general"]
-        XCTAssertTrue(general.waitForExistence(timeout: 5), app.debugDescription)
-        general.tap()
+        let phoneGroup = app.buttons["settings.group.phone"]
+        XCTAssertTrue(phoneGroup.waitForExistence(timeout: 5), app.debugDescription)
+        phoneGroup.tap()
         let integration = app.buttons["settings.appIntegration"]
         if !integration.exists || !integration.isHittable {
             app.swipeUp()

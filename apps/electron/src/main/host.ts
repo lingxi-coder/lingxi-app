@@ -915,11 +915,15 @@ export class HostController {
         this.invalidateCredentialBrokerStatus();
         this.bridge.invalidateLaunchConfigCache();
         this.codexAccountEmail = session.email;
+        // A running chat takes the new session with its next Codex request. Only
+        // one that cannot take it in place, or that the sign-in stopped, restarts.
         // Authentication is durable even if the unrelated engine launch fails.
         // Keep metadata authoritative; the runtime exposes its own connection error.
-        await this.restartIfConfigured().catch(() => {
-          this.diagnostics.add('warn', 'host', 'Codex authentication saved; the session runtime could not restart.');
-        });
+        if (!this.currentRuntime()?.movesOpenAiOAuthInPlace) {
+          await this.restartIfConfigured().catch(() => {
+            this.diagnostics.add('warn', 'host', 'Codex authentication saved; the session runtime could not restart.');
+          });
+        }
         return { credential: this.providerCredentialMetadata(CODEX_PROVIDER_ID), settings: this.settings.getPublic() };
       } finally {
         event.sender.removeListener('destroyed', cancel);

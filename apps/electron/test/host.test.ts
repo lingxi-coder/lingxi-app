@@ -1320,3 +1320,42 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
   assert.deepEqual(operations.slice(-2), ['stop-oauth', 'delete']);
   await handlers.get(CH_CODEX_CANCEL)!(event);
 });
+
+test('Codex sign-in restarts only a chat that cannot take the session in place', async () => {
+  for (const inPlace of [true, false]) {
+    const handlers = new Map<string, (...args: any[]) => any>();
+    let restarts = 0;
+    const runtime = { connectionState: { status: 'connected' }, isStarting: false, movesOpenAiOAuthInPlace: inPlace };
+    const host = new HostController(
+      { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
+      { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
+        get: () => runtime,
+        invalidateLaunchConfigCache() {},
+        restart: async () => { restarts++; },
+        withCodexAuthMutation: async (mutation: () => Promise<unknown>) => mutation(),
+      } as any,
+      new DiagnosticBuffer(), undefined,
+      { handle: (channel: string, handler: any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) } as any,
+      undefined,
+      { health: async () => undefined,
+        set: async (id: string) => ({ providerId: id, configured: true }),
+        delete: async () => undefined,
+        listStatus: async () => [],
+        resolve: async () => undefined,
+        preview: async () => { throw new Error('OAuth previews must never be requested'); },
+      } as any,
+      undefined,
+      async () => ({ access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false }),
+    );
+    const frame = { url: 'http://127.0.0.1:4242' };
+    const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {} };
+    host.registerWindow(sender as any, frame.url); host.registerIpc();
+    try {
+      await handlers.get(CH_CODEX_LOGIN)!({ sender, senderFrame: frame });
+      // A running chat takes the new session with its next Codex request.
+      assert.equal(restarts, inPlace ? 0 : 1);
+    } finally {
+      host.dispose();
+    }
+  }
+});

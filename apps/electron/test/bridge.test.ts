@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { BridgeClient } from '@lingxi/bridge-client';
 
-import { SessionRuntime } from '../src/main/bridge.js';
+import { CodexSessionBusyError, SessionRuntime } from '../src/main/bridge.js';
 import {
   discoverExternalReusableBridge,
   discoverLegacyOrphanBridges,
@@ -2791,6 +2791,55 @@ test('a Codex prompt moves the Codex session in first, or fails saying sign-in i
       assert.deepEqual(sent, ['claim']);
       assert.equal(runtime.turnActive, false);
     }
+  }
+});
+
+test('a chat cannot sign in to Codex by itself while the app moves the Codex session', async () => {
+  for (const managed of [true, false]) {
+    const sent: string[] = [];
+    const runtime = new SessionRuntime({
+      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+      ...(managed ? { resolveOpenAiOAuth: async () => undefined } : {}),
+    });
+    (runtime as any).activeWorkspace = '/workspace';
+    (runtime as any).requireClient = () => ({ sendCommand: (command: any) => { sent.push(command.raw); } });
+    for (const raw of ['/connect chatgpt', '/connect  openai-chatgpt ']) {
+      const dispatched = runtime.dispatchCommand({ type: 'run_slash_command', raw });
+      if (managed) await assert.rejects(dispatched, /^Error: Sign in to Codex from Settings\. Every chat uses that sign-in\.$/);
+      else await dispatched;
+    }
+    // Other providers still connect from the chat.
+    await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/connect openrouter' });
+    assert.deepEqual(sent, managed
+      ? ['/connect openrouter']
+      : ['/connect chatgpt', '/connect  openai-chatgpt ', '/connect openrouter']);
+  }
+});
+
+test('a scheduled Codex run fails while another chat uses the session, and pauses without a sign-in', async () => {
+  const cases = [
+    { claim: async () => { throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.'); },
+      expected: /^Error: Wait for the other Codex chat to finish before changing Codex authentication\.$/ },
+    { claim: async () => undefined, expected: /^Error: paused: Codex authentication is unavailable\. Sign in again\.$/ },
+  ];
+  for (const { claim, expected } of cases) {
+    const sent: string[] = [];
+    const runtime = new SessionRuntime({
+      sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/fixture', isPackaged: true, claimOpenAiOAuth: claim,
+    } as any);
+    const client = { sendCommand: (command: { type: string }) => sent.push(command.type) };
+    (runtime as any).requireClient = () => client;
+    (runtime as any).client = client;
+    (runtime as any).child = {};
+    (runtime as any).state = { status: 'connected' };
+    (runtime as any).credentialRoutingSettings = {};
+    (runtime as any).ensureModelProviderCredential = async () => undefined;
+    await assert.rejects(runtime.runScheduledTurn('run-1', {
+      prompt: 'automatic task',
+      automation: { model: 'openai-chatgpt/gpt-5.6-sol', reasoning: { type: 'automatic' } },
+    } as any), expected);
+    assert.deepEqual(sent, []);
+    assert.equal(runtime.turnActive, false);
   }
 });
 

@@ -127,6 +127,13 @@ type ProviderCredentialStatus = Extract<ClientEvent, { type: 'provider_credentia
 
 const CODEX_SIGN_IN_REQUIRED = 'Codex authentication is unavailable. Sign in again.';
 
+/**
+ * The Codex session cannot move yet because work that uses it is still
+ * running. Unlike a missing sign-in this clears up by itself, so a scheduled
+ * run that meets it fails on its own instead of pausing its task.
+ */
+export class CodexSessionBusyError extends Error {}
+
 function isCodexModel(model: string | undefined): boolean {
   return model?.startsWith(`${CODEX_PROVIDER_ID}/`) === true;
 }
@@ -588,7 +595,16 @@ export class SessionRuntime {
       catch (error) { assertPreparing(); throw new Error(`paused: ${error instanceof Error ? error.message : String(error)}`); }
       assertPreparing();
       if (isCodexModel(config.model)) {
-        await this.ensureOpenAiOAuth();
+        // Another chat still using the Codex session fails only this run. A
+        // missing sign-in pauses the task, like a missing provider key. Not
+        // `busy:`: the scheduler would retry every second until that chat
+        // lets go, which may be never.
+        try { await this.ensureOpenAiOAuth(); }
+        catch (error) {
+          assertPreparing();
+          if (error instanceof CodexSessionBusyError) throw error;
+          throw new Error(`paused: ${error instanceof Error ? error.message : String(error)}`);
+        }
         assertPreparing();
       }
       const catalog = await this.scheduledModelCatalog();
@@ -2429,6 +2445,13 @@ export class SessionRuntime {
     }
     if ((validated.type === 'set_model' || validated.type === 'run_slash_command') && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
     assertCommandAllowedDuringTurn(validated, this.turnActive);
+    // The app signs in to Codex and moves that one session between chats. A
+    // chat that signed in by itself would refresh its own copy behind the app,
+    // and two engines refreshing one session invalidate each other's tokens.
+    if (validated.type === 'run_slash_command' && this.opts.resolveOpenAiOAuth
+      && /^\/connect\s+(?:chatgpt|openai-chatgpt)$/i.test(validated.raw.trim())) {
+      throw new Error('Sign in to Codex from Settings. Every chat uses that sign-in.');
+    }
     if (validated.type === 'run_slash_command' && /^\/fusion(?:\s|$)/i.test(validated.raw.trim())
       && !/^\/fusion\s+setup\s*$/i.test(validated.raw.trim())
       && !/(?:^|\s)--retry-publication(?:\s|$)/.test(validated.raw)
@@ -2510,11 +2533,11 @@ export class SessionRuntime {
       };
       const onEvent = (event: ClientEvent) => {
         if (event.type !== 'task_list_complete' || event.request_id !== requestId) return;
-        if (event.error) finish(new Error('Could not check background work before activating Codex.'));
-        else if (event.active_count > 0) finish(new Error('Wait for background tasks to finish before activating Codex.'));
+        if (event.error) finish(new CodexSessionBusyError('Could not check background work before activating Codex.'));
+        else if (event.active_count > 0) finish(new CodexSessionBusyError('Wait for background tasks to finish before activating Codex.'));
         else finish();
       };
-      const timer = setTimeout(() => finish(new Error('Background task check timed out; the session was not restarted.')), 5_000);
+      const timer = setTimeout(() => finish(new CodexSessionBusyError('Background task check timed out; the session was not restarted.')), 5_000);
       client.on('event', onEvent);
       try { client.sendCommand({ type: 'task_list', request_id: requestId }); }
       catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }

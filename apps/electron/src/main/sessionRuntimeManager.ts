@@ -3,7 +3,7 @@ import type { ClientEvent } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { SessionRuntime } from './bridge.js';
+import { CodexSessionBusyError, SessionRuntime } from './bridge.js';
 import { urlOrigin } from './bridgeEvents.js';
 import {
   CH_ANSWER_ASK_USER_QUESTION,
@@ -451,24 +451,24 @@ export class SessionRuntimeManager {
     // A claimant that is still starting may be booting with the session.
     const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
       && (runtime.hasOpenAiOAuth || (runtime === owner && runtime.isStarting)));
-    // A background launch must not stop the chat on screen; it retries once
-    // that chat lets go.
+    // A background launch must not take Codex from the chat on screen; its
+    // run fails instead.
     const background = sessionId !== undefined && this.isBackgroundLaunch(sessionId);
     if (background && candidates.some(runtime => runtime.sessionId === this.activeSessionId)) {
-      throw new Error('The active Codex chat holds Codex authentication; background work waits for it.');
+      throw new CodexSessionBusyError('The active Codex chat holds Codex authentication; background work waits for it.');
     }
     if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0
       || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
-      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+      throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.');
     }
     for (const runtime of candidates) {
       if (runtime.connectionState.status === 'connected') await runtime.assertNoBackgroundTasks();
       else if (runtime.hasOpenAiOAuth && runtime.connectionState.status !== 'idle') {
-        throw new Error('Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.');
+        throw new CodexSessionBusyError('Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.');
       }
     }
     if (candidates.some(runtime => runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0)) {
-      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+      throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.');
     }
     for (const runtime of candidates) {
       if (runtime.movesOpenAiOAuthInPlace) await runtime.releaseOpenAiOAuth();

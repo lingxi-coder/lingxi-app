@@ -34,6 +34,34 @@ function renderGroup(tools: ToolRunItem[], open = false) {
     group: { type: 'tool-group', id: 'group', tools }, open, toolOpen: () => undefined, onSetOpen: () => {},
   })));
 }
+test('a lone summary-only tool stays one non-interactive row regardless of group expansion', () => {
+  const item: ToolRunItem = {
+    type: 'tool', id: 'web', tool: 'WebSearch', status: 'done',
+    view: { verb: 'web', icon: 'globe', label: 'Web Search', title: 'Web Search', primary: '武汉 天气' },
+    result: { headline: 'Search complete', body_lines: 0, body_truncated: false },
+  };
+  for (const status of ['done', 'error'] as const) {
+    for (const open of [false, true]) {
+      const html = renderGroup([{ ...item, status }], open);
+      assert.equal((html.match(/data-tool-icon="globe"/g) ?? []).length, 1);
+      assert.match(html, /武汉 天气/);
+      assert.match(html, /Search complete/);
+      assert.match(html, new RegExp(`data-status="${status}"`));
+      assert.doesNotMatch(html, /<button|aria-expanded|disclosure-body|tool-group-trigger/);
+    }
+  }
+});
+
+test('multiple summary-only tools retain a disclosure to reveal earlier calls', () => {
+  const items = [tool('first'), tool('last')].map(({ result, ...item }) => item);
+  assert.match(renderGroup(items), /aria-expanded="false"/);
+  assert.doesNotMatch(renderGroup(items), /Read first/);
+  assert.match(renderGroup(items, true), /Read first/);
+});
+
+test('a lone tool with result details keeps its disclosure', () => {
+  assert.match(renderGroup([tool('details')]), /tool-group-trigger/);
+});
 test('running groups show only active calls, even when disclosure was open', () => {
   const html = renderGroup([tool('finished'), tool('active', 'running')], true);
   assert.match(html, /Read active/);

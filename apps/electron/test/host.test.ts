@@ -1218,18 +1218,32 @@ test('settings model, voice and Thought patches persist without restarting a liv
       voice,
     })) as { voice?: Record<string, unknown>; voiceRevision?: number };
 
-    // Current generated v4 config is normalized, not echoed raw: language is
-    // trimmed, rate clamped, and the explicit system source/voice are retained.
-    const expectedVoice = audioConfigurationDefaults();
-    expectedVoice.recognition.source = 'offline';
-    expectedVoice.speech.source = 'system';
-    expectedVoice.speech.voice = { source: 'system', id: 'Alex' };
-    expectedVoice.language = 'ZH-cn';
-    expectedVoice.rate = 2.0;
-    expectedVoice.autoPlayReplies = true;
-    assert.deepEqual(result.voice, expectedVoice);
+    // The current v4 contract normalizes rather than echoing the patch: it
+    // preserves source intent, trims language, clamps rate, and fills the
+    // independent cloud/conversation defaults.
+    assert.deepEqual(result.voice, {
+      schemaVersion: 4,
+      recognition: {
+        source: 'offline', offlineModelId: null,
+        cloud: { binding: 'follow_session', profileId: null, modelId: null },
+      },
+      speech: {
+        source: 'system',
+        offlineModelId: null,
+        voice: { source: 'system', id: 'Alex' },
+        cloud: { binding: 'follow_session', profileId: null, modelId: null },
+      },
+      conversation: {
+        mode: 'agent', interaction: 'turn_based',
+        cloud: { binding: 'follow_session', profileId: null, modelId: null }, voice: null,
+      },
+      language: 'ZH-cn',
+      rate: 2.0,
+      autoPlayReplies: true,
+    });
     assert.equal(result.voiceRevision, expectedVoiceRevision + 1);
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
+    assert.deepEqual(new SettingsStore(userData).getPublic().voice, result.voice, 'v4 preferences must survive reopening the settings store');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 
     for (const value of [false, true]) {

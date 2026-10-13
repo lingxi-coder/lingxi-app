@@ -22,6 +22,10 @@ export function classifyDesktopError(raw: string): ActionableError {
   if (/(?:other|active) Codex chat|before (?:changing|activating) Codex authentication/i.test(message)) {
     return { title: 'Codex authentication is busy', detail: message };
   }
+  // Codex signs in with OAuth; it has no stored API key to replace.
+  if (/Codex authentication.*Sign in again/i.test(message)) {
+    return { title: 'Codex sign-in required', detail: message };
+  }
   if (/401|403|unauthori[sz]ed|api[-_ ]?key|credential|authentication/i.test(message)) {
     return { title: 'Provider credential rejected', detail: 'Replace the stored API key in Settings, then retry.' };
   }

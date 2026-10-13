@@ -383,13 +383,16 @@ function copyPackagePayload(sourceRoot, destinationRoot, manifest) {
       && existsSync(join(sourceRoot, parent)) && lstatSync(join(sourceRoot, parent)).isDirectory(),
   ));
   for (const entry of uniqueEntries) {
+    // Dependency README examples can contain author workstation paths. They
+    // are documentation, not runtime payload; retain license/notice files.
+    if (/^readme(?:\..*)?$/i.test(basename(entry))) continue;
     const source = join(sourceRoot, entry);
     if (existsSync(source) && basename(source) !== 'package.json') {
       copyPath(source, join(destinationRoot, entry));
     }
   }
   for (const entry of readdirSync(sourceRoot)) {
-    if (/^(?:licen[cs]e|notice|readme)(?:\..*)?$/i.test(entry)) {
+    if (/^(?:licen[cs]e|notice)(?:\..*)?$/i.test(entry)) {
       const destination = join(destinationRoot, entry);
       if (!existsSync(destination)) {
         copyPath(join(sourceRoot, entry), destination);

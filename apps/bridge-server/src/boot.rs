@@ -57,6 +57,8 @@ pub const DEFAULT_API_BASE: &str = "https://api.anthropic.com";
 pub const MAX_STDIN_API_KEY_BYTES: usize = 16 * 1024;
 /// Maximum accepted JSON credential envelope size from `--credential-stdin`.
 pub const MAX_STDIN_CREDENTIAL_BYTES: usize = 64 * 1024;
+/// Provider id under which the desktop delivers and releases its Codex session.
+pub(crate) const CODEX_PROVIDER_ID: &str = "openai-chatgpt";
 
 /// Parsed command-line flags the binary accepts (a tiny hand-rolled parser;
 /// `apps/bridge-server` deliberately avoids a clap dependency).
@@ -290,7 +292,7 @@ impl secret::credential::OpenAiOAuthObserver for OpenAiOAuthHostObserver {
     }
 }
 
-fn validate_openai_oauth_session(
+pub(crate) fn validate_openai_oauth_session(
     session: &client::protocol::events::OpenAiOAuthSessionDto,
 ) -> Result<(), String> {
     let valid_token = |token: &str| {
@@ -316,6 +318,24 @@ fn validate_openai_oauth_session(
         return Err("invalid Codex OAuth session in credential envelope".into());
     }
     Ok(())
+}
+
+/// The engine's form of a validated host-delivered Codex session.
+pub(crate) fn openai_oauth_tokens(
+    session: &client::protocol::events::OpenAiOAuthSessionDto,
+) -> secret::credential::OpenAiOAuthTokens {
+    secret::credential::OpenAiOAuthTokens {
+        access_token: lingxi_core::types::Secret::new(session.access_token.clone()),
+        refresh_token: session
+            .refresh_token
+            .clone()
+            .map(lingxi_core::types::Secret::new),
+        expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
+        scopes: vec![],
+        account_id: session.account_id.clone(),
+        fedramp: session.fedramp,
+        email: session.email.clone(),
+    }
 }
 
 /// Read and validate the one-line JSON envelope used by the packaged desktop.
@@ -1501,38 +1521,68 @@ pub async fn assemble_with_credentials(
         harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed),
     );
 
-    let shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
+    let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
         cfg.isolated_credential_storage,
         cfg.credential_storage_policy,
     )
     .await
     .map_err(|error| error.to_string())?;
-    if let Some(session) = openai_oauth {
-        validate_openai_oauth_session(&session)?;
-        shared
-            .credentials
-            .store_openai_oauth_tokens(
-                &session.access_token,
-                session.refresh_token.as_deref(),
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
-                vec![],
-                session.account_id.as_deref(),
-                session.fedramp,
-                session.email.as_deref(),
-            )
-            .await
-            .map_err(|_| "failed to seed Codex OAuth session".to_string())?;
+    // A desktop that owns credential persistence moves its one Codex session
+    // between engines while they run, so this engine serves ChatGPT through a
+    // slot the router fills and empties. Its rotations always reach the host.
+    let openai_oauth_slot = provider_credentials_ephemeral
+        .then(|| Arc::new(llm_runtime::auth::openai::OpenAiOAuthSlot::new()));
+    shared.openai_oauth_slot = openai_oauth_slot.clone();
+    if openai_oauth_slot.is_some() {
         shared
             .credentials
             .set_openai_oauth_observer(Arc::new(OpenAiOAuthHostObserver {
                 sink: event_sink.clone(),
             }));
     }
+    let mut boot_openai_oauth = None;
+    if let Some(session) = openai_oauth {
+        validate_openai_oauth_session(&session)?;
+        if openai_oauth_slot.is_some() {
+            boot_openai_oauth = Some(session);
+        } else {
+            shared
+                .credentials
+                .store_openai_oauth_tokens(
+                    &session.access_token,
+                    session.refresh_token.as_deref(),
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
+                    vec![],
+                    session.account_id.as_deref(),
+                    session.fedramp,
+                    session.email.as_deref(),
+                )
+                .await
+                .map_err(|_| "failed to seed Codex OAuth session".to_string())?;
+            shared
+                .credentials
+                .set_openai_oauth_observer(Arc::new(OpenAiOAuthHostObserver {
+                    sink: event_sink.clone(),
+                }));
+        }
+    }
     let runtime =
         harness_runtime::desktop::build_with_host_automation(cfg, output, permission_sink, shared)
             .await
             .map_err(|e| e.to_string())?;
+    // The engine bound the slot while it was built; only now can it serve the
+    // session the host delivered at launch.
+    if let (Some(slot), Some(session)) = (&openai_oauth_slot, boot_openai_oauth) {
+        slot.install(openai_oauth_tokens(&session))
+            .await
+            .map_err(|_| "failed to install Codex OAuth session".to_string())?;
+        refresh_fusion_catalog_bounded(
+            &runtime.catalog_registry,
+            vec![CODEX_PROVIDER_ID.to_string()],
+        )
+        .await;
+    }
     receive_gate.set(runtime.orchestrator.clone());
     // The runtime cloned the exact construction-only lease into its hydrated
     // coordinator. Do not let the bridge's process-registration guard pin the
@@ -1734,6 +1784,7 @@ pub async fn assemble_with_credentials(
     .with_catalog_registry(runtime.catalog_registry.clone())
     .with_provider_model_catalog_listings(provider_model_catalog_listings)
     .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
+    .with_openai_oauth_slot(openai_oauth_slot)
     .with_http(runtime.http.clone())
     .with_session_store(
         session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()),

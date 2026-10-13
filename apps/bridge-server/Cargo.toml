@@ -98,6 +98,8 @@ anyhow = "1"
 
 [dev-dependencies]
 client = { workspace = true, features = ["test-support"] }
+# Codex slot router tests implement the token refresh transport.
+lingxi-llm-client = { workspace = true }
 # F2-06 e2e: drive a REAL streaming turn (mock streaming client + a real tool)
 # through the connection-scoped AdapterPermissionGate + AdapterOutputStream, then
 # exercise the permission round-trip over a live WebSocket. `orchestrator` itself

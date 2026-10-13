@@ -117,17 +117,18 @@ test('failed task checks do not authorize an OAuth restart', async () => {
   assert.deepEqual(calls, []);
 });
 
-test('taking OAuth ownership cannot stop another chat with active agents or registry tasks', async () => {
-  for (const agents of [true, false]) {
+test('taking OAuth ownership cannot release or stop another chat with active agents or registry tasks', async () => {
+  for (const agents of [true, false]) for (const inPlace of [true, false]) {
     const manager = new SessionRuntimeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
-    let stopped = false;
+    let released = false;
     (manager as any).runtimes.set('other', {
-      sessionId: 'other', hasOpenAiOAuth: true, isStarting: false, turnActive: false,
+      sessionId: 'other', hasOpenAiOAuth: true, isStarting: false, turnActive: false, movesOpenAiOAuthInPlace: inPlace,
       hasActiveAgents: agents, pendingInteractions: 0, connectionState: { status: 'connected' },
       assertNoBackgroundTasks: async () => { throw new Error('Wait for background tasks'); },
-      stop: async () => { stopped = true; },
+      releaseOpenAiOAuth: async () => { released = true; },
+      stop: async () => { released = true; },
     });
-    await assert.rejects((manager as any).stopOtherCodexRuntimes('current'), /Wait/);
-    assert.equal(stopped, false);
+    await assert.rejects((manager as any).releaseOtherCodexRuntimes('current'), /Wait/);
+    assert.equal(released, false);
   }
 });

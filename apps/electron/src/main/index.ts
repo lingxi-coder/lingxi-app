@@ -358,55 +358,41 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const configured = settings.getPublic();
       const model = settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
-      const credentialStartedAt = Date.now();
-      const credentialsPromise = launchCache.credentials(model, credentialBroker).then((credentials) => {
-        diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
-          durationMs: Date.now() - credentialStartedAt,
-          parallel: true,
-          phase: 'provider_credentials',
-          projectPath: workspace,
-          sessionId: ref.sessionId,
-        }));
-        return credentials;
-      });
-      const pluginSecretsStartedAt = Date.now();
-      const pluginSecretsPromise = launchCache.pluginSecrets(credentialBroker).then((pluginSecrets) => {
-        diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
-          durationMs: Date.now() - pluginSecretsStartedAt,
-          parallel: true,
-          phase: 'plugin_secrets',
-          projectPath: workspace,
-          sessionId: ref.sessionId,
-        }));
-        return pluginSecrets;
-      });
-      const openAiOAuthSelected = model?.startsWith(`${CODEX_PROVIDER_ID}/`) === true;
-      const oauthStartedAt = Date.now();
-      const openAiOAuthPromise = (openAiOAuthSelected
-        ? launchCache.openAiOAuth(credentialBroker)
-        : Promise.resolve(undefined)
-      ).then((openaiOAuth) => {
-        if (openAiOAuthSelected) {
+      // A chat opens even when its credentials cannot be read. The engine
+      // starts without them, and the first prompt that needs one loads it
+      // again or fails saying why. The Codex session is never part of a
+      // launch: it moves into the engine with the first Codex request.
+      const phase = async <T>(name: string, load: () => Promise<T>, fallback: T): Promise<T> => {
+        const phaseStartedAt = Date.now();
+        try {
+          const value = await load();
           diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
-            durationMs: Date.now() - oauthStartedAt,
+            durationMs: Date.now() - phaseStartedAt,
             parallel: true,
-            phase: 'openai_oauth',
+            phase: name,
             projectPath: workspace,
             sessionId: ref.sessionId,
           }));
+          return value;
+        } catch (error) {
+          diagnostics.add('warn', 'host', diagnosticEvent('session_launch_config_phase_failed', {
+            durationMs: Date.now() - phaseStartedAt,
+            error: sanitizeDiagnostic(error),
+            phase: name,
+            projectPath: workspace,
+            sessionId: ref.sessionId,
+          }));
+          return fallback;
         }
-        return openaiOAuth;
-      });
-      const [credentials, pluginSecrets, openaiOAuth] = await Promise.all([
-        credentialsPromise,
-        pluginSecretsPromise,
-        openAiOAuthPromise,
+      };
+      const [credentials, pluginSecrets] = await Promise.all([
+        phase('provider_credentials', () => launchCache.credentials(model, credentialBroker), {}),
+        phase('plugin_secrets', () => launchCache.pluginSecrets(credentialBroker), {}),
       ]);
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
         parallel: true,
         hasApiKey: Boolean(credentials.apiKey),
-        hasOpenAiOAuth: Boolean(openaiOAuth),
         model,
         pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
         projectPath: workspace,
@@ -421,7 +407,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         pluginSecrets,
-        openaiOAuth,
         model,
         apiBaseUrl: configured.apiBaseUrl,
       };

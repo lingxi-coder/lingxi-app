@@ -875,6 +875,7 @@ dependencies = [
  "harness-runtime",
  "hooks",
  "http",
+ "lingxi-llm-client",
  "llm-runtime",
  "mcp",
  "migrations",

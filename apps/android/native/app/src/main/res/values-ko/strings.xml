@@ -178,6 +178,7 @@
     <string name="chat_run_tool_executing">도구 실행 중</string>
     <string name="chat_run_tools_windowed">이전 도구 호출 %1$d개</string>
     <string name="chat_runtime_waiting">대기 중</string>
+    <string name="chat_session_panel_a11y">대화 패널 열기</string>
     <string name="chat_session_replaced">기존 세션이 더 이상 존재하지 않아 새 대화를 만들었습니다</string>
     <string name="chat_share_reply">답변 공유</string>
     <string name="chat_shell_cancelled">셸 취소됨</string>
@@ -574,6 +575,8 @@
     <string name="mcp_tools_unavailable_sub">서버에 연결되면 실제 도구 목록을 읽습니다.</string>
     <string name="mcp_transport_description_prefix">표준 MCP stdio / SSE / Streamable HTTP 구성 형식을 사용하며, iOS에서 실제 구성과 연결 상태를 표시합니다.\n공개 서버 디렉터리 둘러보기:</string>
     <string name="mcp_transport_mode">전송 방식</string>
+    <string name="new_chat_pick_workspace_title">어느 작업 공간에서 시작할까요</string>
+    <string name="new_chat_workspace_a11y">작업 공간 %1$s, 눌러서 변경</string>
     <string name="onboarding_assistant_subtitle">어시스턴트를 화면과 대화에서 부를 이름이며, 나중에 설정에서 언제든 바꿀 수 있습니다.</string>
     <string name="onboarding_assistant_title">灵犀에게 이름을 지어주세요</string>
     <string name="onboarding_assistant_wake_hint">이것이 호출어가 됩니다. 이후 \"헤이, %1$s\"라고 말하면 언제든 깨울 수 있습니다.</string>
@@ -701,6 +704,8 @@
     <string name="session_index_save_new_failed_fmt">새 세션 인덱스 저장 실패: %1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_panel_make_scheduled">예약 작업으로 만들기</string>
+    <string name="session_panel_mode_hint">모드를 바꾸면 새 대화로 분기해 이어갑니다</string>
     <string name="session_relative_days_ago_fmt">%1$d일 전</string>
     <string name="session_relative_hours_ago_fmt">%1$d시간 전</string>
     <string name="session_relative_minutes_ago_fmt">%1$d분 전</string>

@@ -178,6 +178,7 @@
     <string name="chat_run_tool_executing">Running tool</string>
     <string name="chat_run_tools_windowed">%1$d earlier tool calls</string>
     <string name="chat_runtime_waiting">Waiting</string>
+    <string name="chat_session_panel_a11y">Open session panel</string>
     <string name="chat_session_replaced">The previous session no longer exists — a new conversation was created</string>
     <string name="chat_share_reply">Share Reply</string>
     <string name="chat_shell_cancelled">Shell cancelled</string>
@@ -574,6 +575,8 @@
     <string name="mcp_tools_unavailable_sub">The real tool list is read after the server connects.</string>
     <string name="mcp_transport_description_prefix">Uses the standard MCP stdio, SSE, and Streamable HTTP configuration formats; iOS shows the real configuration and connection status.\nBrowse the public server directory:</string>
     <string name="mcp_transport_mode">Transport</string>
+    <string name="new_chat_pick_workspace_title">Start in which workspace</string>
+    <string name="new_chat_workspace_a11y">Workspace %1$s, tap to change</string>
     <string name="onboarding_assistant_subtitle">This is what the assistant will be called in the UI and conversation — you can change it anytime in Settings.</string>
     <string name="onboarding_assistant_title">Give Your Lingxi a Name</string>
     <string name="onboarding_assistant_wake_hint">This will become its wake word. Afterward you can say “Hey, %1$s” anytime to wake it.</string>
@@ -701,6 +704,8 @@
     <string name="session_index_save_new_failed_fmt">Failed to save new session index: %1$s</string>
     <string name="session_mode_chat">Chat</string>
     <string name="session_mode_code">Code</string>
+    <string name="session_panel_make_scheduled">Make it a scheduled task</string>
+    <string name="session_panel_mode_hint">Changing the mode continues in a new, forked chat</string>
     <string name="session_relative_days_ago_fmt">%1$d days ago</string>
     <string name="session_relative_hours_ago_fmt">%1$d hr ago</string>
     <string name="session_relative_minutes_ago_fmt">%1$d min ago</string>

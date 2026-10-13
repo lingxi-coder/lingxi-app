@@ -114,7 +114,7 @@ object GeneratedVoiceModelCatalog {
             sampleRateHz = 44100,
             approxSizeBytes = 167006755L,
             sha256 = "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
-            files = listOf("model.int8.onnx", "tokens.txt", "lexicon.txt", "date.fst", "phone.fst", "number.fst"),
+            files = listOf("model.onnx", "tokens.txt", "lexicon.txt", "date.fst", "phone.fst", "number.fst"),
             requiredDirectories = listOf("dict"),
             sourceUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2",
             runtimeParams = GeneratedSherpaRuntimeParams.Tts.Vits(numThreads = 2),

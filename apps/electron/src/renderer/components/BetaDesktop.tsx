@@ -1,4 +1,5 @@
-import { audioFeatureGate, audioConversationGate } from '../audio/audioFeatureGate';
+import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
+import { AudioSetupGuide } from './AudioSetupGuide';
 import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
@@ -1667,6 +1668,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [imageNotice, setImageNotice] = useState<string | null>(null);
   const [imageDragActive, setImageDragActive] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
+  const [audioGuidance, setAudioGuidance] = useState<AudioSetupGuidance | null>(null);
   const [flowMode, setFlowMode] = useState(false);
   const [flowState, setFlowState] = useState<VoiceFlowState>(DEFAULT_VOICE_FLOW_STATE);
   const [slashResultIndex, setSlashResultIndex] = useState(0);
@@ -1706,6 +1708,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const conversationAudioGate = audioConversationGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot());
   const voicePrefsRef = useRef({ configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 });
   voicePrefsRef.current = { configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 };
+  useEffect(() => { setAudioGuidance(null); }, [bridge.bootstrap?.settings.voiceRevision, activeSessionId]);
   const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
   const dictationOwner = useRef<NativeAudioOwner | null>(null);
   const autoplayOwner = useRef<NativeAudioOwner | null>(null);
@@ -2249,10 +2252,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const reportNativeAudioFailure = useCallback((result: AudioOperationResultDto): boolean => {
     if (result.type !== 'failed') return false;
-    if (result.error.kind === 'permission_denied') setVoiceState('denied');
-    else if (result.error.kind === 'unavailable' || result.error.kind === 'unsupported') setVoiceState('unsupported');
-    else setVoiceState('idle');
-    if (result.error.kind !== 'cancelled') setImageNotice(`语音操作失败：${result.error.message}`);
+    setVoiceState(voiceStateAfterAudioFailure(result.error.kind));
+    setAudioGuidance(audioSetupGuidance(result.error.kind, result.error.message));
     return true;
   }, []);
 
@@ -2277,9 +2278,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [audio, bridge.audioCancel]);
 
   const startStandardListening = async () => {
-    if (!inputAudioGate.ready && inputAudioGate.reason) setImageNotice(inputAudioGate.reason);
+    if (!inputAudioGate.ready && inputAudioGate.reason) {
+      setAudioGuidance(audioSetupGuidance('unavailable', inputAudioGate.reason));
+      return;
+    }
     if (!audio || typeof bridge.audioExecute !== 'function') {
       setVoiceState('unsupported');
+      setAudioGuidance(audioSetupGuidance('unsupported'));
       return;
     }
     const editor = input.current;
@@ -2289,6 +2294,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     const generation = ++dictationGeneration.current;
     standardListeningRef.current = true;
     setVoiceState('listening');
+    setAudioGuidance(null);
     setImageNotice(null);
     let preserveFailureState = false;
     try {
@@ -2306,7 +2312,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         if (transcript) insertVoiceTextAtSelection(transcript);
       }
     } catch (cause) {
-      if (generation === dictationGeneration.current) setImageNotice(cause instanceof Error ? cause.message : '本机语音识别失败。');
+      if (generation === dictationGeneration.current) setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
     } finally {
       if (generation === dictationGeneration.current) {
         standardListeningRef.current = false;
@@ -2322,7 +2328,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     try {
       await bridge.audioFinishListen();
     } catch (cause) {
-      setImageNotice(cause instanceof Error ? cause.message : '停止语音识别失败。');
+      setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
     }
   };
 
@@ -2365,7 +2371,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
         clearTimeout: (handle) => window.clearTimeout(handle as number),
       },
-      onStateChange: (state) => setFlowState(state),
+      onStateChange: (state) => {
+        setFlowState(state);
+        if (state.phase === 'failed' || state.phase === 'configurationRequired') {
+          setAudioGuidance(audioSetupGuidance('unavailable', state.detail));
+        }
+      },
     });
     flowControllerRef.current = controller;
     setFlowState(controller.getState());
@@ -2388,6 +2399,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     void controller.stop();
   }, [flowMode, voicePrefs.conversation.mode, bridge.audioRealtimeCommand]);
+
+  useEffect(() => {
+    const state = bridge.audioRealtimeState;
+    if (flowMode && voicePrefs.conversation.mode === 'realtime'
+      && (state.phase === 'failed' || state.phase === 'configurationRequired')) {
+      setAudioGuidance(audioSetupGuidance('unavailable', state.detail));
+    }
+  }, [flowMode, voicePrefs.conversation.mode, bridge.audioRealtimeState.phase, bridge.audioRealtimeState.detail]);
 
   useEffect(() => {
     if (!audio) {
@@ -2441,7 +2460,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     if (voiceState === 'denied') {
-      void bridge.openSystemSettings('microphone');
+      setAudioGuidance(audioSetupGuidance('permission_denied'));
       return;
     }
     if (standardListeningRef.current) {
@@ -2456,6 +2475,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       void stopFlowMode();
       return;
     }
+    if (!conversationAudioGate.ready) {
+      setAudioGuidance(audioSetupGuidance('unavailable', conversationAudioGate.reason));
+      return;
+    }
+    setAudioGuidance(null);
     setFlowMode(true);
   };
 
@@ -3091,6 +3115,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   );
   return (
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
+      {audioGuidance && <AudioSetupGuide guidance={audioGuidance}
+        onOpenSettings={() => onOpenSettingsPage('voice')} onDismiss={() => setAudioGuidance(null)} />}
       {flowMode && (
         <VoiceFlowPanel
           state={voicePrefs.conversation.mode === 'realtime' ? bridge.audioRealtimeState : flowState}
@@ -3610,10 +3636,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </>
             )}
           </div>
-          {inputAudioGate.visible && (
+          {(inputAudioGate.visible || (voicePrefs.recognition.source === 'provider' && bridge.audioSnapshot?.capabilities?.supported_operations.includes('record'))) && (
           <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           )}
-          {conversationAudioGate.visible && !canStop && !hasPrompt && <button
+          {(conversationAudioGate.visible || bridge.audioSnapshot?.capabilities?.supported_operations.includes('record')) && !canStop && !hasPrompt && <button
             type="button"
             disabled={!ready}
             className="composer-icon-action"
@@ -3644,10 +3670,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           </div>
         </div>
         )}
-        {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
-          {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}
-          {voiceState === 'denied' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.danger, fontSize: 10.5 }}>Microphone permission denied</span>}
-        </div>}
       </div>
     </div>
   );

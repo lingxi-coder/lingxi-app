@@ -102,6 +102,7 @@ test('settings preserves content and scroll track insets while scrolling and swi
       const context = `${theme} ${position}`;
       assert.deepEqual(state.viewportInsets, { top: 44, right: 6, bottom: 8 }, `${context}: viewport clears the titlebar and window edges`);
       assert.deepEqual(state.contentInsets, { left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
+      assert.ok(state.contentBottomClearance >= 32, `${context}: final content clears the bottom padding`);
       assert.deepEqual(state.sidebarInsets, { left: 6, right: 6, bottom: 8 }, `${context}: sidebar scroll track remains inset`);
       assert.equal(state.scrollPaddingTop, '0px', context);
       assert.equal(state.scrollPaddingBottom, '0px', context);
@@ -376,13 +377,30 @@ test('provider region saves a layer and applies only through reconnect', async (
   assert.equal(result.restarted, true);
 });
 
-test('Customize catalogs, plugin lifecycle, skill preview, draft guards, and responsive layout work together', async () => {
-  const { beforeConfirm, afterConfirm, ...checks } = await runScenario('customize');
-  for (const [name, passed] of Object.entries(checks)) assert.equal(passed, true, name);
-  assert.equal(beforeConfirm.filter(({ command }) => command.action === 'apply_operation').length, 0);
-  const preview = beforeConfirm.find(({ command }) => command.action === 'preview_operation');
-  assert.deepEqual(JSON.parse(preview.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user' });
-  const applied = afterConfirm.find(({ command }) => command.action === 'apply_operation');
-  assert.equal(applied.command.revision, 'a'.repeat(64));
-  assert.deepEqual(JSON.parse(applied.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user', confirmed: true });
+test('Plugins, MCP and Skills share settings chrome while preserving catalogs, drafts and responsive layout', async () => {
+  for (const theme of ['light', 'dark']) {
+    const { baseline, shell, beforeConfirm, afterConfirm, ...checks } = await runScenario('customize', theme);
+    for (const [name, passed] of Object.entries(checks)) assert.equal(passed, true, `${theme}: ${name}`);
+    for (const [page, state] of Object.entries(shell)) {
+      const context = `${theme}: ${page}`;
+      assert.deepEqual(state.geometry, baseline.geometry, `${context}: sidebar, insets, title and navigation match General`);
+      assert.equal(state.title, state.navigationLabel, `${context}: title matches the settings navigation`);
+      assert.equal(state.selectedNavigation, 'page', `${context}: current page is marked in settings navigation`);
+      assert.equal(state.settingsSearchVisible, true, `${context}: shared settings search remains visible`);
+      assert.equal(state.backButtonCount, 1, `${context}: there is one way back to the app`);
+      assert.equal(state.contentScrollCount, 1, `${context}: the shell owns content scrolling`);
+      assert.equal(state.legacyChromeCount, 0, `${context}: no separate Customize navigation is rendered`);
+      assert.equal(state.duplicateHeadingCount, 0, `${context}: page content does not repeat the shell title`);
+      assert.equal(state.nestedScrollCount, 0, `${context}: catalogs do not add a nested scroll surface`);
+      assert.equal(state.layerControlCount, state.page === 'mcp' ? 0 : 1, `${context}: layer controls follow the settings page contract`);
+      assert.equal(state.layerControlsVisible, state.page !== 'mcp', `${context}: layered controls are visible in the regular header`);
+      assert.equal(state.horizontalOverflow, false, `${context}: content fits the window`);
+    }
+    assert.equal(beforeConfirm.filter(({ command }) => command.action === 'apply_operation').length, 0);
+    const preview = beforeConfirm.find(({ command }) => command.action === 'preview_operation');
+    assert.deepEqual(JSON.parse(preview.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user' });
+    const applied = afterConfirm.find(({ command }) => command.action === 'apply_operation');
+    assert.equal(applied.command.revision, 'a'.repeat(64));
+    assert.deepEqual(JSON.parse(applied.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user', confirmed: true });
+  }
 });

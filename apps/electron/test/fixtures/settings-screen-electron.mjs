@@ -243,8 +243,9 @@ async function runWindowChromeScenario(window, webContents) {
     const sidebarScrollRect = rect(sidebarScroll);
     const sidebarStyle = getComputedStyle(sidebar);
     const style = getComputedStyle(contentScroll);
-    // Round layout subpixels so the assertions compare physical spacing,
-    // while excluding the last card's margin from the inner padding.
+    // Padding belongs to the shared content wrapper. Nested details/card
+    // margins can collapse, so their rectangle difference is clearance,
+    // not a reliable way to infer the wrapper's CSS padding.
     const pixels = (value) => Math.round(value * 100) / 100;
     return {
       viewportInsets: {
@@ -255,8 +256,9 @@ async function runWindowChromeScenario(window, webContents) {
       contentInsets: {
         left: pixels(headerRect.left - innerRect.left),
         right: pixels(innerRect.right - headerRect.right),
-        bottom: pixels(innerRect.bottom - rect(lastChild).bottom - parseFloat(getComputedStyle(lastChild).marginBottom)),
+        bottom: parseFloat(getComputedStyle(inner).paddingBottom),
       },
+      contentBottomClearance: pixels(innerRect.bottom - rect(lastChild).bottom),
       sidebarInsets: {
         left: pixels(sidebarScrollRect.left - sidebarRect.left - parseFloat(sidebarStyle.borderLeftWidth)),
         right: pixels(sidebarRect.right - parseFloat(sidebarStyle.borderRightWidth) - sidebarScrollRect.right),
@@ -750,7 +752,7 @@ async function runConfigurationNavigation(window, webContents) {
     const initialList = page === 'skills'
       ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
       : await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
-    const searchLabel = page === 'skills' ? 'Search skills' : 'Search tools';
+    const searchLabel = page === 'skills' ? 'Search skills' : 'Search mcp 服务器';
     const query = page === 'skills' ? 'release-notes' : 'context7';
     await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${searchLabel}"]`)}, ${JSON.stringify(query)})`);
     await delay(40);
@@ -818,8 +820,52 @@ async function runCustomizeScenario(window, webContents) {
     window.showInactive();
     await delay(120);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${process.env.LINGXI_SETTINGS_SCREEN_THEME || 'light'}-customize-${name}.png`), (await window.capturePage()).toPNG());
+    writeFileSync(join(dir, `${new URL(url).searchParams.get('theme') || 'light'}-customize-${name}.png`), (await window.capturePage()).toPNG());
   };
+  const measureShell = (page) => run(`(() => {
+    const dialog = document.querySelector('[role="dialog"][aria-label="设置"]');
+    const scroll = document.querySelector('.settings-content-scroll');
+    const inner = document.querySelector('.settings-content-inner');
+    const navScroll = document.querySelector('.settings-nav-scroll');
+    const title = document.querySelector('.settings-page-title');
+    if (!scroll || !inner || !navScroll || !title) throw new Error('missing shared settings shell on ' + ${JSON.stringify(page)});
+    const sidebar = navScroll.parentElement;
+    const navLink = dialog.querySelector('[data-nav-page="' + ${JSON.stringify(page)} + '"]');
+    const bounds = dialog.getBoundingClientRect();
+    const viewport = scroll.getBoundingClientRect();
+    const side = sidebar.getBoundingClientRect();
+    const contentStyle = getComputedStyle(inner);
+    const titleStyle = getComputedStyle(title);
+    const pixels = (value) => Math.round(value * 100) / 100;
+    const visible = (element) => Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
+    const layerSwitcher = dialog.querySelector('[data-testid="layer-switcher"]');
+    return {
+      page: ${JSON.stringify(page)},
+      geometry: {
+        sidebarWidth: pixels(side.width),
+        viewportInsets: { top: pixels(viewport.top - bounds.top), right: pixels(bounds.right - viewport.right), bottom: pixels(bounds.bottom - viewport.bottom) },
+        contentPadding: [contentStyle.paddingLeft, contentStyle.paddingRight, contentStyle.paddingBottom],
+        titleTypography: [titleStyle.fontSize, titleStyle.fontWeight, titleStyle.letterSpacing, titleStyle.lineHeight],
+        navPages: [...navScroll.querySelectorAll('[data-nav-page]')].map((element) => element.dataset.navPage),
+      },
+      title: title.textContent.trim(),
+      navigationLabel: navLink?.textContent.trim(),
+      selectedNavigation: navLink?.getAttribute('aria-current'),
+      settingsSearchVisible: visible(dialog.querySelector('[aria-label="搜索设置"]')),
+      backButtonCount: dialog.querySelectorAll('[aria-label="Back to app"]').length,
+      contentScrollCount: dialog.querySelectorAll('.settings-content-scroll').length,
+      legacyChromeCount: dialog.querySelectorAll('.extension-customize-window, .extension-customize-rail, .extension-sidebar, .extension-window-navigation').length,
+      duplicateHeadingCount: dialog.querySelectorAll('.extension-hub-header h1').length,
+      nestedScrollCount: [...dialog.querySelectorAll('.extension-hub-main, .extension-hub-page')].filter((element) => ['auto', 'scroll'].includes(getComputedStyle(element).overflowY)).length,
+      layerControlCount: dialog.querySelectorAll('[data-testid="layer-switcher"]').length,
+      layerControlsVisible: visible(layerSwitcher),
+      horizontalOverflow: scroll.scrollWidth > scroll.clientWidth + 1,
+    };
+  })()`);
+  await click('[data-nav-page="general"]');
+  const baseline = await measureShell('general');
+  await capture('general');
+  const shell = {};
   const names = ['Accessibility', 'Agent Browser', 'Apple Design', 'Artifacts Builder', 'Code Review', 'Frontend Design', 'Release Notes', 'Project Review'];
   const descriptions = ['Audit and improve web accessibility following WCAG guidelines.', 'Browser automation for everyday tasks and testing.', 'Build clear interfaces with thoughtful motion and typography.', 'Create interactive artifacts for your workflow.', 'Review changes for correctness and maintainability.', 'Design distinctive, production-ready interfaces.', 'Turn commits into release notes for your users.', 'Review changes in the current project.'];
   const entries = names.map((name, index) => ({ id: `skill-${index}`, name, source: index === 7 ? 'project' : 'user', rootDir: '/test/skills', directory: `/test/skills/${index}`, writable: true, description: descriptions[index] }));
@@ -842,6 +888,7 @@ async function runCustomizeScenario(window, webContents) {
   await run('window.__settingsScreenTest.selectPage("plugins")');
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-list"))');
   await capture('plugins');
+  shell.plugins = await measureShell('plugins');
   const publicCatalog = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 8');
   const twoColumns = await run('getComputedStyle(document.querySelector(".extension-hub-list")).gridTemplateColumns.split(" ").length === 2');
   await click('.extension-hub-row-open');
@@ -854,6 +901,7 @@ async function runCustomizeScenario(window, webContents) {
   await click('.extension-breadcrumb button');
   await click('[data-nav-page="skills"]');
   await capture('skills');
+  shell.skills = await measureShell('skills');
   const installedPreview = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 6');
   await click('.extension-skills-installed .extension-see-more');
   const expanded = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 8');
@@ -879,17 +927,39 @@ async function runCustomizeScenario(window, webContents) {
   const dirtyGuard = await run('Boolean(document.querySelector(".extension-skill-dialog")) && document.body.textContent.includes("丢弃并切换")');
   await button('继续编辑');
   const retainedDraft = await run('document.querySelector(\'[aria-label="Accessibility markdown"]\').value === "# Edited instructions"');
+  await click('[data-nav-page="general"]');
+  const skillNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-skill-dialog")) && document.querySelector(".settings-page-title").textContent === "Skills"');
+  await button('Continue editing');
+  const skillNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="Accessibility markdown"]\').value === "# Edited instructions"');
   await click('[aria-label="Close details"]');
   await button('丢弃并切换');
   await click('[data-nav-page="mcp"]');
   await capture('tools');
-  const tools = await run('document.querySelector(".extension-hub-heading h1").textContent === "Tools" && Boolean(document.querySelector(".configuration-entry"))');
-  await run('[...document.querySelectorAll(".extension-sidebar-installed button")].find(el => el.textContent.includes("Secure Tools")).click()');
+  shell.mcp = await measureShell('mcp');
+  const tools = await run('document.querySelector(".settings-page-title").textContent === "MCP 服务器" && Boolean(document.querySelector(".configuration-entry"))');
+  await button('Add');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="mcp-name"]\', "draft-mcp")');
+  await delay(40);
+  await click('[data-nav-page="plugins"]');
+  const mcpNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".configuration-detail")) && document.querySelector(".settings-page-title").textContent === "MCP 服务器"');
+  await button('Continue editing');
+  const mcpNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="mcp-name"]\').value === "draft-mcp"');
+  await click('[data-nav-page="general"]');
+  const mcpNormalNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && document.querySelector(".settings-page-title").textContent === "MCP 服务器"');
+  await button('Discard and switch');
+  const normalNavigation = await run('document.querySelector(".settings-page-title").textContent === "通用"');
+  await click('[data-nav-page="plugins"]');
+  await button('Personal');
+  await run('(() => { const row = [...document.querySelectorAll(".configuration-entry .extension-hub-row-open")].find(el => el.textContent.includes("Secure Tools")); if (!row) throw new Error("missing Personal catalog Secure Tools row"); row.click(); })()');
   await delay(60);
-  const sidebarDeepLink = await run('document.querySelector(".extension-plugin-title-row h1")?.textContent === "Secure Tools"');
+  const personalCatalogDetail = await run('document.querySelector(".extension-plugin-title-row h1")?.textContent === "Secure Tools"');
   await click('.extension-plugin-configuration summary');
   await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="secure@acme 配置"]\', \'{"option":"draft"}\')');
   await delay(40);
+  await click('[data-nav-page="general"]');
+  const pluginNormalNavigationGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-plugin-page")) && document.querySelector(".settings-page-title").textContent === "插件与市场"');
+  await button('Continue editing');
+  const pluginNavigationRetainedDraft = await run('document.querySelector(\'[aria-label="secure@acme 配置"]\').value.includes("draft")');
   await click('[data-nav-page="skills"]');
   const pluginDraftGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-plugin-page"))');
   await button('Discard and switch');
@@ -897,7 +967,15 @@ async function runCustomizeScenario(window, webContents) {
   await delay(80);
   await capture('narrow');
   const narrow = await run('getComputedStyle(document.querySelector(".extension-hub-list")).gridTemplateColumns.split(" ").length === 1 && document.querySelector(".extension-hub-main").scrollWidth <= document.querySelector(".extension-hub-main").clientWidth + 1');
-  return { publicCatalog, twoColumns, inlineDetail, beforeConfirm, afterConfirm, installedPreview, expanded, sourceFilter, emptySearch, renderedMarkdown, modalCentered, trappedFocus, dirtyGuard, retainedDraft, tools, sidebarDeepLink, pluginDraftGuard, narrow };
+  shell.narrowSkills = await measureShell('skills');
+  await click('[data-nav-page="plugins"]');
+  await capture('narrow-plugins');
+  shell.narrowPlugins = await measureShell('plugins');
+  const narrowPlugins = await run('getComputedStyle(document.querySelector(".extension-hub-list")).gridTemplateColumns.split(" ").length === 1');
+  await click('[data-nav-page="mcp"]');
+  await capture('narrow-mcp');
+  shell.narrowMcp = await measureShell('mcp');
+  return { baseline, shell, publicCatalog, twoColumns, inlineDetail, beforeConfirm, afterConfirm, installedPreview, expanded, sourceFilter, emptySearch, renderedMarkdown, modalCentered, trappedFocus, dirtyGuard, retainedDraft, skillNavigationGuard, skillNavigationRetainedDraft, tools, mcpNavigationGuard, mcpNavigationRetainedDraft, mcpNormalNavigationGuard, normalNavigation, personalCatalogDetail, pluginNormalNavigationGuard, pluginNavigationRetainedDraft, pluginDraftGuard, narrow, narrowPlugins };
 }
 
 async function main() {

@@ -1782,4 +1782,45 @@
     <string name="chat_question_collapsed">접힘</string>
     <string name="chat_question_expanded">펼쳐짐</string>
     <string name="chat_question_no_answer">응답 없음</string>
+
+<!-- Audio recovery above the composer. -->
+    <string name="audio_guide_permission_title">음성 권한이 필요합니다</string>
+    <string name="audio_guide_permission_detail">시스템 설정에서 마이크와 음성 인식을 허용한 후 다시 시도하세요.</string>
+    <string name="audio_guide_quota_title">클라우드 음성 할당량이 부족합니다</string>
+    <string name="audio_guide_quota_detail">음성 계정 할당량을 확인하거나 음성 설정에서 시스템 음성 또는 사용 가능한 계정을 선택하세요.</string>
+    <string name="audio_guide_configuration_title">음성 설정이 필요합니다</string>
+    <string name="audio_guide_configuration_detail">인식 언어와 음성 소스를 확인하세요. 중국어는 중국어를 선택하고, 지원되지 않으면 해당 모델을 설치하거나 사용 가능한 소스를 선택하세요.</string>
+    <string name="audio_guide_retry_title">음성을 일시적으로 사용할 수 없습니다</string>
+    <string name="audio_guide_retry_detail">앱을 전면에 유지하고 다시 시도하세요. 계속 실패하면 음성 설정에서 언어, 소스 및 권한을 확인하세요.</string>
+    <string name="audio_guide_settings">음성 설정</string>
+    <string name="audio_guide_dismiss">닫기</string>
+    <string name="audio_language_hint">자동은 시스템 언어를 따르며 말하는 언어를 감지하지 않습니다. 중국어를 말할 때는 중국어를 선택하세요.</string>
+
+    <string name="audio_offline_recognition_models">오프라인 인식 모델</string>
+    <string name="audio_offline_speech_models">오프라인 읽기 모델</string>
+    <string name="audio_offline_recognition_hint">인식 모델만 표시됩니다. MeloTTS와 Kitten은 읽기 모델이며 음성 출력에서 선택하세요.</string>
+    <string name="audio_offline_speech_hint">읽기 모델만 표시됩니다. MeloTTS는 중국어와 영어를 읽으며 음성 인식은 음성 입력에서 설정하세요.</string>
+    <string name="audio_offline_models_hint">인식 모델은 음성 입력에, 읽기 모델은 음성 출력에 사용됩니다. 설치 후 해당 목록에서 선택하세요.</string>
+    <string name="audio_model_installed">설치됨</string>
+    <string name="audio_model_not_installed">설치되지 않음</string>
+    <string name="audio_language_default_model">언어에 따라 선택</string>
+
+    <string name="audio_settings_input">음성 입력</string>
+    <string name="audio_settings_output">읽어주기</string>
+    <string name="audio_source_title">소스</string>
+    <string name="audio_settings_offline_models">오프라인 모델</string>
+    <string name="audio_settings_advanced">고급 설정 및 권한</string>
+    <string name="audio_settings_expand">펼치기</string>
+    <string name="audio_settings_collapse">접기</string>
+    <string name="audio_settings_status">저장 상태</string>
+    <string name="audio_settings_saving">저장 중…</string>
+    <string name="audio_settings_saved">이 기기에 저장됨</string>
+    <string name="audio_settings_account">음성 계정</string>
+    <string name="audio_settings_model">음성 모델</string>
+    <string name="audio_settings_follow_session">현재 채팅 계정 사용</string>
+    <string name="audio_settings_select_account">계정 선택</string>
+    <string name="audio_settings_default">자동 선택</string>
+    <string name="audio_settings_connected">연결됨</string>
+    <string name="audio_source_system">시스템</string>
+    <string name="audio_settings_cloud_source">클라우드 서비스</string>
 </resources>

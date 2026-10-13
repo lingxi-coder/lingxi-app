@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'settings-screen-electron.mjs');
 
-async function runScenario(scenario) {
+async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light') {
   const viteCacheDir = mkdtempSync(join(tmpdir(), `lingxi-settings-screen-vite-${scenario}-`));
   const vite = await createServer({
     root: fixtureRoot,
@@ -34,7 +34,6 @@ async function runScenario(scenario) {
     await vite.listen();
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port, 'Vite fixture server did not bind a port');
-    const fixtureTheme = process.env.LINGXI_SETTINGS_SCREEN_THEME === 'dark' ? 'dark' : 'light';
     const fixtureUrl = `http://127.0.0.1:${address.port}/settings-screen-fixture.html?theme=${fixtureTheme}`;
     child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
       cwd: electronRoot,
@@ -93,13 +92,31 @@ test('the layer switcher appears only on layered pages', async () => {
   assert.equal(customProviders.hasLayerSwitcher, true, 'custom-providers is outside 编码 but IS layered');
 });
 
-test('settings exposes a titlebar drag strip and flush right scroll track', async () => {
-  const result = await runScenario('window-chrome');
-  assert.equal(result.hasDragRegion, true);
-  assert.equal(result.dragRegionMode, 'drag');
-  assert.equal(result.dragRegionHeight, '18px');
-  assert.equal(result.scrollPaddingTop, '0px');
-  assert.equal(result.scrollPaddingBottom, '0px');
+test('settings preserves content and scroll track insets while scrolling and switching pages', async () => {
+  for (const theme of ['light', 'dark']) {
+    const result = await runScenario('window-chrome', theme);
+    assert.equal(result.hasDragRegion, true);
+    assert.equal(result.dragRegionMode, 'drag');
+    assert.equal(result.dragRegionHeight, '18px');
+    for (const [position, state] of Object.entries(result.layout)) {
+      const context = `${theme} ${position}`;
+      assert.deepEqual(state.viewportInsets, { top: 44, right: 6, bottom: 8 }, `${context}: viewport clears the titlebar and window edges`);
+      assert.deepEqual(state.contentInsets, { left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
+      assert.deepEqual(state.sidebarInsets, { left: 6, right: 6, bottom: 8 }, `${context}: sidebar scroll track remains inset`);
+      assert.equal(state.scrollPaddingTop, '0px', context);
+      assert.equal(state.scrollPaddingBottom, '0px', context);
+      for (const scrollbar of state.scrollbars) {
+        assert.equal(scrollbar.thumbBorder, '2px', `${context}: thumb has an inset border`);
+        assert.deepEqual(scrollbar.trackMargins, ['4px', '4px'], `${context}: track clears both viewport ends`);
+      }
+    }
+    assert.equal(result.layout.top.scrollTop, 0, 'Voice starts at the top');
+    assert.ok(result.layout.bottom.scrollTop > 0, 'Voice has enough content to exercise scrolling');
+    assert.equal(result.layout.bottom.atBottom, true, 'Voice reaches the end of its content');
+    assert.equal(result.layout.switched.scrollTop, 0, 'switching settings pages resets the content scroll');
+    assert.equal(result.layout.returned.scrollTop, 0, 'returning to Voice starts at the top');
+    assert.equal(result.layout.narrow.windowWidth, 760, 'the same insets hold in a narrow window');
+  }
 });
 
 test('the four configuration managers render without horizontal dialog overflow', async () => {

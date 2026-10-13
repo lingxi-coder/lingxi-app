@@ -215,20 +215,93 @@ async function runPageContentScenario(webContents) {
   return { placeholderKinds, afterHooksEscapeHatch, hasFiles, fileActions };
 }
 
-async function runWindowChromeScenario(webContents) {
-  return webContents.executeJavaScript(`(() => {
-    const dragRegion = document.querySelector('.settings-window-drag-region');
+async function runWindowChromeScenario(window, webContents) {
+  const run = (expression) => webContents.executeJavaScript(expression);
+  const theme = new URL(url).searchParams.get('theme') ?? 'light';
+  const capture = async (position) => {
+    const screenshotDir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+    if (!screenshotDir) return;
+    window.showInactive();
+    await delay(120);
+    mkdirSync(screenshotDir, { recursive: true });
+    writeFileSync(join(screenshotDir, `settings-voice-${theme}-${position}.png`), (await window.capturePage()).toPNG());
+    window.hide();
+  };
+  const measure = () => run(`(() => {
+    const dialog = document.querySelector('[role="dialog"]');
     const contentScroll = document.querySelector('.settings-content-scroll');
+    const inner = document.querySelector('.settings-content-inner');
+    const sidebarScroll = document.querySelector('.settings-nav-scroll');
+    const sidebar = sidebarScroll.parentElement;
+    const rect = (element) => element.getBoundingClientRect();
+    const dialogRect = rect(dialog);
+    const scrollRect = rect(contentScroll);
+    const innerRect = rect(inner);
+    const headerRect = rect(inner.firstElementChild);
+    const lastChild = inner.lastElementChild;
+    const sidebarRect = rect(sidebar);
+    const sidebarScrollRect = rect(sidebarScroll);
+    const sidebarStyle = getComputedStyle(sidebar);
+    const style = getComputedStyle(contentScroll);
+    // Round layout subpixels so the assertions compare physical spacing,
+    // while excluding the last card's margin from the inner padding.
+    const pixels = (value) => Math.round(value * 100) / 100;
+    return {
+      viewportInsets: {
+        top: pixels(scrollRect.top - dialogRect.top),
+        right: pixels(dialogRect.right - scrollRect.right),
+        bottom: pixels(dialogRect.bottom - scrollRect.bottom),
+      },
+      contentInsets: {
+        left: pixels(headerRect.left - innerRect.left),
+        right: pixels(innerRect.right - headerRect.right),
+        bottom: pixels(innerRect.bottom - rect(lastChild).bottom - parseFloat(getComputedStyle(lastChild).marginBottom)),
+      },
+      sidebarInsets: {
+        left: pixels(sidebarScrollRect.left - sidebarRect.left - parseFloat(sidebarStyle.borderLeftWidth)),
+        right: pixels(sidebarRect.right - parseFloat(sidebarStyle.borderRightWidth) - sidebarScrollRect.right),
+        bottom: pixels(sidebarRect.bottom - sidebarScrollRect.bottom),
+      },
+      scrollPaddingTop: style.paddingTop,
+      scrollPaddingBottom: style.paddingBottom,
+      scrollTop: contentScroll.scrollTop,
+      atBottom: Math.abs(contentScroll.scrollHeight - contentScroll.clientHeight - contentScroll.scrollTop) <= 1,
+      windowWidth: window.innerWidth,
+      scrollbars: [contentScroll, sidebarScroll].map((element) => {
+        const thumb = getComputedStyle(element, '::-webkit-scrollbar-thumb');
+        const track = getComputedStyle(element, '::-webkit-scrollbar-track');
+        return { thumbBorder: thumb.borderTopWidth, trackMargins: [track.marginTop, track.marginBottom] };
+      }),
+    };
+  })()`);
+  await run('window.__settingsScreenTest.selectPage("voice")');
+  await waitFor(webContents, 'Boolean(document.querySelector(\'[aria-label="语音会话模式"]\'))');
+  const top = await measure();
+  await capture('top');
+  await run('document.querySelector(".settings-content-scroll").scrollTop = document.querySelector(".settings-content-scroll").scrollHeight');
+  await delay(50);
+  const bottom = await measure();
+  await capture('bottom');
+  await run('window.__settingsScreenTest.selectPage("general")');
+  await waitFor(webContents, 'document.querySelector(".settings-content-scroll").scrollTop === 0');
+  const switched = await measure();
+  await run('window.__settingsScreenTest.selectPage("voice")');
+  await waitFor(webContents, 'Boolean(document.querySelector(\'[aria-label="语音会话模式"]\')) && document.querySelector(".settings-content-scroll").scrollTop === 0');
+  const returned = await measure();
+  window.setSize(760, 720);
+  await waitFor(webContents, 'window.innerWidth === 760');
+  const narrow = await measure();
+  await capture('narrow');
+  const chrome = await run(`(() => {
+    const dragRegion = document.querySelector('.settings-window-drag-region');
     const dragStyle = dragRegion && getComputedStyle(dragRegion);
-    const scrollStyle = contentScroll && getComputedStyle(contentScroll);
     return {
       hasDragRegion: Boolean(dragRegion),
       dragRegionMode: dragStyle?.webkitAppRegion ?? null,
       dragRegionHeight: dragStyle?.height ?? null,
-      scrollPaddingTop: scrollStyle?.paddingTop ?? null,
-      scrollPaddingBottom: scrollStyle?.paddingBottom ?? null,
     };
   })()`);
+  return { ...chrome, layout: { top, bottom, switched, returned, narrow } };
 }
 
 async function runLayerReseedScenario(webContents) {
@@ -850,7 +923,7 @@ async function main() {
       : scenario === 'focus-trap' ? await runFocusTrapScenario(webContents)
       : scenario === 'back-click' ? await runBackClickScenario(webContents)
       : scenario === 'page-content' ? await runPageContentScenario(webContents)
-      : scenario === 'window-chrome' ? await runWindowChromeScenario(webContents)
+      : scenario === 'window-chrome' ? await runWindowChromeScenario(window, webContents)
       : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)
       : scenario === 'permission-rule-dispatch' ? await runPermissionRuleDispatchScenario(webContents)
       : scenario === 'remount-on-layer-switch' ? await runRemountOnLayerSwitchScenario(webContents)

@@ -515,6 +515,7 @@ export function SettingsScreen({
   const layerLocked = layerLockCount > 0;
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const contentScrollRef = useRef<HTMLDivElement>(null);
   const backRef = useRef<HTMLButtonElement>(null);
   // A ref, not a dependency, so the mount effect below (which must run its
   // capture-focus/attach-listener logic exactly once) always calls the
@@ -527,6 +528,10 @@ export function SettingsScreen({
   const engineReady = bridge.connected && Boolean(activeSessionId);
   const activePage = SETTINGS_NAV.find((candidate) => candidate.id === page) ?? SETTINGS_NAV[0];
   const nav = useMemo(() => groupedNav(query), [query]);
+
+  useEffect(() => {
+    contentScrollRef.current?.scrollTo(0, 0);
+  }, [page]);
 
   // Editing a layer that just became unavailable (the project closed) falls
   // back to `user` — the one layer that is always editable — rather than
@@ -706,9 +711,9 @@ export function SettingsScreen({
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <nav style={{
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
-          borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflowY: 'auto',
+          borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflow: 'hidden',
         }}>
-          <div style={{ padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
+          <div style={{ flexShrink: 0, padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
             <button ref={backRef} type="button" aria-label="Back to app" onClick={onClose}
               className="settings-back-button"
               style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
@@ -734,7 +739,7 @@ export function SettingsScreen({
               />
             </div>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 10px 14px' }}>
+          <div className="settings-nav-scroll settings-scroll-area">
             {nav.length === 0 && (
               <div data-testid="nav-empty-state" style={{ padding: '18px 6px', color: t.text4, fontSize: 12 }}>
                 没有匹配的设置项
@@ -774,20 +779,22 @@ export function SettingsScreen({
           </div>
         </nav>
 
-        <div className="settings-content-scroll" style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 0 }}>
-          <div style={{ padding: '20px 32px 40px' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
-              <div>
-                <div style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
+        <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
+          <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
+            <div className="settings-content-inner">
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+                <div>
+                  <div style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
+                </div>
+                {showLayerSwitcher && (
+                  <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+                )}
               </div>
               {showLayerSwitcher && (
-                <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
               )}
+              {body}
             </div>
-            {showLayerSwitcher && (
-              <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
-            )}
-            {body}
           </div>
         </div>
 

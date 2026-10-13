@@ -36,6 +36,9 @@ settings:
       - ko
 
 packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    exactVersion: 0.9.20
   Firebase:
     url: https://github.com/firebase/firebase-ios-sdk.git
     exactVersion: 12.19.2
@@ -61,6 +64,7 @@ targets:
         excludes:
           - Firebase/**
     dependencies:
+      - package: ZIPFoundation
       - package: Firebase
         product: FirebaseAuth
       - package: GoogleSignIn

@@ -1,8 +1,10 @@
 package com.lingxi.code.drawer
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -22,8 +23,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,23 +44,25 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
-import com.lingxi.code.components.tint
+import com.lingxi.code.components.modeColor
 import com.lingxi.code.model.Chat
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Project
 import com.lingxi.code.model.SessionMode
-import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.Workspace
 import com.lingxi.code.theme.LingXiTheme
+import java.util.TimeZone
 
 /**
  * Production drawer collections supplied by real repositories.
@@ -73,21 +79,26 @@ data class DrawerProductionData(
     val projectStatusMessage: String? = null,
 )
 
+/** The signed-in account shown on the drawer's bottom row; `null` means signed out. */
+@Immutable
+data class DrawerAccount(val displayName: String, val email: String?)
+
 /**
- * The 对话 / 项目 / 定时 drawer content — the Android analog of the iOS `Drawer`,
- * rendered as the `drawerContent` of a Material 3 `ModalNavigationDrawer` (the
+ * The mobile drawer: search, two fixed entries (定时任务 · 项目), then ONE
+ * recents list that is not split by mode — Chat / Code are only filter chips.
+ * Running and awaiting-approval sessions carry a marker at the row's end. The
+ * bottom row holds the account, the terminal and settings.
+ *
+ * Rendered as the `drawerContent` of a Material 3 `ModalNavigationDrawer` (the
  * gesture, scrim and slide are owned by the M3 component, so this is just the
  * 320dp panel body).
  *
- * State is hoisted into [DrawerUiState]; selecting a chat/session calls
- * [onSelectSession] (which the root shell uses to close the drawer and switch
- * the conversation), the terminal shortcut calls [onOpenTerminal], and the
- * account row calls [onOpenSettings].
- *
- * Layout mirrors the prototype top-to-bottom: status-bar offset → header →
- * workspace pills → search → section tabs → scrolling section body → account
- * row.
+ * State is hoisted into [DrawerUiState]. Opening a session calls
+ * [onResumeSession] / [onSelectProjectSession], which the root shell uses to
+ * rebind the engine to the session's own scope AND mode and to close the
+ * drawer. Search matches sessions, projects and scheduled tasks.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DrawerContent(
     ui: DrawerUiState,
@@ -97,74 +108,92 @@ fun DrawerContent(
     modifier: Modifier = Modifier,
     onOpenTerminal: () -> Unit = {},
     /**
-     * The engine's REAL resumable sessions (out-of-band catalog). The 对话 tab
-     * renders this state directly, including loading / empty / error, and never
-     * falls back to mock sessions in production.
+     * The engine's REAL resumable sessions (out-of-band catalog). The recents
+     * list renders this state directly and never falls back to mock sessions in
+     * production.
      */
     engineSessions: EngineSessionState = EngineSessionState.loading(),
     /** Resume a real engine session by its wire uuid. */
     onResumeSession: (String) -> Unit = { onSelectSession(SessionRef(it, it)) },
-    onNewGlobalSession: () -> Unit = { onSelectSession(SessionRef("new", "")) },
     /** Real project/cron/workspace collections. Null collections render unavailable. */
     productionData: DrawerProductionData = DrawerProductionData(),
-    onCreateProject: () -> Unit = {},
     onSelectProjectSession: (String, SessionRef) -> Unit = { _, session -> onSelectSession(session) },
-    onNewProjectSession: (String) -> Unit = {},
-    onReimportProject: (String) -> Unit = {},
-    onExportProject: (String) -> Unit = {},
-    onReauthorizeProject: (String) -> Unit = {},
     onOpenCron: (String) -> Unit = {},
-    onCreateCron: () -> Unit = {},
+    onOpenCronList: () -> Unit = {},
+    onOpenProjects: () -> Unit = {},
+    onOpenProject: (String) -> Unit = {},
     onContinueSession: (ConversationScope, SessionRow, SessionMode) -> Unit = { _, _, _ -> },
-    onSelectSection: (DrawerSection) -> Unit = { ui.section = it },
-    isWorkspaceCollapsed: (SessionMode, String) -> Boolean = { _, _ -> false },
-    onToggleWorkspaceCollapsed: (SessionMode, String) -> Unit = { _, _ -> },
-    pinnedAtEpochMillis: (SessionMode, String) -> Long? = { _, _ -> null },
-    onToggleWorkspacePinned: (SessionMode, String) -> Unit = { _, _ -> },
+    onToggleSessionPinned: (String) -> Unit = {},
+    /**
+     * The engine is bound to one session at a time, so only the visible session
+     * can be running or waiting for the user's approval.
+     */
+    runningSessionId: String? = null,
+    awaitingSessionId: String? = null,
+    /** Scheduled-task results the user has not looked at yet. */
+    newCronResults: Int = 0,
+    account: DrawerAccount? = null,
 ) {
     val t = LingXiTheme.palette
 
-    // Live search query — filters the active workspace's chats / projects / crons
-    // (the real editable analog of the prototype's static search pill). Kept as a
-    // plain `remember` (transient, like a search box that resets when the drawer
-    // closes); the workspace-scoped lists below recompute on every keystroke.
+    // Live search query — filters sessions, projects and scheduled tasks. A plain
+    // `remember` (transient, like a search box that resets when the drawer
+    // closes); the lists below recompute on every keystroke.
     var query by remember { mutableStateOf("") }
+    val searching = query.isNotBlank()
 
     val globalName = stringResource(R.string.drawer_workspace_global)
     val projects = productionData.projects.orEmpty()
-    val chatWorkspaceGroups = remember(engineSessions.rows, projects, query) {
-        filterWorkspaceGroups(
-            buildWorkspaceGroups(
-                mode = SessionMode.Chat,
-                globalName = globalName,
-                globalSessions = engineSessions.rows,
-                projects = projects,
-                pinnedAtEpochMillis = { workspaceKey -> pinnedAtEpochMillis(SessionMode.Chat, workspaceKey) },
-            ),
-            query,
+    val nowSeconds = System.currentTimeMillis() / 1000L
+    val utcOffsetSeconds = TimeZone.getDefault().getOffset(nowSeconds * 1000L) / 1000
+    // The local calendar day is part of the key so "今天" rolls over at midnight
+    // even if no session data changed while the drawer stayed composed.
+    val localDay = Math.floorDiv(nowSeconds + utcOffsetSeconds, 86_400L)
+    val groups = remember(
+        engineSessions.rows,
+        projects,
+        ui.filter,
+        query,
+        ui.pinnedSessions,
+        runningSessionId,
+        awaitingSessionId,
+        localDay,
+    ) {
+        buildRecentGroups(
+            globalName = globalName,
+            globalSessions = engineSessions.rows,
+            projects = projects,
+            filter = ui.filter,
+            query = query,
+            pinnedSessions = ui.pinnedSessions,
+            statusFor = { id ->
+                when (id) {
+                    awaitingSessionId -> RecentStatus.AwaitingConfirmation
+                    runningSessionId -> RecentStatus.Running
+                    else -> RecentStatus.Idle
+                }
+            },
+            nowEpochSeconds = nowSeconds,
+            utcOffsetSeconds = utcOffsetSeconds,
         )
     }
-    val codeWorkspaceGroups = remember(engineSessions.rows, projects, query) {
-        filterWorkspaceGroups(
-            buildWorkspaceGroups(
-                mode = SessionMode.Code,
-                globalName = globalName,
-                globalSessions = engineSessions.rows,
-                projects = projects,
-                pinnedAtEpochMillis = { workspaceKey -> pinnedAtEpochMillis(SessionMode.Code, workspaceKey) },
-            ),
-            query,
-        )
+    val matchingProjects = remember(projects, query) {
+        if (query.isBlank()) emptyList() else projects.filter { project ->
+            project.name.contains(query.trim(), ignoreCase = true) ||
+                project.desc.contains(query.trim(), ignoreCase = true)
+        }
     }
-    val cronWorkspaceGroups = remember(productionData.crons, projects, query) {
-        filterCronWorkspaceGroups(
-            buildCronWorkspaceGroups(
-                globalName = globalName,
-                crons = productionData.crons.orEmpty(),
-                projects = projects,
-            ),
-            query,
-        )
+    val matchingCrons = remember(productionData.crons, query) {
+        if (query.isBlank()) emptyList() else filterCrons(productionData.crons.orEmpty(), query)
+    }
+
+    fun open(session: RecentSession) {
+        ui.selectSession(session.uuid)
+        when (val scope = session.scope) {
+            ConversationScope.Global, ConversationScope.Scheduled -> onResumeSession(session.uuid)
+            is ConversationScope.Project ->
+                onSelectProjectSession(scope.projectId, SessionRef(session.uuid, session.title))
+        }
     }
 
     Column(
@@ -175,15 +204,27 @@ fun DrawerContent(
     ) {
         DrawerHeader(onClose = onClose)
         SearchBar(query = query, onQueryChange = { query = it })
-        SectionTabs(
-            section = ui.section,
-            chats = chatWorkspaceGroups.sumOf { it.sessions.size },
-            projects = codeWorkspaceGroups.sumOf { it.sessions.size },
-            crons = cronWorkspaceGroups.sumOf { it.crons.size },
-            onSelect = onSelectSection,
-        )
 
-        // Scrolling section body — fills the space above shortcuts/account.
+        if (!searching) {
+            EntryRow(
+                icon = LXIconName.Clock,
+                label = stringResource(R.string.settings_title_cron),
+                badge = newCronResults.takeIf { it > 0 }
+                    ?.let { stringResource(R.string.drawer_cron_new_results, it) },
+                tag = UiTags.DRAWER_ENTRY_CRON,
+                onClick = onOpenCronList,
+            )
+            EntryRow(
+                icon = LXIconName.Folder,
+                label = stringResource(R.string.drawer_entry_projects),
+                count = projects.size,
+                tag = UiTags.DRAWER_ENTRY_PROJECTS,
+                onClick = onOpenProjects,
+            )
+            FilterChips(selected = ui.filter, onSelect = { ui.filter = it })
+        }
+
+        // Scrolling body — fills the space above the bottom bar.
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -192,55 +233,38 @@ fun DrawerContent(
                 .padding(horizontal = 12.dp)
                 .padding(top = 4.dp, bottom = 8.dp),
         ) {
-            when (ui.section) {
-                DrawerSection.Chat -> {
-                    WorkspaceGroupsSection(
-                        groups = chatWorkspaceGroups,
-                        mode = SessionMode.Chat,
-                        activeWs = ui.activeWs,
-                        activeSession = ui.activeSession,
-                        onSelectWorkspace = ui::selectWorkspace,
-                        isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Chat, it) },
-                        onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Chat, it) },
-                        isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Chat, it) != null },
-                        onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Chat, it) },
-                        onSelectGlobalSession = { onResumeSession(it.uuid) },
-                        onSelectProjectSession = onSelectProjectSession,
-                        onNewGlobalSession = onNewGlobalSession,
-                        onNewProjectSession = onNewProjectSession,
-                        onContinueSession = onContinueSession,
-                    )
-                }
-
-                DrawerSection.Code -> {
-                    WorkspaceGroupsSection(
-                        groups = codeWorkspaceGroups,
-                        mode = SessionMode.Code,
-                        activeWs = ui.activeWs,
-                        activeSession = ui.activeSession,
-                        onSelectWorkspace = ui::selectWorkspace,
-                        isWorkspaceCollapsed = { isWorkspaceCollapsed(SessionMode.Code, it) },
-                        onToggleWorkspaceCollapsed = { onToggleWorkspaceCollapsed(SessionMode.Code, it) },
-                        isWorkspacePinned = { pinnedAtEpochMillis(SessionMode.Code, it) != null },
-                        onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Code, it) },
-                        onSelectGlobalSession = { onResumeSession(it.uuid) },
-                        onSelectProjectSession = onSelectProjectSession,
-                        onNewGlobalSession = onNewGlobalSession,
-                        onNewProjectSession = onNewProjectSession,
-                        onContinueSession = onContinueSession,
-                    )
-                }
-
-                DrawerSection.Cron -> CronWorkspaceGroupsSection(
-                    groups = cronWorkspaceGroups,
+            if (searching) {
+                SearchResults(
+                    groups = groups,
+                    projects = matchingProjects,
+                    crons = matchingCrons,
+                    activeSession = ui.activeSession,
+                    onOpenSession = ::open,
+                    onOpenProject = onOpenProject,
                     onOpenCron = onOpenCron,
-                    onCreateCron = onCreateCron,
+                    isPinned = { ui.sessionPinnedAt(it) != null },
+                    onTogglePinned = onToggleSessionPinned,
+                    onContinue = onContinueSession,
+                )
+            } else {
+                RecentList(
+                    groups = groups,
+                    state = engineSessions,
+                    activeSession = ui.activeSession,
+                    onOpenSession = ::open,
+                    isPinned = { ui.sessionPinnedAt(it) != null },
+                    onTogglePinned = onToggleSessionPinned,
+                    onContinue = onContinueSession,
                 )
             }
         }
 
-        TerminalShortcut(onClick = onOpenTerminal)
-        AccountRow(onClick = onOpenSettings)
+        BottomBar(
+            account = account,
+            onOpenAccount = onOpenSettings,
+            onOpenTerminal = onOpenTerminal,
+            onOpenSettings = onOpenSettings,
+        )
     }
 }
 
@@ -276,74 +300,11 @@ private fun DrawerHeader(onClose: () -> Unit) {
     }
 }
 
-// MARK: - workspace pills ---------------------------------------------------
-
-@Composable
-private fun WorkspaceSource(
-    workspaces: List<Workspace>?,
-    activeWs: String,
-    onSelect: (String) -> Unit,
-) {
-    if (workspaces == null) {
-        WorkspaceUnavailableMessage(stringResource(R.string.drawer_workspaces_unavailable))
-        return
-    }
-    if (workspaces.isEmpty()) {
-        WorkspaceUnavailableMessage(stringResource(R.string.drawer_no_workspaces))
-        return
-    }
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 12.dp),
-    ) {
-        workspaces.forEach { ws ->
-            WorkspacePill(ws = ws, active = ws.id == activeWs, onClick = { onSelect(ws.id) })
-        }
-    }
-}
-
-@Composable
-private fun WorkspaceUnavailableMessage(message: String) {
-    val t = LingXiTheme.palette
-    Text(
-        message,
-        color = t.text4,
-        fontSize = 12.sp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 12.dp),
-    )
-}
-
-@Composable
-private fun WorkspacePill(ws: Workspace, active: Boolean, onClick: () -> Unit) {
-    val t = LingXiTheme.palette
-    val shape = RoundedCornerShape(50)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        modifier = Modifier
-            .clip(shape)
-            .background(if (active) ws.color.tint(0.20f) else t.surface)
-            .border(0.5.dp, if (active) ws.color.tint(0.35f) else t.border, shape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-    ) {
-        Text(ws.icon, color = if (active) ws.color else t.text3, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-        Text(ws.name, color = if (active) ws.color else t.text3, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-    }
-}
-
 // MARK: - search ------------------------------------------------------------
 
 /**
  * The drawer's real search field — an editable [BasicTextField] whose [query]
- * filters the section lists (chats / projects / crons) live as the user types.
+ * filters sessions, projects and scheduled tasks live as the user types.
  * Hoisted so the filtering logic lives in [DrawerContent]; a trailing × clears
  * the query when non-empty.
  */
@@ -357,7 +318,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 18.dp)
-            .padding(bottom = 14.dp)
+            .padding(bottom = 10.dp)
             .clip(shape)
             .background(t.surface)
             .border(0.5.dp, t.border, shape)
@@ -366,7 +327,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
         LXIcon(name = LXIconName.Search, size = 16.dp, color = t.text4, stroke = 2f)
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text(stringResource(R.string.drawer_search_chats_placeholder), color = t.text4, fontSize = 14.sp)
+                Text(stringResource(R.string.drawer_search_all_placeholder), color = t.text4, fontSize = 14.sp, maxLines = 1)
             }
             BasicTextField(
                 value = query,
@@ -393,127 +354,394 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
     }
 }
 
-// MARK: - section tabs ------------------------------------------------------
+// MARK: - entries + filter --------------------------------------------------
 
+/** One of the fixed destinations above the recents list. */
 @Composable
-private fun SectionTabs(
-    section: DrawerSection,
-    chats: Int,
-    projects: Int,
-    crons: Int,
-    onSelect: (DrawerSection) -> Unit,
-) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp)
-            .padding(bottom = 8.dp),
-    ) {
-        SectionTab(DrawerSection.Chat, LXIconName.Message, stringResource(R.string.drawer_tab_chats), chats, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Code, LXIconName.Folder, stringResource(R.string.drawer_tab_projects), projects, section, onSelect, Modifier.weight(1f))
-        SectionTab(DrawerSection.Cron, LXIconName.Clock, stringResource(R.string.drawer_tab_crons), crons, section, onSelect, Modifier.weight(1f))
-    }
-}
-
-@Composable
-private fun SectionTab(
-    id: DrawerSection,
+private fun EntryRow(
     icon: LXIconName,
     label: String,
-    count: Int,
-    current: DrawerSection,
-    onSelect: (DrawerSection) -> Unit,
-    modifier: Modifier = Modifier,
+    tag: String,
+    onClick: () -> Unit,
+    count: Int? = null,
+    badge: String? = null,
 ) {
-    val t = LingXiTheme.palette
-    val active = id == current
-    val shape = RoundedCornerShape(9.dp)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
-        modifier = modifier
-            .clip(shape)
-            .background(if (active) t.surfaceActive else Color.Transparent)
-            .border(0.5.dp, if (active) t.border else Color.Transparent, shape)
-            .clickable { onSelect(id) }
-            .testTag(UiTags.drawerTab(id.key))
-            .padding(horizontal = 4.dp, vertical = 9.dp),
-    ) {
-        LXIcon(name = icon, size = 14.dp, color = if (active) t.text else t.text3, stroke = 1.8f)
-        Text(
-            label,
-            color = if (active) t.text else t.text3,
-            fontSize = 13.sp,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-        )
-        Text(
-            count.toString(),
-            color = if (active) t.accent else t.text4,
-            fontSize = 10.5f.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun DrawerCollectionState(message: String) {
-    val t = LingXiTheme.palette
-    Text(
-        message,
-        color = t.text4,
-        fontSize = 12.sp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-    )
-}
-
-// MARK: - shortcuts / account -----------------------------------------------
-
-@Composable
-private fun TerminalShortcut(onClick: () -> Unit) {
     val t = LingXiTheme.palette
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .testTag(UiTags.DRAWER_TERMINAL)
+            .padding(horizontal = 10.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .testTag(tag)
             .clickable(onClick = onClick)
-            .padding(horizontal = 26.dp, vertical = 12.dp),
+            .padding(horizontal = 10.dp, vertical = 11.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(t.accent.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(
-                name = LXIconName.Terminal,
-                size = 20.dp,
+        LXIcon(name = icon, size = 18.dp, color = t.text2, stroke = 1.7f)
+        Text(label, color = t.text, fontSize = 15.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        if (badge != null) {
+            Text(
+                badge,
                 color = t.accent,
-                stroke = 1.7f,
+                fontSize = 11.5f.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(t.accent.copy(alpha = 0.14f))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
             )
+        } else if (count != null) {
+            Text(count.toString(), color = t.text4, fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(stringResource(R.string.settings_linux_section_terminal), color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text("Android Shell", color = t.text4, fontSize = 11.5f.sp)
-        }
-        LXIcon(
-            name = LXIconName.ChevronR,
-            size = 16.dp,
-            color = t.text4,
-            stroke = 1.6f,
-        )
     }
 }
 
 @Composable
-private fun AccountRow(onClick: () -> Unit) {
+private fun FilterChips(selected: RecentsFilter, onSelect: (RecentsFilter) -> Unit) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp)
+            .padding(top = 10.dp, bottom = 6.dp),
+    ) {
+        RecentsFilter.entries.forEach { filter ->
+            FilterChip(
+                label = when (filter) {
+                    RecentsFilter.All -> stringResource(R.string.drawer_filter_all)
+                    RecentsFilter.Chat -> stringResource(R.string.session_mode_chat)
+                    RecentsFilter.Code -> stringResource(R.string.session_mode_code)
+                },
+                tint = when (filter) {
+                    RecentsFilter.All -> LingXiTheme.palette.text
+                    RecentsFilter.Chat -> LingXiTheme.palette.modeColor(SessionMode.Chat)
+                    RecentsFilter.Code -> LingXiTheme.palette.modeColor(SessionMode.Code)
+                },
+                active = filter == selected,
+                onClick = { onSelect(filter) },
+                modifier = Modifier.testTag(UiTags.drawerFilter(filter.key)),
+            )
+        }
+    }
+}
+
+@Composable
+private fun FilterChip(
+    label: String,
+    tint: Color,
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val t = LingXiTheme.palette
-    Box(
+    val shape = RoundedCornerShape(50)
+    Text(
+        text = label,
+        color = if (active) tint else t.text3,
+        fontSize = 13.sp,
+        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+        modifier = modifier
+            .clip(shape)
+            .background(if (active) tint.copy(alpha = 0.16f) else t.surface)
+            .border(0.5.dp, if (active) tint.copy(alpha = 0.4f) else t.border, shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
+}
+
+// MARK: - recents -----------------------------------------------------------
+
+@Composable
+private fun bucketTitle(bucket: RecentBucket): String = stringResource(
+    when (bucket) {
+        RecentBucket.Pinned -> R.string.drawer_recents_pinned
+        RecentBucket.Today -> R.string.drawer_recents_today
+        RecentBucket.Yesterday -> R.string.session_relative_yesterday
+        RecentBucket.LastWeek -> R.string.drawer_recents_week
+        RecentBucket.Earlier -> R.string.drawer_recents_earlier
+    },
+)
+
+@Composable
+private fun RecentList(
+    groups: List<RecentGroup>,
+    state: EngineSessionState,
+    activeSession: String,
+    onOpenSession: (RecentSession) -> Unit,
+    isPinned: (String) -> Boolean,
+    onTogglePinned: (String) -> Unit,
+    onContinue: (ConversationScope, SessionRow, SessionMode) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    if (groups.isEmpty()) {
+        Text(
+            text = when {
+                state.isLoading -> stringResource(R.string.drawer_sessions_loading)
+                state.isError -> state.errorMessage ?: stringResource(R.string.drawer_sessions_load_failed)
+                else -> stringResource(R.string.drawer_no_sessions)
+            },
+            color = t.text4,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 12.dp),
+        )
+        return
+    }
+    groups.forEach { group ->
+        SectionHeader(bucketTitle(group.bucket))
+        group.sessions.forEach { session ->
+            RecentRow(
+                session = session,
+                active = session.uuid == activeSession,
+                pinned = isPinned(session.uuid),
+                onClick = { onOpenSession(session) },
+                onTogglePinned = { onTogglePinned(session.uuid) },
+                onContinue = onContinue,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String) {
+    val t = LingXiTheme.palette
+    Text(
+        text = title,
+        color = t.text4,
+        fontSize = 11.5f.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 4.dp),
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecentRow(
+    session: RecentSession,
+    active: Boolean,
+    pinned: Boolean,
+    onClick: () -> Unit,
+    onTogglePinned: () -> Unit,
+    onContinue: (ConversationScope, SessionRow, SessionMode) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    var menuOpen by remember { mutableStateOf(false) }
+    val otherMode = when (session.mode) {
+        SessionMode.Chat -> SessionMode.Code
+        SessionMode.Code -> SessionMode.Chat
+    }
+    Box {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (active) t.surfaceActive else Color.Transparent)
+                .testTag(UiTags.drawerSession(session.uuid))
+                .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
+                .padding(horizontal = 10.dp, vertical = 9.dp),
+        ) {
+            // Mode dot: the session's mode, in the mode's palette color.
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(t.modeColor(session.mode)),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = session.title,
+                    color = if (active) t.text else t.text2,
+                    fontSize = 14.sp,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = listOf(session.workspaceName, session.relativeTime)
+                        .filter(String::isNotBlank)
+                        .joinToString(" · "),
+                    color = t.text4,
+                    fontSize = 11.5f.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            when (session.status) {
+                RecentStatus.Running -> StatusPill(stringResource(R.string.chat_status_running), t.accent)
+                RecentStatus.AwaitingConfirmation ->
+                    StatusPill(stringResource(R.string.drawer_status_awaiting), t.statusTesting)
+                RecentStatus.Idle -> if (pinned) {
+                    LXIcon(name = LXIconName.Pin, size = 12.dp, color = t.text4, stroke = 1.8f)
+                }
+            }
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        stringResource(if (pinned) R.string.drawer_session_unpin else R.string.drawer_session_pin),
+                    )
+                },
+                onClick = {
+                    menuOpen = false
+                    onTogglePinned()
+                },
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        stringResource(
+                            R.string.drawer_session_continue_in,
+                            stringResource(
+                                when (otherMode) {
+                                    SessionMode.Chat -> R.string.session_mode_chat
+                                    SessionMode.Code -> R.string.session_mode_code
+                                },
+                            ),
+                        ),
+                    )
+                },
+                modifier = Modifier.testTag(UiTags.drawerSessionFork(session.uuid, otherMode.wireKey)),
+                onClick = {
+                    menuOpen = false
+                    onContinue(
+                        session.scope,
+                        SessionRow(
+                            uuid = session.uuid,
+                            title = session.title,
+                            messageCount = session.messageCount,
+                            relativeTime = session.relativeTime,
+                            mode = session.mode,
+                            modifiedAtEpochSeconds = session.modifiedAtEpochSeconds,
+                        ),
+                        otherMode,
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(label: String, color: Color) {
+    Text(
+        text = label,
+        color = color,
+        fontSize = 10.5f.sp,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.14f))
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+    )
+}
+
+// MARK: - search results ----------------------------------------------------
+
+@Composable
+private fun SearchResults(
+    groups: List<RecentGroup>,
+    projects: List<Project>,
+    crons: List<Cron>,
+    activeSession: String,
+    onOpenSession: (RecentSession) -> Unit,
+    onOpenProject: (String) -> Unit,
+    onOpenCron: (String) -> Unit,
+    isPinned: (String) -> Boolean,
+    onTogglePinned: (String) -> Unit,
+    onContinue: (ConversationScope, SessionRow, SessionMode) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    if (groups.isEmpty() && projects.isEmpty() && crons.isEmpty()) {
+        Text(
+            text = stringResource(R.string.drawer_no_match),
+            color = t.text4,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 12.dp),
+        )
+        return
+    }
+    if (groups.isNotEmpty()) {
+        SectionHeader(stringResource(R.string.drawer_search_section_sessions))
+        groups.flatMap { it.sessions }.forEach { session ->
+            RecentRow(
+                session = session,
+                active = session.uuid == activeSession,
+                pinned = isPinned(session.uuid),
+                onClick = { onOpenSession(session) },
+                onTogglePinned = { onTogglePinned(session.uuid) },
+                onContinue = onContinue,
+            )
+        }
+    }
+    if (projects.isNotEmpty()) {
+        SectionHeader(stringResource(R.string.drawer_entry_projects))
+        projects.forEach { project ->
+            ResultRow(
+                icon = LXIconName.Folder,
+                title = project.name,
+                subtitle = project.desc,
+                onClick = { onOpenProject(project.id) },
+            )
+        }
+    }
+    if (crons.isNotEmpty()) {
+        SectionHeader(stringResource(R.string.settings_title_cron))
+        crons.forEach { cron ->
+            ResultRow(
+                icon = LXIconName.Clock,
+                title = cron.title,
+                subtitle = cron.next,
+                onClick = { onOpenCron(cron.id) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ResultRow(icon: LXIconName, title: String, subtitle: String, onClick: () -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+    ) {
+        LXIcon(name = icon, size = 15.dp, color = t.text3, stroke = 1.7f)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = t.text2, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle.isNotBlank()) {
+                Text(subtitle, color = t.text4, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+// MARK: - bottom bar --------------------------------------------------------
+
+/** Account (real Firebase profile), terminal and settings. */
+@Composable
+private fun BottomBar(
+    account: DrawerAccount?,
+    onOpenAccount: () -> Unit,
+    onOpenTerminal: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
         modifier = Modifier
             .fillMaxWidth()
             .topBorder(t.border)
@@ -523,10 +751,11 @@ private fun AccountRow(onClick: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier
-                .fillMaxWidth()
+                .weight(1f)
                 .clip(RoundedCornerShape(12.dp))
-                .clickable(onClick = onClick)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .testTag(UiTags.DRAWER_ACCOUNT)
+                .clickable(onClick = onOpenAccount)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
         ) {
             Box(
                 modifier = Modifier
@@ -535,20 +764,58 @@ private fun AccountRow(onClick: () -> Unit) {
                     .background(Brush.linearGradient(listOf(t.accent, t.accent2))),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Y", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                val initial = account?.displayName?.trim()?.firstOrNull()?.uppercase()
+                if (initial != null) {
+                    Text(initial, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                } else {
+                    LXIcon(name = LXIconName.Sparkle, size = 16.dp, color = Color.White, stroke = 1.8f)
+                }
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text("Yuxin Yang", color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Text(stringResource(R.string.drawer_account_subtitle_mock), color = t.text4, fontSize = 11.5f.sp)
+                Text(
+                    text = account?.displayName ?: stringResource(R.string.drawer_account_signed_out_title),
+                    color = t.text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = account?.email ?: stringResource(R.string.drawer_account_signed_out_subtitle),
+                    color = t.text4,
+                    fontSize = 11.5f.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            LXIcon(
-                name = LXIconName.Cog,
-                size = 18.dp,
-                color = t.text3,
-                stroke = 1.6f,
-                contentDescription = stringResource(R.string.settings_title_main),
-            )
         }
+        BottomIconButton(
+            icon = LXIconName.Terminal,
+            description = stringResource(R.string.settings_linux_section_terminal),
+            tag = UiTags.DRAWER_TERMINAL,
+            onClick = onOpenTerminal,
+        )
+        BottomIconButton(
+            icon = LXIconName.Cog,
+            description = stringResource(R.string.settings_title_main),
+            tag = UiTags.DRAWER_SETTINGS,
+            onClick = onOpenSettings,
+        )
+    }
+}
+
+@Composable
+private fun BottomIconButton(icon: LXIconName, description: String, tag: String, onClick: () -> Unit) {
+    val t = LingXiTheme.palette
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .testTag(tag)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        LXIcon(name = icon, size = 20.dp, color = t.text2, stroke = 1.7f, contentDescription = description)
     }
 }
 

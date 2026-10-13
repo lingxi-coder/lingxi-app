@@ -10,7 +10,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.components.UiTags
-import com.lingxi.code.drawer.DrawerSection
+import com.lingxi.code.drawer.RecentsFilter
 import com.lingxi.code.theme.AppearanceStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -66,32 +66,37 @@ class AppFlowUiTest {
         rule.onNodeWithText("语音模式集成").assertDoesNotExist()
     }
 
-    /** Open the Chat/Code/Cron drawer via the conversation top-bar hamburger. */
+    /** Open the drawer via the conversation top-bar hamburger. */
     private fun openDrawer() {
         rule.onNodeWithTag(UiTags.OPEN_DRAWER).performClick()
         rule.waitForIdle()
     }
 
-    // --- 1. drawer tab switch ---------------------------------------------
+    // --- 1. drawer entries + recents filter --------------------------------
 
     @Test
-    fun drawer_switchesBetweenChatCodeAndCron() {
+    fun drawer_showsEntriesAndSwitchesTheRecentsFilter() {
         openDrawer()
 
         rule.onNodeWithText("知识库").assertDoesNotExist()
         rule.onNodeWithText("记忆").assertDoesNotExist()
 
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Code.key)).performClick()
-        rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Code.key)).assertIsDisplayed()
+        // 定时任务 and 项目 are fixed entries, no longer tabs.
+        rule.onNodeWithTag(UiTags.DRAWER_ENTRY_CRON).assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.DRAWER_ENTRY_PROJECTS).assertIsDisplayed()
 
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Cron.key)).performClick()
+        // Chat / Code are only a filter on the one recents list.
+        rule.onNodeWithTag(UiTags.drawerFilter(RecentsFilter.Code.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Cron.key)).assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.drawerFilter(RecentsFilter.Code.key)).assertIsDisplayed()
 
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chat.key)).performClick()
+        rule.onNodeWithTag(UiTags.drawerFilter(RecentsFilter.Chat.key)).performClick()
         rule.waitForIdle()
-        rule.onNodeWithTag(UiTags.drawerTab(DrawerSection.Chat.key)).assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.drawerFilter(RecentsFilter.Chat.key)).assertIsDisplayed()
+
+        rule.onNodeWithTag(UiTags.drawerFilter(RecentsFilter.All.key)).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag(UiTags.drawerFilter(RecentsFilter.All.key)).assertIsDisplayed()
     }
 
     // --- 2. settings push-nav + system back -------------------------------
@@ -100,8 +105,8 @@ class AppFlowUiTest {
     fun settings_pushNavToAppearance_andSystemBackReturnsToRoot() {
         openDrawer()
 
-        // Account row opens the settings surface.
-        rule.onNodeWithText("Yuxin Yang").performClick()
+        // The bottom bar's settings button opens the settings surface.
+        rule.onNodeWithTag(UiTags.DRAWER_SETTINGS).performClick()
         rule.waitForIdle()
         // Root settings title.
         rule.onNodeWithText("设置").assertIsDisplayed()
@@ -127,7 +132,7 @@ class AppFlowUiTest {
     @Test
     fun appearance_themeRadioAndAccentSwatchApply() {
         openDrawer()
-        rule.onNodeWithText("Yuxin Yang").performClick()
+        rule.onNodeWithTag(UiTags.DRAWER_SETTINGS).performClick()
         rule.waitForIdle()
         rule.onNodeWithText("外观").performScrollTo().performClick()
         rule.waitForIdle()

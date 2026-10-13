@@ -59,6 +59,16 @@ class ScopeStateStore internal constructor(
         mutex.withLock { load().workspacePresentation }
     }
 
+    /** Pinned sessions, keyed by session id with the pin time in epoch millis. */
+    suspend fun readPinnedSessions(): Map<String, Long> = withContext(Dispatchers.IO) {
+        mutex.withLock { load().pinnedSessions }
+    }
+
+    /** When the user last opened the scheduled-task page; 0 when they never have. */
+    suspend fun readCronResultsSeenAt(): Long = withContext(Dispatchers.IO) {
+        mutex.withLock { load().cronResultsSeenAtEpochMillis }
+    }
+
     suspend fun persistActiveScope(scopeKey: String) {
         mutate { it.copy(activeScopeKey = scopeKey) }
     }
@@ -105,11 +115,30 @@ class ScopeStateStore internal constructor(
         }
     }
 
+    /** Pin a session, or unpin it when [pinnedAtEpochMillis] is null. */
+    suspend fun persistSessionPinned(sessionId: String, pinnedAtEpochMillis: Long?) {
+        mutate { snapshot ->
+            snapshot.copy(
+                pinnedSessions = if (pinnedAtEpochMillis == null) {
+                    snapshot.pinnedSessions - sessionId
+                } else {
+                    snapshot.pinnedSessions + (sessionId to pinnedAtEpochMillis)
+                },
+            )
+        }
+    }
+
+    suspend fun persistCronResultsSeenAt(epochMillis: Long) {
+        mutate { it.copy(cronResultsSeenAtEpochMillis = epochMillis) }
+    }
+
     private data class Snapshot(
         val activeScopeKey: String? = null,
         val activeMode: SessionMode = SessionMode.Code,
         val scopes: Map<String, ScopeState> = emptyMap(),
         val workspacePresentation: Map<String, WorkspacePresentationState> = emptyMap(),
+        val pinnedSessions: Map<String, Long> = emptyMap(),
+        val cronResultsSeenAtEpochMillis: Long = 0L,
     )
 
     private suspend fun mutate(transform: (Snapshot) -> Snapshot) {
@@ -159,6 +188,13 @@ class ScopeStateStore internal constructor(
                 }
             },
         )
+        .put(
+            "pinnedSessions",
+            JSONObject().also { pins ->
+                snapshot.pinnedSessions.forEach { (sessionId, at) -> pins.put(sessionId, at) }
+            },
+        )
+        .put("cronResultsSeenAtEpochMillis", snapshot.cronResultsSeenAtEpochMillis)
         .toString(2)
 
     private fun decode(text: String): Snapshot {
@@ -198,6 +234,12 @@ class ScopeStateStore internal constructor(
                 )
             }
         }
+        val pinnedSessionsJson = json.optJSONObject("pinnedSessions") ?: JSONObject()
+        val pinnedSessions = buildMap {
+            pinnedSessionsJson.keys().forEach { sessionId ->
+                pinnedSessionsJson.optLong(sessionId).takeIf { it > 0L }?.let { put(sessionId, it) }
+            }
+        }
         return Snapshot(
             activeScopeKey = if (json.isNull("activeScopeKey")) {
                 null
@@ -210,6 +252,8 @@ class ScopeStateStore internal constructor(
             },
             scopes = scopes,
             workspacePresentation = workspacePresentation,
+            pinnedSessions = pinnedSessions,
+            cronResultsSeenAtEpochMillis = json.optLong("cronResultsSeenAtEpochMillis", 0L),
         )
     }
 

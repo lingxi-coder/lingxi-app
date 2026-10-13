@@ -11,7 +11,7 @@ package com.lingxi.code.components
  * source and its test.
  */
 object UiTags {
-    /** The conversation top-bar hamburger that opens the 对话/项目/定时 drawer. */
+    /** The conversation top-bar hamburger that opens the drawer. */
     const val OPEN_DRAWER = "tag.openDrawer"
 
     /** The composer's camera affordance that triggers an on-device photo capture. */
@@ -87,7 +87,7 @@ object UiTags {
     /** The permission prompt's Deny action. */
     const val PERMISSION_DENY = "tag.permissionDeny"
 
-    /** The drawer's editable search field that filters the section lists. */
+    /** The drawer's editable search field that filters sessions, projects and scheduled tasks. */
     const val DRAWER_SEARCH = "tag.drawerSearch"
 
     /** The persistent drawer shortcut that opens the full-screen Android shell. */
@@ -108,17 +108,30 @@ object UiTags {
     /** The model-managed plan checklist pinned above the composer. */
     const val PLAN_TASKS_PANEL = "tag.planTasksPanel"
 
-    /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
-    const val DRAWER_TAB_PREFIX = "tag.drawerTab."
-    const val DRAWER_WORKSPACE_PREFIX = "tag.drawerWorkspace."
-    const val DRAWER_WORKSPACE_PIN_PREFIX = "tag.drawerWorkspacePin."
-    const val DRAWER_WORKSPACE_COLLAPSE_PREFIX = "tag.drawerWorkspaceCollapse."
+    /** The drawer's fixed 定时任务 / 项目 entries above the recents list. */
+    const val DRAWER_ENTRY_CRON = "tag.drawerEntryCron"
+    const val DRAWER_ENTRY_PROJECTS = "tag.drawerEntryProjects"
+
+    /** The full-screen projects list, its create action, a project page and its new-session action. */
+    const val PROJECTS_PAGE = "tag.projectsPage"
+    const val PROJECTS_CREATE = "tag.projectsCreate"
+    const val PROJECT_PAGE = "tag.projectPage"
+    const val PROJECT_NEW_SESSION = "tag.projectNewSession"
+    const val PROJECT_ROW_PREFIX = "tag.projectRow."
+
+    fun projectRow(projectId: String): String = PROJECT_ROW_PREFIX + projectId
+
+    /** The drawer's bottom account row and its settings button. */
+    const val DRAWER_ACCOUNT = "tag.drawerAccount"
+    const val DRAWER_SETTINGS = "tag.drawerSettings"
+
+    /** Prefixes for the recents filter chips and rows; suffixed with a filter key / session id. */
+    const val DRAWER_FILTER_PREFIX = "tag.drawerFilter."
+    const val DRAWER_SESSION_PREFIX = "tag.drawerSession."
     const val DRAWER_SESSION_FORK_PREFIX = "tag.drawerSessionFork."
 
-    fun drawerTab(sectionKey: String): String = DRAWER_TAB_PREFIX + sectionKey
-    fun drawerWorkspace(workspaceKey: String): String = DRAWER_WORKSPACE_PREFIX + workspaceKey
-    fun drawerWorkspacePin(workspaceKey: String): String = DRAWER_WORKSPACE_PIN_PREFIX + workspaceKey
-    fun drawerWorkspaceCollapse(workspaceKey: String): String = DRAWER_WORKSPACE_COLLAPSE_PREFIX + workspaceKey
+    fun drawerFilter(filterKey: String): String = DRAWER_FILTER_PREFIX + filterKey
+    fun drawerSession(sessionId: String): String = DRAWER_SESSION_PREFIX + sessionId
     fun drawerSessionFork(sessionId: String, targetModeKey: String): String =
         DRAWER_SESSION_FORK_PREFIX + sessionId + "." + targetModeKey
 }

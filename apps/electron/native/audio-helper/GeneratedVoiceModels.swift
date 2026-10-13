@@ -117,7 +117,7 @@ enum GeneratedVoiceModelCatalog {
                 sampleRateHz: 44100,
                 approxSizeBytes: 167006755,
                 sha256: "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
-                files: ["model.int8.onnx", "tokens.txt", "lexicon.txt", "date.fst", "phone.fst", "number.fst"],
+                files: ["model.onnx", "tokens.txt", "lexicon.txt", "date.fst", "phone.fst", "number.fst"],
                 requiredDirectories: ["dict"],
                 sourceURL: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-melo-tts-zh_en.tar.bz2",
                 runtimeParams: .ttsVits(numThreads: 2),

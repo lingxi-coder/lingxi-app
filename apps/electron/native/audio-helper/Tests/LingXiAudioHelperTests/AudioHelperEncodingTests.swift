@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Testing
+import SherpaOnnx
 @testable import LingXiAudioHelper
 
 private final class AudioHelperOutputProbe: @unchecked Sendable {
@@ -160,6 +161,68 @@ struct AudioHelperEncodingTests {
         #expect(!validateArchivePath("../escape"))
         #expect(!validateArchivePath("model/../escape"))
         #expect(!validateArchivePath("/absolute/path"))
+    }
+
+    @Test
+    func upstreamArchiveDirectoryIsActivatedUnderTheInstalledModelID() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for model in GeneratedVoiceModelCatalog.all {
+            let staging = root.appendingPathComponent("staging-\(model.id)")
+            let upstream = staging.appendingPathComponent("upstream-release-directory")
+            try FileManager.default.createDirectory(at: upstream, withIntermediateDirectories: true)
+            for file in model.files {
+                let url = upstream.appendingPathComponent(file)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data([0]).write(to: url)
+            }
+            for directory in model.requiredDirectories {
+                try FileManager.default.createDirectory(at: upstream.appendingPathComponent(directory), withIntermediateDirectories: true)
+            }
+            #expect(SherpaRuntime.extractedModelDirectory(for: model, root: staging)?.resolvingSymlinksInPath().path == upstream.resolvingSymlinksInPath().path)
+            #expect(SherpaRuntime.modelDirectory(for: model, root: staging) == nil)
+            let installedRoot = root.appendingPathComponent("installed-\(model.id)")
+            try FileManager.default.createDirectory(at: installedRoot, withIntermediateDirectories: true)
+            let final = installedRoot.appendingPathComponent(model.id)
+            try FileManager.default.moveItem(at: upstream, to: final)
+            #expect(SherpaRuntime.modelDirectory(for: model, root: installedRoot)?.path == final.path)
+            try FileManager.default.removeItem(at: final.appendingPathComponent(model.files[0]))
+            #expect(SherpaRuntime.modelDirectory(for: model, root: installedRoot) == nil)
+        }
+    }
+
+    @Test
+    func snapshotConfigurationPreviewDoesNotChangeTheActiveConfiguration() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = HelperStateStore(storageRoot: root, writer: LineWriter(emit: { _ in }))
+        let before = await state.snapshot(message: nil)
+        let configuration = AudioConfigurationNormalizer.normalize([
+            "schemaVersion": audioConfigurationSchemaVersion,
+            "language": "zh-CN", "speech": ["source": "offline", "offlineModelId": "sherpa.melo-zh-en"]
+        ])
+        let preview = await state.snapshot(message: nil, configurationOverride: configuration)
+        #expect(preview.capabilities?.readiness.first(where: { $0.operation == "synthesize" })?.state == "missing_model")
+        let after = await state.snapshot(message: nil)
+        #expect(after.configurationRevision == before.configurationRevision)
+        #expect(after.capabilities?.readiness.map { "\($0.operation):\($0.state)" } == before.capabilities?.readiness.map { "\($0.operation):\($0.state)" })
+        #expect(after.activeRecordingCount == 0)
+        #expect(after.activePlaybackCount == 0)
+    }
+
+    @Test
+    func meloUsesTheChineseDictionaryInsteadOfAnEspeakDataDirectory() throws {
+        let configuration = SherpaRuntime.meloModelConfiguration(directory: URL(fileURLWithPath: "/models/melo"))
+        #expect(String(cString: try #require(configuration.dict_dir)) == "/models/melo/dict")
+        #expect(String(cString: try #require(configuration.data_dir)) == "")
+        #expect(String(cString: try #require(configuration.model)) == "/models/melo/model.onnx")
+    }
+
+    @Test
+    func invalidOfflineTtsInitializationReturnsAnErrorInsteadOfCallingANullSynthesizer() {
+        var configuration = sherpaOnnxOfflineTtsConfig(model: sherpaOnnxOfflineTtsModelConfig())
+        #expect(throws: HelperError.self) { try SherpaRuntime.makeOfflineTts(&configuration) }
     }
 
     @Test

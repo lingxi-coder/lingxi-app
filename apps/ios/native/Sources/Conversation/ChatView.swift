@@ -156,7 +156,9 @@ struct ChatView: View {
                 }
                 messageList(showsSelectedAgent: false)
                 runtimeFooter
-                if voiceInteraction.isPresented {
+                if let guidance = AudioSetupGuidance.forPhase(voiceInteraction.phase, message: voiceInteraction.statusDetail) {
+                    AudioSetupBanner(guidance: guidance, onConfigure: onOpenVoiceSettings, onDismiss: voiceInteraction.close)
+                } else if voiceInteraction.isPresented {
                     InlineVoicePanel(
                         controller: voiceInteraction,
                         onConfigure: onOpenVoiceSettings

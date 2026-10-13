@@ -1745,4 +1745,45 @@
     <string name="common_submit">提交</string>
     <string name="cron_run_section_overview">概覽</string>
     <string name="computer_use_tier_click">點選</string>
+
+    <!-- Audio recovery above the composer. -->
+    <string name="audio_guide_permission_title">需要語音權限</string>
+    <string name="audio_guide_permission_detail">在系統設定中允許麥克風和語音識別，然後重試。</string>
+    <string name="audio_guide_quota_title">雲端語音額度不足</string>
+    <string name="audio_guide_quota_detail">檢查語音帳號額度，或在語音設定中選擇系統語音或可用的帳號。</string>
+    <string name="audio_guide_configuration_title">需要設定語音</string>
+    <string name="audio_guide_configuration_detail">檢查識別語言和語音來源。中文請選擇中文；目前來源不支援時，安裝對應模型或選擇可用的來源。</string>
+    <string name="audio_guide_retry_title">語音暫時無法使用</string>
+    <string name="audio_guide_retry_detail">保持 app 在前景後重試。若持續失敗，請檢查語音設定中的語言、來源和權限。</string>
+    <string name="audio_guide_settings">語音設定</string>
+    <string name="audio_guide_dismiss">關閉</string>
+    <string name="audio_language_hint">自動跟隨系統語言，不會偵測所說語言。說中文時請選擇中文。</string>
+
+    <string name="audio_offline_recognition_models">離線識別模型</string>
+    <string name="audio_offline_speech_models">離線朗讀模型</string>
+    <string name="audio_offline_recognition_hint">這裡只列出識別模型。MeloTTS、Kitten 是朗讀模型，請在語音輸出中選擇。</string>
+    <string name="audio_offline_speech_hint">這裡只列出朗讀模型。MeloTTS 可朗讀中英文；語音識別請在語音輸入中設定。</string>
+    <string name="audio_offline_models_hint">識別模型用於語音輸入，朗讀模型用於語音輸出。安裝後可在對應列表中選擇。</string>
+    <string name="audio_model_installed">已安裝</string>
+    <string name="audio_model_not_installed">未安裝</string>
+    <string name="audio_language_default_model">依語言自動選擇</string>
+
+    <string name="audio_settings_input">語音輸入</string>
+    <string name="audio_settings_output">朗讀</string>
+    <string name="audio_source_title">來源</string>
+    <string name="audio_settings_offline_models">離線模型</string>
+    <string name="audio_settings_advanced">進階設定與權限</string>
+    <string name="audio_settings_expand">展開</string>
+    <string name="audio_settings_collapse">收起</string>
+    <string name="audio_settings_status">儲存狀態</string>
+    <string name="audio_settings_saving">正在儲存…</string>
+    <string name="audio_settings_saved">已儲存在此裝置</string>
+    <string name="audio_settings_account">語音帳號</string>
+    <string name="audio_settings_model">語音模型</string>
+    <string name="audio_settings_follow_session">使用目前對話帳號</string>
+    <string name="audio_settings_select_account">選擇帳號</string>
+    <string name="audio_settings_default">自動選擇</string>
+    <string name="audio_settings_connected">已連線</string>
+    <string name="audio_source_system">系統</string>
+    <string name="audio_settings_cloud_source">雲端服務商</string>
 </resources>

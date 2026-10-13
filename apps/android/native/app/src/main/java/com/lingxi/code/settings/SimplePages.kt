@@ -114,6 +114,7 @@ fun VoicePage(
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
+    val modelStates by VoiceModelDownloader.states.collectAsState()
     val allClearLabel = stringResource(R.string.settings_voice_all_clear)
     val appSettingsIntent = remember(context) {
         Intent(
@@ -123,34 +124,21 @@ fun VoicePage(
     }
 
     Column(Modifier.fillMaxWidth()) {
-        SettingsSection(label = "Voice conversation", footer = "Agent voice uses the current conversation, tools and permissions.") {
-            RadioList(options = buildList {
-                add(RadioOption("agent", "Agent conversation", "Recognize speech, run the current Agent, and speak its reply"))
-                if (capability.realtimeConversationSupported) add(RadioOption("realtime", "Realtime conversation", "Native audio with the current Agent"))
-            }, selected = voice.conversation.mode, onSelect = { mode -> onChange { it.copy(conversation = it.conversation.copy(mode = mode)) } })
-            if (voice.conversation.mode == "realtime") {
-                ProviderAudioControls(voice.conversation.cloud, capability.providerRealtime, capability.providerRealtimeProfiles,
-                    onProviderSettings) { cloud -> onChange { it.copy(conversation = it.conversation.copy(cloud = cloud, voice = null)) } }
-                val realtimeVoices = capability.providerRealtime?.voices.orEmpty().filter { it.selection.modelId == capability.providerRealtime?.modelId }
-                if (realtimeVoices.isNotEmpty()) RadioList(options = listOf(RadioOption("", "Catalog default voice")) + realtimeVoices.map { RadioOption(it.selection.id, it.label) },
-                    selected = voice.conversation.voice?.id.orEmpty(), onSelect = { id ->
-                        onChange { it.copy(conversation = it.conversation.copy(voice = realtimeVoices.firstOrNull { it.selection.id == id }?.selection)) }
-                    })
-                RadioList(options = listOf(RadioOption("turn_based", "Take turns", "Release the microphone to commit speech; microphone pauses during playback")),
-                    selected = voice.conversation.interaction, onSelect = { interaction -> onChange { it.copy(conversation = it.conversation.copy(interaction = interaction)) } })
-            }
-            SettingsRow(label = "Audio interaction", value = if (capability.fullDuplex) "Full duplex" else "Take turns",
-                sub = if (capability.acousticEchoCancellation) "Acoustic echo cancellation available" else "Stop playback before microphone capture", chevron = false)
-            if (voice.conversation.mode == "realtime" && !capability.realtimeConversationSupported) {
-                SettingsRow(label = "Realtime unavailable", sub = capability.realtimeConversationReason,
-                    onTap = { onChange { it.copy(conversation = it.conversation.copy(mode = "agent")) } }, isLast = true)
-            }
-        }
         SettingsSection(
-            label = stringResource(R.string.settings_voice_listen_section),
+            label = stringResource(R.string.audio_settings_input),
             footer = stringResource(R.string.settings_voice_listen_footer),
         ) {
-            RadioList(
+            VoiceChoiceRow(label = stringResource(R.string.voice_recognition_language),
+                options = listOf(
+                    RadioOption("auto", stringResource(R.string.onboarding_voice_language_system)),
+                    RadioOption("zh-CN", stringResource(R.string.onboarding_voice_language_zh)),
+                    RadioOption("en-US", stringResource(R.string.onboarding_voice_language_en)),
+                    RadioOption("ja-JP", stringResource(R.string.onboarding_voice_language_ja)),
+                ) + if (voice.language !in listOf("auto", "zh-CN", "en-US", "ja-JP")) listOf(RadioOption(voice.language, voice.language)) else emptyList(),
+                selected = voice.language, onSelect = { language -> onChange { it.copy(language = language) } })
+            Text(stringResource(R.string.audio_language_hint), color = t.text3, fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp))
+            VoiceChoiceRow(label = stringResource(R.string.audio_source_title),
                 options = listOf(
                     RadioOption(
                         AudioSource.AUTOMATIC.value,
@@ -168,7 +156,7 @@ fun VoicePage(
                         stringResource(R.string.settings_voice_mode_local_only_sub),
                     ),
                 ) + if (capability.providerRecognition?.supported == true || capability.providerRecognitionProfiles.isNotEmpty()) {
-                    listOf(RadioOption(AudioSource.PROVIDER.value, "Provider", "Follow this session's exact provider profile or select an override"))
+                    listOf(RadioOption(AudioSource.PROVIDER.value, stringResource(R.string.audio_settings_cloud_source)))
                 } else emptyList(),
                 selected = voice.recognition.source.value,
                 onSelect = { source ->
@@ -187,15 +175,17 @@ fun VoicePage(
                     onProviderSettings) { cloud -> onChange { it.copy(recognition = it.recognition.copy(cloud = cloud)) } }
             }
             if (voice.recognition.source == AudioSource.OFFLINE) {
+                Text(stringResource(R.string.audio_offline_recognition_hint), color = t.text3, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
                 val sttModels = GeneratedVoiceModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.GeneratedModelKind.Stt }
-                RadioList(
+                VoiceChoiceRow(label = stringResource(R.string.audio_offline_recognition_models),
                     options = listOf(
                         RadioOption("", "Language default model", "Select the first installed model for this language"),
                     ) + sttModels.map { model ->
                         RadioOption(
                             model.id,
-                            model.localizedDisplayName("en"),
-                            model.languages.joinToString(", "),
+                            model.localizedDisplayName(context.resources.configuration.locales[0].language),
+                            model.languages.joinToString(", ") + " · " + stringResource(if (modelStates[model.id] == ModelState.Ready) R.string.audio_model_installed else R.string.audio_model_not_installed),
                         )
                     },
                     selected = voice.recognition.offlineModelId.orEmpty(),
@@ -206,80 +196,21 @@ fun VoicePage(
                     },
                 )
             }
-            Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        stringResource(R.string.voice_recognition_language),
-                        color = t.text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        voiceLanguageLabel(voice.language),
-                        color = t.text3,
-                        fontSize = 13.sp,
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    listOf("auto", "zh-CN", "en-US", "ja-JP").forEach { language ->
-                        Text(
-                            text = voiceLanguageShortLabel(language),
-                            color = if (voice.language == language) t.accent else t.text3,
-                            fontSize = 12.sp,
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(
-                                    if (voice.language == language) {
-                                        t.accent.tint(0.14f)
-                                    } else {
-                                        t.surfaceActive
-                                    },
-                                )
-                                .clickable { onChange { current -> current.copy(language = language) } }
-                                .weight(1f)
-                                .sizeIn(minHeight = 48.dp)
-                                .padding(horizontal = 6.dp, vertical = 7.dp),
-                        )
-                    }
-                }
-            }
-            SettingsRow(
-                label = stringResource(R.string.settings_voice_requested_backend),
-                value = audioSourceLabel(voice.recognition.source),
-                chevron = false,
-            )
-            SettingsRow(
-                label = stringResource(R.string.settings_voice_effective_backend),
-                value = "${capability.effectiveRecognitionBackend} · ${readinessLabel(capability.recognitionReadiness)}",
-                sub = capability.recognitionReason,
-                chevron = false,
-                isLast = true,
-            )
         }
 
         SettingsSection(
-            label = stringResource(R.string.settings_voice_speak_section),
+            label = stringResource(R.string.audio_settings_output),
             footer = stringResource(R.string.settings_voice_speak_footer),
         ) {
             val systemVoices = capability.systemVoiceOptions
             val offlineVoices = capability.offlineVoiceOptions
-            RadioList(
+            VoiceChoiceRow(label = stringResource(R.string.audio_source_title),
                 options = listOf(
                     RadioOption(AudioSource.AUTOMATIC.value, stringResource(R.string.settings_voice_mode_automatic), "Resolve system first, then an installed offline model"),
                     RadioOption(AudioSource.SYSTEM.value, stringResource(R.string.settings_voice_backend_system), stringResource(R.string.settings_voice_android_system_sub)),
                     RadioOption(AudioSource.OFFLINE.value, stringResource(R.string.settings_voice_mode_local_only), stringResource(R.string.settings_voice_mode_local_only_sub)),
                 ) + if (capability.providerSpeech?.supported == true || capability.providerSpeechProfiles.isNotEmpty()) {
-                    listOf(RadioOption(AudioSource.PROVIDER.value, "Provider", "Follow this session's exact provider profile or select an override"))
+                    listOf(RadioOption(AudioSource.PROVIDER.value, stringResource(R.string.audio_settings_cloud_source)))
                 } else emptyList(),
                 selected = voice.speech.source.value,
                 onSelect = { source ->
@@ -299,12 +230,15 @@ fun VoicePage(
                     onProviderSettings) { cloud -> onChange { it.copy(speech = it.speech.copy(cloud = cloud, voice = null)) } }
             }
             if (voice.speech.source == AudioSource.OFFLINE) {
+                Text(stringResource(R.string.audio_offline_speech_hint), color = t.text3, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp))
                 val ttsModels = GeneratedVoiceModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.GeneratedModelKind.Tts }
-                RadioList(
+                VoiceChoiceRow(label = stringResource(R.string.audio_offline_speech_models),
                     options = listOf(
                         RadioOption("", "Language default model", "Select the first installed model for this language"),
                     ) + ttsModels.map { model ->
-                        RadioOption(model.id, model.localizedDisplayName("en"), model.languages.joinToString(", "))
+                        RadioOption(model.id, model.localizedDisplayName(context.resources.configuration.locales[0].language),
+                            model.languages.joinToString(", ") + " · " + stringResource(if (modelStates[model.id] == ModelState.Ready) R.string.audio_model_installed else R.string.audio_model_not_installed))
                     },
                     selected = voice.speech.offlineModelId.orEmpty(),
                     onSelect = { modelId ->
@@ -328,7 +262,7 @@ fun VoicePage(
                 AudioSource.PROVIDER -> capability.voiceOptions.filter { it.source == VoiceOptionSource.Provider }
                 else -> emptyList()
             }
-            RadioList(
+            VoiceChoiceRow(label = stringResource(R.string.voice_voice_name),
                 options = listOf(
                     RadioOption("", stringResource(R.string.settings_voice_system_default), "Use the selected source's default voice"),
                 ) + voiceChoices.map { option -> RadioOption(option.id, option.label, option.details) },
@@ -358,48 +292,6 @@ fun VoicePage(
                     }
                 },
             )
-            SettingsRow(
-                label = stringResource(R.string.settings_voice_requested_voice),
-                value = capability.requestedVoice?.label ?: stringResource(R.string.settings_voice_system_default),
-                chevron = false,
-            )
-            SettingsRow(
-                label = stringResource(R.string.settings_voice_effective_voice),
-                value = capability.effectiveVoice?.label ?: if (voice.speech.source == AudioSource.PROVIDER && capability.providerSpeech?.readiness == "ready" && voice.speech.voice == null) "Catalog default voice"
-                    else stringResource(R.string.settings_voice_unavailable_short),
-                sub = capability.speechReason ?: capability.effectiveVoice?.details,
-                chevron = false,
-                isLast = true,
-            )
-            SettingsRow(
-                label = "Playback route preview",
-                value = "${capability.speechRoute?.effective?.source?.value ?: "unavailable"} · ${readinessLabel(capability.speechReadiness)}",
-                sub = capability.speechReason,
-                chevron = false,
-                isLast = true,
-            )
-        }
-
-        SettingsSection(
-            label = stringResource(R.string.settings_voice_model_section),
-            footer = stringResource(R.string.settings_voice_model_footer),
-        ) {
-            capability.modelPackStates.forEachIndexed { index, pack ->
-                SettingsRow(
-                    label = pack.title,
-                    sub = pack.subtitle,
-                    value = voicePackStatusLabel(pack.state, pack.recognitionReady, pack.speechReady),
-                    isLast = index == capability.modelPackStates.lastIndex,
-                    onTap = {
-                        val activeState = pack.state
-                        if (activeState is ModelState.Queued || activeState is ModelState.Downloading || activeState is ModelState.Verifying || activeState is ModelState.Extracting) {
-                            cancelVoicePack(pack.language)
-                        } else {
-                            VoiceModelDownloader.startPack(pack.language)
-                        }
-                    },
-                )
-            }
         }
 
         SettingsSection(
@@ -450,6 +342,56 @@ fun VoicePage(
             }
         }
 
+        VoiceSettingsDisclosure(title = stringResource(R.string.audio_settings_offline_models),
+            initiallyOpen = voice.recognition.source == AudioSource.OFFLINE || voice.speech.source == AudioSource.OFFLINE) {
+        SettingsSection(
+            label = stringResource(R.string.settings_voice_model_section),
+            footer = stringResource(R.string.audio_offline_models_hint),
+        ) {
+            capability.modelPackStates.forEachIndexed { index, pack ->
+                SettingsRow(
+                    label = pack.title,
+                    sub = pack.subtitle,
+                    value = voicePackStatusLabel(pack.state, pack.recognitionReady, pack.speechReady),
+                    isLast = index == capability.modelPackStates.lastIndex,
+                    onTap = {
+                        val activeState = pack.state
+                        if (activeState is ModelState.Queued || activeState is ModelState.Downloading || activeState is ModelState.Verifying || activeState is ModelState.Extracting) {
+                            cancelVoicePack(pack.language)
+                        } else {
+                            VoiceModelDownloader.startPack(pack.language)
+                        }
+                    },
+                )
+            }
+        }
+
+        }
+        VoiceSettingsDisclosure(title = stringResource(R.string.audio_settings_advanced),
+            initiallyOpen = capability.microphonePermission != VoicePermissionStatus.Granted) {
+        SettingsSection(label = "Voice conversation", footer = "Agent voice uses the current conversation, tools and permissions.") {
+            RadioList(options = buildList {
+                add(RadioOption("agent", "Agent conversation", "Recognize speech, run the current Agent, and speak its reply"))
+                if (capability.realtimeConversationSupported) add(RadioOption("realtime", "Realtime conversation", "Native audio with the current Agent"))
+            }, selected = voice.conversation.mode, onSelect = { mode -> onChange { it.copy(conversation = it.conversation.copy(mode = mode)) } })
+            if (voice.conversation.mode == "realtime") {
+                ProviderAudioControls(voice.conversation.cloud, capability.providerRealtime, capability.providerRealtimeProfiles,
+                    onProviderSettings) { cloud -> onChange { it.copy(conversation = it.conversation.copy(cloud = cloud, voice = null)) } }
+                val realtimeVoices = capability.providerRealtime?.voices.orEmpty().filter { it.selection.modelId == capability.providerRealtime?.modelId }
+                if (realtimeVoices.isNotEmpty()) RadioList(options = listOf(RadioOption("", "Catalog default voice")) + realtimeVoices.map { RadioOption(it.selection.id, it.label) },
+                    selected = voice.conversation.voice?.id.orEmpty(), onSelect = { id ->
+                        onChange { it.copy(conversation = it.conversation.copy(voice = realtimeVoices.firstOrNull { it.selection.id == id }?.selection)) }
+                    })
+                RadioList(options = listOf(RadioOption("turn_based", "Take turns", "Release the microphone to commit speech; microphone pauses during playback")),
+                    selected = voice.conversation.interaction, onSelect = { interaction -> onChange { it.copy(conversation = it.conversation.copy(interaction = interaction)) } })
+            }
+            SettingsRow(label = "Audio interaction", value = if (capability.fullDuplex) "Full duplex" else "Take turns",
+                sub = if (capability.acousticEchoCancellation) "Acoustic echo cancellation available" else "Stop playback before microphone capture", chevron = false)
+            if (voice.conversation.mode == "realtime" && !capability.realtimeConversationSupported) {
+                SettingsRow(label = "Realtime unavailable", sub = capability.realtimeConversationReason,
+                    onTap = { onChange { it.copy(conversation = it.conversation.copy(mode = "agent")) } }, isLast = true)
+            }
+        }
         SettingsSection(
             label = stringResource(R.string.settings_voice_permissions_section),
             footer = stringResource(R.string.settings_voice_permissions_footer),
@@ -483,18 +425,19 @@ fun VoicePage(
             )
         }
 
-        SettingsSection(label = "Configuration") {
+        SettingsSection(label = stringResource(R.string.audio_settings_status)) {
             SettingsRow(
-                label = "Expected revision",
-                value = revision.toString(),
+                label = stringResource(R.string.audio_settings_status),
+                value = if (saving) stringResource(R.string.audio_settings_saving) else stringResource(R.string.audio_settings_saved),
                 sub = when {
                     saving -> "Saving…"
                     saveError != null -> saveError
-                    else -> "Saved on this device"
+                    else -> "${stringResource(R.string.audio_settings_saved)} · v$revision"
                 },
                 chevron = false,
                 isLast = true,
             )
+        }
         }
     }
 }
@@ -504,18 +447,18 @@ private fun ProviderAudioControls(
     cloud: AudioCloudBinding, capability: ProviderAudioCapability?, profiles: List<ProviderAudioProfileOption>,
     onProviderSettings: () -> Unit, onChange: (AudioCloudBinding) -> Unit,
 ) {
-    RadioList(options = listOf(RadioOption("follow_session", "Current session provider", "Uses the actual profile selected by this session"),
-        RadioOption("explicit_profile", "Audio provider override", "Select a profile for this audio operation only")),
+    VoiceChoiceRow(label = stringResource(R.string.audio_settings_account), options = listOf(RadioOption("follow_session", stringResource(R.string.audio_settings_follow_session)),
+        RadioOption("explicit_profile", stringResource(R.string.audio_settings_select_account))),
         selected = cloud.binding, onSelect = { onChange(cloud.copy(binding = it, modelId = null)) })
     if (cloud.binding == "explicit_profile") {
-        RadioList(options = profiles.map { RadioOption(it.profileId, it.label, it.capability.reason ?: it.capability.readiness) },
+        VoiceChoiceRow(label = stringResource(R.string.audio_settings_account), options = profiles.map { RadioOption(it.profileId, it.label, null) },
             selected = cloud.profileId.orEmpty(), onSelect = { onChange(cloud.copy(profileId = it, modelId = null)) })
     }
     val models = capability?.modelIds.orEmpty()
-    if (models.isNotEmpty()) RadioList(options = listOf(RadioOption("", "Catalog default audio model")) + models.filterNotNull().map { RadioOption(it, it) },
+    if (models.isNotEmpty()) VoiceChoiceRow(label = stringResource(R.string.audio_settings_model), options = listOf(RadioOption("", stringResource(R.string.audio_settings_default))) + models.filterNotNull().map { RadioOption(it, it) },
         selected = cloud.modelId.orEmpty(), onSelect = { onChange(cloud.copy(modelId = it.ifBlank { null })) })
-    SettingsRow(label = "Provider route", value = listOfNotNull(capability?.profileId, capability?.modelId).joinToString(" · ").ifBlank { "Needs configuration" },
-        sub = capability?.reason ?: capability?.readiness, onTap = onProviderSettings, isLast = true)
+    SettingsRow(label = stringResource(R.string.audio_settings_account),
+        value = stringResource(if (capability?.readiness == "ready") R.string.audio_settings_connected else R.string.audio_guide_configuration_title), onTap = onProviderSettings, isLast = true)
 }
 
 /**

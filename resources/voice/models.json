@@ -93,7 +93,7 @@
       "approxSizeBytes": 167006755,
       "sha256": "e58351ed7149f290a54534538badd4077cdbe6fddc964b24d0bee870415d1514",
       "files": [
-        "model.int8.onnx",
+        "model.onnx",
         "tokens.txt",
         "lexicon.txt",
         "date.fst",

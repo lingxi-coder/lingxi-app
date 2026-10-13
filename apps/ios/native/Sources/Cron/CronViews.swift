@@ -199,7 +199,14 @@ private struct CronTaskEditorView: View {
     @State private var saving = false
 
     private var reasoningOptions: [ReasoningSelectionDto] {
-        repository.modelDetails[repository.draft.automation.model ?? ""]?.reasoning.options.map(\.selection) ?? [.automatic]
+        (repository.modelDetails[repository.draft.automation.model ?? ""]?.reasoning.options ?? [])
+            .filter { option in
+                switch option.selection {
+                case .automatic, .disabled: return false
+                default: return true
+                }
+            }
+            .map(\.selection)
     }
     private var taskHistory: [CronRunRecord] {
         repository.state.history.filter { $0.scopeID == repository.draft.scopeID && $0.taskID == repository.draft.taskID }

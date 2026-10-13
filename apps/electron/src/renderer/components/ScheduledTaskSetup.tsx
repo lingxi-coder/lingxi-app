@@ -50,7 +50,7 @@ export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessi
   const availableModels = context?.models ?? models;
   const availableSessions = context ? context.sessions.map((session) => ({ id: session.uuid, title: session.title ?? `Chat ${session.uuid.slice(0, 8)}`, scopeId: draft.scopeId ?? 'global' })) : sessions;
   const selectedModel = availableModels.find((model) => model.reference === automation.model);
-  const reasoningOptions = selectedModel?.reasoning.options.filter((option) => option.persistable).map((option) => option.selection) ?? [{ type: 'automatic' } as const];
+  const reasoningOptions = selectedModel?.reasoning.options.filter((option) => option.persistable && option.selection.type !== 'automatic' && option.selection.type !== 'disabled').map((option) => option.selection) ?? [];
   const update = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((previous) => ({ ...previous, [key]: value }));
   const updateAutomation = (patch: Partial<ScheduledAutomation>) => setDraft((previous) => ({ ...previous, automation: { ...previous.automation!, ...patch } }));
   async function saveTask(event: FormEvent<HTMLFormElement>) {

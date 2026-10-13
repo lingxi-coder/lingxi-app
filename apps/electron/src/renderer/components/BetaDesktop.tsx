@@ -1765,7 +1765,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const modelListPlacement = modelPickerSubmenuPlacement(390, submenuBounds);
   const optionListPlacement = modelPickerSubmenuPlacement(300, submenuBounds);
   const reasoningControls = bridge.desktop.conversationControls?.reasoning;
-  const reasoningOptions = reasoningControls?.spec.options ?? [];
+  const reasoningOptions = (reasoningControls?.spec.options ?? []).filter(
+    ({ selection }) => selection.type !== 'automatic' && selection.type !== 'disabled',
+  );
   const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
   const providerCredentials = bridge.bootstrap?.providerCredentials;
 
@@ -1774,8 +1776,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     knownModel: (model) => bridge.desktop.models.includes(model),
     setPermissionMode: (mode) => bridge.setPermissionMode(mode),
     setReasoningLevel: (id) => bridge.setReasoningSelection({ type: 'level', id }),
-    setReasoningAutomatic: () => bridge.setReasoningSelection({ type: 'automatic' }),
-    setReasoningDisabled: () => bridge.setReasoningSelection({ type: 'disabled' }),
     setFastMode: (enabled) => bridge.setFastMode(enabled),
     fastMode: () => bridge.desktop.fastMode,
     setTheme: (theme) => onSetTheme(theme),

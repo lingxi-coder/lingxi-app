@@ -144,6 +144,8 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     connected,
     sessionLoading: false,
     audioSnapshot: supportedAudioSnapshot(),
+    audioRealtimeState: { phase: 'paused', detail: '实时会话已停止', generation: 0 },
+    audioRealtimeCommand: async () => undefined,
     audioExecute: executeAudioOperation,
     audioCancel: cancelAudioOperation,
     audioFinishListen: finishAudioListen,

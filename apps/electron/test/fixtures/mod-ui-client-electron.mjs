@@ -10,6 +10,10 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 900, height: 600, webPreferences: { sandbox: true } });
   try {
     await window.loadURL(url);
+    const documentFocusedBeforeActivation = await window.webContents.executeJavaScript('document.hasFocus()');
+    window.showInactive();
+    window.webContents.focus();
+    const documentFocusedAfterActivation = await window.webContents.executeJavaScript('document.hasFocus()');
     const run = (script) => window.webContents.executeJavaScript(script);
     const wait = async (expression) => {
       const deadline = Date.now() + 8_000;
@@ -17,7 +21,20 @@ async function main() {
         if (await run(expression)) return;
         await delay(25);
       }
-      throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}`);
+      const diagnostic = await run(`(() => {
+        const button = document.querySelector('.mod-ui-client-button');
+        const calls = window.__modUiClientFixture?.calls ?? [];
+        return {
+          documentHasFocus: document.hasFocus(),
+          activeElement: document.activeElement?.outerHTML?.slice(0, 180) ?? null,
+          button: button ? { connected: button.isConnected, disabled: button.disabled, label: button.getAttribute('aria-label') } : null,
+          clickReachedTarget: window.__modUiClientFixture?.clickReachedTarget ?? false,
+          clientPresses: calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_press').map((call) => ({ request: call.request, result: call.result })),
+          runHeld: calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld').map((call) => call.request),
+          debug: window.__modUiClientFixture?.debugSnapshot?.() ?? null,
+        };
+      })()`);
+      throw new Error(`Timed out: ${expression}\n${JSON.stringify(diagnostic)}\n${await run('document.body.innerText')}`);
     };
     await wait(`Boolean(document.querySelector('.mod-ui-client-button')) && document.querySelector('[data-client="sibling"]')?.textContent.includes('Sibling Alive')`);
 
@@ -106,7 +123,14 @@ async function main() {
     await run(`window.__modUiClientFixture.releaseHeldFrameOperations()`);
     await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'resize' && call.request.runtimeId === 'runtime-status')`);
 
-    await run(`document.querySelector('.mod-ui-client-button').click()`);
+    await run(`(() => {
+      const button = document.querySelector('.mod-ui-client-button');
+      window.__modUiClientFixture.clickReachedTarget = false;
+      button.addEventListener('click', (event) => {
+        window.__modUiClientFixture.clickReachedTarget = event.target === button;
+      }, { once: true });
+      button.click();
+    })()`);
     await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 17)`);
     const buttonPressHandled = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_press' && call.request.event.type === 'press').length === 1`);
     const buttonUsesCurrentHandle = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 17 && !('event' in call.request)).length === 1`);
@@ -389,7 +413,7 @@ async function main() {
       return lateRenders.length > 0 && lateRenders.every((call) => call.returnedRevision !== undefined && lateUnmounts.has(call.returnedRevision));
     })()`);
 
-    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, selectUsesHookReachedValue, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp })}\n`);
+    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, selectUsesHookReachedValue, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
   } finally {
     window.destroy();
     app.quit();

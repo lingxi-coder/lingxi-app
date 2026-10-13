@@ -1,7 +1,9 @@
 # LingXi product applications
 
-Product entrypoints share one pinned Harness runtime. Electron and Web use the
+Product entrypoints share one pinned Harness runtime. Electron uses the
 Rust Bridge service; iOS and Android use their platform-local Rust FFI wrappers.
+The current Web app is the public website and SDK documentation, with retained
+prototype screens; it does not establish a deployed browser Agent service.
 Each platform directory owns its interface and build entrypoints.
 
 | Directory | Responsibility |
@@ -10,8 +12,8 @@ Each platform directory owns its interface and build entrypoints.
 | [`ios/native/`](ios/native/README.md), [`ios/ffi/`](ios/ffi/) | SwiftUI/Xcode application and the `ios-framework` Rust wrapper. |
 | [`android/native/`](android/native/README.md), [`android/ffi/`](android/ffi/) | Kotlin/Gradle application and the `android-aar` Rust wrapper. |
 | [`cli/host/`](cli/host/), [`cli/tui/`](cli/tui/), [`cli/tui-core/`](cli/tui-core/) | CLI entrypoint and its terminal interface. |
-| [`bridge-server/`](bridge-server/) | Rust service consumed by the desktop and Web clients. |
-| [`web/`](web/) | Web interface. |
+| [`bridge-server/`](bridge-server/) | Local Rust service consumed by the Electron desktop client. |
+| [`web/`](web/) | Public website, SDK documentation and retained prototype screens. |
 | [`../packages/bridge-client/`](../packages/bridge-client/) | Private `@lingxi/bridge-client` package: protocol types and Node `BridgeClient`. |
 | [`../resources/voice/`](../resources/voice/README.md) | Shared voice model and audio configuration sources and generators. |
 | [`../resources/translations/`](../resources/translations/README.md) | Canonical translations and generators for native localized resources. |
@@ -73,6 +75,8 @@ Changes to Rust FFI signatures require regenerating the platform bindings before
 building the native consumers. Pure interface changes can reuse existing bindings.
 
 ## Further reading
+
+- [Complete technical handbook](../docs/technical/en/README.md) / [中文](../docs/technical/zh/README.md)
 
 - [Bridge conversation and transport checks](README-bridge.md)
 - [Electron development and packaging](electron/README.md)

@@ -12,7 +12,7 @@ LingXi 的产品仓库，包含命令行与 TUI、Electron 桌面端、iOS、And
 
 | 目录 | 职责 |
 |---|---|
-| [`Cargo.toml`](Cargo.toml) | 根 Rust 产品 workspace，统一锁定 8 个成员与上游 SDK 来源 |
+| [`Cargo.toml`](Cargo.toml) | 根 Rust 产品 workspace，统一锁定 9 个成员与上游 SDK 来源 |
 | [`apps/`](apps/README.md) | 按产品入口组织 Electron、iOS、Android、CLI/TUI、Bridge 和 Web |
 | [`packages/`](packages/) | 产品共享包：TypeScript Bridge 客户端与 Rust 配置要求 |
 | [`tools/ios-use/`](tools/ios-use/) | 产品使用的 iOS 控制工具 |
@@ -37,6 +37,7 @@ apps/
 │   ├── host/           # cli Rust 包
 │   ├── tui/            # tui Rust 包
 │   └── tui-core/       # tui-core Rust 包
+├── audio-provider/     # 产品音频服务与原生宿主适配
 ├── bridge-server/      # 多客户端共享的 Rust Bridge 服务入口
 └── web/                # Web 界面
 ```
@@ -106,6 +107,10 @@ python3 resources/translations/generate.py --check
 [多仓开发指南](docs/development/multi-repo-workflow.md)。旧里程碑和历史审计记录不代表当前验证状态。
 
 ## 文档
+
+- [完整中文技术手册](docs/technical/zh/README.md)
+- [Complete English technical handbook](docs/technical/en/README.md)
+- 手册正文与官网由同一份双语文档数据维护；工作区源码、SDK HEAD 与产品固定依赖分别标注。
 
 - [文档导航](docs/README.md)
 - [多仓开发与 SDK 独立性](docs/development/multi-repo-workflow.md)

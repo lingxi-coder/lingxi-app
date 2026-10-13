@@ -1,6 +1,6 @@
 import type { DocPage } from './types';
 
-// Public contracts and examples verified against mobile-linux-runtime fd31413213bff8b78d1f537c5c0eaa390fc90f06.
+// Authored bilingual content; source baselines are recorded by docs:sync.
 export const mobilePages: DocPage[] = [
   {
     "id": "mobile-linux",
@@ -14,7 +14,7 @@ export const mobilePages: DocPage[] = [
       "zh": "在 Android 与 iOS 应用内嵌入 Linux 用户空间，提供命令、流式输出、PTY、原始标准输入输出与经过校验的 rootfs 生命周期。"
     },
     "packageName": "mobile-linux-runtime",
-    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/blob/fd31413213bff8b78d1f537c5c0eaa390fc90f06/docs/SDK-INTEGRATION.md",
+    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/Cargo.toml",
     "sections": [
       {
         "id": "platforms",
@@ -78,9 +78,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "SDK-INTEGRATION.md · source-check excerpt / 源码检查摘录",
+            "label": {
+              "en": "SDK-INTEGRATION.md · source-check excerpt",
+              "zh": "源码检查摘录"
+            },
             "language": "bash",
-            "code": ": \"${SDK_BUILD_DIR:?Set an absolute directory outside the source checkout}\"\nexport CARGO_TARGET_DIR=\"$SDK_BUILD_DIR/rust\"\ncargo test --locked -p mobile-linux-api -p mobile-linux-core -p platform-pty\nbash scripts/checks/check-dependencies.sh\nbash scripts/checks/check-resource-contracts.sh\nbash scripts/checks/check-resource-tests.sh"
+            "code": ": \"${SDK_BUILD_DIR:?Set an absolute directory outside the source checkout}\"\nexport CARGO_TARGET_DIR=\"$SDK_BUILD_DIR/rust\"\ncargo test --locked -p mobile-linux-api -p mobile-linux-core -p platform-pty\nbash scripts/checks/check-dependencies.sh\nbash scripts/checks/check-resource-contracts.sh\nbash scripts/checks/check-resource-tests.sh",
+            "verification": "excerpt"
           }
         ]
       },
@@ -108,9 +112,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "types.rs · RuntimeConfig declaration excerpt / 配置声明摘录",
+            "label": {
+              "en": "types.rs · RuntimeConfig declaration excerpt",
+              "zh": "配置声明摘录"
+            },
             "language": "rust",
-            "code": "pub struct RuntimeConfig {\n    pub platform: RuntimePlatform,\n    pub managed_root: String,\n    pub app_sandbox_root: String,\n    pub abi: String,\n    pub rootfs_version: String,\n    pub archive_sha256: Option<String>,\n    pub native_library_dir: Option<String>,\n    pub workspace_host_path: Option<String>,\n    pub stable_workspace_id: Option<String>,\n    pub authorization_file: Option<String>,\n    pub rootfs_archive_path: Option<String>,\n    #[uniffi(default = None)]\n    pub rootfs_patch_path: Option<String>,\n    pub default_mount_path: Option<String>,\n    pub protected_host_roots: Vec<String>,\n    pub allowed_mount_roots: Vec<String>,\n    pub allowed_guest_roots: Vec<String>,\n}"
+            "code": "pub struct RuntimeConfig {\n    pub platform: RuntimePlatform,\n    pub managed_root: String,\n    pub app_sandbox_root: String,\n    pub abi: String,\n    pub rootfs_version: String,\n    pub archive_sha256: Option<String>,\n    pub native_library_dir: Option<String>,\n    pub workspace_host_path: Option<String>,\n    pub stable_workspace_id: Option<String>,\n    pub authorization_file: Option<String>,\n    pub rootfs_archive_path: Option<String>,\n    #[uniffi(default = None)]\n    pub rootfs_patch_path: Option<String>,\n    pub default_mount_path: Option<String>,\n    pub protected_host_roots: Vec<String>,\n    pub allowed_mount_roots: Vec<String>,\n    pub allowed_guest_roots: Vec<String>,\n}",
+            "verification": "excerpt"
           }
         ]
       },
@@ -173,6 +181,122 @@ export const mobilePages: DocPage[] = [
             "zh": "使用对应发布版本的 checksums 与 release-provenance.json。源码构建成功、压缩包存在或模拟器链接成功，不等同于真机验收。validation-only 产物不属于发布产物。"
           }
         ]
+      },
+      {
+        "id": "lifecycle-flow",
+        "title": {
+          "en": "Installation and session flow",
+          "zh": "安装与会话流程"
+        },
+        "paragraphs": [
+          {
+            "en": "Rootfs identity belongs to the embedding app. A version label describes the intended image; it does not substitute for the archive digest, manifest inventory or platform ABI. Keep immutable image assets separate from the writable workspace and guest home. The runtime owns execution handles after the host has admitted a request.",
+            "zh": "rootfs 身份由嵌入应用决定。版本标签描述预期镜像，不能替代压缩包摘要、manifest 文件清单或平台 ABI。不可变镜像资源应与可写工作区和 guest home 分离；宿主准入请求后，由运行时拥有执行句柄。"
+          },
+          {
+            "en": "Boot establishes readiness, while verify explicitly refreshes integrity. A status read is diagnostic data; repair and reset are deliberate lifecycle actions. An app should show the returned state and last_error, preserve user workspace data, and ask the runtime to repair only the managed image.",
+            "zh": "boot 建立可执行状态，verify 显式刷新完整性。status 读取是诊断数据；repair 与 reset 是明确的生命周期操作。应用应展示返回的状态及 last_error、保留用户工作区，并只对托管镜像执行修复。"
+          }
+        ],
+        "steps": [
+          {
+            "en": "Acquire the platform resource bundle and pin its archive digest and revision.",
+            "zh": "获取平台资源包，固定其压缩包摘要与修订版本。"
+          },
+          {
+            "en": "Stage and verify the rootfs; construct RuntimeConfig with app-private absolute roots.",
+            "zh": "暂存并验证 rootfs；用应用私有绝对路径创建 RuntimeConfig。"
+          },
+          {
+            "en": "Retain one runtime, inspect capability, boot, then issue commands or open sessions.",
+            "zh": "保留运行时，检查 capability 并 boot，再执行命令或打开会话。"
+          },
+          {
+            "en": "Consume output and terminal state; close PTY/raw/background handles before shutdown.",
+            "zh": "消费输出及终态；在 shutdown 前关闭 PTY、raw stdio 与后台句柄。"
+          }
+        ],
+        "diagram": {
+          "src": "/docs-assets/platform-mobile-lifecycle.svg",
+          "alt": {
+            "en": "Resource verification leads to a ready runtime, then owned execution sessions and cleanup.",
+            "zh": "资源校验进入就绪运行时，之后创建有归属的执行会话并清理。"
+          },
+          "caption": {
+            "en": "Repair targets managed rootfs; iOS process-wide kernel changes may require a restart.",
+            "zh": "修复针对托管 rootfs；iOS 进程级内核变更可能要求重启。"
+          }
+        }
+      },
+      {
+        "id": "validation-levels",
+        "title": {
+          "en": "Implementation, evidence and open acceptance",
+          "zh": "实现、证据与开放验收"
+        },
+        "paragraphs": [
+          {
+            "en": "The public trait, UniFFI handle and Kotlin/Swift wrappers implement the described integration surfaces. The source repository includes unit/contract checks and device-smoke applications. A documented test command is a repeatable check, not a claim that it has run on every supported device.",
+            "zh": "公共 trait、UniFFI 句柄及 Kotlin/Swift 包装实现本页接入接口。源码仓库包含单元／契约检查和真机 smoke 应用；文档命令提供可重复验证方法，不表示已经在所有受支持设备上执行。"
+          },
+          {
+            "en": "Acceptance for a new distribution still requires archive corruption and recovery tests, ABI packaging validation, permission denial, network/memory enforcement, process-tree cancellation and actual guest execution on a physical device. The simulator is suitable for API and linking tests only.",
+            "zh": "新分发版本仍须验收压缩包损坏与恢复、ABI 打包、权限拒绝、网络／内存约束、进程树取消及真机 guest 执行。模拟器仅用于 API 和链接测试。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Portable Rust contracts",
+              "zh": "可移植 Rust 契约"
+            },
+            "href": "/docs/mobile-rust"
+          },
+          {
+            "label": {
+              "en": "Mount, network and rootfs policy",
+              "zh": "挂载、网络与 rootfs 策略"
+            },
+            "href": "/docs/mobile-authorization"
+          },
+          {
+            "label": {
+              "en": "Product native host",
+              "zh": "产品原生宿主"
+            },
+            "href": "/docs/platform-integration"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "Cargo.toml"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "rust-toolchain.toml"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ffi/src/runtime.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ffi/src/types.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "android/runtime/build.gradle.kts"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "ios/Package.swift"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "scripts/checks/check-resource-contracts.sh"
       }
     ]
   },
@@ -188,7 +312,7 @@ export const mobilePages: DocPage[] = [
       "zh": "命令、任务生命周期、PTY、原始标准输入输出、挂载与 rootfs 校验的共享契约。"
     },
     "packageName": "mobile-linux-api",
-    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/blob/fd31413213bff8b78d1f537c5c0eaa390fc90f06/crates/mobile-linux-api/src/mobile_linux.rs",
+    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/crates/mobile-linux-api/src/mobile_linux.rs",
     "sections": [
       {
         "id": "crates",
@@ -222,6 +346,35 @@ export const mobilePages: DocPage[] = [
         ]
       },
       {
+        "id": "working-tree-consumer",
+        "title": {
+          "en": "Consumer workspace and source identity",
+          "zh": "消费者工作区与源码身份"
+        },
+        "paragraphs": [
+          {
+            "en": "Create a standalone consumer directory beside the mobile-linux-runtime checkout and use this complete Cargo.toml. The empty workspace keeps the consumer out of a parent product workspace; the direct path dependency binds it to the current SDK working tree. Save the Rust lifecycle function from this page in src/lib.rs and run cargo check from the consumer root. Replace the SDK path only when deliberately choosing another source snapshot.",
+            "zh": "在 mobile-linux-runtime checkout 旁创建独立消费者目录，并使用这份完整 Cargo.toml。空 workspace 使消费者脱离父产品工作区；直接 path 依赖绑定当前 SDK 工作树。将本页 Rust 生命周期函数保存到 src/lib.rs，并从消费者根目录运行 cargo check。只有明确选择其他源码快照时才替换 SDK 路径。"
+          },
+          {
+            "en": "This example depends only on the portable mobile-linux-api contract. Constructing a platform runtime additionally requires its Android or iOS backend and matching native-support artifacts from one revision. Compilation of this consumer does not boot Linux, install rootfs assets, exercise UniFFI or prove physical-device execution.",
+            "zh": "此示例仅依赖可移植 mobile-linux-api 契约。构造平台运行时还需要相同 revision 的 Android 或 iOS 后端及匹配 native-support 产物。编译此消费者不会启动 Linux、安装 rootfs、执行 UniFFI 或证明真机执行。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Cargo.toml · complete working-tree consumer",
+              "zh": "Cargo.toml · 完整工作树消费者"
+            },
+            "language": "toml",
+            "code": "[package]\nname = \"handbook-mobile-consumer\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nmobile-linux-api = { path = \"../mobile-linux-runtime/crates/mobile-linux-api\" }\n",
+            "exampleId": "mobile-working-tree-manifest",
+            "verification": "manual"
+          }
+        ]
+      },
+      {
         "id": "commands",
         "title": {
           "en": "Command requests and results",
@@ -235,9 +388,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "mobile_linux.rs · request declaration excerpt / 请求声明摘录",
+            "label": {
+              "en": "mobile_linux.rs · request declaration excerpt",
+              "zh": "请求声明摘录"
+            },
             "language": "rust",
-            "code": "pub struct LinuxCommandRequest {\n    pub command: String,\n    pub args: Vec<String>,\n    pub cwd: Option<String>,\n    pub env: BTreeMap<String, String>,\n    pub stdin: Option<String>,\n    pub timeout_ms: Option<u64>,\n    pub network: NetworkPolicy,\n    #[serde(default)]\n    pub resource_limits: ResourceLimits,\n    pub mounts: Vec<MountSpec>,\n}"
+            "code": "pub struct LinuxCommandRequest {\n    pub command: String,\n    pub args: Vec<String>,\n    pub cwd: Option<String>,\n    pub env: BTreeMap<String, String>,\n    pub stdin: Option<String>,\n    pub timeout_ms: Option<u64>,\n    pub network: NetworkPolicy,\n    #[serde(default)]\n    pub resource_limits: ResourceLimits,\n    pub mounts: Vec<MountSpec>,\n}",
+            "verification": "excerpt"
           }
         ],
         "apis": [
@@ -369,9 +526,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "mobile_linux.rs · raw stdio request excerpt / 原始 IO 请求摘录",
+            "label": {
+              "en": "mobile_linux.rs · raw stdio request excerpt",
+              "zh": "原始 IO 请求摘录"
+            },
             "language": "rust",
-            "code": "pub struct RawStdioOpenRequest {\n    pub command: String,\n    pub args: Vec<String>,\n    pub cwd: Option<String>,\n    pub env: BTreeMap<String, String>,\n    pub network: NetworkPolicy,\n    #[serde(default)]\n    pub resource_limits: ResourceLimits,\n    pub mounts: Vec<MountSpec>,\n}"
+            "code": "pub struct RawStdioOpenRequest {\n    pub command: String,\n    pub args: Vec<String>,\n    pub cwd: Option<String>,\n    pub env: BTreeMap<String, String>,\n    pub network: NetworkPolicy,\n    #[serde(default)]\n    pub resource_limits: ResourceLimits,\n    pub mounts: Vec<MountSpec>,\n}",
+            "verification": "excerpt"
           }
         ],
         "apis": [
@@ -409,7 +570,7 @@ export const mobilePages: DocPage[] = [
           }
         ],
         "note": {
-          "en": "The FFI form takes MobileLinuxCommandRequestFfi, rejects non-empty stdin or timeout_ms, and requires read max_bytes in 1..1048576. Control writes and lifetime through the returned session ID.",
+          "en": "The FFI form takes MobileLinuxCommandRequestFfi, rejects any provided stdin or timeout_ms, and requires read max_bytes in 1..1048576. Control writes and lifetime through the returned session ID.",
           "zh": "FFI 版本接收 MobileLinuxCommandRequestFfi，拒绝已设置的 stdin 或 timeout_ms，并要求读取 max_bytes 在 1..1048576 范围内。通过返回的会话 ID 控制写入与生命周期。"
         }
       },
@@ -525,6 +686,162 @@ export const mobilePages: DocPage[] = [
             }
           }
         ]
+      },
+      {
+        "id": "complete-command",
+        "title": {
+          "en": "Complete command lifecycle example",
+          "zh": "完整命令生命周期示例"
+        },
+        "paragraphs": [
+          {
+            "en": "This reusable function accepts the already configured platform trait, boots it, executes a bounded command, validates the requested network receipt and always attempts shutdown after execution. It returns nonzero exit codes as command results; callers must inspect exit_code, timed_out and cancelled before declaring success. Construction and rootfs distribution remain host inputs.",
+            "zh": "此复用函数接收已经配置的平台 trait，启动后执行有时间上限的命令、验证网络执行回执，并在执行后始终尝试 shutdown。非零退出码仍作为命令结果返回，调用方须检查 exit_code、timed_out 与 cancelled 后才能判断成功。构造和 rootfs 分发仍由宿主提供。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Rust consumer function",
+              "zh": "Rust 消费者函数"
+            },
+            "language": "rust",
+            "code": "use mobile_linux_api::{\n    LinuxCommandRequest, LinuxCommandResult, MobileLinuxError,\n    MobileLinuxRuntime, NetworkPolicy, ResourceLimits,\n};\nuse std::collections::BTreeMap;\n\npub async fn execute_once(\n    runtime: &dyn MobileLinuxRuntime,\n) -> Result<LinuxCommandResult, MobileLinuxError> {\n    runtime.boot().await?;\n    let network = NetworkPolicy::Disabled;\n    let limits = ResourceLimits::default();\n    let execution = runtime.run(LinuxCommandRequest {\n        command: \"/bin/sh\".into(),\n        args: vec![\"-c\".into(), \"printf 'ready\\n'\".into()],\n        cwd: Some(\"/root\".into()),\n        env: BTreeMap::new(),\n        stdin: None,\n        timeout_ms: Some(10_000),\n        network,\n        resource_limits: limits,\n        mounts: Vec::new(),\n    }).await;\n    let cleanup = runtime.shutdown().await;\n    let result = execution?;\n    cleanup?;\n    result.enforcement.ensure_for(network, limits)?;\n    Ok(result)\n}",
+            "verification": "compile",
+            "exampleId": "mobile-command-lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "io-ownership",
+        "title": {
+          "en": "IO selection, cancellation and event cursors",
+          "zh": "IO 选择、取消与事件游标"
+        },
+        "paragraphs": [
+          {
+            "en": "Use run for collected text, run_streaming for incremental stdout lines and stderr byte chunks, PTY for a terminal, and raw stdio for byte-framed protocols. PTY terminal processing changes bytes, so LSP or a binary protocol needs raw stdio. A zero-length raw read is rejected by the FFI rather than used as a readiness probe.",
+            "zh": "run 用于收集文本，run_streaming 用于增量 stdout 行与 stderr 字节块，PTY 用于终端，raw stdio 用于字节分帧协议。PTY 的终端处理会改变字节，因此 LSP 或二进制协议需要 raw stdio。FFI 拒绝长度为零的 raw read，不能用它探测就绪。"
+          },
+          {
+            "en": "Keep sequence cursors only for read_events, advancing to the largest returned sequence. The UniFFI streaming sink synthesizes per-call events with sequence 0 and a run-N task identifier; those callback sequences are not the backend event-log cursor. A task snapshot reconciles current state after a UI reconnect; output is not durable conversation history.",
+            "zh": "只为 read_events 保留序号游标，并推进到本批最大 sequence。UniFFI 流式 sink 合成每次调用的事件，sequence 为 0，任务标识为 run-N；这些回调序号不是后端事件日志游标。界面重连后通过任务快照对齐当前状态；进程输出并非持久会话历史。"
+          },
+          {
+            "en": "Managed background, PTY and raw handles own guest processes. Explicit kill/close returns only after the owned process tree is reaped. Foreground drop, timeout and shutdown paths have dedicated iOS transport tests, but a future cancellation alone is not an app-level promise of suspended or resumable mobile execution.",
+            "zh": "托管后台、PTY 与 raw 句柄拥有 guest 进程。显式 kill/close 在归属进程树回收后才返回。iOS 传输层具有前台 future 丢弃、超时及 shutdown 专项测试，但仅取消 future 不能承诺应用层移动执行可暂停或恢复。"
+          }
+        ],
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Surface",
+                "zh": "接口"
+              },
+              {
+                "en": "Output / ownership",
+                "zh": "输出／归属"
+              },
+              {
+                "en": "Finish",
+                "zh": "结束方式"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "run / run_streaming",
+                  "zh": "run / run_streaming"
+                },
+                {
+                  "en": "One awaited operation; final result carries enforcement.",
+                  "zh": "单次等待操作，终态结果携带执行回执。"
+                },
+                {
+                  "en": "Completion, timeout, or owner cancellation.",
+                  "zh": "完成、超时或归属取消。"
+                }
+              ],
+              [
+                {
+                  "en": "spawn_background",
+                  "zh": "spawn_background"
+                },
+                {
+                  "en": "Opaque LinuxProcessHandle plus task snapshots.",
+                  "zh": "不透明 LinuxProcessHandle 加任务快照。"
+                },
+                {
+                  "en": "kill(handle), then inspect terminal task state.",
+                  "zh": "kill(handle)，再检查任务终态。"
+                }
+              ],
+              [
+                {
+                  "en": "open_pty",
+                  "zh": "open_pty"
+                },
+                {
+                  "en": "Terminal bytes and PtyOutput/PtyClosed events.",
+                  "zh": "终端字节及 PtyOutput/PtyClosed 事件。"
+                },
+                {
+                  "en": "close_pty(handle).",
+                  "zh": "close_pty(handle)。"
+                }
+              ],
+              [
+                {
+                  "en": "open_raw_stdio",
+                  "zh": "open_raw_stdio"
+                },
+                {
+                  "en": "Separate binary streams and closed/exit_code reads.",
+                  "zh": "分离的二进制流与 closed/exit_code 读取。"
+                },
+                {
+                  "en": "close_raw_stdio(handle).",
+                  "zh": "close_raw_stdio(handle)。"
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-api/src/mobile_linux.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-api/src/execution.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ffi/src/runtime.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/store/install.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/store/lifecycle.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/implementation.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/implementation.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/tests.rs"
       }
     ]
   },
@@ -540,7 +857,7 @@ export const mobilePages: DocPage[] = [
       "zh": "安装 Maven 分发包、暂存经过验证的 rootfs，并使用持久 Kotlin 运行时。"
     },
     "packageName": "io.github.lingxi-coder:mobile-linux-runtime",
-    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/blob/fd31413213bff8b78d1f537c5c0eaa390fc90f06/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt",
+    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt",
     "sections": [
       {
         "id": "maven-bundle",
@@ -560,9 +877,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "SDK-INTEGRATION.md · Maven installer excerpt / Maven 安装摘录",
+            "label": {
+              "en": "SDK-INTEGRATION.md · Maven installer excerpt",
+              "zh": "Maven 安装摘录"
+            },
             "language": "bash",
-            "code": "python3 scripts/release/install-maven-bundle.py \\\n  --archive \"$SDK_MAVEN_ARCHIVE\" --sha256 \"$SDK_MAVEN_SHA256\" \\\n  --version \"$SDK_VERSION\" --source-revision \"$SDK_SOURCE_REVISION\" \\\n  --cache-dir \"$SDK_BUILD_DIR/download-cache\" \\\n  --output-dir \"$SDK_BUILD_DIR/maven\""
+            "code": "python3 scripts/release/install-maven-bundle.py \\\n  --archive \"$SDK_MAVEN_ARCHIVE\" --sha256 \"$SDK_MAVEN_SHA256\" \\\n  --version \"$SDK_VERSION\" --source-revision \"$SDK_SOURCE_REVISION\" \\\n  --cache-dir \"$SDK_BUILD_DIR/download-cache\" \\\n  --output-dir \"$SDK_BUILD_DIR/maven\"",
+            "verification": "excerpt"
           }
         ]
       },
@@ -580,9 +901,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "SDK-INTEGRATION.md · local-coordinate excerpt / 本地坐标摘录",
+            "label": {
+              "en": "SDK-INTEGRATION.md · local-coordinate excerpt",
+              "zh": "本地坐标摘录"
+            },
             "language": "kotlin",
-            "code": "plugins {\n    id(\"io.github.lingxi-coder.mobile-linux\") version \"0.1.0\"\n}\ndependencies {\n    implementation(\"io.github.lingxi-coder:mobile-linux-runtime:0.1.0\")\n}"
+            "code": "plugins {\n    id(\"io.github.lingxi-coder.mobile-linux\") version \"0.1.0\"\n}\ndependencies {\n    implementation(\"io.github.lingxi-coder:mobile-linux-runtime:0.1.0\")\n}",
+            "verification": "excerpt"
           }
         ],
         "bullets": [
@@ -624,9 +949,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "RealRuntimeSmokeTest.kt · partial staging excerpt / 部分暂存摘录",
+            "label": {
+              "en": "RealRuntimeSmokeTest.kt · partial staging excerpt",
+              "zh": "部分暂存摘录"
+            },
             "language": "kotlin",
-            "code": "val result = RootfsInstaller.stage(\n            managedRoot = managed, expectedRootfsVersion = version,\n            expectedArchiveSha = archiveSha, expectedManifestAbi = manifest.getString(\"abi\"),\n            archiveName = archiveRecord.getString(\"filename\"), manifestJson = manifestText,\n            sbomJson = File(inputs, \"rootfs.spdx.json\").readText(),\n            copyArchive = { destination -> archive.copyTo(destination, overwrite = true) },\n        )"
+            "code": "val result = RootfsInstaller.stage(\n            managedRoot = managed, expectedRootfsVersion = version,\n            expectedArchiveSha = archiveSha, expectedManifestAbi = manifest.getString(\"abi\"),\n            archiveName = archiveRecord.getString(\"filename\"), manifestJson = manifestText,\n            sbomJson = File(inputs, \"rootfs.spdx.json\").readText(),\n            copyArchive = { destination -> archive.copyTo(destination, overwrite = true) },\n        )",
+            "verification": "excerpt"
           }
         ]
       },
@@ -638,9 +967,13 @@ export const mobilePages: DocPage[] = [
         },
         "code": [
           {
-            "label": "MobileLinuxRuntime.kt · wrapper source / 封装源码",
+            "label": {
+              "en": "MobileLinuxRuntime.kt · wrapper source",
+              "zh": "封装源码"
+            },
             "language": "kotlin",
-            "code": "package io.lingxi.mobilelinux\n\nimport io.lingxi.mobilelinux.bindings.*\n\n/** One persistent runtime. The embedding app owns policy, paths and rootfs distribution. */\nclass MobileLinuxRuntime private constructor(val handle: RuntimeHandle) {\n    companion object {\n        fun create(config: RuntimeConfig): MobileLinuxRuntime = MobileLinuxRuntime(createRuntime(config))\n    }\n    suspend fun boot(): MobileLinuxStatusFfi = handle.boot()\n    suspend fun shutdown() = handle.shutdown()\n    suspend fun capability(): MobileLinuxCapabilityFfi = handle.capability()\n    suspend fun execute(request: MobileLinuxCommandRequestFfi): MobileLinuxCommandResultFfi = handle.runCommand(request)\n    // Raw stdio and PTY are deliberately exposed on handle without text conversion.\n}"
+            "code": "package io.lingxi.mobilelinux\n\nimport io.lingxi.mobilelinux.bindings.*\n\n/** One persistent runtime. The embedding app owns policy, paths and rootfs distribution. */\nclass MobileLinuxRuntime private constructor(val handle: RuntimeHandle) {\n    companion object {\n        fun create(config: RuntimeConfig): MobileLinuxRuntime = MobileLinuxRuntime(createRuntime(config))\n    }\n    suspend fun boot(): MobileLinuxStatusFfi = handle.boot()\n    suspend fun shutdown() = handle.shutdown()\n    suspend fun capability(): MobileLinuxCapabilityFfi = handle.capability()\n    suspend fun execute(request: MobileLinuxCommandRequestFfi): MobileLinuxCommandResultFfi = handle.runCommand(request)\n    // Raw stdio and PTY are deliberately exposed on handle without text conversion.\n}",
+            "verification": "excerpt"
           }
         ],
         "apis": [
@@ -700,9 +1033,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "RealRuntimeSmokeTest.kt · helper excerpt / 辅助函数摘录",
+            "label": {
+              "en": "RealRuntimeSmokeTest.kt · helper excerpt",
+              "zh": "辅助函数摘录"
+            },
             "language": "kotlin",
-            "code": "private fun command(script: String, network: NetworkPolicyFfi = NetworkPolicyFfi.DISABLED,\n                        python: Boolean = false, raw: Boolean = false) = MobileLinuxCommandRequestFfi(\n        command = if (python) \"/usr/bin/python3\" else \"/bin/sh\",\n        args = if (python) listOf(\"-u\", \"-c\", script) else listOf(\"-c\", script),\n        cwd = \"/root\", env = emptyList(), stdin = null,\n        timeoutMs = if (raw) null else 15_000uL, network = network,\n        resourceLimits = ResourceLimitsFfi(null, null, null, null), mounts = emptyList(),\n    )"
+            "code": "private fun command(script: String, network: NetworkPolicyFfi = NetworkPolicyFfi.DISABLED,\n                        python: Boolean = false, raw: Boolean = false) = MobileLinuxCommandRequestFfi(\n        command = if (python) \"/usr/bin/python3\" else \"/bin/sh\",\n        args = if (python) listOf(\"-u\", \"-c\", script) else listOf(\"-c\", script),\n        cwd = \"/root\", env = emptyList(), stdin = null,\n        timeoutMs = if (raw) null else 15_000uL, network = network,\n        resourceLimits = ResourceLimitsFfi(null, null, null, null), mounts = emptyList(),\n    )",
+            "verification": "excerpt"
           }
         ]
       },
@@ -726,6 +1063,78 @@ export const mobilePages: DocPage[] = [
           "en": "MainActivity demonstrates object creation only. RealRuntimeSmokeTest supplies verified assets and exercises guest execution; running neither has been claimed by this documentation build.",
           "zh": "MainActivity 仅演示对象创建。RealRuntimeSmokeTest 提供经验证的资源并测试 guest 执行；本次文档构建不声称运行过这两个示例。"
         }
+      },
+      {
+        "id": "android-end-to-end",
+        "title": {
+          "en": "Execute and release a Kotlin runtime",
+          "zh": "执行并释放 Kotlin 运行时"
+        },
+        "paragraphs": [
+          {
+            "en": "Pass a RuntimeConfig whose rootfs has already been staged by RootfsInstaller and whose nativeLibraryDir is Context.applicationInfo.nativeLibraryDir. This complete consumer function handles boot, a bounded command, result checks and cleanup. Run it from a coroutine off the UI thread; display typed integrity or policy errors instead of silently retrying a rejected request.",
+            "zh": "传入已由 RootfsInstaller 暂存 rootfs 的 RuntimeConfig，nativeLibraryDir 来自 Context.applicationInfo.nativeLibraryDir。此完整消费者函数包含 boot、有超时上限的命令、结果检查及清理。通过协程在 UI 线程之外执行；展示类型化完整性或策略错误，不要静默重试被拒绝的请求。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Kotlin lifecycle function",
+              "zh": "Kotlin 生命周期函数"
+            },
+            "language": "kotlin",
+            "code": "import io.lingxi.mobilelinux.MobileLinuxRuntime\nimport io.lingxi.mobilelinux.bindings.*\n\nsuspend fun executeOnce(config: RuntimeConfig): MobileLinuxCommandResultFfi {\n    val runtime = MobileLinuxRuntime.create(config)\n    runtime.boot()\n    try {\n        val result = runtime.execute(MobileLinuxCommandRequestFfi(\n            command = \"/bin/sh\", args = listOf(\"-c\", \"printf 'ready\\n'\"),\n            cwd = \"/root\", env = emptyList(), stdin = null,\n            timeoutMs = 10_000uL, network = NetworkPolicyFfi.DISABLED,\n            resourceLimits = ResourceLimitsFfi(null, null, null, null),\n            mounts = emptyList(),\n        ))\n        check(result.enforcement.networkPolicyEnforced) { \"Network isolation not proven\" }\n        check(result.exitCode == 0 && !result.timedOut && !result.cancelled)\n        return result\n    } finally {\n        runtime.shutdown()\n    }\n}",
+            "verification": "manual",
+            "exampleId": "android-runtime-lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "android-recovery",
+        "title": {
+          "en": "Packaging, recovery and device acceptance",
+          "zh": "打包、恢复与设备验收"
+        },
+        "paragraphs": [
+          {
+            "en": "Missing helper libraries or an ABI mismatch are packaging failures, before model or shell diagnosis. Verify the selected APK flavor contains its native libraries and extracted executable helpers. Rootfs installation errors belong to the archive/manifest/SBOM boundary; repair uses validated staging, and reset must preserve external user workspaces.",
+            "zh": "辅助库缺失或 ABI 不匹配属于打包故障，应先于模型或 shell 排查。确认选定 APK flavor 含有原生库和已提取的可执行辅助程序。rootfs 安装错误属于压缩包／manifest／SBOM 边界；repair 使用已验证的暂存镜像，reset 必须保留外部用户工作区。"
+          },
+          {
+            "en": "The SDK exposes background processes but Android can stop an application process. Host foreground-service and app lifecycle policy are separate from Linux task state. Keep resource paths stable across activity recreation, retain handles in an application-owned component, and inspect task snapshots rather than inferring task survival from a screen.",
+            "zh": "SDK 暴露后台进程，但 Android 可能终止应用进程。宿主前台服务与应用生命周期策略独立于 Linux 任务状态。Activity 重建时保持资源路径稳定，在应用拥有的组件中保留句柄，并读取任务快照，不能根据页面状态推断任务存活。"
+          },
+          {
+            "en": "RealRuntimeSmokeTest exercises actual device requests and policy cases. It is the acceptance entry point, not evidence that this documentation edit ran instrumentation. Validate both arm64-v8a and x86_64 where supported, timeout descendants, binary stdio, terminal resize and denied network/memory policies on the artifact to be distributed.",
+            "zh": "RealRuntimeSmokeTest 覆盖真实设备请求和策略用例，是验收入口，不表示此文档修改已经执行 instrumentation。对待分发产物验证支持的 arm64-v8a 与 x86_64、超时后代进程、二进制 stdio、终端尺寸调整及拒绝网络／内存策略。"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "android/installer/src/main/kotlin/io/lingxi/mobilelinux/RootfsInstaller.kt"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "android/gradle-plugin/src/main/java/io/lingxi/mobilelinux/gradle/MobileLinuxPlugin.java"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/config.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ffi/src/runtime.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "examples/android/app/src/androidTest/java/io/lingxi/mobilelinux/sample/RealRuntimeSmokeTest.kt"
       }
     ]
   },
@@ -741,7 +1150,7 @@ export const mobilePages: DocPage[] = [
       "zh": "接入 SwiftPM 与 XCFramework 产品、提供 iSH fakefs 资源，并通过 Swift 控制生命周期。"
     },
     "packageName": "MobileLinuxRuntime",
-    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/blob/fd31413213bff8b78d1f537c5c0eaa390fc90f06/ios/SDK/MobileLinuxRuntime.swift",
+    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/ios/SDK/MobileLinuxRuntime.swift",
     "sections": [
       {
         "id": "swiftpm",
@@ -765,9 +1174,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "ios/Package.swift · local target excerpt / 本地 target 摘录",
+            "label": {
+              "en": "ios/Package.swift · local target excerpt",
+              "zh": "本地 target 摘录"
+            },
             "language": "swift",
-            "code": "    targets: [\n        .binaryTarget(name: \"MobileLinuxRuntimeFFI\", path: \"Artifacts/MobileLinuxRuntimeFFI.xcframework\"),\n        .binaryTarget(name: \"MobileLinuxNativeSupport\", path: \"Artifacts/MobileLinuxNativeSupport.xcframework\"),\n        .target(name: \"MobileLinuxNativeSupportLink\", dependencies: [\"MobileLinuxNativeSupport\"], path: \"NativeSupportLink\", linkerSettings: [.linkedLibrary(\"sqlite3\"), .linkedLibrary(\"resolv\"), .linkedLibrary(\"z\"), .linkedLibrary(\"c++\")]),\n        .target(name: \"MobileLinuxRuntimeBindings\", dependencies: [\"MobileLinuxRuntimeFFI\"], path: \"Bindings\"),\n        .target(name: \"MobileLinuxRuntime\", dependencies: [\"MobileLinuxRuntimeBindings\", \"MobileLinuxNativeSupportLink\"], path: \"SDK\"),"
+            "code": "    targets: [\n        .binaryTarget(name: \"MobileLinuxRuntimeFFI\", path: \"Artifacts/MobileLinuxRuntimeFFI.xcframework\"),\n        .binaryTarget(name: \"MobileLinuxNativeSupport\", path: \"Artifacts/MobileLinuxNativeSupport.xcframework\"),\n        .target(name: \"MobileLinuxNativeSupportLink\", dependencies: [\"MobileLinuxNativeSupport\"], path: \"NativeSupportLink\", linkerSettings: [.linkedLibrary(\"sqlite3\"), .linkedLibrary(\"resolv\"), .linkedLibrary(\"z\"), .linkedLibrary(\"c++\")]),\n        .target(name: \"MobileLinuxRuntimeBindings\", dependencies: [\"MobileLinuxRuntimeFFI\"], path: \"Bindings\"),\n        .target(name: \"MobileLinuxRuntime\", dependencies: [\"MobileLinuxRuntimeBindings\", \"MobileLinuxNativeSupportLink\"], path: \"SDK\"),",
+            "verification": "excerpt"
           }
         ]
       },
@@ -785,9 +1198,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "SDK-INTEGRATION.md · XCFramework build excerpt / XCFramework 构建摘录",
+            "label": {
+              "en": "SDK-INTEGRATION.md · XCFramework build excerpt",
+              "zh": "XCFramework 构建摘录"
+            },
             "language": "bash",
-            "code": "rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios\nbash scripts/build/build-ios-xcframework.sh \\\n  --output \"$SDK_BUILD_DIR/ios-native\" --cache \"$SDK_BUILD_DIR/ios-cache\" \\\n  --kind native-support --configuration Release\npython3 scripts/build/build-ffi.py --platform ios --release \\\n  --output-dir \"$SDK_BUILD_DIR/ios-ffi\" --target-dir \"$SDK_BUILD_DIR/ios-rust\""
+            "code": "rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios\nbash scripts/build/build-ios-xcframework.sh \\\n  --output \"$SDK_BUILD_DIR/ios-native\" --cache \"$SDK_BUILD_DIR/ios-cache\" \\\n  --kind native-support --configuration Release\npython3 scripts/build/build-ffi.py --platform ios --release \\\n  --output-dir \"$SDK_BUILD_DIR/ios-ffi\" --target-dir \"$SDK_BUILD_DIR/ios-rust\"",
+            "verification": "excerpt"
           }
         ]
       },
@@ -809,9 +1226,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "SDK-INTEGRATION.md · rootfs conversion excerpt / rootfs 转换摘录",
+            "label": {
+              "en": "SDK-INTEGRATION.md · rootfs conversion excerpt",
+              "zh": "rootfs 转换摘录"
+            },
             "language": "bash",
-            "code": ": \"${ROOTFS_ARCHIVE:?Set the aarch64 archive path}\"\n: \"${ROOTFS_ARCHIVE_SHA256:?Set its pinned SHA-256}\"\nbash scripts/build/prepare-ios-rootfs.sh \\\n  --archive \"$ROOTFS_ARCHIVE\" --expected-archive-sha256 \"$ROOTFS_ARCHIVE_SHA256\" \\\n  --profile toolchain --native-output \"$SDK_BUILD_DIR/ios-native/native\" \\\n  --output \"$SDK_BUILD_DIR/ios-rootfs\" --cache \"$SDK_BUILD_DIR/ios-cache\""
+            "code": ": \"${ROOTFS_ARCHIVE:?Set the aarch64 archive path}\"\n: \"${ROOTFS_ARCHIVE_SHA256:?Set its pinned SHA-256}\"\nbash scripts/build/prepare-ios-rootfs.sh \\\n  --archive \"$ROOTFS_ARCHIVE\" --expected-archive-sha256 \"$ROOTFS_ARCHIVE_SHA256\" \\\n  --profile toolchain --native-output \"$SDK_BUILD_DIR/ios-native/native\" \\\n  --output \"$SDK_BUILD_DIR/ios-rootfs\" --cache \"$SDK_BUILD_DIR/ios-cache\"",
+            "verification": "excerpt"
           }
         ]
       },
@@ -823,9 +1244,13 @@ export const mobilePages: DocPage[] = [
         },
         "code": [
           {
-            "label": "MobileLinuxRuntime.swift · wrapper source / 封装源码",
+            "label": {
+              "en": "MobileLinuxRuntime.swift · wrapper source",
+              "zh": "封装源码"
+            },
             "language": "swift",
-            "code": "import MobileLinuxRuntimeBindings\n\n/// The app chooses paths, authorization, mount policy and rootfs distribution.\n/// Keep this object alive while using its task, PTY and raw-stdio handles.\npublic final class MobileLinuxRuntime {\n    public let handle: RuntimeHandle\n    public init(configuration: RuntimeConfig) throws {\n        self.handle = try createRuntime(config: configuration)\n    }\n    public func boot() async throws -> MobileLinuxStatusFfi { try await handle.boot() }\n    public func shutdown() async throws { try await handle.shutdown() }\n    public func capability() async -> MobileLinuxCapabilityFfi { await handle.capability() }\n}"
+            "code": "import MobileLinuxRuntimeBindings\n\n/// The app chooses paths, authorization, mount policy and rootfs distribution.\n/// Keep this object alive while using its task, PTY and raw-stdio handles.\npublic final class MobileLinuxRuntime {\n    public let handle: RuntimeHandle\n    public init(configuration: RuntimeConfig) throws {\n        self.handle = try createRuntime(config: configuration)\n    }\n    public func boot() async throws -> MobileLinuxStatusFfi { try await handle.boot() }\n    public func shutdown() async throws { try await handle.shutdown() }\n    public func capability() async -> MobileLinuxCapabilityFfi { await handle.capability() }\n}",
+            "verification": "excerpt"
           }
         ],
         "apis": [
@@ -948,9 +1373,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "SDKDeviceSmoke.swift · helper excerpt / 辅助函数摘录",
+            "label": {
+              "en": "SDKDeviceSmoke.swift · helper excerpt",
+              "zh": "辅助函数摘录"
+            },
             "language": "swift",
-            "code": "    private func command(_ script: String, network: NetworkPolicyFfi = .disabled, memory: UInt32? = nil, timeout: UInt64? = 10_000) -> MobileLinuxCommandRequestFfi {\n        MobileLinuxCommandRequestFfi(command: \"/bin/sh\", args: [\"-c\", script], cwd: nil, env: [], stdin: nil,\n            timeoutMs: timeout, network: network,\n            resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: memory, maxProcesses: nil, maxOpenFiles: nil), mounts: [])\n    }"
+            "code": "    private func command(_ script: String, network: NetworkPolicyFfi = .disabled, memory: UInt32? = nil, timeout: UInt64? = 10_000) -> MobileLinuxCommandRequestFfi {\n        MobileLinuxCommandRequestFfi(command: \"/bin/sh\", args: [\"-c\", script], cwd: nil, env: [], stdin: nil,\n            timeoutMs: timeout, network: network,\n            resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: memory, maxProcesses: nil, maxOpenFiles: nil), mounts: [])\n    }",
+            "verification": "excerpt"
           }
         ]
       },
@@ -966,6 +1395,82 @@ export const mobilePages: DocPage[] = [
             "zh": "一个应用进程具有一份不可变的 iSH 内核与 rootfs 配置，会话可以使用不同工作区路径和稳定 ID。修改已初始化的内核配置，或在启动后 repair/reset，可能返回 RestartRequired。宿主负责应用重启体验。"
           }
         ]
+      },
+      {
+        "id": "ios-end-to-end",
+        "title": {
+          "en": "Execute and close a Swift session",
+          "zh": "执行并关闭 Swift 会话"
+        },
+        "paragraphs": [
+          {
+            "en": "This complete function receives a host-created configuration, boots the logical session, executes a bounded request and closes it on both success and error. The host must additionally inspect exitCode, timedOut, cancelled and enforcement.networkPolicyEnforced before accepting output. Device archive, overlay, VDSO and mount resources must match the selected SDK build.",
+            "zh": "此完整函数接收宿主创建的配置，启动逻辑会话、执行有时间上限的请求，并在成功或失败时关闭会话。宿主还须检查 exitCode、timedOut、cancelled 与 enforcement.networkPolicyEnforced 后才接受输出。真机压缩包、overlay、VDSO 与挂载资源必须匹配选定 SDK 构建。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Swift lifecycle function",
+              "zh": "Swift 生命周期函数"
+            },
+            "language": "swift",
+            "code": "import MobileLinuxRuntime\nimport MobileLinuxRuntimeBindings\n\nfunc executeOnce(config: RuntimeConfig) async throws -> MobileLinuxCommandResultFfi {\n    let runtime = try MobileLinuxRuntime(configuration: config)\n    _ = try await runtime.boot()\n    do {\n        let request = MobileLinuxCommandRequestFfi(\n            command: \"/bin/sh\", args: [\"-c\", \"printf 'ready\\n'\"], cwd: \"/root\",\n            env: [], stdin: nil, timeoutMs: 10_000, network: .disabled,\n            resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: nil,\n                maxProcesses: nil, maxOpenFiles: nil), mounts: [])\n        let result = try await runtime.handle.runCommand(request: request)\n        try await runtime.shutdown()\n        return result\n    } catch {\n        try? await runtime.shutdown()\n        throw error\n    }\n}",
+            "verification": "manual",
+            "exampleId": "ios-runtime-lifecycle"
+          }
+        ]
+      },
+      {
+        "id": "ios-recovery-and-evidence",
+        "title": {
+          "en": "Process identity and acceptance boundary",
+          "zh": "进程身份与验收边界"
+        },
+        "paragraphs": [
+          {
+            "en": "Stable workspace identity is independent of the immutable process kernel identity. Switching workspaces must preserve the kernel/rootfs configuration. When repair, reset or configuration change returns RestartRequired, persist the requested state and surface a deliberate host restart action; do not loop boot attempts in the same process.",
+            "zh": "稳定工作区身份与进程不可变内核身份相互独立。切换工作区须保留内核／rootfs 配置。当 repair、reset 或配置变更返回 RestartRequired，保存所请求状态并提供明确的宿主重启动作，不要在同一进程内循环 boot。"
+          },
+          {
+            "en": "Swift concurrency does not itself grant background execution time. The application owns OS suspension, scene transitions and resource cleanup. An iOS simulator native-support slice deliberately reports unavailable guest execution; API generation and simulator linking cannot replace a signed physical-device run.",
+            "zh": "Swift 并发本身不授予后台执行时间。应用负责系统挂起、scene 切换及资源清理。iOS 模拟器 native-support 切片会明确报告 guest 执行不可用；API 生成和模拟器链接不能替代已签名真机运行。"
+          },
+          {
+            "en": "SDKDeviceSmoke is the physical-device acceptance source. Validate the exact framework and resource bundle together, including interrupted install, integrity refresh, restart-required behavior, raw byte preservation and whole-tree cancellation. Unit tests with fake native transport establish lifecycle logic only.",
+            "zh": "SDKDeviceSmoke 是真机验收源码。框架与资源包须作为一组验证，包括安装中断、完整性刷新、要求重启的行为、raw 字节保持及完整进程树取消。使用伪原生传输的单元测试仅证明生命周期逻辑。"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "ios/SDK/MobileLinuxRuntime.swift"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "ios/Package.swift"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/config.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/lifecycle.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/implementation.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "examples/ios/App/SDKDeviceSmoke.swift"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "scripts/build/prepare-ios-rootfs.sh"
       }
     ]
   },
@@ -981,7 +1486,7 @@ export const mobilePages: DocPage[] = [
       "zh": "宿主拥有的挂载策略、网络与资源执行约束、rootfs 信任及明确的平台限制。"
     },
     "packageName": "mobile-linux-runtime",
-    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/blob/fd31413213bff8b78d1f537c5c0eaa390fc90f06/crates/mobile-linux-api/src/mobile_linux.rs",
+    "sourceUrl": "https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/crates/mobile-linux-api/src/mobile_linux.rs",
     "sections": [
       {
         "id": "host-policy",
@@ -1022,9 +1527,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "types.rs · mount record excerpt / 挂载记录摘录",
+            "label": {
+              "en": "types.rs · mount record excerpt",
+              "zh": "挂载记录摘录"
+            },
             "language": "rust",
-            "code": "pub struct MobileLinuxMountSpecFfi {\n    pub host_path: String,\n    pub guest_path: String,\n    pub read_only: bool,\n    pub purpose: MobileLinuxMountPurposeFfi,\n}"
+            "code": "pub struct MobileLinuxMountSpecFfi {\n    pub host_path: String,\n    pub guest_path: String,\n    pub read_only: bool,\n    pub purpose: MobileLinuxMountPurposeFfi,\n}",
+            "verification": "excerpt"
           }
         ],
         "note": {
@@ -1056,9 +1565,13 @@ export const mobilePages: DocPage[] = [
         ],
         "code": [
           {
-            "label": "mobile_linux.rs · enforcement receipt excerpt / 执行回执摘录",
+            "label": {
+              "en": "mobile_linux.rs · enforcement receipt excerpt",
+              "zh": "执行回执摘录"
+            },
             "language": "rust",
-            "code": "pub struct LinuxEnforcementReceipt {\n    pub network_policy_enforced: bool,\n    pub memory_limit_enforced: bool,\n}"
+            "code": "pub struct LinuxEnforcementReceipt {\n    pub network_policy_enforced: bool,\n    pub memory_limit_enforced: bool,\n}",
+            "verification": "excerpt"
           }
         ]
       },
@@ -1160,6 +1673,88 @@ export const mobilePages: DocPage[] = [
             "zh": "SDK Rust 源码保留 MIT OR Apache-2.0，部分 crate 或源码有明确例外。完整分发包含适用独立条款的第三方组件，包括 GPL/LGPL 代码。分发 SDK 产物时保留组件声明、源码版本、补丁来源与 rootfs SBOM 许可证信息。"
           }
         ]
+      },
+      {
+        "id": "policy-decision-flow",
+        "title": {
+          "en": "Admission and enforcement flow",
+          "zh": "准入与执行约束流程"
+        },
+        "paragraphs": [
+          {
+            "en": "An application permission decision admits an operation; runtime validation then checks its concrete path, mount, network and resource request. These are distinct decisions. When a required guarantee is unavailable, return a typed failure before accepting output rather than interpreting compatibility-layer execution as isolation.",
+            "zh": "应用权限决定准入操作；运行时校验随后检查具体路径、挂载、网络与资源请求，两者是不同决定。当所需保证不可用时，在接受输出前返回类型化错误，不能把兼容层执行解释成隔离。"
+          },
+          {
+            "en": "For finite commands inspect the returned enforcement receipt. Long-lived process/PTY/raw handles also carry enforcement identity in the portable contract; validate it when admitting a session. ResourceLimits lists requested ceilings, but its portable proof currently has only network_policy_enforced and memory_limit_enforced. Do not invent receipt bits for CPU, process count or file descriptors.",
+            "zh": "有限命令检查返回的执行回执。可移植契约中的长期进程／PTY／raw 句柄也携带执行约束身份，准入会话时进行验证。ResourceLimits 列出所请求上限，但当前可移植证明仅包含 network_policy_enforced 和 memory_limit_enforced，不能臆造 CPU、进程数或文件描述符的回执位。"
+          }
+        ],
+        "steps": [
+          {
+            "en": "Authorize the user action and choose explicit policy.",
+            "zh": "授权用户动作并选择明确策略。"
+          },
+          {
+            "en": "Validate absolute paths and platform mount boundaries.",
+            "zh": "校验绝对路径与平台挂载边界。"
+          },
+          {
+            "en": "Verify the image and admit execution through the selected backend.",
+            "zh": "验证镜像，并通过选定后端准入执行。"
+          },
+          {
+            "en": "Check the typed result/handle receipt, output and terminal state.",
+            "zh": "检查类型化结果／句柄回执、输出及终态。"
+          }
+        ]
+      },
+      {
+        "id": "negative-acceptance",
+        "title": {
+          "en": "Failure scenarios to test",
+          "zh": "需要验证的失败场景"
+        },
+        "paragraphs": [
+          {
+            "en": "Corrupt the pinned archive or an immutable file: staging/verify must report integrity failure, and no unverified image may become active. Request a writable guest executable through immutable authorization: it must be rejected. Restore valid staging and test repair without deleting user workspace data.",
+            "zh": "破坏固定的压缩包或不可变文件：暂存／verify 必须报告完整性失败，未经验证的镜像不能成为活动镜像。通过不可变授权请求可写 guest 可执行文件时，必须拒绝。恢复有效暂存镜像后，验证 repair 不删除用户工作区数据。"
+          },
+          {
+            "en": "Request mount ancestors of protected paths, a mismatched stable workspace, missing allowlists, a zero-byte raw read, or raw stdin/timeout fields. Check typed rejection. Separately test network-disabled escape attempts and memory limits on actual devices, because host-only tests cannot establish native policy enforcement.",
+            "zh": "请求保护路径的祖先挂载、不匹配的稳定工作区、缺少白名单、零字节 raw read，或 raw stdin／timeout 字段，检查类型化拒绝。另在真机测试禁用网络的逃逸尝试与内存限制，因为宿主测试不能证明原生策略执行。"
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-api/src/mobile_linux.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-api/src/execution.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/store/verification.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/store/install.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/validation.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/mounts.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "scripts/tests/test_resource_contracts.py"
       }
     ]
   }

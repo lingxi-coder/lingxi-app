@@ -18,3 +18,6 @@ pnpm-debug.log*
 # Test and OS artifacts
 coverage/
 .DS_Store
+
+# Compiler documentation generated from isolated SDK consumers
+public/rustdoc/

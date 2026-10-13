@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="510" viewBox="0 0 960 510" role="img" aria-labelledby="title desc">
+  <title id="title">Session lifecycle / 会话生命周期</title>
+  <desc id="desc">Durable append preserves row UUID and parent links. Cold resume reconstructs the selected graph, clears file read state and reattaches services. Fork creates a new session identity. Context compaction changes model input separately from local transcript reclamation.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="#526b78"/></marker>
+    <style>text{font-family:system-ui,-apple-system,sans-serif;fill:#163642}.label{font-size:18px;font-weight:600}.sub{font-size:14px;fill:#526b78}.flow{fill:none;stroke:#526b78;stroke-width:2;marker-end:url(#arrow)}.box{fill:#fff;stroke:#cadadd;stroke-width:1.5}</style>
+  </defs>
+  <rect width="960" height="510" rx="20" fill="#f3f7f7"/>
+  <text x="40" y="42" class="label">Persisted identity survives presentation · 持久标识独立于展示</text>
+  <rect x="40" y="80" width="230" height="102" rx="12" class="box"/>
+  <text x="60" y="115" class="label">Live session · 活动会话</text><text x="60" y="143" class="sub">session ID / row UUID</text><text x="60" y="165" class="sub">provider ID / stream index</text>
+  <rect x="330" y="80" width="270" height="102" rx="12" fill="#e7f1ed" stroke="#91b9a6" stroke-width="1.5"/>
+  <text x="350" y="115" class="label">Durable append · 持久追加</text><text x="350" y="143" class="sub">authority → identity → append</text><text x="350" y="165" class="sub">fsync → success / receipt</text>
+  <rect x="660" y="80" width="260" height="102" rx="12" class="box"/>
+  <text x="680" y="115" class="label">JSONL graph · 对话图</text><text x="680" y="143" class="sub">uuid → parentUuid</text><text x="680" y="165" class="sub">metadata / tool-results</text>
+  <path d="M270 132H327" class="flow"/><path d="M600 132H657" class="flow"/>
+  <rect x="660" y="256" width="260" height="110" rx="12" class="box"/>
+  <text x="680" y="290" class="label">Cold resume · 冷恢复</text><text x="680" y="316" class="sub">selected parent chain</text><text x="680" y="338" class="sub">empty FileStateCache</text><text x="680" y="358" class="sub">reattach live services · 重新挂载</text>
+  <path d="M790 182V253" class="flow"/>
+  <rect x="330" y="256" width="270" height="110" rx="12" class="box"/>
+  <text x="350" y="290" class="label">Fork · 分支</text><text x="350" y="316" class="sub">new session ID / JSONL</text><text x="350" y="338" class="sub">rewrite session / parent chain</text><text x="350" y="358" class="sub">retained history · 保留历史</text>
+  <path d="M720 182V218H465V253" class="flow"/>
+  <rect x="40" y="256" width="230" height="110" rx="12" class="box"/>
+  <text x="60" y="290" class="label">Context · 模型上下文</text><text x="60" y="316" class="sub">compacted request history</text><text x="60" y="338" class="sub">summaries / boundaries</text><text x="60" y="358" class="sub">does not erase JSONL</text>
+  <path d="M155 182V253" class="flow"/>
+  <rect x="40" y="414" width="880" height="56" rx="12" class="box"/>
+  <text x="60" y="448" class="sub">Local transcript GC is a separate opt-in reclamation policy · 本地对话 GC 是独立显式回收策略</text>
+</svg>

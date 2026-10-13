@@ -493,7 +493,17 @@ export class NativeAudioManager {
         const snapshot = await this.resolvePackagedPermissions(command.permissions);
         return { type: 'authorization', snapshot };
       }
-      const response = await this.sendHelperEnvelope({ id: randomUUID(), kind: 'command', command: command.type === 'get_snapshot' ? { type: 'get_snapshot' } : command }, null);
+      let helperCommand = command;
+      if (command.type === 'get_snapshot') {
+        // Native readiness must use the same language and sources as hosted readiness.
+        // The helper previews this configuration without changing any active operation.
+        let configuration = command.configuration;
+        if (!configuration) {
+          try { configuration = this.opts.getAudioConfiguration?.() ?? audioConfigurationDefaults(); } catch { /* Keep settings readable when saved preferences are invalid. */ }
+        }
+        helperCommand = { type: 'get_snapshot', ...(configuration ? { configuration } : {}) };
+      }
+      const response = await this.sendHelperEnvelope({ id: randomUUID(), kind: 'command', command: helperCommand }, null);
       const normalized = this.normalizeCommandResponse(response);
       if (this.helper && normalized.type !== 'error' && normalized.snapshot.capabilities) {
         this.capabilitiesHelper = this.helper;

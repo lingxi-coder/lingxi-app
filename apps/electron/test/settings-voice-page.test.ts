@@ -187,8 +187,8 @@ test('the page saves explicit v4 preferences and executes model/audio work throu
   assert.match(source, /voiceRevision/);
   assert.match(source, /catch \(cause\)/);
   assert.match(source, /bridge\.setVoicePreferences\(configuration,/);
-  assert.match(source, /保存语音偏好/);
-  assert.match(source, /实际：/);
+  assert.match(source, /保存设置/);
+  assert.match(source, /实际使用/);
   assert.doesNotMatch(source, /speechSynthesis|navigator\.mediaDevices/);
 });
 

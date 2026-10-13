@@ -219,6 +219,9 @@ struct LanguagePage: View {
 
 // MARK: - Voice TTS
 struct VoicePage: View {
+    @Environment(\.theme) private var theme
+    @State private var modelsExpanded = false
+    @State private var advancedExpanded = false
     @Environment(VoiceCapabilityModel.self) private var capability
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
@@ -226,24 +229,37 @@ struct VoicePage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            VoiceConversationSettingsSection(capability: capability)
             VoiceRecognitionSettingsSection(capability: capability)
             VoiceSpeechSettingsSection(capability: capability)
-            if !capability.offlinePackStates.isEmpty {
+            VoicePlaybackSettingsSection(capability: capability)
+            DisclosureGroup("audio_settings_offline_models", isExpanded: $modelsExpanded) {
                 VoiceOfflineModelsSettingsSection(capability: capability)
             }
-            VoicePlaybackSettingsSection(capability: capability)
-            VoiceAccessSettingsSection(
-                capability: capability,
-                permissionAction: handlePermissionAction
-            )
-
-            VoiceAudioStatusSettingsSection(capability: capability)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 18)
+            .font(.scaledSystem(13, weight: .semibold, relativeTo: .subheadline))
+            .tint(theme.accent)
+            DisclosureGroup("audio_settings_advanced", isExpanded: $advancedExpanded) {
+                VoiceConversationSettingsSection(capability: capability)
+                VoiceAccessSettingsSection(capability: capability, permissionAction: handlePermissionAction)
+                VoiceAudioStatusSettingsSection(capability: capability)
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 18)
+            .font(.scaledSystem(13, weight: .semibold, relativeTo: .subheadline))
+            .tint(theme.accent)
             if let error = capability.errorMessage {
                 BlurbText(text: error)
             }
         }
-        .task { capability.reloadFromDefaults(); await capability.refreshCloudCapabilities() }
+        .task {
+            capability.reloadFromDefaults()
+            modelsExpanded = capability.mode == .onDevice || capability.speechMode == .offline
+            advancedExpanded = capability.microphonePermissionStatus != .granted
+            await capability.refreshCloudCapabilities()
+        }
+        .onChange(of: capability.mode) { _, mode in if mode == .onDevice { modelsExpanded = true } }
+        .onChange(of: capability.speechMode) { _, mode in if mode == .offline { modelsExpanded = true } }
         .task(id: capability.configurationRevision) { await capability.refreshCloudCapabilities() }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -284,8 +300,8 @@ private struct VoiceConversationSettingsSection: View {
                     }.labelsHidden().frame(maxWidth: 190)
                 }
             }
-            Group {
-                SettingsRow(label: String(localized: "audio_provider_binding"), sub: capability.cloudService.profileID(for: preference.cloud), chevron: false) {
+            if preference.mode == "realtime" {
+                SettingsRow(label: String(localized: "audio_provider_binding"), chevron: false) {
                     Picker("audio_provider_binding", selection: Binding(get: { preference.cloud.binding }, set: { binding in
                         var next = preference; next.cloud = AudioCloudBinding(binding: binding); next.voice = nil; capability.setConversationPreference(next)
                     })) {
@@ -401,26 +417,12 @@ private struct VoiceRecognitionSettingsSection: View {
 
     var body: some View {
         SettingsSection(
-            label: String(localized: "settings_voice_listen_section"),
+            label: String(localized: "audio_settings_input"),
             footer: String(localized: "settings_voice_listen_footer")
         ) {
             SettingsRow(
-                label: String(localized: "voice_recognition_mode"),
-                sub: capability.mode.detail,
-                chevron: false
-            ) {
-                Picker("voice_recognition_mode", selection: modeBinding) {
-                    ForEach(capability.recognitionModes) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .labelsHidden()
-                .frame(maxWidth: 170)
-            }
-            VoiceCloudBindingRows(capability: capability, kind: .recognition)
-            SettingsRow(
                 label: String(localized: "voice_recognition_language"),
-                sub: "\(String(localized: "voice_effective_language")) · \(capability.effectiveLanguageLabel)",
+                sub: "\(String(localized: "voice_effective_language")) · \(capability.effectiveLanguageLabel)\n\(String(localized: "audio_language_hint"))",
                 chevron: false
             ) {
                 Picker("voice_recognition_language", selection: languageBinding) {
@@ -432,13 +434,20 @@ private struct VoiceRecognitionSettingsSection: View {
                 .frame(maxWidth: 170)
             }
             SettingsRow(
-                label: String(localized: "settings_voice_effective_backend"),
-                sub: capability.effectiveRecognitionStatus.fallbackReason
-                    ?? capability.effectiveRecognitionStatus.detail,
-                value: capability.effectiveRecognitionStatus.modeLabel,
-                chevron: false,
-                isLast: true
-            )
+                label: String(localized: "voice_recognition_mode"),
+                sub: nil,
+                chevron: false
+            ) {
+                Picker("voice_recognition_mode", selection: modeBinding) {
+                    ForEach(capability.recognitionModes) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 170)
+            }
+            if capability.mode == .onDevice { OfflineVoiceModelPicker(capability: capability, kind: .stt) }
+            VoiceCloudBindingRows(capability: capability, kind: .recognition)
         }
     }
 
@@ -456,11 +465,11 @@ private struct VoiceSpeechSettingsSection: View {
 
     var body: some View {
         SettingsSection(
-            label: String(localized: "settings_voice_speak_section"),
+            label: String(localized: "audio_settings_output"),
             footer: String(localized: "settings_voice_speak_footer")
         ) {
-            SettingsRow(label: "Playback source", chevron: false) {
-                Picker("Playback source", selection: speechModeBinding) {
+            SettingsRow(label: String(localized: "audio_source_title"), chevron: false) {
+                Picker("audio_source_title", selection: speechModeBinding) {
                     ForEach(capability.speechModes) { mode in
                         Text(mode.title).tag(mode)
                     }
@@ -468,12 +477,7 @@ private struct VoiceSpeechSettingsSection: View {
                 .labelsHidden()
                 .frame(maxWidth: 190)
             }
-            SettingsRow(
-                label: "Preview route",
-                sub: capability.speechRoutePreview.fallbackReason,
-                value: capability.speechSourceLabel,
-                chevron: false
-            )
+            if capability.speechMode == .offline { OfflineVoiceModelPicker(capability: capability, kind: .tts) }
             VoiceCloudBindingRows(capability: capability, kind: .speech)
             if capability.speechMode == .cloud {
                 if let voices = capability.cloudService.capabilities[.speech]?.voices, !voices.isEmpty {
@@ -487,24 +491,13 @@ private struct VoiceSpeechSettingsSection: View {
             } else {
             SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
                 Picker("voice_voice_name", selection: voiceBinding) {
-                    ForEach(capability.voices) { voice in
+                    ForEach(capability.speechVoiceOptions) { voice in
                         Text("\(voice.name) · \(voice.language)").tag(voice.id)
                     }
                 }
                 .labelsHidden()
                 .frame(maxWidth: 190)
             }
-            SettingsRow(
-                label: String(localized: "settings_voice_requested_voice"),
-                value: capability.requestedVoiceLabel,
-                chevron: false
-            )
-            SettingsRow(
-                label: String(localized: "settings_voice_effective_voice"),
-                sub: capability.selectedVoice?.language,
-                value: capability.effectiveVoiceLabel,
-                chevron: false
-            )
             }
             if capability.speechMode != .cloud || capability.cloudPreviewSupported {
             SettingsRow(
@@ -544,12 +537,12 @@ private struct VoiceOfflineModelsSettingsSection: View {
     var body: some View {
         SettingsSection(
             label: String(localized: "settings_voice_model_section"),
-            footer: String(localized: "settings_voice_model_footer")
+            footer: String(localized: "audio_offline_models_hint")
         ) {
             ForEach(capability.offlinePackStates) { status in
                 SettingsRow(
                     label: displayName(for: status),
-                    sub: status.model.license,
+                    sub: (status.model.kind == .stt ? String(localized: "settings_section_voice_input") : String(localized: "settings_section_voice_output")) + " · " + status.model.license,
                     value: stateLabel(status.state),
                     valueColor: status.state.isReady ? theme.ok : theme.text3,
                     chevron: false

@@ -1208,10 +1208,10 @@ test('settings model, voice and Thought patches persist without restarting a liv
     const result = await Promise.resolve(update!(event, {
       voiceRevision: expectedVoiceRevision,
       voice: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         recognition: { source: 'offline', offlineModelId: null },
         speech: {
-          source: 'automatic',
+          source: 'system',
           offlineModelId: null,
           voice: { source: 'system', id: 'Alex' },
         },
@@ -1221,16 +1221,23 @@ test('settings model, voice and Thought patches persist without restarting a liv
       },
     })) as { voice?: Record<string, unknown>; voiceRevision?: number };
 
-    // Normalized through the generated v3 contract, not echoed back raw:
-    // language is trimmed, rate is clamped, and a fixed voice makes an
-    // otherwise automatic persisted speech source explicitly system-backed.
+    // The current v4 contract preserves explicit source intent, trims
+    // language, clamps rate, and fills independent cloud/conversation defaults.
     assert.deepEqual(result.voice, {
-      schemaVersion: 3,
-      recognition: { source: 'offline', offlineModelId: null },
+      schemaVersion: 4,
+      recognition: {
+        source: 'offline', offlineModelId: null,
+        cloud: { binding: 'follow_session', profileId: null, modelId: null },
+      },
       speech: {
         source: 'system',
         offlineModelId: null,
         voice: { source: 'system', id: 'Alex' },
+        cloud: { binding: 'follow_session', profileId: null, modelId: null },
+      },
+      conversation: {
+        mode: 'agent', interaction: 'turn_based',
+        cloud: { binding: 'follow_session', profileId: null, modelId: null }, voice: null,
       },
       language: 'ZH-cn',
       rate: 2.0,
@@ -1238,6 +1245,7 @@ test('settings model, voice and Thought patches persist without restarting a liv
     });
     assert.equal(result.voiceRevision, expectedVoiceRevision + 1);
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
+    assert.deepEqual(new SettingsStore(userData).getPublic().voice, result.voice, 'v4 preferences must survive reopening the settings store');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 
     for (const value of [false, true]) {

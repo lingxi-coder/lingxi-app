@@ -86,6 +86,30 @@ test('artifact names are versioned and architecture-specific', () => {
   assert.equal(paths.checksumPath, '/tmp/desktop/dist/LingXi-Code-1.2.3-mac-arm64.zip.sha256');
 });
 
+test('runtime packages omit README author paths while retaining legal notices', () => {
+  for (const files of [undefined, ['runtime.js', 'readme.md', 'LICENSE', 'NOTICE']]) {
+    const root = mkdtempSync(join(tmpdir(), 'lingxi-runtime-docs-'));
+    try {
+      const source = join(root, 'node_modules', 'fixture');
+      mkdirSync(source, { recursive: true });
+      writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0', files }));
+      writeFileSync(join(source, 'runtime.js'), 'export const ready = true;');
+      writeFileSync(join(source, 'readme.md'), 'Example: /Users/example-author/project/');
+      writeFileSync(join(source, 'LICENSE'), 'MIT license');
+      writeFileSync(join(source, 'NOTICE'), 'Copyright fixture authors');
+      const destination = join(root, 'output', 'node_modules');
+      copyProductionDependencies({ fixture: '1.0.0' }, root, destination);
+      assert.equal(existsSync(join(destination, 'fixture', 'readme.md')), false);
+      assert.equal(existsSync(join(destination, 'fixture', 'runtime.js')), true);
+      assert.equal(readFileSync(join(destination, 'fixture', 'LICENSE'), 'utf8'), 'MIT license');
+      assert.equal(readFileSync(join(destination, 'fixture', 'NOTICE'), 'utf8'), 'Copyright fixture authors');
+      scanTreeForForbiddenContent(destination);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('runtime dependency copy expands package file globs by copying installed payload', () => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-dependency-test-'));
   try {

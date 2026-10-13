@@ -19,6 +19,7 @@ import type {
   WritableScopeDto,
 } from '@lingxi/bridge-client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { watchCredentialRecovery } from './credentialRecovery.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import { hostMicrophonePermissionReader } from '../../shared/microphoneAccess.js';
 import type {
@@ -1899,6 +1900,22 @@ export function useBridge(): UseBridge {
       capture(cause);
     }
   }, [capture, host, updateRuntime]);
+  const credentialStorageUnavailable = bootstrap?.providerCredentials?.some((entry) => Boolean(entry.storageError)) ?? false;
+  useEffect(() => {
+    if (!host || !credentialStorageUnavailable) return;
+    let disposed = false;
+    const stop = watchCredentialRecovery({
+      windowTarget: window,
+      documentTarget: document,
+      isVisible: () => document.visibilityState === 'visible',
+      refresh: async () => {
+        const snapshot = await host.bootstrap();
+        if (!disposed) applyBootstrap(snapshot);
+      },
+    });
+    return () => { disposed = true; stop(); };
+  }, [applyBootstrap, credentialStorageUnavailable, host]);
+
   const clearSession = useCallback(async (name?: string) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;

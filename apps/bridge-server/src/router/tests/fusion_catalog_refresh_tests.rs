@@ -291,16 +291,18 @@ async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejec
     let home = temp.path().join("home");
     std::fs::create_dir_all(&cwd).unwrap();
     let runtime = Box::pin(harness_runtime::desktop::build(
-        harness_runtime::desktop::DesktopConfig {
-            cwd: cwd.clone(),
-            lingxi_home: home.clone(),
-            isolated_credential_storage: true,
-            credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
-            host_workspace_trusted: Some(true),
-            restricted: true,
-            strict_mcp_config: true,
-            default_model_explicit: true,
-            ..Default::default()
+        {
+            let mut __desktop_config = harness_runtime::desktop::DesktopConfig::default();
+            __desktop_config.cwd = cwd.clone();
+            __desktop_config.lingxi_home = home.clone();
+            __desktop_config.isolated_credential_storage = true;
+            __desktop_config.credential_storage_policy =
+                lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
+            __desktop_config.host_workspace_trusted = Some(true);
+            __desktop_config.restricted = true;
+            __desktop_config.strict_mcp_config = true;
+            __desktop_config.default_model_explicit = true;
+            __desktop_config
         },
         Arc::new(orchestrator::test_support::MockOutputStream::new()),
         Arc::new(CronPermissionSink),

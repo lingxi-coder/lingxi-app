@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
 use client::protocol::commands::{
     ClientCommand, ListingKindDto, PermissionBehaviorDto, WritableScopeDto,
@@ -36,8 +36,8 @@ use client::protocol::events::{ClientEvent, ErrorKindDto};
 use futures_util::{SinkExt, StreamExt};
 use harness_runtime::desktop::DesktopConfig;
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 /// `boot::assemble` → `initialize_live_session` writes to PROCESS-GLOBAL
 /// statics (`PROCESS_DIR` / `PROCESS_SESSION` / `PROCESS_NAME` in
@@ -115,83 +115,87 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         harness_runtime::desktop::settings_watch::MANAGED_DIR_ENV,
         managed_dir(&tmp),
     );
-    let cfg = DesktopConfig {
-        build_info: harness_runtime::desktop::BuildInfo::default(),
-        enable_automation_scheduler: true,
-        host_workspace_trusted: None,
-        mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
-        api_base: "https://api.anthropic.com".to_string(),
-        api_key: String::new(),
-        api_key_helper: None,
-        managed_oauth_only: false,
-        anthropic_key_fd_present: false,
-        cwd: cwd.clone(),
-        lingxi_home,
-        default_model: "claude-sonnet-4-20250514".to_string(),
-        default_model_explicit: true,
+    let cfg = {
+        let mut __desktop_config = DesktopConfig::default();
+        __desktop_config.build_info = harness_runtime::desktop::BuildInfo::default();
+        __desktop_config.enable_automation_scheduler = true;
+        __desktop_config.host_workspace_trusted = None;
+        __desktop_config.mod_render_surface =
+            Some(harness_runtime::desktop::ModRenderSurface::Desktop);
+        __desktop_config.api_base = "https://api.anthropic.com".to_string();
+        __desktop_config.api_key = String::new();
+        __desktop_config.api_key_helper = None;
+        __desktop_config.managed_oauth_only = false;
+        __desktop_config.anthropic_key_fd_present = false;
+        __desktop_config.cwd = cwd.clone();
+        __desktop_config.lingxi_home = lingxi_home;
+        __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
+        __desktop_config.default_model_explicit = true;
         // Same hazard as `e2e_serve_test.rs`: without this, any provider key
         // in the developer's real login keychain would make this test
         // machine-dependent.
-        isolated_credential_storage: true,
-        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativePreferred,
-        recent_models: Vec::new(),
-        fallback_model: None,
-        custom_betas: Vec::new(),
-        flag_settings: None,
-        provider_profiles: None,
-        routing: None,
-        mcp_paths: vec![cwd.join(".mcp.json")],
-        use_noop_permission_gate: false,
-        deny_unresolved_ask: false,
-        is_tty: false,
-        initial_teammate_team_name: None,
-        injected_permission_gate: None,
-        injected_plugin_secrets: Default::default(),
-        ask_user_question_tx: None,
-        computer_access_tx: None,
-        session_agent_observer: None,
+        __desktop_config.isolated_credential_storage = true;
+        __desktop_config.credential_storage_policy =
+            lingxi_core::host::CredentialStoragePolicy::NativePreferred;
+        __desktop_config.recent_models = Vec::new();
+        __desktop_config.fallback_model = None;
+        __desktop_config.custom_betas = Vec::new();
+        __desktop_config.flag_settings = None;
+        __desktop_config.provider_profiles = None;
+        __desktop_config.routing = None;
+        __desktop_config.mcp_paths = vec![cwd.join(".mcp.json")];
+        __desktop_config.use_noop_permission_gate = false;
+        __desktop_config.deny_unresolved_ask = false;
+        __desktop_config.is_tty = false;
+        __desktop_config.initial_teammate_team_name = None;
+        __desktop_config.injected_permission_gate = None;
+        __desktop_config.injected_plugin_secrets = Default::default();
+        __desktop_config.ask_user_question_tx = None;
+        __desktop_config.computer_access_tx = None;
+        __desktop_config.session_agent_observer = None;
         // `assemble` fills this with the connection's own `AudioBridge`.
-        audio: None,
-        session_started_as_coordinator: false,
-        memory_provider: None,
-        permission_mode: permission::PermissionMode::Default,
-        permission_mode_cli: None,
-        permission_mode_preference: None,
-        permission_mode_cli_explicit: false,
-        allow_dangerously_skip_permissions: false,
-        connect_prompt: None,
-        max_turns: None,
-        plan_mode_instructions: None,
-        plans_directory: None,
-        max_budget_usd: None,
-        json_schema: None,
-        system_prompt_override: None,
-        append_system_prompt: None,
-        session_id_override: None,
-        session_writer_lease: None,
-        disable_slash_commands: false,
+        __desktop_config.audio = None;
+        __desktop_config.session_started_as_coordinator = false;
+        __desktop_config.memory_provider = None;
+        __desktop_config.permission_mode = permission::PermissionMode::Default;
+        __desktop_config.permission_mode_cli = None;
+        __desktop_config.permission_mode_preference = None;
+        __desktop_config.permission_mode_cli_explicit = false;
+        __desktop_config.allow_dangerously_skip_permissions = false;
+        __desktop_config.connect_prompt = None;
+        __desktop_config.max_turns = None;
+        __desktop_config.plan_mode_instructions = None;
+        __desktop_config.plans_directory = None;
+        __desktop_config.max_budget_usd = None;
+        __desktop_config.json_schema = None;
+        __desktop_config.system_prompt_override = None;
+        __desktop_config.append_system_prompt = None;
+        __desktop_config.session_id_override = None;
+        __desktop_config.session_writer_lease = None;
+        __desktop_config.disable_slash_commands = false;
         // This fixture has no per-session skill allowlist input.
-        session_skill_allowlist: None,
-        add_dir: Vec::new(),
-        cli_mcp_servers: Vec::new(),
-        strict_mcp_config: false,
-        restricted: false,
-        restricted_tools: None,
-        exclude_dynamic_system_prompt_sections: false,
-        setting_source_scope: (true, true),
-        customization_gates: harness_runtime::desktop::CustomizationGates::default(),
-        session_persistence: true,
-        cli_agents_json: None,
-        cli_agent: None,
-        cli_plugin_dirs: Vec::new(),
-        initial_effort: None,
-        default_model_env_pinned: false,
-        session_thinking: Default::default(),
-        parent_session_id: None,
-        bg_session_forker: None,
-        worktree_launch: None,
-        tmux_launch: None,
-        ..Default::default()
+        __desktop_config.session_skill_allowlist = None;
+        __desktop_config.add_dir = Vec::new();
+        __desktop_config.cli_mcp_servers = Vec::new();
+        __desktop_config.strict_mcp_config = false;
+        __desktop_config.restricted = false;
+        __desktop_config.restricted_tools = None;
+        __desktop_config.exclude_dynamic_system_prompt_sections = false;
+        __desktop_config.setting_source_scope = (true, true);
+        __desktop_config.customization_gates =
+            harness_runtime::desktop::CustomizationGates::default();
+        __desktop_config.session_persistence = true;
+        __desktop_config.cli_agents_json = None;
+        __desktop_config.cli_agent = None;
+        __desktop_config.cli_plugin_dirs = Vec::new();
+        __desktop_config.initial_effort = None;
+        __desktop_config.default_model_env_pinned = false;
+        __desktop_config.session_thinking = Default::default();
+        __desktop_config.parent_session_id = None;
+        __desktop_config.bg_session_forker = None;
+        __desktop_config.worktree_launch = None;
+        __desktop_config.tmux_launch = None;
+        __desktop_config
     };
     (tmp, cfg)
 }

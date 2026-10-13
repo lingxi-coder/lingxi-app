@@ -1026,11 +1026,12 @@ mod retained_shutdown_tests {
         for code in [exit_codes::SUCCESS, exit_codes::SIGINT] {
             let root = tempfile::tempdir().unwrap();
             let runtime = crate::init::build_runtime_from_config(
-                harness_runtime::desktop::DesktopConfig {
-                    lingxi_home: root.path().join("home"),
-                    cwd: root.path().to_path_buf(),
-                    isolated_credential_storage: true,
-                    ..Default::default()
+                {
+                    let mut __desktop_config = harness_runtime::desktop::DesktopConfig::default();
+                    __desktop_config.lingxi_home = root.path().join("home");
+                    __desktop_config.cwd = root.path().to_path_buf();
+                    __desktop_config.isolated_credential_storage = true;
+                    __desktop_config
                 },
                 Arc::new(orchestrator::test_support::MockOutputStream::new()),
             )

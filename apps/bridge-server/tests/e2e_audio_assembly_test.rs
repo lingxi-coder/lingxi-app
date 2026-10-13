@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
 use client::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioOperationDto, AudioOperationKindDto,
@@ -49,8 +49,8 @@ use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
 };
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 const TEST_TOKEN: &str = "audio-asm-token-32chars000000000";
 
@@ -122,20 +122,21 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         harness_runtime::desktop::settings_watch::MANAGED_DIR_ENV,
         &managed,
     );
-    let cfg = DesktopConfig {
-        cwd: cwd.clone(),
-        lingxi_home: cwd.join(".lingxi"),
+    let cfg = {
+        let mut __desktop_config = DesktopConfig::default();
+        __desktop_config.cwd = cwd.clone();
+        __desktop_config.lingxi_home = cwd.join(".lingxi");
         // `assemble` requires the real adapter gate (it binds the gate handle).
-        use_noop_permission_gate: false,
+        __desktop_config.use_noop_permission_gate = false;
         // Keep the developer's login keychain out of the build: with a real key
         // in it the runtime resolves a different model/provider set than on a
         // machine that has never logged in.
-        isolated_credential_storage: true,
+        __desktop_config.isolated_credential_storage = true;
         // …and for the same reason, do not let a connected provider re-pick the
         // default model.
-        default_model_explicit: true,
-        session_persistence: false,
-        ..DesktopConfig::default()
+        __desktop_config.default_model_explicit = true;
+        __desktop_config.session_persistence = false;
+        __desktop_config
     };
     (tmp, cfg)
 }

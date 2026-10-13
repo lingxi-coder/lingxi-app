@@ -21,6 +21,9 @@ object SettingsRoutes {
     const val MAIN = "settings/main"
     const val ACCOUNT = "settings/account"
 
+    /** One of the six groups on the settings home; `{group}` is a [SettingsGroup] key. */
+    const val GROUP = "settings/group/{group}"
+
     // Providers and audio
     const val PROVIDER_LIST = "settings/providers/{kind}"
     const val PROVIDER_PICKER = "settings/providers/{kind}/add"
@@ -39,6 +42,9 @@ object SettingsRoutes {
     const val CRON = "settings/cron"
     const val CRON_TASK = "settings/cron/task/{task}"
     const val CRON_RUN = "settings/cron/run/{run}"
+
+    /** The scheduled-task form, opened with `{prompt}` already filled in. */
+    const val CRON_NEW = "settings/cron/new/{prompt}"
 
     // Device settings
     const val APPEARANCE = "settings/appearance"
@@ -61,6 +67,20 @@ object SettingsRoutes {
             ?.let { "$CRON/task/${android.net.Uri.encode(it)}" }
             ?: CRON
     fun cronRun(runId: String): String = "$CRON/run/${android.net.Uri.encode(runId)}"
+    /** A blank prompt has no path segment to carry, so it falls back to the task list. */
+    fun cronNew(prompt: String): String =
+        prompt.takeIf(String::isNotBlank)
+            ?.let { "$CRON/new/${android.net.Uri.encode(it)}" }
+            ?: CRON
+    fun group(key: String): String = "settings/group/$key"
+
+    /**
+     * The scheduled-task pages are not part of settings any more — the drawer
+     * opens them as a page of their own. Entered through [SettingsHost] they
+     * replace the settings home, so back closes the page instead of landing on
+     * a settings list the user never visited.
+     */
+    fun isStandalone(route: String): Boolean = route == CRON || route.startsWith("$CRON/")
 }
 
 /** The title resources shown in the [SettingsHost] TopAppBar (and the back chevron). */

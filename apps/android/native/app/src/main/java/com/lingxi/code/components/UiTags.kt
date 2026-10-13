@@ -149,4 +149,13 @@ object UiTags {
     fun drawerSession(sessionId: String): String = DRAWER_SESSION_PREFIX + sessionId
     fun drawerSessionFork(sessionId: String, targetModeKey: String): String =
         DRAWER_SESSION_FORK_PREFIX + sessionId + "." + targetModeKey
+
+    /** The grouped settings home: search field, account card, and one row per group / page. */
+    const val SETTINGS_SEARCH = "tag.settingsSearch"
+    const val SETTINGS_ACCOUNT_CARD = "tag.settingsAccountCard"
+    const val SETTINGS_GROUP_PREFIX = "tag.settingsGroup."
+    const val SETTINGS_PAGE_PREFIX = "tag.settingsPage."
+
+    fun settingsGroup(groupKey: String): String = SETTINGS_GROUP_PREFIX + groupKey
+    fun settingsPage(route: String): String = SETTINGS_PAGE_PREFIX + route
 }

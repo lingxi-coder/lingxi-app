@@ -309,6 +309,10 @@ class MainActivity : ComponentActivity() {
                             settingsInitialRoute = SettingsRoutes.cron(taskKey)
                             settingsOpen = true
                         },
+                        onOpenCronCreate = { prompt ->
+                            settingsInitialRoute = SettingsRoutes.cronNew(prompt)
+                            settingsOpen = true
+                        },
                         onOpenTerminal = openTerminal,
                         modelSetupRequired = settingsState.needsLlmSetup,
                         assistantName = prefs.assistantName,

@@ -47,9 +47,9 @@ impl BuiltinCommandHandler for EffortHandler {
             && snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.capabilities.xhigh);
-        // Native keeps `auto` available even when this model has no named levels.
+        // Native keeps both reset forms available even when this model has no named levels.
         let choices = format!(
-            "{}{}auto{}",
+            "{}{}auto|unset{}",
             levels.join("|"),
             if levels.is_empty() { "" } else { "|" },
             if ultra_available {
@@ -71,7 +71,7 @@ impl BuiltinCommandHandler for EffortHandler {
                     .unwrap_or_else(|| "Model default".into()),
             };
             format!("Current effort level: {current}")
-        } else if value == "auto"
+        } else if matches!(value.as_str(), "auto" | "unset")
             || levels.contains(&value.as_str())
             || (value == "med" && levels.contains(&"medium"))
             || (ultra_available
@@ -101,7 +101,7 @@ impl BuiltinCommandHandler for EffortHandler {
         "Set the model effort level"
     }
     fn argument_hint(&self) -> Option<&str> {
-        Some("<level|auto>")
+        Some("<level|auto|unset>")
     }
 }
 
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_clears_a_previously_selected_effort_level() {
+    async fn auto_and_unset_clear_a_previously_selected_effort_level() {
         let handle = Arc::new(MockOrchestratorHandle::new());
         let model = "anthropic/claude-sonnet-4-5";
         handle.set_status_snapshot(StatusSnapshot {
@@ -182,27 +182,30 @@ mod tests {
         });
 
         let handler = EffortHandler::new(handle.clone());
-        handler.handle(&parsed("high")).await;
-        assert_eq!(
-            handle
-                .effort_command_snapshot()
-                .await
-                .unwrap()
-                .unwrap()
-                .session,
-            SessionEffort::Level(serde_json::Value::String("high".into()))
-        );
+        for reset in ["auto", "unset"] {
+            handler.handle(&parsed("high")).await;
+            assert_eq!(
+                handle
+                    .effort_command_snapshot()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .session,
+                SessionEffort::Level(serde_json::Value::String("high".into()))
+            );
 
-        handler.handle(&parsed("auto")).await;
-        assert_eq!(
-            handle
-                .effort_command_snapshot()
-                .await
-                .unwrap()
-                .unwrap()
-                .session,
-            SessionEffort::Default
-        );
-        assert_eq!(handle.current_effort().await, None);
+            handler.handle(&parsed(reset)).await;
+            assert_eq!(
+                handle
+                    .effort_command_snapshot()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .session,
+                SessionEffort::Default,
+                "{reset} clears the current session override"
+            );
+            assert_eq!(handle.current_effort().await, None);
+        }
     }
 }

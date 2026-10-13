@@ -127,16 +127,22 @@ test('arguments apply directly', async () => {
   assert.deepEqual(await run('/fast on'), ['setFastMode:true']);
   assert.deepEqual(await run('/effort high'), ['setReasoningLevel:high']);
   assert.deepEqual(await run('/effort auto'), ['setReasoningAutomatic']);
+  assert.deepEqual(await run('/effort unset'), ['setReasoningAutomatic']);
 });
 
-test('/effort auto clears a previously selected level through the automatic selection', async () => {
+test('/effort auto and unset clear a previously selected level through the automatic selection', async () => {
   const { ctx, calls, reasoningSelection } = recordingContext();
-  await dispatch('/effort high', ctx);
-  assert.deepEqual(reasoningSelection(), { type: 'level', id: 'high' });
+  for (const reset of ['auto', 'unset']) {
+    await dispatch('/effort high', ctx);
+    assert.deepEqual(reasoningSelection(), { type: 'level', id: 'high' });
 
-  await dispatch('/effort auto', ctx);
-  assert.deepEqual(reasoningSelection(), { type: 'automatic' });
-  assert.deepEqual(calls, ['setReasoningLevel:high', 'setReasoningAutomatic']);
+    await dispatch(`/effort ${reset}`, ctx);
+    assert.deepEqual(reasoningSelection(), { type: 'automatic' });
+  }
+  assert.deepEqual(calls, [
+    'setReasoningLevel:high', 'setReasoningAutomatic',
+    'setReasoningLevel:high', 'setReasoningAutomatic',
+  ]);
 });
 
 test('a bad argument reports itself instead of silently doing nothing', async () => {
@@ -153,7 +159,7 @@ test('bare /fast toggles from the live state', async () => {
 });
 
 test('/effort off and removed aliases are rejected', async () => {
-  for (const value of ['off', 'automatic', 'disabled', 'unset']) {
+  for (const value of ['off', 'automatic', 'disabled']) {
     assert.deepEqual(
       await run(`/effort ${value}`),
       ['emit:error:/effort requires a model-supported effort level'],

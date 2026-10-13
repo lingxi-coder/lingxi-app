@@ -18,6 +18,9 @@ test('desktop errors distinguish credential, protocol, engine, workspace, and tr
   const codexHandoff = 'Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.';
   assert.deepEqual(classifyDesktopError(codexHandoff), { title: 'Codex authentication is busy', detail: codexHandoff });
   assert.equal(classifyDesktopError('The active Codex chat holds Codex authentication; background work waits for it.').title, 'Codex authentication is busy');
+  const codexSignIn = 'Codex authentication is unavailable. Sign in again.';
+  assert.deepEqual(classifyDesktopError(codexSignIn), { title: 'Codex sign-in required', detail: codexSignIn });
+  assert.equal(classifyDesktopError('Failed to persist refreshed Codex authentication. Sign in again.').title, 'Codex sign-in required');
   assert.equal(classifyDesktopError('incompatible protocol version').title, 'Engine version mismatch');
   assert.equal(classifyDesktopError('packaged bridge-server is missing').title, 'Bundled engine unavailable');
   assert.equal(classifyDesktopError('workspace path is not a directory').title, 'Workspace unavailable');

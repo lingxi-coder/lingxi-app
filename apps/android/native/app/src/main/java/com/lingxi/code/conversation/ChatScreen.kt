@@ -69,6 +69,8 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.modeColor
+import com.lingxi.code.model.SessionMode
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.connectivity.OfflineBanner
@@ -80,14 +82,17 @@ import kotlinx.coroutines.delay
 /**
  * The conversation surface — the Android analog of the iOS `ChatView`.
  *
- * Composes the top bar (menu / title / theme-toggle / new-chat), a scrolling
+ * Composes the top bar (menu / title with a 「模式 · 工作区」 subtitle / new-chat), a scrolling
  * message list (with the live execution trace and the new-chat empty state),
  * and the [Composer]. The conversation itself is owned by [state]; user
  * intents are hoisted to the caller's [ChatViewModel] via the callbacks.
  *
- * @param onOpenDrawer opens the 对话/项目/定时 drawer (wired by the root shell).
- * @param isDark current appearance, drives the sun/moon toggle glyph.
- * @param onToggleTheme flips the persisted theme.
+ * @param onOpenDrawer opens the drawer (wired by the root shell).
+ * @param isDark current appearance (drives inline visualization theming).
+ * @param sessionMode / [workspaceName] the conversation's mode and workspace, shown
+ *   under the title and used by the new-chat mode bar.
+ * @param onOpenSessionPanel opens the merged session panel; the title is only
+ *   tappable when this is non-null.
  * @param onMicClick a plain mic tap (reserved; the future short-press action).
  * @param onMicHoldStart / onMicHoldRelease hook the voice-flow overlay — held
  *   past the threshold opens it, releasing dismisses (the iOS "松开发送").
@@ -101,9 +106,15 @@ fun ChatScreen(
     onNewChat: () -> Unit,
     onSelectModel: (ModelOption) -> Unit,
     isDark: Boolean,
-    onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenDrawer: () -> Unit = {},
+    sessionMode: SessionMode = SessionMode.Code,
+    workspaceName: String = "",
+    onOpenSessionPanel: (() -> Unit)? = null,
+    /** New-chat mode bar: start a fresh conversation in this mode. */
+    onSelectNewChatMode: (SessionMode) -> Unit = {},
+    /** New-chat workspace capsule: choose where the conversation runs. */
+    onPickWorkspace: () -> Unit = {},
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
@@ -258,11 +269,15 @@ fun ChatScreen(
     ConversationDetailHost(state) {
     Box(modifier = modifier.fillMaxSize().background(t.windowBg)) {
         Column(modifier = Modifier.fillMaxSize()) {
+            val isNewChat = renderItems.any { it is ChatRenderItem.Empty }
             TopBar(
                 title = state.session.title,
-                isDark = isDark,
+                subtitle = listOf(sessionModeLabel(sessionMode), workspaceName)
+                    .filter(String::isNotBlank)
+                    .joinToString(" · "),
+                subtitleColor = t.modeColor(sessionMode),
                 onOpenDrawer = onOpenDrawer,
-                onToggleTheme = onToggleTheme,
+                onTitleClick = onOpenSessionPanel?.takeIf { !isNewChat && state.session.id != "new" },
                 onNewChat = onNewChat,
             )
             Box(modifier = Modifier.weight(1f)) {
@@ -329,6 +344,14 @@ fun ChatScreen(
                 onToggleToolCall = onToggleToolCall,
             )
             flowModePanel?.invoke()
+            if (renderItems.any { it is ChatRenderItem.Empty }) {
+                NewChatBar(
+                    mode = sessionMode,
+                    workspaceName = workspaceName,
+                    onSelectMode = onSelectNewChatMode,
+                    onPickWorkspace = onPickWorkspace,
+                )
+            }
             Composer(
                 text = draft,
                 promptSuggestion = state.promptSuggestion,
@@ -448,9 +471,10 @@ data class ComputerUseSetupStatus(
 @Composable
 private fun TopBar(
     title: String,
-    isDark: Boolean,
+    subtitle: String,
+    subtitleColor: Color,
     onOpenDrawer: () -> Unit,
-    onToggleTheme: () -> Unit,
+    onTitleClick: (() -> Unit)?,
     onNewChat: () -> Unit,
 ) {
     val t = LingXiTheme.palette
@@ -469,27 +493,46 @@ private fun TopBar(
             contentDescription = stringResource(R.string.chat_open_side_drawer),
             modifier = Modifier.testTag(UiTags.OPEN_DRAWER),
         )
-        Spacer(Modifier.weight(1f))
-        Text(
-            text = title,
-            color = t.text,
-            fontSize = 14.5f.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.weight(1f))
-        IconButton(
-            name = if (isDark) LXIconName.Sun else LXIconName.Moon,
-            color = t.text2,
-            size = 18.dp,
-            onClick = onToggleTheme,
-            contentDescription = if (isDark) {
-                stringResource(R.string.chat_toggle_theme_light)
-            } else {
-                stringResource(R.string.chat_toggle_theme_dark)
-            },
-        )
+        // The title block is the entry to the session panel; the subtitle says
+        // which mode (and so whether files can change) and workspace this is.
+        val sessionPanelLabel = stringResource(R.string.chat_session_panel_a11y)
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .then(
+                    if (onTitleClick != null) {
+                        Modifier
+                            .testTag(UiTags.SESSION_TITLE)
+                            .semantics { contentDescription = sessionPanelLabel }
+                            .clickable(onClick = onTitleClick)
+                    } else {
+                        Modifier
+                    },
+                )
+                .padding(vertical = 2.dp),
+        ) {
+            Text(
+                text = title,
+                color = t.text,
+                fontSize = 14.5f.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    color = subtitleColor,
+                    fontSize = 11.5f.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         IconButton(
             name = LXIconName.Edit,
             color = t.accent,

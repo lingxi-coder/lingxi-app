@@ -73,7 +73,7 @@ class DesktopConversationParityUiTest {
     private fun FixtureScreen(state: ChatState, dark: Boolean, onToggle: (String) -> Unit) {
         LingXiTheme(darkTheme = dark) {
             ChatScreen(state = state, onSend = {}, onNewChat = {}, onSelectModel = {},
-                isDark = dark, onToggleTheme = {}, onToggleToolCall = onToggle)
+                isDark = dark, onToggleToolCall = onToggle)
         }
     }
 
@@ -160,7 +160,7 @@ class DesktopConversationParityUiTest {
                 val keyboardBottom = WindowInsets.ime.getBottom(LocalDensity.current)
                 SideEffect { imeVisible.set(keyboardBottom > 0) }
                 ChatScreen(state.value, onSend = { sent += it }, onNewChat = {}, onSelectModel = {},
-                    isDark = false, onToggleTheme = {}, draft = draft.value, modifier = Modifier.safeDrawingPadding().imePadding(),
+                    isDark = false, draft = draft.value, modifier = Modifier.safeDrawingPadding().imePadding(),
                     onDraftChange = { draft.value = it })
             }
         }
@@ -190,7 +190,7 @@ class DesktopConversationParityUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = false) {
                 ChatScreen(state.value, onSend = {}, onNewChat = {}, onSelectModel = {},
-                    isDark = false, onToggleTheme = {}, draft = "", modifier = Modifier.safeDrawingPadding(),
+                    isDark = false, draft = "", modifier = Modifier.safeDrawingPadding(),
                     onDraftChange = {})
             }
         }

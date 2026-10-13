@@ -77,6 +77,10 @@ import com.lingxi.code.drawer.DrawerAccount
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.DrawerProductionData
 import com.lingxi.code.drawer.rememberDrawerUiState
+import com.lingxi.code.conversation.SessionPanel
+import com.lingxi.code.conversation.SessionPanelModel
+import com.lingxi.code.conversation.WorkspacePickerSheet
+import com.lingxi.code.conversation.permissionModeLabel
 import com.lingxi.code.project.ProjectPage
 import com.lingxi.code.project.ProjectsPage
 import com.lingxi.code.model.ConversationScope
@@ -221,13 +225,16 @@ internal fun isBoundToScopeMode(
 @OptIn(ExperimentalCoroutinesApi::class)
 fun RootScreen(
     isDark: Boolean,
-    onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
+    /** Open the scheduled-task page on a new task prefilled with the given prompt. */
+    onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
+    /** Open the permission-mode settings page. */
+    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
@@ -1487,6 +1494,17 @@ fun RootScreen(
     }
     var projectsPageOpen by rememberSaveable { mutableStateOf(false) }
     var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
+    var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
+    // A scheduled-task workspace is not a place to start chatting: new chats from
+    // there go to the global workspace.
+    val newChatScope = if (sourceScope == ConversationScope.Scheduled) ConversationScope.Global else sourceScope
+    val currentWorkspaceName = when (val current = newChatScope) {
+        ConversationScope.Global, ConversationScope.Scheduled -> stringResource(R.string.common_global)
+        is ConversationScope.Project ->
+            drawerProductionData.projects.orEmpty().firstOrNull { it.id == current.projectId }?.name
+                ?: stringResource(R.string.drawer_entry_projects)
+    }
     fun closeProjectPages() {
         projectPageId = null
         projectsPageOpen = false
@@ -1528,18 +1546,33 @@ fun RootScreen(
         }
     }
 
-    /** Start a new conversation in a project, in [mode] (default: the current mode). */
-    fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) {
-        val project = projectState.projects.firstOrNull { it.record.id == projectId } ?: return
-        val targetScope = ConversationScope.Project(projectId)
-        if (sourceMatches(targetScope, mode)) {
+    /**
+     * Start a new conversation in [target] in [mode]. The mode is part of the
+     * engine binding, so a different mode (or workspace) rebinds the engine, and
+     * the conversation mode is then set explicitly. [carryDraft] moves what the
+     * user already typed into the destination's draft slot, which is keyed per
+     * (workspace, mode), so picking a mode on the new-chat page keeps the text.
+     */
+    fun startNewSessionIn(
+        target: ConversationScope,
+        mode: SessionMode = activeSessionMode,
+        carryDraft: Boolean = false,
+    ) {
+        val project = projectSnapshotForScope(target)
+        if (target is ConversationScope.Project && project == null) return
+        val carried = draft
+        if (sourceMatches(target, mode)) {
             chatViewModel.startNewSession()
             closeDrawer()
             closeProjectPages()
         } else {
             scope.launch {
+                if (carryDraft && carried.isNotEmpty()) {
+                    scopeStore.persistDraft(target.sessionStateKey(mode), carried)
+                }
                 if (
                     switchEngineScope(
+                        engineScope = target,
                         project = project,
                         target = null,
                         newSession = true,
@@ -1554,6 +1587,10 @@ fun RootScreen(
             }
         }
     }
+
+    /** Start a new conversation in a project, in [mode] (default: the current mode). */
+    fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) =
+        startNewSessionIn(ConversationScope.Project(projectId), mode)
 
     Box(modifier = modifier.fillMaxSize()) {
         AdaptiveConversationDrawer(
@@ -1719,7 +1756,15 @@ fun RootScreen(
                     },
                     onSelectModel = chatViewModel::selectModel,
                     isDark = isDark,
-                    onToggleTheme = onToggleTheme,
+                    sessionMode = activeSessionMode,
+                    workspaceName = currentWorkspaceName,
+                    onOpenSessionPanel = { sessionPanelOpen = true },
+                    onSelectNewChatMode = { mode ->
+                        if (mode != activeSessionMode) {
+                            startNewSessionIn(newChatScope, mode, carryDraft = true)
+                        }
+                    },
+                    onPickWorkspace = { workspacePickerOpen = true },
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     // Ordinary mic and Flow Mode are separate controls.
                     onMicClick = {
@@ -1917,6 +1962,82 @@ fun RootScreen(
                 )
             }
         }
+        if (sessionPanelOpen) {
+            val panelRow = SessionRow(
+                uuid = state.session.id,
+                title = state.session.title,
+                messageCount = state.messages.size,
+                relativeTime = "",
+                mode = activeSessionMode,
+            )
+            val otherMode = when (activeSessionMode) {
+                SessionMode.Chat -> SessionMode.Code
+                SessionMode.Code -> SessionMode.Chat
+            }
+            SessionPanel(
+                model = SessionPanelModel(
+                    title = state.session.title,
+                    mode = activeSessionMode,
+                    workspaceName = currentWorkspaceName,
+                    modelName = state.model.name,
+                    permissionLabel = permissionModeLabel(settingsState.effectivePermissionMode),
+                    pinned = drawerUi.sessionPinnedAt(state.session.id) != null,
+                    canArchive = sourceScope != ConversationScope.Scheduled,
+                ),
+                onDismiss = { sessionPanelOpen = false },
+                // Changing a conversation's mode forks it into a new session.
+                onContinueInOtherMode = {
+                    sessionPanelOpen = false
+                    scope.launch { continueSessionInMode(sourceScope, panelRow, otherMode) }
+                },
+                onOpenPermissionSettings = {
+                    sessionPanelOpen = false
+                    onOpenPermissionSettings()
+                },
+                onTogglePinned = {
+                    sessionPanelOpen = false
+                    val id = state.session.id
+                    drawerUi.toggleSessionPinned(id)
+                    scope.launch { scopeStore.persistSessionPinned(id, drawerUi.sessionPinnedAt(id)) }
+                },
+                onMakeScheduled = {
+                    sessionPanelOpen = false
+                    onOpenCronCreate(
+                        state.messages.firstOrNull { it.role == com.lingxi.code.model.Role.User }
+                            ?.text.orEmpty().take(500),
+                    )
+                },
+                onOpenTerminal = {
+                    sessionPanelOpen = false
+                    onOpenTerminal("interactive", null)
+                },
+                onArchive = {
+                    sessionPanelOpen = false
+                    val id = state.session.id
+                    val projectId = (sourceScope as? ConversationScope.Project)?.projectId
+                    scope.launch {
+                        runCatching { projectStore.setSessionArchived(projectId, id, true) }
+                            .onSuccess { chatViewModel.startNewSession() }
+                            .onFailure {
+                                chatViewModel.reportHostError(
+                                    resources.getString(R.string.session_index_save_failed_fmt, it.message.orEmpty()),
+                                )
+                            }
+                    }
+                },
+            )
+        }
+        if (workspacePickerOpen) {
+            WorkspacePickerSheet(
+                projects = drawerProductionData.projects.orEmpty(),
+                currentScope = newChatScope,
+                onDismiss = { workspacePickerOpen = false },
+                onPick = { target ->
+                    workspacePickerOpen = false
+                    if (target != newChatScope) startNewSessionIn(target, activeSessionMode, carryDraft = true)
+                },
+            )
+        }
         CreateProjectDialog(
             visible = showCreateProject,
             onDismiss = { showCreateProject = false },
@@ -2053,6 +2174,6 @@ internal fun appendVoiceTranscript(base: String, transcript: String): String = w
 @Composable
 private fun RootScreenPreview() {
     LingXiTheme {
-        RootScreen(isDark = true, onToggleTheme = {})
+        RootScreen(isDark = true)
     }
 }

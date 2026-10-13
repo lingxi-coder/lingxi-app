@@ -112,6 +112,21 @@ object UiTags {
     const val DRAWER_ENTRY_CRON = "tag.drawerEntryCron"
     const val DRAWER_ENTRY_PROJECTS = "tag.drawerEntryProjects"
 
+    /** The new-chat mode bar, one chip per mode, and its workspace capsule. */
+    const val NEW_CHAT_BAR = "tag.newChatBar"
+    const val NEW_CHAT_WORKSPACE = "tag.newChatWorkspace"
+    const val NEW_CHAT_MODE_PREFIX = "tag.newChatMode."
+
+    fun newChatMode(modeKey: String): String = NEW_CHAT_MODE_PREFIX + modeKey
+
+    /** The tappable top-bar title and the session panel it opens, with its main actions. */
+    const val SESSION_TITLE = "tag.sessionTitle"
+    const val SESSION_PANEL = "tag.sessionPanel"
+    const val SESSION_PANEL_MODE = "tag.sessionPanelMode"
+    const val SESSION_PANEL_PIN = "tag.sessionPanelPin"
+    const val SESSION_PANEL_SCHEDULE = "tag.sessionPanelSchedule"
+    const val SESSION_PANEL_ARCHIVE = "tag.sessionPanelArchive"
+
     /** The full-screen projects list, its create action, a project page and its new-session action. */
     const val PROJECTS_PAGE = "tag.projectsPage"
     const val PROJECTS_CREATE = "tag.projectsCreate"

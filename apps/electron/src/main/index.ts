@@ -136,6 +136,8 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#0c0b10',
     titleBarStyle: 'hiddenInset',
+    // Center the 12px native buttons in the renderer's 44px desktop toolbar.
+    trafficLightPosition: { x: 14, y: 16 },
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(moduleDirectory, '../preload/index.cjs'),

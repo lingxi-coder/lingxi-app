@@ -2,6 +2,10 @@
 
 ## 当前入口
 
+- **[完整技术手册（中文）](technical/zh/README.md)** / **[English technical handbook](technical/en/README.md)**：当前工作区的系统架构、SDK、执行、协议、平台、构建与排障权威入口。
+- 正文来自 `apps/web/src/data/docs/`，`technical/` 为生成产物；请通过 `npm run docs:sync` 更新，并运行 `npm run docs:check`。
+- 下列迁移、设计与验证记录提供专项和历史证据；其中版本及测试数量不自动代表当前实现。
+
 - [架构与运行时边界](ARCHITECTURE.md)
 - [Harness 首次提取的设计与验证记录](architecture/harness-runtime-extraction.md)
 - [Harness 验证记录](architecture/harness-runtime-verification.md)

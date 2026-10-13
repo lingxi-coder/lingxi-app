@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="390" viewBox="0 0 1040 390" role="img" aria-labelledby="title desc">
+  <title id="title">Product host transports · 产品宿主传输</title>
+  <desc id="desc">Electron renderer reaches Electron main via validated IPC, which connects to Rust Bridge by authenticated WebSocket. Swift and Kotlin native hosts use generated UniFFI callbacks and handles. Both hosts submit the shared ClientCommand and receive ClientEvent through Harness, which delegates provider communication to LLM Client.</desc>
+  <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="none" stroke="#566477" stroke-width="1.5"/></marker></defs>
+  <rect width="1040" height="390" rx="20" fill="#f3f5f7"/>
+  <g font-family="system-ui,-apple-system,sans-serif" text-anchor="middle" fill="#182536">
+    <text x="520" y="36" font-size="18" font-weight="650">Shared DTOs, host-specific transport · 共享 DTO 与各宿主传输</text>
+    <g fill="#fff" stroke="#c5ced8" stroke-width="1.2"><rect x="24" y="70" width="180" height="87" rx="12"/><rect x="258" y="70" width="180" height="87" rx="12"/><rect x="496" y="70" width="180" height="87" rx="12"/><rect x="24" y="234" width="414" height="87" rx="12"/><rect x="496" y="234" width="180" height="87" rx="12"/>
+      <rect x="746" y="70" width="268" height="251" rx="12" fill="#e5ebf1"/></g>
+    <g font-size="16" font-weight="600"><text x="114" y="103">Electron renderer</text><text x="348" y="103">Electron main</text><text x="586" y="103">Rust Bridge</text><text x="231" y="265">Swift / Kotlin native host</text><text x="586" y="265">UniFFI facade</text><text x="880" y="132">Harness Runtime</text></g>
+    <g font-size="13"><text x="114" y="127">界面与 preload</text><text x="348" y="127">进程与服务归属</text><text x="586" y="127">会话命令路由</text><text x="231" y="291">原生服务、权限与 UI 回调</text><text x="586" y="291">生成绑定与句柄</text><text x="880" y="160">ClientCommand / ClientEvent</text><text x="880" y="187">session · tools · permissions</text><text x="880" y="210">会话、工具与权限</text></g>
+    <rect x="776" y="234" width="208" height="59" rx="9" fill="#fff" stroke="#c5ced8"/>
+    <text x="880" y="258" font-size="15" font-weight="600">LLM Client</text><text x="880" y="280" font-size="12">Provider protocols · 模型协议</text>
+    <g font-size="11" fill="#566477"><text x="231" y="62">validated IPC · 已校验 IPC</text><text x="468" y="185">authorized WebSocket · 认证连接</text><text x="231" y="347">In-process native callbacks · 进程内原生回调</text><text x="520" y="373">Web SDK site is separate · Web SDK 官网为独立应用</text></g>
+  </g>
+  <g stroke="#566477" stroke-width="1.5" fill="none" marker-end="url(#arrow)"><path d="M204 114 H250"/><path d="M438 114 H488"/><path d="M676 114 H738"/><path d="M438 277 H488"/><path d="M676 277 H738"/></g>
+</svg>

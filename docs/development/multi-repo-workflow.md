@@ -1,5 +1,11 @@
 # 多仓开发与 SDK 独立性
 
+当前开发与依赖身份的权威说明见[技术手册](../technical/zh/development-workflow.md)（[English](../technical/en/development-workflow.md)）。产品当前包含九个 Rust workspace 成员，包括 `apps/audio-provider`；相邻 SDK 不会自动替换固定 Git 依赖。
+
+下文保留迁移时的布局、选择和证据；其中成员数量、路径与来源快照应结合记录日期解读，不能替代当前清单和来源解析器。
+
+## 历史迁移与设计记录
+
 将相关 checkout 放在 `~/lingxi/`，使编辑器和终端容易同时打开它们；每个仓库仍独立维护源码、提交、工具链、锁文件和发行。`~/lingxi/` 是开发目录，不建立覆盖所有 SDK 的 Cargo workspace、Git 仓库或产品子模块树。
 
 ## 目录和职责

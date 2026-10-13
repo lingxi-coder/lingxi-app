@@ -1,0 +1,28 @@
+[package]
+name = "handbook-harness-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+harness-runtime = { path = "../harness-runtime/crates/runtime", default-features = false, features = ["desktop"] }
+client = { path = "../harness-runtime/crates/client", features = ["adapter"] }
+tool-api = { path = "../harness-runtime/crates/tool-api" }
+permission = { path = "../harness-runtime/crates/permission" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[patch."https://github.com/lingxi-coder/llm-client.git"]
+lingxi-llm-client = { path = "../llm-client" }
+
+[patch."https://github.com/lingxi-coder/mobile-linux-runtime.git"]
+mobile-linux-api = { path = "../mobile-linux-runtime/crates/mobile-linux-api" }
+mobile-linux-core = { path = "../mobile-linux-runtime/crates/mobile-linux-core" }
+mobile-linux-android = { path = "../mobile-linux-runtime/crates/mobile-linux-android" }
+mobile-linux-ios = { path = "../mobile-linux-runtime/crates/mobile-linux-ios" }
+platform-pty = { path = "../mobile-linux-runtime/crates/platform-pty" }
+
+[patch.crates-io]
+git2 = { path = "../harness-runtime/third_party/git2-rs/git2" }

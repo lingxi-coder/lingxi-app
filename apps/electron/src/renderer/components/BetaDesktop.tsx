@@ -750,7 +750,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderWidth: '0 0.5px', borderStyle: 'solid', borderColor: t.border, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
     >
-      <div className="drag-region desktop-sidebar-brand" style={{ height: 56, flexShrink: 0, padding: '5px 12px 4px 64px', borderBottom: `0.5px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div className="drag-region desktop-sidebar-brand" style={{ height: 'var(--desktop-toolbar-height, 44px)', flexShrink: 0, padding: '5px 12px 4px 64px', borderBottom: `0.5px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
         <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1 }}>LingXi</strong>
         <button type="button" className="sidebar-header-icon" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }} style={{ color: t.text3 }}><Icon name="bell" size={18} stroke={1.65} /></button>
         <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
@@ -1322,7 +1322,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 16px 0 22px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
+    <header className="drag-region desktop-topbar" style={{ height: 'var(--desktop-toolbar-height, 44px)', position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 16px 0 22px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
       <div className="desktop-topbar-project">
         <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.65} /></span>
         <div style={{ minWidth: 0 }}>

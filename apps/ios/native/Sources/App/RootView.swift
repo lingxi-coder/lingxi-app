@@ -944,6 +944,8 @@ struct RootView: View {
             ProjectPage(
                 projectStore: projectStore,
                 projectID: projectID,
+                activeScope: activeScope,
+                source: source,
                 cronState: cronRepository.state,
                 isPinned: workspacePinnedAt[ConversationScope.project(projectID).workspaceKey] != nil,
                 activeSession: activeSession,

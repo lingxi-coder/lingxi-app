@@ -526,7 +526,9 @@ fun RootScreen(
         val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
         activeSessionMode = restoredMode
         drawerUi.replaceSessionPins(scopeStore.readPinnedSessions())
-        cronResultsSeenAt = scopeStore.readCronResultsSeenAt()
+        // Results that already exist when this first runs are not "new".
+        cronResultsSeenAt = scopeStore.readCronResultsSeenAt().takeIf { it > 0L }
+            ?: System.currentTimeMillis().also { scopeStore.persistCronResultsSeenAt(it) }
         val presentation = scopeStore.readWorkspacePresentation()
         drawerUi.replaceWorkspacePresentation(
             collapsed = presentation.filterValues { it.collapsed }.keys,

@@ -131,6 +131,7 @@ struct ProjectPage: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var projectStore: ProjectStore
     let projectID: String
+    let activeScope: ConversationScope
     let cronState: CronRepositoryState
     let isPinned: Bool
     let activeSession: String
@@ -141,8 +142,37 @@ struct ProjectPage: View {
     let onOpenCron: (String?, String?) -> Void
     let onOpenTerminal: () -> Void
 
+    @ObservedObject private var convo: ConversationModel
     @State private var filter: RecentsFilter = .all
     @State private var showFolderPicker = false
+
+    init(
+        projectStore: ProjectStore,
+        projectID: String,
+        activeScope: ConversationScope,
+        source: any ConversationSource,
+        cronState: CronRepositoryState,
+        isPinned: Bool,
+        activeSession: String,
+        onTogglePinned: @escaping () -> Void,
+        onNewSession: @escaping (SessionMode) -> Void,
+        onOpenSession: @escaping (SessionMode, String) -> Void,
+        onOpenCron: @escaping (String?, String?) -> Void,
+        onOpenTerminal: @escaping () -> Void
+    ) {
+        self.projectStore = projectStore
+        self.projectID = projectID
+        self.activeScope = activeScope
+        self.cronState = cronState
+        self.isPinned = isPinned
+        self.activeSession = activeSession
+        self.onTogglePinned = onTogglePinned
+        self.onNewSession = onNewSession
+        self.onOpenSession = onOpenSession
+        self.onOpenCron = onOpenCron
+        self.onOpenTerminal = onOpenTerminal
+        convo = source.model
+    }
 
     private var project: ProjectSnapshot? {
         projectStore.projects.first { $0.id == projectID }
@@ -187,7 +217,9 @@ struct ProjectPage: View {
 
     @ViewBuilder
     private func content(_ project: ProjectSnapshot) -> some View {
-        let scopeRows = WorkspaceGroupBuilder.mergedSessionRows(live: [], cached: project.sessions)
+        // The bound project's live catalog is fresher than the cached index.
+        let live = activeScope == .project(projectID) ? convo.engineSessions : []
+        let scopeRows = WorkspaceGroupBuilder.mergedSessionRows(live: live, cached: project.sessions)
         let rows = RecentSessionsBuilder.sessions(in: scopeRows, filter: filter)
         let tasks = cronState.tasks.filter { $0.scope.projectID == projectID }
         List {

@@ -1,10 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useT } from '../../../theme/ThemeContext';
-import type { UseBridge } from '../../../bridge/bridgeTypes.js';
+import type { PageContentProps, SettingsNavigationRequest } from '../SettingsScreen';
 import { ExtensionGlyph, ExtensionSkillArtwork } from './ExtensionHubIcons';
-
-type ExtensionHubTab = 'plugins' | 'mcp' | 'skills';
 
 const DIALOG_FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -83,16 +81,19 @@ export function useExtensionHubDialogFocus(open: boolean, onRequestClose: () => 
 
 export function extensionHubStyle(t: ReturnType<typeof useT>): CSSProperties {
   return {
-    '--hub-active': t.dark ? t.surfaceActive : '#ededee',
+    '--hub-active': t.surfaceActive,
     '--hub-accent': t.accent,
     '--hub-border': t.border,
-    '--hub-hover': t.dark ? t.surfaceHover : '#f6f6f6',
+    '--hub-danger': t.danger,
+    '--hub-hover': t.surfaceHover,
     '--hub-muted': t.text3,
-    '--hub-subtle': t.dark ? t.text4 : '#b7b7ba',
-    '--hub-page': t.stageBg,
-    '--hub-sidebar': t.dark ? '#2b2b2d' : '#fafafa',
+    '--hub-on-accent': '#fff',
+    '--hub-subtle': t.text4,
+    '--hub-page': t.windowBg,
+    '--hub-sidebar': t.sidebarBg,
     '--hub-surface': t.surface,
     '--hub-text': t.text,
+    '--hub-text-secondary': t.text2,
     '--hub-toggle-off': t.surfaceActive,
   } as CSSProperties;
 }
@@ -104,63 +105,31 @@ export function ExtensionIcon({ kind = 'plugin', large = false }: { kind?: 'plug
   </span>;
 }
 
-export function ExtensionHubLayout({ bridge, active, onNavigate, onClose, onSelectPlugin, selectedPlugin, scopeControls, children }: {
-  bridge: UseBridge;
-  active: ExtensionHubTab;
-  onNavigate: (pageId: string, pluginId?: string) => void;
-  onClose: () => void;
-  onSelectPlugin?: (id: string) => void;
-  selectedPlugin?: string | null;
-  scopeControls?: ReactNode;
-  children: ReactNode;
-}) {
+/** Routes the shared settings navigation through the current page's draft guard. */
+export function useExtensionHubNavigation(
+  register: PageContentProps['onRegisterNavigationRequest'],
+  handler: SettingsNavigationRequest,
+) {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+
+  useEffect(() => {
+    if (!register) return;
+    register((pageId, pluginId) => handlerRef.current(pageId, pluginId));
+    return () => register(null);
+  }, [register]);
+}
+
+export function ExtensionHubLayout({ children }: { children: ReactNode }) {
   const t = useT();
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const catalog = parseJson(bridge.pluginCatalogEvent?.catalog_json);
-  const installed = (Array.isArray(catalog.installed) ? catalog.installed : []).flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
-    const entry = item as Record<string, unknown>;
-    const id = typeof entry.id === 'string' ? entry.id : typeof entry.name === 'string' ? entry.name : '';
-    const name = typeof entry.display_name === 'string' ? entry.display_name : typeof entry.name === 'string' ? entry.name : id;
-    return id && name.toLowerCase().includes(search.trim().toLowerCase()) ? [{ id, name }] : [];
-  });
-  return <div className="extension-customize" style={extensionHubStyle(t)}>
-    <aside className="extension-sidebar">
-      <div className="extension-sidebar-heading"><h2>Customize</h2><button type="button" className="extension-hub-icon-button" aria-label="Search installed plugins" aria-expanded={searchOpen} onClick={() => setSearchOpen(!searchOpen)}><ExtensionGlyph name="search" size={16} /></button></div>
-      {searchOpen && <input autoFocus className="extension-sidebar-search" aria-label="Filter installed plugins" placeholder="Search installed" value={search} onChange={(event) => setSearch(event.target.value)} />}
-      <nav aria-label="Customize">
-        {([{ id: 'plugins', label: 'Plugins', icon: 'plugin' }, { id: 'skills', label: 'Skills', icon: 'skills' }, { id: 'mcp', label: 'Tools', icon: 'tools' }] as const).map((tab) => <button key={tab.id} type="button" data-nav-page={tab.id} aria-current={active === tab.id && !selectedPlugin ? 'page' : undefined} className="extension-sidebar-link" onClick={() => onNavigate(tab.id)}><ExtensionGlyph name={tab.icon} /><span>{tab.label}</span></button>)}
-      </nav>
-      <div className="extension-sidebar-installed"><div className="extension-sidebar-label">Installed</div>
-        {installed.map((entry) => <button key={entry.id} type="button" className="extension-sidebar-link" aria-current={selectedPlugin === entry.id ? 'page' : undefined} onClick={() => onSelectPlugin ? onSelectPlugin(entry.id) : onNavigate('plugins', entry.id)}><ExtensionGlyph name="plugin" /><span>{entry.name}</span></button>)}
-        {installed.length === 0 && <p className="extension-sidebar-empty">{search ? 'No matching plugins' : 'Your installed plugins appear here.'}</p>}
-      </div>
-      <div className="extension-sidebar-footer">
-        {scopeControls && <details className="extension-scope-controls"><summary>Settings scope <ExtensionGlyph name="chevron" size={12} /></summary>{scopeControls}</details>}
-        <button type="button" className="extension-sidebar-link" aria-label="All settings" onClick={() => onNavigate('general')}><ExtensionGlyph name="cog" size={16} /><span>Settings</span></button>
-        <button type="button" className="extension-sidebar-link" aria-label="Back to app" onClick={onClose}><ExtensionGlyph name="arrowLeft" size={16} /><span>Back to app</span></button>
-      </div>
-    </aside>
-    <main className="extension-hub-main settings-content-scroll"><div className="extension-hub-page">{children}</div></main>
-  </div>;
+  return <div className="extension-hub-main" style={extensionHubStyle(t)}><div className="extension-hub-page">{children}</div></div>;
 }
 
 export function ExtensionHubHeader({ title, description, search, onSearch, actions }: {
   title: string; description: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
 }) {
   return <header className="extension-hub-header">
-    <div className="extension-hub-heading"><h1>{title}</h1><p>{description}</p></div>
+    <div className="extension-hub-heading"><p>{description}</p></div>
     <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={`Search ${title.toLowerCase()}`} aria-label={`Search ${title.toLowerCase()}`} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
   </header>;
-}
-
-function parseJson(raw: string | null | undefined): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const value = JSON.parse(raw) as unknown;
-    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  } catch {
-    return {};
-  }
 }

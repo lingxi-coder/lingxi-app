@@ -5,7 +5,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
 import {
   adminRecordCommand,
   asRecord,
@@ -94,7 +94,7 @@ function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLay
   return objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
 }
 
-export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, scopeControls, initialPluginId }: PageContentProps) {
+export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onRegisterNavigationRequest, initialPluginId }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { pluginAdmin?: unknown }).pluginAdmin === 'function';
   const catalog = useMemo(() => parseEventEnvelope<PluginCatalogEnvelope>(bridge.pluginCatalogEvent?.catalog_json, { installed: [], revisions: {} }), [bridge.pluginCatalogEvent?.catalog_json]);
@@ -158,6 +158,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     if (pageId === 'plugins') requestSelection(pluginId ? { kind: 'plugin', id: pluginId } : { kind: 'list' });
     else onNavigate(pageId, pluginId);
   };
+  useExtensionHubNavigation(onRegisterNavigationRequest, requestHubNavigation);
   const discardAndNavigate = () => {
     if (!pendingHubPage) return;
     setDraftEnabled(enabledPlugins);
@@ -210,7 +211,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const isPluginDetail = selection.kind === 'plugin' || selection.kind === 'available';
   const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list' && !isPluginDetail, () => requestSelection({ kind: 'list' }));
   useEffect(() => {
-    if (isPluginDetail) detailPageRef.current?.closest('.extension-hub-main')?.scrollTo({ top: 0 });
+    if (isPluginDetail) detailPageRef.current?.closest('.settings-content-scroll')?.scrollTo({ top: 0 });
   }, [isPluginDetail, selection]);
 
   const preview = () => {
@@ -318,7 +319,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   };
 
   return (
-    <ExtensionHubLayout bridge={bridge} active="plugins" onNavigate={requestHubNavigation} onClose={onClose} scopeControls={scopeControls} selectedPlugin={selectedPlugin} onSelectPlugin={(id) => requestSelection({ kind: 'plugin', id })}>
+    <ExtensionHubLayout>
       {!isPluginDetail && <>
         <ExtensionHubHeader title="Plugins" description="Connect plugins to let LingXi work across your tools" search={search} onSearch={setSearch} actions={<>
           <button type="button" onClick={refreshCatalog} disabled={busy} className="extension-hub-icon-button" aria-label="Refresh plugins"><ExtensionGlyph name="refresh" size={16} /></button>

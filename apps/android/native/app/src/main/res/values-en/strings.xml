@@ -437,7 +437,7 @@
     <string name="drawer_close_sidebar_a11y">Close sidebar</string>
     <string name="drawer_continue_session_in_progress">Wait for the current continue action to finish.</string>
     <string name="drawer_continue_session_timeout">Continuing this session timed out. Try again.</string>
-    <string name="drawer_cron_new_results">%1$d new</string>
+    <string name="drawer_cron_new_results_fmt">%1$d new</string>
     <string name="drawer_crons_unavailable">Scheduled tasks data source not yet connected</string>
     <string name="drawer_current_project_a11y">Current Project</string>
     <string name="drawer_empty_chats">No chats in this scope yet</string>

@@ -437,7 +437,7 @@
     <string name="drawer_close_sidebar_a11y">关闭侧栏</string>
     <string name="drawer_continue_session_in_progress">请等待当前继续操作完成。</string>
     <string name="drawer_continue_session_timeout">继续会话超时，请重试。</string>
-    <string name="drawer_cron_new_results">%1$d 个新结果</string>
+    <string name="drawer_cron_new_results_fmt">%1$d 个新结果</string>
     <string name="drawer_crons_unavailable">定时任务数据源尚未接入</string>
     <string name="drawer_current_project_a11y">当前项目</string>
     <string name="drawer_empty_chats">当前作用域暂无会话</string>

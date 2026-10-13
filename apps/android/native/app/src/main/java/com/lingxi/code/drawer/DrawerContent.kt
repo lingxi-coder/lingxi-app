@@ -210,7 +210,7 @@ fun DrawerContent(
                 icon = LXIconName.Clock,
                 label = stringResource(R.string.settings_title_cron),
                 badge = newCronResults.takeIf { it > 0 }
-                    ?.let { stringResource(R.string.drawer_cron_new_results, it) },
+                    ?.let { stringResource(R.string.drawer_cron_new_results_fmt, it) },
                 tag = UiTags.DRAWER_ENTRY_CRON,
                 onClick = onOpenCronList,
             )

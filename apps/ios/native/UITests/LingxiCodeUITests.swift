@@ -40,7 +40,7 @@ final class LingxiCodeUITests: XCTestCase {
 
     func testScheduledTaskCenterShowsStatusesAndPreservesDraft() {
         openDrawer()
-        app.buttons["drawer.tab.cron"].tap()
+        app.buttons["drawer.entry.cron"].tap()
         let create = app.buttons["cron.add"]
         XCTAssertTrue(create.waitForExistence(timeout: 12), app.debugDescription)
         XCTAssertTrue(app.buttons["All"].exists, app.debugDescription)
@@ -593,22 +593,21 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
-    /// The drawer has THREE tabs — `DrawerSection` is `chat`/`code`/`cron` —
-    /// and no projects tab: a project is a workspace CARD inside the chat and
-    /// code sections, and `drawer.project.create` lives in
-    /// `conversationActions`, rendered for every non-cron section. This test
-    /// used to drive `drawer.tab.projects`, `drawer.tab.crons`,
-    /// `drawer.scope.global` and `drawer.scope.project.<name>`, none of which
-    /// any `accessibilityIdentifier` in `Sources/` has produced since the
-    /// workspace-card rework.
-    func testDrawerTabsCreateAndSwitchProject() {
+    /// The sidebar has two entries (scheduled tasks, projects) and one recents
+    /// list with a mode filter — no per-mode tabs and no per-project cards. A
+    /// project is created on the projects page and starts its sessions from
+    /// its own page.
+    func testSidebarEntriesCreateProjectAndStartSession() {
         openDrawer()
-        XCTAssertTrue(app.buttons["drawer.tab.chat"].exists)
-        XCTAssertTrue(app.buttons["drawer.tab.code"].exists)
-        XCTAssertTrue(app.buttons["drawer.tab.cron"].exists)
+        XCTAssertTrue(app.buttons["drawer.entry.cron"].exists)
+        XCTAssertTrue(app.buttons["drawer.entry.projects"].exists)
+        XCTAssertTrue(app.buttons["drawer.filter.all"].exists)
+        XCTAssertTrue(app.buttons["drawer.filter.chat"].exists)
+        XCTAssertTrue(app.buttons["drawer.filter.code"].exists)
 
-        let create = app.buttons["drawer.project.create"]
-        XCTAssertTrue(create.waitForExistence(timeout: 5))
+        app.buttons["drawer.entry.projects"].tap()
+        let create = app.buttons["projects.create"]
+        XCTAssertTrue(create.waitForExistence(timeout: 8), app.debugDescription)
         create.tap()
         let createLocalProject = app.buttons["新建本地项目"]
         XCTAssertTrue(createLocalProject.waitForExistence(timeout: 5), app.debugDescription)
@@ -622,33 +621,14 @@ final class LingxiCodeUITests: XCTestCase {
         field.typeText(projectName)
         app.buttons["创建"].tap()
 
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
-        openDrawer()
-        // A workspace card is `drawer.workspace.<ConversationScope.workspaceKey>`
-        // — `project.<id>` — and the id is minted by the engine, so match the
-        // prefix and read the name off the card. The card itself is the
-        // group's container `VStack`, not a control, so it is matched over
-        // every element type rather than `app.buttons`. The card declares
-        // `.accessibilityElement(children: .contain)`, which is what keeps it
-        // addressable here AND keeps the buttons inside it
-        // (`drawer.workspace.new.*`, `drawer.session.*`) addressable below —
-        // without it the card id overwrites every one of them.
-        let projectWorkspace = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "drawer.workspace.project.")
-        ).firstMatch
-        XCTAssertTrue(projectWorkspace.waitForExistence(timeout: 5), app.debugDescription)
+        // Creating a project lands on its page, where the name is the title.
+        XCTAssertTrue(
+            app.descendants(matching: .any)["project.page"].waitForExistence(timeout: 10),
+            app.debugDescription
+        )
         XCTAssertTrue(app.staticTexts[projectName].waitForExistence(timeout: 5), app.debugDescription)
 
-        // Leaving the project: the global card's own new-conversation button,
-        // which routes through `startNewConversation(in: .global)`.
-        app.buttons["drawer.workspace.new.global"].tap()
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
-        openDrawer()
-        let backToProject = app.buttons.matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "drawer.workspace.new.project.")
-        ).firstMatch
-        XCTAssertTrue(backToProject.waitForExistence(timeout: 5), app.debugDescription)
-        backToProject.tap()
+        app.buttons["project.new-session"].tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
@@ -658,9 +638,7 @@ final class LingxiCodeUITests: XCTestCase {
     /// it: an edge drag on the chat must land on the sidebar.
     ///
     /// Only the opening direction is a gesture. iOS has no forward swipe, so
-    /// returning to the chat is a tap — here the global workspace card's
-    /// new-conversation button, which routes through
-    /// `startNewConversation(in: .global)` and its `closeSidebar()`.
+    /// returning to the chat is a tap on the sidebar's close control.
     func testEdgeSwipeOpensTheSidebar() {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
 
@@ -669,11 +647,11 @@ final class LingxiCodeUITests: XCTestCase {
         origin.press(forDuration: 0.05, thenDragTo: target)
 
         XCTAssertTrue(
-            app.buttons["drawer.tab.chat"].waitForExistence(timeout: 8),
+            app.buttons["drawer.filter.chat"].waitForExistence(timeout: 8),
             app.debugDescription
         )
 
-        app.buttons["drawer.workspace.new.global"].tap()
+        app.buttons["drawer.close"].tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
@@ -709,7 +687,7 @@ final class LingxiCodeUITests: XCTestCase {
         // Terminal — a push onto the detail column's stack, i.e. the one route
         // that changes the split view's column and the stack's path together.
         openDrawer()
-        app.buttons["drawer.terminal.top"].tap()
+        app.buttons["drawer.terminal"].tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["terminal.root"].waitForExistence(timeout: 15),
             app.debugDescription
@@ -720,7 +698,7 @@ final class LingxiCodeUITests: XCTestCase {
 
     /// The name is now WIDER than what the test asserts, and the name is kept
     /// only because `docs/superpowers/plans/` still cites it: scheduled tasks
-    /// are no longer hidden anywhere — `Drawer.tabs` renders `tab(.cron, …)`
+    /// are no longer hidden anywhere — the sidebar renders its cron entry
     /// unconditionally. What this covers is the provider-settings round trip
     /// (open Settings → LLM providers → a preset sheet → back out) and that it
     /// leaves the drawer intact. See the trailing assertions for what the two
@@ -786,31 +764,31 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(settingsClose.waitForExistence(timeout: 5), app.debugDescription)
         settingsClose.tap()
         openDrawer()
-        // This leg used to assert `drawer.tab.crons` and `drawer.shortcut.cron`
-        // were ABSENT. Neither identifier has ever been produced by anything in
-        // `Sources/` — the tab is `drawer.tab.cron` (`DrawerSection`'s rawValue
-        // is singular) and there is no cron shortcut at all — so both were
-        // vacuously true and asserted nothing. Scheduled tasks are an
-        // unconditional drawer section now (`Drawer.tabs` renders
-        // `tab(.cron, …)` with no gate), so what this leg can honestly pin is
-        // that the provider round-trip leaves the drawer intact.
-        XCTAssertTrue(app.buttons["drawer.tab.chat"].exists, app.debugDescription)
-        XCTAssertTrue(app.buttons["drawer.tab.cron"].exists, app.debugDescription)
+        // Scheduled tasks are an unconditional sidebar entry, so what this leg
+        // can honestly pin is that the provider round-trip leaves the sidebar
+        // intact.
+        XCTAssertTrue(app.buttons["drawer.filter.chat"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.entry.cron"].exists, app.debugDescription)
     }
 
-    func testChatSummaryMenuContainsFormerToolbarActions() {
+    /// The chat's top bar keeps the summary menu and a new-chat button; the
+    /// theme toggle moved into Appearance and the session details into the
+    /// session panel that the title opens.
+    func testChatTopBarHasNewChatAndTitleButOnlySummariesInTheMenu() {
         let menu = app.buttons["conversation.summary-menu"]
         XCTAssertTrue(menu.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertGreaterThanOrEqual(menu.frame.width, 28)
         XCTAssertGreaterThanOrEqual(menu.frame.height, 32)
-        XCTAssertFalse(app.buttons["conversation.session-details"].exists, app.debugDescription)
-        XCTAssertFalse(app.buttons["conversation.theme-toggle"].exists, app.debugDescription)
-        XCTAssertFalse(app.buttons["conversation.new-chat"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["conversation.new-chat"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["conversation.project-context"].exists, app.debugDescription)
 
         menu.tap()
-        XCTAssertTrue(app.buttons["conversation.session-details"].waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.buttons["conversation.theme-toggle"].exists, app.debugDescription)
-        XCTAssertTrue(app.buttons["conversation.new-chat"].exists, app.debugDescription)
+        XCTAssertTrue(
+            app.buttons["conversation.summary.category.tools"].waitForExistence(timeout: 5),
+            app.debugDescription
+        )
+        XCTAssertFalse(app.buttons["conversation.session-details"].exists, app.debugDescription)
+        XCTAssertFalse(app.buttons["conversation.theme-toggle"].exists, app.debugDescription)
     }
 
     func testSummaryMenuOpensBottomSheetDismissesAndPreservesDraft() {
@@ -857,10 +835,14 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["conversation.agent-status"].exists, app.debugDescription)
     }
 
-    func testSessionDetailsOpensFromChatHeader() {
-        app.buttons["conversation.summary-menu"].tap()
-        let details = app.buttons["conversation.session-details"]
-        XCTAssertTrue(details.waitForExistence(timeout: 8), app.debugDescription)
+    func testSessionDetailsOpensFromSessionPanel() {
+        app.buttons["conversation.project-context"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["session-panel"].waitForExistence(timeout: 8),
+            app.debugDescription
+        )
+        let details = app.buttons["session-panel.details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 5), app.debugDescription)
         details.tap()
 
         let sheet = app.descendants(matching: .any)["conversation.session-details-sheet"]
@@ -874,32 +856,6 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["conversation.session-details.close"].tap()
         XCTAssertTrue(waitUntilGone(sheet, timeout: 8), app.debugDescription)
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
-    }
-
-    func testThemeToggleUsesCompleteSystemGlyphAndUpdatesItsAction() {
-        app.buttons["conversation.summary-menu"].tap()
-        let themeToggle = app.buttons["conversation.theme-toggle"]
-        XCTAssertTrue(themeToggle.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertGreaterThanOrEqual(themeToggle.frame.width, 28)
-        XCTAssertGreaterThanOrEqual(themeToggle.frame.height, 32)
-
-        let initialLabel = themeToggle.label
-        XCTAssertTrue(
-            initialLabel == "切换到深色主题" || initialLabel == "切换到浅色主题",
-            app.debugDescription
-        )
-
-        themeToggle.tap()
-        let expectedLabel = initialLabel == "切换到深色主题" ? "切换到浅色主题" : "切换到深色主题"
-        XCTAssertTrue(waitUntilGone(themeToggle, timeout: 3), app.debugDescription)
-        app.buttons["conversation.summary-menu"].tap()
-        let updatedToggle = app.buttons["conversation.theme-toggle"]
-        XCTAssertTrue(updatedToggle.waitForExistence(timeout: 5), app.debugDescription)
-        let labelChanged = expectation(
-            for: NSPredicate(format: "label == %@", expectedLabel),
-            evaluatedWith: updatedToggle
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [labelChanged], timeout: 5), .completed, app.debugDescription)
     }
 
     func testAppIntegrationExposesRealSystemActions() {
@@ -1150,7 +1106,7 @@ final class LingxiCodeUITests: XCTestCase {
     /// the system back button — the leading navigation-bar item — not an
     /// app-drawn control any more.
     private func openDrawer() {
-        let chatsTab = app.buttons["drawer.tab.chat"]
+        let chatsTab = app.buttons["drawer.filter.chat"]
         if chatsTab.exists { return }
 
         let trigger = app.navigationBars.firstMatch.buttons.element(boundBy: 0)

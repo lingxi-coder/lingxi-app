@@ -121,9 +121,13 @@ final class CronRepository {
         await loadState(lastReconciledAtMs: state.scheduling.lastReconciledAtMs)
     }
 
-    func beginCreate(scopeID: String? = nil) {
+    /// - Parameter prompt: instructions to start the form with ("make this a
+    ///   scheduled task"). Part of the saved baseline, so an untouched form
+    ///   does not ask to discard changes.
+    func beginCreate(scopeID: String? = nil, prompt: String = "") {
         let target = scopeID ?? state.activeScopeID
         draft = .create(scopeID: target)
+        draft.prompt = prompt
         draft.automation.model = defaultModel
         draft.automation.reasoning = defaultReasoning
         savedDraft = draft

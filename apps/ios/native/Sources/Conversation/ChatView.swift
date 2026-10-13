@@ -19,7 +19,20 @@ struct ChatView: View {
 
     let session: SessionRef
     let projectName: String?
-    let projectPath: String?
+    /// The conversation's mode and workspace, for the top bar's `Mode · Workspace`
+    /// line, the new-chat bar and the session panel.
+    let sessionMode: SessionMode
+    let workspaceName: String
+    var isPinned = false
+    /// An existing (not brand-new) session can be archived.
+    var canArchive = false
+    var onSelectNewChatMode: (SessionMode) -> Void = { _ in }
+    var onPickWorkspace: () -> Void = {}
+    var onContinueInOtherMode: () -> Void = {}
+    var onTogglePinned: () -> Void = {}
+    var onMakeScheduled: () -> Void = {}
+    var onOpenTerminal: () -> Void = {}
+    var onArchive: () -> Void = {}
 
     /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
     /// published `model` and forwards user input to it — it no longer owns the
@@ -55,6 +68,12 @@ struct ChatView: View {
     /// when the active session changes.
     @State private var summaryCategory: ConversationSummaryCategory?
     @State private var summaryDetent: PresentationDetent = .medium
+    /// The session panel, and what to do after it has closed (sheets cannot
+    /// present one another, so a row picks a follow-up that runs on dismiss).
+    @State private var sessionPanelOpen = false
+    @State private var sessionPanelFollowUp: SessionPanelAction?
+    @State private var modelPickerOpen = false
+    @State private var permissionSheetOpen = false
 
     /// Root-owned state machine shared by ordinary dictation and Flow Mode.
     let voiceInteraction: VoiceInteractionController
@@ -73,13 +92,33 @@ struct ChatView: View {
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
          projectName: String? = nil,
-         projectPath: String? = nil,
+         sessionMode: SessionMode = .code,
+         workspaceName: String = "",
+         isPinned: Bool = false,
+         canArchive: Bool = false,
+         onSelectNewChatMode: @escaping (SessionMode) -> Void = { _ in },
+         onPickWorkspace: @escaping () -> Void = {},
+         onContinueInOtherMode: @escaping () -> Void = {},
+         onTogglePinned: @escaping () -> Void = {},
+         onMakeScheduled: @escaping () -> Void = {},
+         onOpenTerminal: @escaping () -> Void = {},
+         onArchive: @escaping () -> Void = {},
          onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenSessionDetails: @escaping () -> Void = {},
          onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
         self.session = session
         self.projectName = projectName
-        self.projectPath = projectPath
+        self.sessionMode = sessionMode
+        self.workspaceName = workspaceName
+        self.isPinned = isPinned
+        self.canArchive = canArchive
+        self.onSelectNewChatMode = onSelectNewChatMode
+        self.onPickWorkspace = onPickWorkspace
+        self.onContinueInOtherMode = onContinueInOtherMode
+        self.onTogglePinned = onTogglePinned
+        self.onMakeScheduled = onMakeScheduled
+        self.onOpenTerminal = onOpenTerminal
+        self.onArchive = onArchive
         self._draft = draft
         self.voiceInteraction = voiceInteraction
         self.source = source
@@ -121,6 +160,14 @@ struct ChatView: View {
                     InlineVoicePanel(
                         controller: voiceInteraction,
                         onConfigure: onOpenVoiceSettings
+                    )
+                }
+                if showsNewChatBar {
+                    NewChatBar(
+                        mode: sessionMode,
+                        workspaceName: workspaceName,
+                        onSelectMode: onSelectNewChatMode,
+                        onPickWorkspace: onPickWorkspace
                     )
                 }
                 Group {
@@ -193,7 +240,10 @@ struct ChatView: View {
                          onMicTap: toggleVoiceCapture,
                          onFlowModeTap: enterFlowMode,
                          voiceCapturePhase: voiceInteraction.capturePhase,
-                         voiceInteractionMode: voiceInteraction.mode)
+                         voiceInteractionMode: voiceInteraction.mode,
+                         modelOpen: $modelPickerOpen,
+                         controlsOpen: $permissionSheetOpen,
+                         showsPermissionChip: sessionMode == .code)
                 }
             }
 
@@ -296,6 +346,25 @@ struct ChatView: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.ask-user-question.sheet")
         }
+        .sheet(isPresented: $sessionPanelOpen, onDismiss: runSessionPanelFollowUp) {
+            SessionPanelSheet(
+                title: sessionTitle,
+                mode: sessionMode,
+                workspaceName: workspaceName,
+                messageCount: convo.messages.count,
+                modelName: activeModelName,
+                effortLabel: effortLabel,
+                permissionLabel: sessionMode == .code ? permissionLabel : nil,
+                isPinned: isPinned,
+                canArchive: canArchive && !convo.isNew,
+                onAction: { action in
+                    sessionPanelFollowUp = action
+                    sessionPanelOpen = false
+                }
+            )
+            .environment(\.theme, t)
+            .tint(t.accent)
+        }
         .sheet(item: $summaryCategory, onDismiss: {
             if let id = pendingAgentDetailID {
                 pendingAgentDetailID = nil
@@ -349,29 +418,94 @@ struct ChatView: View {
         // the system navigation bar so that the leading item stays the system's
         // sidebar affordance — the only thing that both opens the sidebar and
         // advertises the back-swipe. Nothing here may hide that bar.
-        .navigationTitle(projectName ?? (convo.isNew ? String(localized: "chat_new_conversation") : session.title))
+        .navigationTitle(sessionTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text(projectName ?? (convo.isNew ? String(localized: "chat_new_conversation") : session.title))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(t.text)
-                        .lineLimit(1)
-                    if let path = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-                        Text(path)
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(t.text4)
+                // Tap the title to open everything about this session.
+                Button { sessionPanelOpen = true } label: {
+                    VStack(spacing: 1) {
+                        Text(sessionTitle)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(t.text)
+                            .lineLimit(1)
+                        Text("\(sessionMode.title) · \(workspaceName)")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(sessionMode.color(t))
                             .lineLimit(1)
                     }
+                    .frame(maxWidth: 220)
+                    .contentShape(Rectangle())
                 }
-                .frame(maxWidth: 220)
-                .accessibilityElement(children: .combine)
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "chat_session_panel_a11y"))
+                .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
                 .accessibilityIdentifier("conversation.project-context")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: newChat) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(t.accent)
+                        .frame(width: 36, height: 36)
+                        .contentShape(.rect)
+                }
+                .accessibilityLabel(String(localized: "chat_new_chat"))
+                .accessibilityIdentifier("conversation.new-chat")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 summaryMenu
             }
+        }
+    }
+
+    // MARK: session panel
+
+    private var sessionTitle: String {
+        convo.isNew ? String(localized: "chat_new_conversation") : session.title
+    }
+
+    /// The new-chat strip is only for a chat that has not started yet.
+    private var showsNewChatBar: Bool {
+        convo.isNew && renderItems.isEmpty && !convo.streaming
+    }
+
+    private var activeModelName: String {
+        let id = convo.activeModelId
+        guard !id.isEmpty else { return "—" }
+        return convo.availableModelDetails[id]?.displayName ?? id
+    }
+
+    private var effortLabel: String {
+        let selection = convo.reasoningSelection
+        if selection.hasPrefix("budget:") { return "\(selection.dropFirst("budget:".count)) tokens" }
+        return selection.isEmpty || selection == "automatic" ? "Auto" : selection.capitalized
+    }
+
+    private var permissionLabel: String {
+        switch convo.effectivePermissionMode {
+        case "bypassPermissions": return String(localized: "settings_permission_mode_bypass")
+        case "auto": return String(localized: "settings_permission_mode_auto")
+        case "default": return String(localized: "settings_permission_mode_default")
+        case "acceptEdits": return String(localized: "settings_permission_mode_accept_edits")
+        case "plan": return String(localized: "settings_permission_mode_plan")
+        case "dontAsk": return String(localized: "settings_permission_mode_dont_ask")
+        default: return convo.effectivePermissionMode
+        }
+    }
+
+    private func runSessionPanelFollowUp() {
+        guard let action = sessionPanelFollowUp else { return }
+        sessionPanelFollowUp = nil
+        switch action {
+        case .model: modelPickerOpen = true
+        case .permission: permissionSheetOpen = true
+        case .details: onOpenSessionDetails()
+        case .togglePinned: onTogglePinned()
+        case .makeScheduled: onMakeScheduled()
+        case .terminal: onOpenTerminal()
+        case .continueInOtherMode: onContinueInOtherMode()
+        case .archive: onArchive()
         }
     }
 
@@ -386,28 +520,6 @@ struct ChatView: View {
                 }
                 .accessibilityIdentifier("conversation.summary.category.\(category.rawValue)")
             }
-            if !summaryCategories.isEmpty { Divider() }
-            Button {
-                onOpenSessionDetails()
-            } label: {
-                Label(String(localized: "session_details_button"), systemImage: "info.circle")
-            }
-            .accessibilityIdentifier("conversation.session-details")
-            Button {
-                app.toggleTheme()
-            } label: {
-                Label(
-                    app.isDark ? String(localized: "chat_theme_light") : String(localized: "chat_theme_dark"),
-                    systemImage: app.isDark ? "sun.max" : "moon"
-                )
-            }
-            .accessibilityIdentifier("conversation.theme-toggle")
-            Button {
-                newChat()
-            } label: {
-                Label(String(localized: "chat_new_chat"), systemImage: "square.and.pencil")
-            }
-            .accessibilityIdentifier("conversation.new-chat")
         } label: {
             Image(systemName: "list.bullet.rectangle")
                 .symbolRenderingMode(.monochrome)

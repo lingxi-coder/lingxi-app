@@ -1,308 +1,16 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
-typealias WorkspaceSessionMode = SessionMode
-
-enum DrawerSection: String, CaseIterable, Hashable, Sendable {
-    case chat
-    case code
-    case cron
-
-    var sessionMode: WorkspaceSessionMode? {
-        switch self {
-        case .chat: .chat
-        case .code: .code
-        case .cron: nil
-        }
-    }
+/// The signed-in profile shown in the sidebar's bottom bar.
+struct DrawerAccountSummary: Equatable, Sendable {
+    let displayName: String
+    let email: String?
 }
 
-enum WorkspaceGroupKind: String, Hashable, Sendable {
-    case global
-    case project
-}
-
-struct WorkspaceSessionRow: Identifiable, Equatable, Sendable {
-    let id: String
-    let title: String
-    let mode: WorkspaceSessionMode
-    let modifiedAt: Date?
-    let relativeTime: String
-    let messageCount: Int
-}
-
-struct WorkspaceCronRow: Identifiable, Equatable, Sendable {
-    let scopeID: String
-    let taskID: String
-    let title: String
-    let detail: String
-    let nextFireAt: Date?
-
-    var id: String { "\(scopeID):\(taskID)" }
-}
-
-struct WorkspaceGroup: Identifiable, Equatable, Sendable {
-    let scope: ConversationScope
-    let key: String
-    let kind: WorkspaceGroupKind
-    let title: String
-    let subtitle: String?
-    let updatedAt: Date?
-    let pinnedAt: Date?
-    let sessions: [WorkspaceSessionRow]
-    let cronRows: [WorkspaceCronRow]
-
-    var id: String { key }
-    var latestSessionAt: Date? { sessions.compactMap(\.modifiedAt).max() }
-    var latestCronAt: Date? { cronRows.compactMap(\.nextFireAt).max() }
-}
-
-struct WorkspaceGroupSeed: Equatable, Sendable {
-    let scope: ConversationScope
-    let kind: WorkspaceGroupKind
-    let title: String
-    let subtitle: String?
-    let updatedAt: Date?
-    let sessions: [WorkspaceSessionRow]
-}
-
-enum WorkspaceGroupBuilder {
-    static func mergedSessionRows(live: [EngineSession], cached: [ProjectSessionSummary]) -> [WorkspaceSessionRow] {
-        let archived = Set(cached.filter(\.isArchived).map(\.sessionId))
-        let liveRows = live.filter { !archived.contains($0.id) }.map { row in
-            if let submitted = cached.first(where: { $0.sessionId == row.id && $0.pendingCatalogConfirmation && $0.messageCount > row.messageCount }) {
-                return projectRow(submitted)
-            }
-            return engineRow(row)
-        }
-        let liveIDs = Set(liveRows.map(\.id))
-        let pending = cached.filter { !$0.isArchived && !liveIDs.contains($0.sessionId) }
-        return pending.map(projectRow) + liveRows
-    }
-
-    static func seededConversationGroups(
-        section: DrawerSection,
-        query: String,
-        groups: [WorkspaceGroupSeed],
-        pinnedAt: [String: Date] = [:]
-    ) -> [WorkspaceGroup] {
-        guard let mode = section.sessionMode else { return [] }
-        let needle = normalized(query)
-        return groups.map {
-            WorkspaceGroup(
-                scope: $0.scope,
-                key: $0.scope.workspaceKey,
-                kind: $0.kind,
-                title: $0.title,
-                subtitle: $0.subtitle,
-                updatedAt: $0.updatedAt,
-                pinnedAt: pinnedAt[$0.scope.workspaceKey],
-                sessions: filteredSessions($0.sessions, mode: mode),
-                cronRows: []
-            )
-        }
-        .compactMap { filteredConversationGroup($0, query: needle) }
-        .sorted { lhs, rhs in compareGroups(lhs, rhs, latestAt: { $0.latestSessionAt }) }
-    }
-
-    static func conversationGroups(
-        section: DrawerSection,
-        query: String,
-        activeScope: ConversationScope,
-        liveSessions: [EngineSession],
-        globalSessions: [ProjectSessionSummary],
-        projects: [ProjectSnapshot],
-        pinnedAt: [String: Date] = [:]
-    ) -> [WorkspaceGroup] {
-        let globalSeed = WorkspaceGroupSeed(
-            scope: .global,
-            kind: .global,
-            title: String(localized: "common_global"),
-            subtitle: nil,
-            updatedAt: nil,
-            sessions: mergedSessionRows(live: (activeScope == .global || activeScope == .scheduled) ? liveSessions : [], cached: globalSessions)
-        )
-        let projectSeeds = projects.map { project in
-            let scope = ConversationScope.project(project.id)
-            return WorkspaceGroupSeed(
-                scope: scope,
-                kind: .project,
-                title: project.record.name,
-                subtitle: project.record.syncState.label,
-                updatedAt: project.record.updatedAt,
-                sessions: mergedSessionRows(live: activeScope == scope ? liveSessions : [], cached: project.sessions)
-            )
-        }
-        return seededConversationGroups(
-            section: section,
-            query: query,
-            groups: [globalSeed] + projectSeeds,
-            pinnedAt: pinnedAt
-        )
-    }
-
-    static func cronGroups(
-        query: String,
-        projects: [ProjectSnapshot],
-        cronState: CronRepositoryState,
-        appSandboxRoot: String,
-        pinnedAt: [String: Date] = [:]
-    ) -> [WorkspaceGroup] {
-        let needle = normalized(query)
-        let tasksByScope = Dictionary(grouping: cronState.tasks, by: { $0.scope.scopeID })
-        let scopes = [CronScope.global(appSandboxRoot: appSandboxRoot)]
-            + projects.map {
-                CronScope(
-                    scopeID: $0.id,
-                    projectID: $0.id,
-                    projectName: $0.record.name,
-                    projectCwd: $0.workspace.hostURL.path,
-                    guestWorkspacePath: $0.workspace.guestPath
-                )
-            }
-        return scopes.map { scope in
-            WorkspaceGroup(
-                scope: scope.projectID.map(ConversationScope.project) ?? .global,
-                key: scope.scopeID,
-                kind: scope.projectID == nil ? .global : .project,
-                title: scope.projectName,
-                subtitle: scope.guestWorkspacePath,
-                updatedAt: nil,
-                pinnedAt: pinnedAt[scope.scopeID],
-                sessions: [],
-                cronRows: (tasksByScope[scope.scopeID] ?? []).map {
-                    WorkspaceCronRow(
-                        scopeID: scope.scopeID,
-                        taskID: $0.task.id,
-                        title: $0.task.prompt,
-                        detail: $0.task.human,
-                        nextFireAt: $0.task.nextFireMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
-                    )
-                }
-            )
-        }
-        .filter { includeCronGroup($0, query: needle) }
-        .sorted { lhs, rhs in compareGroups(lhs, rhs, latestAt: { $0.latestCronAt }) }
-    }
-
-    private static func engineRow(_ session: EngineSession) -> WorkspaceSessionRow {
-        WorkspaceSessionRow(
-            id: session.id,
-            title: session.title,
-            mode: session.mode,
-            modifiedAt: session.modifiedAt,
-            relativeTime: session.relativeTime,
-            messageCount: session.messageCount
-        )
-    }
-
-    private static func projectRow(_ session: ProjectSessionSummary) -> WorkspaceSessionRow {
-        WorkspaceSessionRow(
-            id: session.sessionId,
-            title: session.title,
-            mode: session.mode,
-            modifiedAt: session.modifiedAt,
-            relativeTime: session.relativeTime,
-            messageCount: session.messageCount
-        )
-    }
-
-    private static func filteredSessions(_ sessions: [WorkspaceSessionRow], mode: WorkspaceSessionMode) -> [WorkspaceSessionRow] {
-        sessions.filter { $0.mode == mode }
-            .sorted { lhs, rhs in
-                switch (lhs.modifiedAt, rhs.modifiedAt) {
-                case let (l?, r?) where l != r:
-                    return l > r
-                case (.some, .none):
-                    return true
-                case (.none, .some):
-                    return false
-                default:
-                    return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-                }
-            }
-    }
-
-    private static func filteredConversationGroup(
-        _ group: WorkspaceGroup,
-        query: String
-    ) -> WorkspaceGroup? {
-        guard !query.isEmpty else { return group }
-        if matches(group.title, query) || matches(group.subtitle, query) { return group }
-        let matchingSessions = group.sessions.filter { matches($0.title, query) }
-        guard !matchingSessions.isEmpty else { return nil }
-        return WorkspaceGroup(
-            scope: group.scope,
-            key: group.key,
-            kind: group.kind,
-            title: group.title,
-            subtitle: group.subtitle,
-            updatedAt: group.updatedAt,
-            pinnedAt: group.pinnedAt,
-            sessions: matchingSessions,
-            cronRows: group.cronRows
-        )
-    }
-
-    private static func includeCronGroup(_ group: WorkspaceGroup, query: String) -> Bool {
-        guard !query.isEmpty else { return true }
-        if matches(group.title, query) || matches(group.subtitle, query) { return true }
-        return group.cronRows.contains { matches($0.title, query) || matches($0.detail, query) }
-    }
-
-    private static func compareGroups(
-        _ lhs: WorkspaceGroup,
-        _ rhs: WorkspaceGroup,
-        latestAt: (WorkspaceGroup) -> Date?
-    ) -> Bool {
-        if lhs.kind == .global || rhs.kind == .global {
-            return lhs.kind == .global && rhs.kind != .global
-        }
-        switch (lhs.pinnedAt, rhs.pinnedAt) {
-        case let (l?, r?) where l != r:
-            return l > r
-        case (.some, .none):
-            return true
-        case (.none, .some):
-            return false
-        default:
-            break
-        }
-        switch (latestAt(lhs), latestAt(rhs)) {
-        case let (l?, r?) where l != r:
-            return l > r
-        case (.some, .none):
-            return true
-        case (.none, .some):
-            return false
-        default:
-            break
-        }
-        switch (lhs.updatedAt, rhs.updatedAt) {
-        case let (l?, r?) where l != r:
-            return l > r
-        case (.some, .none):
-            return true
-        case (.none, .some):
-            return false
-        default:
-            break
-        }
-        let titleOrder = lhs.title.localizedStandardCompare(rhs.title)
-        if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
-        return lhs.key < rhs.key
-    }
-
-    private static func normalized(_ query: String) -> String {
-        query.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func matches(_ value: String?, _ query: String) -> Bool {
-        guard let value, !query.isEmpty else { return false }
-        return value.localizedStandardContains(query)
-    }
-}
-
+/// The sidebar: three entries (scheduled tasks, projects, ...), one recent-
+/// sessions list with a mode filter, and the account / terminal / settings bar.
+///
+/// Mode is a property of a session, not a place: rows from both modes live in
+/// the same list and opening one carries its mode (and workspace) along.
 struct Drawer: View {
     @Environment(\.theme) private var t
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -312,31 +20,24 @@ struct Drawer: View {
 
     let source: any ConversationSource
     let cronState: CronRepositoryState
-    let activeMode: WorkspaceSessionMode
-    let workspacePinnedAt: [String: Date]
-    let collapsedWorkspaceKeys: Set<String>
+    let sessionPinnedAt: [String: Date]
+    let newCronResults: Int
+    let account: DrawerAccountSummary?
     let openSettings: () -> Void
+    let openAccount: () -> Void
     let openTerminal: () -> Void
     let openCron: (String?, String?) -> Void
+    let openProjects: () -> Void
+    let openProject: (String) -> Void
     let closeSidebar: () -> Void
-    let onSelectProject: (String?) -> Void
-    let onSelectSession: (String?, String) -> Void
-    let onNewChat: (String?) -> Void
-    let onModeChanged: ((WorkspaceSessionMode) -> Void)?
-    let onToggleWorkspacePinned: (String) -> Void
-    let onSetWorkspaceCollapsed: (Bool, String) -> Void
-    let onContinueInMode: (ConversationScope, String, WorkspaceSessionMode, WorkspaceSessionMode) -> Void
+    let onOpenSession: (ConversationScope, SessionMode, String) -> Void
+    let onToggleSessionPinned: (String) -> Void
+    let onContinueInMode: (ConversationScope, String, SessionMode, SessionMode) -> Void
 
     @ObservedObject private var convo: ConversationModel
-    @Binding private var section: DrawerSection
+    @Binding private var filter: RecentsFilter
     @State private var query = ""
-    @State private var createProjectName = ""
-    @State private var showCreateAlert = false
-    @State private var showFolderPicker = false
-    @State private var pickerMode: FolderPickerMode = .importProject
     @FocusState private var searchFocused: Bool
-
-    private enum FolderPickerMode { case importProject, reauthorize(String) }
 
     init(
         projectStore: ProjectStore,
@@ -344,93 +45,147 @@ struct Drawer: View {
         activeSession: Binding<String>,
         source: any ConversationSource,
         cronState: CronRepositoryState = .init(),
-        activeMode: WorkspaceSessionMode = .code,
-        section: Binding<DrawerSection>,
-        workspacePinnedAt: [String: Date] = [:],
-        collapsedWorkspaceKeys: Set<String> = [],
+        filter: Binding<RecentsFilter>,
+        sessionPinnedAt: [String: Date] = [:],
+        newCronResults: Int = 0,
+        account: DrawerAccountSummary? = nil,
         openSettings: @escaping () -> Void,
+        openAccount: @escaping () -> Void = {},
         openTerminal: @escaping () -> Void,
         openCron: @escaping (String?, String?) -> Void = { _, _ in },
+        openProjects: @escaping () -> Void = {},
+        openProject: @escaping (String) -> Void = { _ in },
         closeSidebar: @escaping () -> Void,
-        onSelectProject: @escaping (String?) -> Void,
-        onSelectSession: @escaping (String?, String) -> Void,
-        onNewChat: @escaping (String?) -> Void,
-        onModeChanged: ((WorkspaceSessionMode) -> Void)? = nil,
-        onToggleWorkspacePinned: @escaping (String) -> Void = { _ in },
-        onSetWorkspaceCollapsed: @escaping (Bool, String) -> Void = { _, _ in },
-        onContinueInMode: @escaping (ConversationScope, String, WorkspaceSessionMode, WorkspaceSessionMode) -> Void = { _, _, _, _ in }
+        onOpenSession: @escaping (ConversationScope, SessionMode, String) -> Void,
+        onToggleSessionPinned: @escaping (String) -> Void = { _ in },
+        onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in }
     ) {
         self.projectStore = projectStore
         self.activeScope = activeScope
         _activeSession = activeSession
         self.source = source
         self.cronState = cronState
-        self.activeMode = activeMode
-        _section = section
-        self.workspacePinnedAt = workspacePinnedAt
-        self.collapsedWorkspaceKeys = collapsedWorkspaceKeys
+        _filter = filter
+        self.sessionPinnedAt = sessionPinnedAt
+        self.newCronResults = newCronResults
+        self.account = account
         self.openSettings = openSettings
+        self.openAccount = openAccount
         self.openTerminal = openTerminal
         self.openCron = openCron
+        self.openProjects = openProjects
+        self.openProject = openProject
         self.closeSidebar = closeSidebar
-        self.onSelectProject = onSelectProject
-        self.onSelectSession = onSelectSession
-        self.onNewChat = onNewChat
-        self.onModeChanged = onModeChanged
-        self.onToggleWorkspacePinned = onToggleWorkspacePinned
-        self.onSetWorkspaceCollapsed = onSetWorkspaceCollapsed
+        self.onOpenSession = onOpenSession
+        self.onToggleSessionPinned = onToggleSessionPinned
         self.onContinueInMode = onContinueInMode
         convo = source.model
     }
 
-    private var currentWorkspaceGuestPath: String {
-        projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
-    }
-
-    private var conversationGroups: [WorkspaceGroup] {
-        return WorkspaceGroupBuilder.conversationGroups(
-            section: section,
-            query: query,
-            activeScope: activeScope,
-            liveSessions: convo.engineSessions,
-            globalSessions: globalSessionsIncludingScheduled,
-            projects: projectStore.projects,
-            pinnedAt: workspacePinnedAt
-        )
-    }
-
-    private var cronGroups: [WorkspaceGroup] {
-        WorkspaceGroupBuilder.cronGroups(
-            query: query,
-            projects: projectStore.projects,
-            cronState: cronState,
-            appSandboxRoot: ConversationSourceFactory.appSandboxRoot(),
-            pinnedAt: workspacePinnedAt
-        )
-    }
+    // MARK: derived state
 
     private var searching: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Every workspace's session catalog. Scheduled-run sessions are never
+    /// listed here — their results live under 定时任务.
+    private var seeds: [WorkspaceGroupSeed] {
+        let globalSeed = WorkspaceGroupSeed(
+            scope: .global,
+            kind: .global,
+            title: String(localized: "common_global"),
+            subtitle: nil,
+            updatedAt: nil,
+            sessions: WorkspaceGroupBuilder.mergedSessionRows(
+                live: activeScope == .global ? convo.engineSessions : [],
+                cached: projectStore.globalSessions
+            )
+        )
+        let projectSeeds = projectStore.projects.map { project in
+            let scope = ConversationScope.project(project.id)
+            return WorkspaceGroupSeed(
+                scope: scope,
+                kind: .project,
+                title: project.record.name,
+                subtitle: project.record.syncState.label,
+                updatedAt: project.record.updatedAt,
+                sessions: WorkspaceGroupBuilder.mergedSessionRows(
+                    live: activeScope == scope ? convo.engineSessions : [],
+                    cached: project.sessions
+                )
+            )
+        }
+        return [globalSeed] + projectSeeds
+    }
+
+    private var awaitingConfirmation: Bool {
+        var awaiting = !convo.pendingQuestions.isEmpty
+        #if canImport(harness_runtimeFFI)
+            awaiting = awaiting || !convo.pendingPermissions.isEmpty
+        #endif
+        return awaiting
+    }
+
+    /// Only the bound session can be running or waiting for the user.
+    private func status(of sessionID: String) -> RecentStatus {
+        guard !sessionID.isEmpty, sessionID == activeSession else { return .idle }
+        if awaitingConfirmation { return .awaitingConfirmation }
+        return convo.streaming ? .running : .idle
+    }
+
+    private var groups: [RecentGroup] {
+        RecentSessionsBuilder.groups(
+            seeds: seeds,
+            filter: filter,
+            query: query,
+            pinnedAt: sessionPinnedAt,
+            statusFor: status(of:)
+        )
+    }
+
+    private var matchingProjects: [ProjectSnapshot] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        return RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: [:])
+            .filter { $0.record.name.localizedStandardContains(needle) }
+    }
+
+    private var matchingCrons: [CronScopedTask] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        return cronState.tasks.filter {
+            $0.task.prompt.localizedStandardContains(needle)
+                || $0.task.human.localizedStandardContains(needle)
+                || $0.scope.projectName.localizedStandardContains(needle)
+        }
+    }
+
+    // MARK: body
+
     var body: some View {
         VStack(spacing: 0) {
-            header
             searchBar
-            tabs
-            bodyContent
-            accountRow
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if searching {
+                        searchResults
+                    } else {
+                        entries
+                        filterChips
+                        recents
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
+            }
+            .frame(maxHeight: .infinity)
+            bottomBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { t.sidebarBg.ignoresSafeArea() }
-        .onAppear {
-            source.listSessions()
-        }
-        .onChange(of: activeMode) { _, mode in
-            if section.sessionMode != nil {
-                section = mode == .chat ? .chat : .code
-            }
-        }
+        .onAppear { source.listSessions() }
         .navigationTitle(String(localized: "app_name"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -445,62 +200,20 @@ struct Drawer: View {
             }
         }
         .navigationSplitViewColumnWidth(min: 300, ideal: 330, max: 420)
-        .alert(String(localized: "drawer_new_local_project"), isPresented: $showCreateAlert) {
-            TextField("drawer_project_name_placeholder", text: $createProjectName)
-            Button("common_create") { createInternalProject() }
-                .disabled(createProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("common_cancel", role: .cancel) {}
-        } message: {
-            Text("drawer_workspace_saved_note")
-        }
-        .fileImporter(
-            isPresented: $showFolderPicker,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false,
-            onCompletion: handleFolderSelection
-        )
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session"))
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundStyle(t.text)
-                    .lineLimit(1)
-                Text(currentWorkspaceGuestPath)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(t.text4)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            Button(action: openTerminal) {
-                Label("settings_linux_section_terminal", systemImage: "terminal.fill")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(t.accent)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(t.accent.opacity(0.14), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("drawer.terminal.top")
-        }
-        .padding(16)
-        .background(t.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(t.border, lineWidth: 0.7))
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-    }
+    // MARK: search
 
     private var searchBar: some View {
         HStack(spacing: 8) {
             LXIcon(name: .search, size: 16, color: t.text4, stroke: 2)
-            TextField("drawer_search_placeholder", text: $query)
+            TextField("drawer_search_all_placeholder", text: $query)
                 .font(.scaledSystem(14, relativeTo: .subheadline))
                 .foregroundColor(t.text)
                 .focused($searchFocused)
                 .submitLabel(.search)
                 .autocorrectionDisabled()
+                .accessibilityIdentifier("drawer.search")
             if !query.isEmpty {
                 Button {
                     query = ""
@@ -517,93 +230,167 @@ struct Drawer: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(searchFocused ? t.accent.opacity(0.5) : t.border, lineWidth: 0.5))
         .padding(.horizontal, 18)
-        .padding(.bottom, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
     }
 
-    private var tabs: some View {
-        HStack(spacing: 4) {
-            tab(.chat, .message, String(localized: "drawer_tab_chat"), count: count(for: .chat))
-            tab(.code, .terminal, String(localized: "drawer_tab_code"), count: count(for: .code))
-            tab(.cron, .clock, String(localized: "drawer_tab_crons"), count: cronGroups.count)
+    @ViewBuilder
+    private var searchResults: some View {
+        let sessionGroups = groups
+        let sessions = sessionGroups.flatMap(\.sessions)
+        let projects = matchingProjects
+        let crons = matchingCrons
+        if sessions.isEmpty && projects.isEmpty && crons.isEmpty {
+            emptyState(text: String(localized: "drawer_no_match"), icon: .search)
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 8)
+        if !sessions.isEmpty {
+            sectionHeader(String(localized: "drawer_search_section_sessions"))
+            ForEach(sessions) { sessionRow($0) }
+        }
+        if !projects.isEmpty {
+            sectionHeader(String(localized: "drawer_entry_projects"))
+            ForEach(projects) { project in
+                Button { openProject(project.id) } label: {
+                    HStack(spacing: 10) {
+                        LXIcon(name: .folder, size: 15, color: t.text3, stroke: 1.8)
+                        Text(project.record.name)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundColor(t.text2)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.project.\(project.id)")
+            }
+        }
+        if !crons.isEmpty {
+            sectionHeader(String(localized: "settings_title_cron"))
+            ForEach(crons) { cron in
+                Button { openCron(cron.scope.scopeID, cron.task.id) } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(cron.task.prompt)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundColor(t.text2)
+                            .lineLimit(1)
+                        Text(cron.task.human).font(.caption).foregroundColor(t.text4).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.cron.\(cron.id)")
+            }
+        }
     }
 
-    private func tab(_ id: DrawerSection, _ icon: LXIconName, _ label: String, count: Int) -> some View {
-        let active = section == id
-        return Button {
-            if id == .cron { openCron(nil, nil); return }
-            section = id
-            if let mode = id.sessionMode {
-                onModeChanged?(mode)
+    // MARK: entries
+
+    private var entries: some View {
+        VStack(spacing: 2) {
+            entryRow(
+                icon: .clock,
+                title: String(localized: "settings_title_cron"),
+                detail: newCronResults > 0
+                    ? String(localized: "drawer_cron_new_results \(newCronResults)")
+                    : nil,
+                highlighted: newCronResults > 0,
+                identifier: "drawer.entry.cron"
+            ) { openCron(nil, nil) }
+            entryRow(
+                icon: .folder,
+                title: String(localized: "drawer_entry_projects"),
+                detail: projectStore.projects.isEmpty ? nil : "\(projectStore.projects.count)",
+                highlighted: false,
+                identifier: "drawer.entry.projects"
+            ) { openProjects() }
+        }
+        .padding(.bottom, 6)
+    }
+
+    private func entryRow(
+        icon: LXIconName,
+        title: String,
+        detail: String?,
+        highlighted: Bool,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                LXIcon(name: icon, size: 17, color: t.text2, stroke: 1.8).frame(width: 22)
+                Text(title).font(.system(size: 14.5, weight: .medium)).foregroundColor(t.text)
+                Spacer(minLength: 8)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 12, weight: highlighted ? .semibold : .regular))
+                        .foregroundColor(highlighted ? t.accent : t.text4)
+                }
+                LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 1.7)
             }
-        } label: {
-            HStack(spacing: 5) {
-                LXIcon(name: icon, size: 14, color: active ? t.text : t.text3, stroke: 1.8)
-                Text(label).font(.system(size: 13, weight: active ? .semibold : .medium))
-                Text("\(count)").font(.system(size: 10.5, weight: .semibold)).foregroundColor(active ? t.accent : t.text4)
-            }
-            .foregroundColor(active ? t.text : t.text3)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(active ? t.surfaceActive : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("drawer.tab.\(id.rawValue)")
+        .accessibilityIdentifier(identifier)
     }
 
-    private func count(for section: DrawerSection) -> Int {
-        return WorkspaceGroupBuilder.conversationGroups(
-            section: section,
-            query: query,
-            activeScope: activeScope,
-            liveSessions: convo.engineSessions,
-            globalSessions: globalSessionsIncludingScheduled,
-            projects: projectStore.projects,
-            pinnedAt: workspacePinnedAt
-        ).count
-    }
+    // MARK: recents
 
-    private var bodyContent: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 10) {
-                if section != .cron {
-                    projectActions
-                    ForEach(conversationGroups) { group in
-                        conversationGroupCard(group)
-                    }
-                } else {
-                    ForEach(cronGroups) { group in
-                        cronGroupCard(group)
-                    }
+    private var filterChips: some View {
+        HStack(spacing: 6) {
+            ForEach(RecentsFilter.allCases, id: \.self) { chip in
+                let selected = filter == chip
+                Button {
+                    filter = chip
+                } label: {
+                    Text(chip.title)
+                        .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+                        .foregroundColor(selected ? t.text : t.text3)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(selected ? t.surfaceActive : .clear, in: Capsule())
+                        .overlay(Capsule().stroke(selected ? t.borderStrong : t.border, lineWidth: 0.6))
                 }
-                if visibleGroupCount == 0 {
-                    emptyState
-                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.filter.\(chip.rawValue)")
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 4)
-            .padding(.bottom, 8)
+            Spacer()
         }
-        .frame(maxHeight: .infinity)
+        .padding(.horizontal, 6)
+        .padding(.bottom, 4)
     }
 
-    private var visibleGroupCount: Int {
-        return section == .cron ? cronGroups.count : conversationGroups.count
-    }
-
-    private var projectActions: some View {
-        HStack(spacing: 8) {
-            projectCreationMenu
+    @ViewBuilder
+    private var recents: some View {
+        let sections = groups
+        if sections.isEmpty {
+            emptyState(text: String(localized: "drawer_no_sessions"), icon: .message)
+        }
+        ForEach(sections) { section in
+            sectionHeader(section.bucket.title)
+            ForEach(section.sessions) { sessionRow($0) }
         }
     }
 
-    private var emptyState: some View {
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundColor(t.text4)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 2)
+    }
+
+    private func emptyState(text: String, icon: LXIconName) -> some View {
         VStack(spacing: 10) {
-            LXIcon(name: searching ? .search : section == .cron ? .clock : .folder, size: 24, color: t.text4, stroke: 1.8)
-            Text(searching ? String(localized: "drawer_no_match") : String(localized: "drawer_no_workspaces"))
+            LXIcon(name: icon, size: 24, color: t.text4, stroke: 1.8)
+            Text(text)
                 .font(.system(size: 13))
                 .foregroundColor(t.text4)
                 .multilineTextAlignment(.center)
@@ -612,305 +399,176 @@ struct Drawer: View {
         .padding(.top, 24)
     }
 
-    private func conversationGroupCard(_ group: WorkspaceGroup) -> some View {
-        let collapsed = collapsedWorkspaceKeys.contains(group.key)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                glyph(for: group.kind)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(group.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(t.text)
-                    if let subtitle = group.subtitle, !subtitle.isEmpty {
-                        Text(subtitle).font(.caption).foregroundStyle(t.text4).lineLimit(1)
-                    }
-                }
-                Spacer()
-                Text("\(group.sessions.count)")
-                    .font(.caption)
-                    .foregroundStyle(t.text4)
-                Button {
-                    onToggleWorkspacePinned(group.key)
-                } label: {
-                    Image(systemName: group.pinnedAt == nil ? "pin" : "pin.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(group.pinnedAt == nil ? t.text4 : t.accent)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("drawer.workspace.pin.\(group.key)")
-                Button {
-                    onSetWorkspaceCollapsed(!collapsed, group.key)
-                } label: {
-                    Image(systemName: collapsed ? "chevron.down" : "chevron.up")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(t.text4)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("drawer.workspace.collapse.\(group.key)")
-                Button(String(localized: "common_open")) { selectWorkspace(group.scope) }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-                Button {
-                    startNewConversation(in: group.scope)
-                } label: {
-                    Image(systemName: "square.and.pencil")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(t.accent)
-                        .frame(width: 30, height: 30)
-                        .background(t.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("drawer.workspace.new.\(group.key)")
-            }
-
-            if collapsed {
-                EmptyView()
-            } else if group.sessions.isEmpty {
-                Text(String(localized: "drawer_empty_chats"))
-                    .font(.caption)
-                    .foregroundStyle(t.text4)
-                    .padding(.leading, 30)
-            } else {
-                ForEach(group.sessions) { row in
-                    sessionRow(row, scope: group.scope)
-                }
-            }
-        }
-        .padding(12)
-        .background(group.scope == activeScope ? t.surfaceActive : t.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(t.border, lineWidth: 0.6))
-        // `.accessibilityIdentifier` on a container REPLACES every descendant's
-        // identifier unless the container is declared a containing element.
-        // Without `children: .contain` this card id swallowed
-        // `drawer.workspace.pin.*`, `drawer.workspace.collapse.*`,
-        // `drawer.workspace.new.*` and every `drawer.session.*` row inside it,
-        // so `app.buttons["drawer.workspace.new.global"]` resolved to nothing.
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("drawer.workspace.\(group.key)")
-    }
-
-    private func cronGroupCard(_ group: WorkspaceGroup) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                glyph(for: group.kind)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(group.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(t.text)
-                    if let subtitle = group.subtitle, !subtitle.isEmpty {
-                        Text(subtitle).font(.caption).foregroundStyle(t.text4).lineLimit(1)
-                    }
-                }
-                Spacer()
-                Text("\(group.cronRows.count)").font(.caption).foregroundStyle(t.text4)
-                Button {
-                    onToggleWorkspacePinned(group.key)
-                } label: {
-                    Image(systemName: group.pinnedAt == nil ? "pin" : "pin.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(group.pinnedAt == nil ? t.text4 : t.accent)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("drawer.workspace.pin.\(group.key)")
-            }
-            if group.cronRows.isEmpty {
-                Text(String(localized: "drawer_no_crons"))
-                    .font(.caption)
-                    .foregroundStyle(t.text4)
-                    .padding(.leading, 30)
-            } else {
-                ForEach(group.cronRows) { row in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.title).font(.system(size: 13.5, weight: .medium)).foregroundStyle(t.text2)
-                        Text(row.detail).font(.caption).foregroundStyle(t.text4)
-                    }
-                    .padding(.leading, 30)
-                }
-            }
-        }
-        .padding(12)
-        .background(t.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(t.border, lineWidth: 0.6))
-        // Same clobber as `conversationGroupCard`: without `children: .contain`
-        // this card id overwrites the `drawer.workspace.pin.*` button inside it.
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("drawer.workspace.\(group.key)")
-    }
-
-    private func sessionRow(_ row: WorkspaceSessionRow, scope: ConversationScope) -> some View {
-        let active = scope == activeScope && row.id == activeSession
-        let title = row.title
-        let targetMode: WorkspaceSessionMode = row.mode == .chat ? .code : .chat
+    private func sessionRow(_ row: RecentSession) -> some View {
+        let active = row.scope == activeScope && row.id == activeSession
+        let targetMode: SessionMode = row.mode == .chat ? .code : .chat
         return Button {
-            selectSession(row.id, in: scope)
+            onOpenSession(row.scope, row.mode, row.id)
         } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13.5, weight: active ? .semibold : .medium)).foregroundColor(active ? t.text : t.text2).lineLimit(1)
-                Text(String(localized: "drawer_session_subtitle \(row.relativeTime) \(row.messageCount)"))
-                    .font(.caption)
-                    .foregroundColor(t.text4)
-                    .lineLimit(1)
+            HStack(spacing: 10) {
+                row.mode.glyph(t, size: 15)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(row.title)
+                            .font(.system(size: 13.5, weight: active ? .semibold : .medium))
+                            .foregroundColor(active ? t.text : t.text2)
+                            .lineLimit(1)
+                        if row.pinnedAt != nil {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(t.text4)
+                        }
+                    }
+                    Text("\(row.mode.title) · \(row.workspaceName) · \(row.relativeTime)")
+                        .font(.caption)
+                        .foregroundColor(t.text4)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                statusMarker(row.status)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(9)
             .background(active ? t.surfaceActive : .clear)
             .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button(
-                String(localized: targetMode == .chat ? "drawer_session_continue_chat" : "drawer_session_continue_code")
-            ) {
-                onContinueInMode(scope, row.id, row.mode, targetMode)
-            }
-        }
-        .accessibilityIdentifier("drawer.session.\(scope.workspaceKey).\(row.id)")
-    }
-
-    private func glyph(for kind: WorkspaceGroupKind) -> some View {
-        Group {
-            switch kind {
-            case .global:
-                Text("◎")
-            case .project:
-                LXIcon(name: .folder, size: 15, color: t.text3, stroke: 1.8)
-            }
-        }
-        .frame(width: 18, height: 18)
-    }
-
-    private var projectCreationMenu: some View {
-        Menu {
-            Button("drawer_new_local_project") {
-                createProjectName = ""
-                showCreateAlert = true
-            }
-            Button("drawer_import_folder") {
-                pickerMode = .importProject
-                showFolderPicker = true
-            }
-        } label: {
-            Label("drawer_new_or_import_project", systemImage: "plus")
-                .font(.system(size: 13))
-                .foregroundColor(t.text3)
-                .frame(maxWidth: .infinity)
-                .padding(11)
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("drawer.project.create")
-    }
-
-    private func dashedButton(_ label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(label, systemImage: "plus")
-                .font(.system(size: 13))
-                .foregroundColor(t.text3)
-                .frame(maxWidth: .infinity)
-                .padding(11)
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var accountRow: some View {
-        Button(action: openSettings) {
-            HStack(spacing: 12) {
-                Circle()
-                    .fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 36, height: 36)
-                    .overlay(LXIcon(name: .cog, size: 16, color: .white, stroke: 1.8))
-                Text("settings_title_main").font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
-                Spacer()
-                LXIcon(name: .chevronR, size: 14, color: t.text4, stroke: 1.7)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("drawer.settings")
+        .contextMenu {
+            Button(String(localized: row.pinnedAt == nil ? "drawer_session_pin" : "drawer_session_unpin")) {
+                onToggleSessionPinned(row.id)
+            }
+            Button(
+                String(localized: targetMode == .chat ? "drawer_session_continue_chat" : "drawer_session_continue_code")
+            ) {
+                onContinueInMode(row.scope, row.id, row.mode, targetMode)
+            }
+        }
+        .accessibilityIdentifier("drawer.session.\(row.workspaceKey).\(row.id)")
+    }
+
+    @ViewBuilder
+    private func statusMarker(_ status: RecentStatus) -> some View {
+        switch status {
+        case .idle:
+            EmptyView()
+        case .running:
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("chat_status_running").font(.system(size: 10.5, weight: .medium)).foregroundColor(t.accent)
+            }
+        case .awaitingConfirmation:
+            Text("drawer_status_awaiting")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundColor(t.statusTesting)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(t.statusTesting.opacity(0.15), in: Capsule())
+        }
+    }
+
+    // MARK: bottom bar
+
+    private var bottomBar: some View {
+        HStack(spacing: 4) {
+            Button(action: openAccount) {
+                HStack(spacing: 12) {
+                    Circle()
+                        .fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 36, height: 36)
+                        .overlay {
+                            if let initial = account?.displayName.trimmingCharacters(in: .whitespaces).first {
+                                Text(String(initial).uppercased())
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.white)
+                            } else {
+                                LXIcon(name: .sparkle, size: 16, color: .white, stroke: 1.8)
+                            }
+                        }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(account?.displayName ?? String(localized: "drawer_account_signed_out_title"))
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(t.text)
+                            .lineLimit(1)
+                        Text(account?.email ?? String(localized: "drawer_account_signed_out_subtitle"))
+                            .font(.system(size: 11.5))
+                            .foregroundColor(t.text4)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("drawer.account")
+            bottomIconButton(icon: .terminal, label: "settings_linux_section_terminal", identifier: "drawer.terminal", action: openTerminal)
+            bottomIconButton(icon: .cog, label: "settings_title_main", identifier: "drawer.settings", action: openSettings)
+        }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .overlay(Rectangle().frame(height: 0.5).foregroundColor(t.border), alignment: .top)
     }
 
-    private var globalSessionsIncludingScheduled: [ProjectSessionSummary] {
-        var rows = projectStore.globalSessions
-        var seen = Set(rows.map(\.sessionId))
-        for session in cronState.generatedSessions where session.projectID == nil {
-            guard seen.insert(session.id).inserted else { continue }
-            rows.append(ProjectSessionSummary(sessionId: session.id, title: session.title, messageCount: 0,
-                relativeTime: formatCronEpoch(session.updatedAtMs),
-                updatedAt: Date(timeIntervalSince1970: Double(session.updatedAtMs) / 1000), mode: .code))
+    private func bottomIconButton(
+        icon: LXIconName,
+        label: LocalizedStringKey,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            LXIcon(name: icon, size: 20, color: t.text2, stroke: 1.7)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
         }
-        return rows
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
+}
 
-    private func selectWorkspace(_ scope: ConversationScope) {
-        if let mode = section.sessionMode {
-            onModeChanged?(mode)
-        }
-        switch scope {
-        case .global, .scheduled:
-            onSelectProject(nil)
-        case let .project(id):
-            onSelectProject(id)
-        }
-    }
-
-    private func selectSession(_ sessionID: String, in scope: ConversationScope) {
-        switch scope {
-        case .global, .scheduled:
-            if let mode = section.sessionMode { onModeChanged?(mode) }
-            onSelectSession(nil, sessionID)
-        case let .project(id):
-            if let mode = section.sessionMode { onModeChanged?(mode) }
-            onSelectSession(id, sessionID)
+extension RecentsFilter {
+    var title: String {
+        switch self {
+        case .all: String(localized: "drawer_filter_all")
+        case .chat: String(localized: "session_mode_chat")
+        case .code: String(localized: "session_mode_code")
         }
     }
+}
 
-    private func startNewConversation(in scope: ConversationScope) {
-        if let mode = section.sessionMode {
-            onModeChanged?(mode)
-        }
-        switch scope {
-        case .global, .scheduled:
-            onNewChat(nil)
-        case let .project(id):
-            onNewChat(id)
+extension RecentBucket {
+    var title: String {
+        switch self {
+        case .pinned: String(localized: "drawer_recents_pinned")
+        case .today: String(localized: "drawer_recents_today")
+        case .yesterday: String(localized: "session_relative_yesterday")
+        case .lastWeek: String(localized: "drawer_recents_week")
+        case .earlier: String(localized: "drawer_recents_earlier")
         }
     }
+}
 
-    private func createInternalProject() {
-        Task { @MainActor in
-            do {
-                let project = try await projectStore.createInternal(name: createProjectName)
-                onSelectProject(project.id)
-            } catch {
-                projectStore.errorMessage = error.localizedDescription
-            }
+extension SessionMode {
+    var title: String {
+        switch self {
+        case .chat: String(localized: "session_mode_chat")
+        case .code: String(localized: "session_mode_code")
         }
     }
 
-    private func handleFolderSelection(_ result: Result<[URL], Error>) {
-        guard case let .success(urls) = result, let url = urls.first else {
-            if case let .failure(error) = result {
-                projectStore.errorMessage = error.localizedDescription
-            }
-            return
+    /// The mode's identifying colour: accent for Chat, the teal accent for Code.
+    func color(_ palette: Palette) -> Color {
+        switch self {
+        case .chat: palette.accent
+        case .code: palette.accent3
         }
-        switch pickerMode {
-        case .importProject:
-            Task { @MainActor in
-                do {
-                    let project = try await projectStore.importExternal(name: url.lastPathComponent, directoryURL: url)
-                    onSelectProject(project.id)
-                } catch {
-                    projectStore.errorMessage = error.localizedDescription
-                }
-            }
-        case let .reauthorize(projectID):
-            projectStore.reauthorize(projectId: projectID, directoryURL: url)
-        }
+    }
+
+    @ViewBuilder
+    func glyph(_ palette: Palette, size: CGFloat) -> some View {
+        LXIcon(name: self == .chat ? .message : .terminal, size: size, color: color(palette), stroke: 1.8)
+            .frame(width: size + 4, height: size + 4)
     }
 }

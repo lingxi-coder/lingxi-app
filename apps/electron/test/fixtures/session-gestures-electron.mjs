@@ -9,19 +9,104 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: true, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  let inputPhase = 'startup';
+  let lastSentMouse = null;
+  const inputTrace = [];
+  const traceInput = (kind, details = {}) => {
+    inputTrace.push({ at: Date.now(), phase: inputPhase, kind, focused: window.isFocused(),
+      ...(process.platform === 'darwin' ? { appActive: app.isActive() } : {}), ...details });
+    if (inputTrace.length > 120) inputTrace.shift();
+  };
+  window.on('focus', () => traceInput('window-focus'));
+  window.on('blur', () => traceInput('window-blur'));
+  window.webContents.on('before-mouse-event', (_event, mouse) => traceInput('before-mouse-event', {
+    type: mouse.type, x: mouse.x, y: mouse.y, globalX: mouse.globalX, globalY: mouse.globalY,
+    button: mouse.button, clickCount: mouse.clickCount,
+  }));
+  window.webContents.on('input-event', (_event, input) => traceInput('webContents-input-event', {
+    type: input.type, x: input.x, y: input.y, key: input.key, button: input.button,
+  }));
   try {
     await window.loadURL(url);
     await configureFixtureWindow(window);
     const run = script => window.webContents.executeJavaScript(script);
+    await run(`(() => {
+      window.sessionGesturesInputTrace = [];
+      for (const type of ['pointerdown', 'pointerup', 'pointermove', 'pointercancel', 'pointerover', 'pointerout',
+        'mousedown', 'mouseup', 'mousemove', 'mouseover', 'mouseout', 'click', 'contextmenu']) {
+        document.addEventListener(type, event => {
+          const target = event.target instanceof Element ? event.target : null;
+          const session = target?.closest('[data-session-id]');
+          const menu = target?.closest('[role="menu"]');
+          const trace = window.sessionGesturesInputTrace;
+          trace.push({ at: Date.now(), type, trusted: event.isTrusted, targetTag: target?.tagName,
+            targetClass: typeof target?.className === 'string' ? target.className : '',
+            sessionId: session?.dataset.sessionId, menuLabel: menu?.getAttribute('aria-label'),
+            clientX: event.clientX, clientY: event.clientY, pointerId: event.pointerId,
+            button: event.button, buttons: event.buttons, documentHasFocus: document.hasFocus() });
+          if (trace.length > 120) trace.shift();
+        }, true);
+      }
+    })()`);
+    const diagnosticSnapshot = async () => {
+      let renderer;
+      try {
+        renderer = await run(`(() => {
+          const lastSentMouse = ${JSON.stringify(lastSentMouse)};
+          const rect = element => {
+            if (!element) return null;
+            const bounds = element.getBoundingClientRect();
+            return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+          };
+          const rows = [...document.querySelectorAll('.sidebar-tree-row')].map(row => {
+            const button = row.querySelector('[data-session-id]');
+            return { sessionId: button?.dataset.sessionId, title: button?.title,
+              rowBounds: rect(row), buttonBounds: rect(button), rowHovered: row.matches(':hover'),
+              buttonHovered: button?.matches(':hover'), dragging: row.dataset.dragging,
+              dragTarget: row.dataset.dragTarget };
+          });
+          const hit = lastSentMouse ? document.elementFromPoint(lastSentMouse.x, lastSentMouse.y) : null;
+          return {
+            documentHasFocus: document.hasFocus(),
+            activeElement: document.activeElement && { tag: document.activeElement.tagName,
+              ariaLabel: document.activeElement.getAttribute('aria-label'),
+              sessionId: document.activeElement.dataset?.sessionId },
+            lastSentMouse, hitTarget: hit && { tag: hit.tagName, className: typeof hit.className === 'string' ? hit.className : '',
+              sessionId: hit.closest?.('[data-session-id]')?.dataset.sessionId,
+              menuLabel: hit.closest?.('[role="menu"]')?.getAttribute('aria-label') },
+            rows,
+            menus: [...document.querySelectorAll('[role="menu"]')].map(menu => ({
+              role: menu.getAttribute('role'), ariaLabel: menu.getAttribute('aria-label'),
+              className: menu.className, text: menu.innerText, bounds: rect(menu) })),
+            pointerEvents: window.sessionGesturesInputTrace.slice(-100),
+          };
+        })()`);
+      } catch (error) {
+        renderer = { snapshotError: String(error) };
+      }
+      return {
+        phase: inputPhase,
+        browserWindowFocused: window.isFocused(),
+        ...(process.platform === 'darwin' ? { appActive: app.isActive() } : {}),
+        mainInputEvents: inputTrace.slice(-100),
+        renderer,
+      };
+    };
+    const focusForInput = async phase => {
+      inputPhase = phase;
+      traceInput('focus-request');
+      if (process.platform === 'darwin') app.focus({ steal: true });
+      window.focus();
+      const deadline = Date.now() + 6000;
+      while (!window.isFocused() && Date.now() < deadline) await delay(20);
+      traceInput(window.isFocused() ? 'focus-confirmed' : 'focus-timeout');
+      if (!window.isFocused()) throw new Error(`BrowserWindow did not focus before ${phase}: ${JSON.stringify(await diagnosticSnapshot())}`);
+    };
     const wait = async expression => {
       const deadline = Date.now() + 6000;
       while (Date.now() < deadline) { if (await run(expression)) return; await delay(20); }
-      const rows = await run(`Array.from(document.querySelectorAll('.sidebar-tree-row')).map(row => ({
-        sessionId: row.querySelector('[data-session-id]')?.dataset.sessionId,
-        dragging: row.dataset.dragging,
-        dragTarget: row.dataset.dragTarget,
-      }))`);
-      throw new Error(`Timed out: ${expression}\nrows=${JSON.stringify(rows)}\n${await run('document.body.innerText')}`);
+      const snapshot = await diagnosticSnapshot();
+      throw new Error(`Timed out: ${expression}\ndiagnostics=${JSON.stringify(snapshot)}\n${await run('document.body.innerText')}`);
     };
     const selector = id => `document.querySelector('[data-session-id="${id}"]')`;
     const point = id => run(`(() => { const r = ${selector(id)}.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
@@ -32,13 +117,19 @@ async function main() {
       const hit = document.elementFromPoint(Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2));
       return hit?.closest('[data-session-id]') === button;
     })()`;
-    const input = async (type, p, extra = {}) => { window.webContents.sendInputEvent({ type, ...p, ...extra }); await delay(40); };
+    const input = async (type, p, extra = {}) => {
+      const event = { type, ...p, ...extra };
+      if (type.startsWith('mouse') && Number.isFinite(event.x) && Number.isFinite(event.y)) lastSentMouse = { x: event.x, y: event.y, type };
+      traceInput('sendInputEvent', { type, x: event.x, y: event.y, button: event.button, modifiers: event.modifiers });
+      window.webContents.sendInputEvent(event);
+      await delay(40);
+    };
     const down = p => input('mouseDown', p, { button: 'left', clickCount: 1 });
     const up = p => input('mouseUp', p, { button: 'left', clickCount: 1 });
     const click = async id => { await wait(hitTargetExpression(id)); const p = await point(id); await input('mouseMove', p); await down(p); await up(p); };
     const opened = () => run('window.sessionGesturesFixture.opened');
     await wait(`Boolean(${selector('gamma')})`);
-    window.focus();
+    await focusForInput('alpha hover, focus, and click');
     await delay(150);
     const alpha = await point('alpha');
     await input('mouseMove', { x: 600, y: 600 });
@@ -62,7 +153,7 @@ async function main() {
     assert.deepEqual(await opened(), ['alpha'], 'short click opens exactly once');
     await delay(200);
     const beta = await point('beta');
-    window.focus();
+    await focusForInput('beta long press');
     await delay(80);
     await wait(hitTargetExpression('beta'));
     await input('mouseMove', beta);
@@ -72,10 +163,11 @@ async function main() {
     await wait(`Boolean(document.querySelector('[role="menu"][aria-label="Actions for beta"]'))`);
     await up(beta);
     assert.deepEqual(await opened(), ['alpha'], 'long press does not open the session');
+    await focusForInput('dismiss beta action menu');
     await input('keyDown', {}, { keyCode: 'Escape' });
     await input('keyUp', {}, { keyCode: 'Escape' });
     await wait(`!document.querySelector('[role="menu"]')`);
-    window.focus();
+    await focusForInput('gamma drag and click');
     await delay(80);
     await input('mouseMove', { x: 600, y: 600 });
     await up(beta);
@@ -119,6 +211,7 @@ async function main() {
     assert.equal(await run('window.sessionGesturesFixture.preferences.length'), 1, 'same-row drag does not persist an order');
     await click('gamma');
     assert.deepEqual(await opened(), ['alpha', 'gamma', 'gamma']);
+    await focusForInput('pinned session long press');
     const pinned = await point('pinned');
     await input('mouseMove', pinned);
     await down(pinned);
@@ -126,11 +219,13 @@ async function main() {
     await wait(`Boolean(document.querySelector('[role="menu"][aria-label="Actions for pinned"]'))`);
     await up(pinned);
     assert.deepEqual(await opened(), ['alpha', 'gamma', 'gamma'], 'pinned session hold does not navigate');
+    await focusForInput('dismiss pinned action menu');
     await input('keyDown', {}, { keyCode: 'Escape' });
     await input('keyUp', {}, { keyCode: 'Escape' });
     await wait(`!document.querySelector('[role="menu"]')`);
     // Cancellation has no mouse sendInputEvent equivalent. Deliver it to the actual
     // captured pointer after a native mouse down, then release outside the row.
+    await focusForInput('cancel gamma pointer gesture');
     await run(`${selector('gamma')}.addEventListener('pointerdown', event => { window.fixturePointerId = event.pointerId; }, { once: true })`);
     const cancelPoint = await point('gamma');
     await input('mouseMove', cancelPoint);
@@ -143,6 +238,7 @@ async function main() {
     assert.equal(await run(`Boolean(document.querySelector('[data-dragging="true"], [role="menu"]'))`), false, 'cancel clears drag and hold');
     assert.equal(await run('window.sessionGesturesFixture.preferences.length'), 1, 'cancel does not save order');
     const opensBeforeClick = (await opened()).length;
+    await focusForInput('click after cancellation');
     await click('gamma');
     assert.equal((await opened()).length, opensBeforeClick + 1, 'new click works after cancellation');
     process.stdout.write(`${JSON.stringify({ passed: true })}\n`);

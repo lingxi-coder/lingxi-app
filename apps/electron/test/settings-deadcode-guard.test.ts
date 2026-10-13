@@ -101,8 +101,10 @@ test('a disabled Skills uninstall action keeps its reason visible and associated
   const source = readFileSync(join(root, path), 'utf8');
   const uninstallButton = buttonElements(source).find((element) => element.includes('className="extension-hub-danger"'));
   assert.ok(uninstallButton, 'the Skills details dialog should retain its Uninstall action');
-  assert.match(uninstallButton, /aria-describedby=\{uninstallDisabledReason \? 'skill-uninstall-disabled-reason' : undefined\}/);
-  assert.match(source, /uninstallDisabledReason && <span id="skill-uninstall-disabled-reason"/);
+  assert.match(uninstallButton, /disabled=\{!selectedDocument\?\.writable\}/);
+  assert.match(uninstallButton, /aria-describedby=\{uninstallDisabledReason \? 'skill-uninstall-readonly-reason' : undefined\}/);
+  assert.match(source, /uninstallDisabledReason && <div id="skill-uninstall-readonly-reason"[^>]*>\s*\{uninstallDisabledReason\}\s*<\/div>/);
+  assert.equal([...source.matchAll(/id="skill-uninstall-readonly-reason"/g)].length, 1);
 });
 
 // ---------------------------------------------------------------------------

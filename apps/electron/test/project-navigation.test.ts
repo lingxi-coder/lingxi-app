@@ -114,6 +114,8 @@ function composerBridgeFixture() {
     conversation: emptyConversation(),
     activeSession: bridge.bootstrap.activeSession,
     audioSnapshot,
+    audioRealtimeState: { phase: 'paused', detail: '实时会话已停止', generation: 0 },
+    audioRealtimeCommand: async () => undefined,
     desktop: {
       ...bridge.desktop,
       models: [],

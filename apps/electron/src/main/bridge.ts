@@ -1341,6 +1341,7 @@ export class SessionRuntime {
       hasCredentialStdin: Boolean(launch.openaiOAuth) || Object.keys(launch.providerCredentials ?? {}).length > 0
         || Object.keys(launch.pluginSecrets ?? {}).length > 0,
       trusted: launch.trusted,
+      allowInsights: launch.allowInsights,
       scheduledController: launch.scheduledController,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });

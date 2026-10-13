@@ -1084,15 +1084,23 @@ impl TurnDriver for OrchestratorTurnDriver {
     ) {
         let human = inputs.iter().any(|input| !input.is_meta);
         self.announce_engine_initiated_turn().await;
-        self.drive_turn_with_inputs(
+        let run = self.drive_turn_with_inputs(
             Utf16JsonProjection::from(""),
             Vec::new(),
             cancel,
             None,
             human,
             Some(inputs),
-        )
-        .await;
+        );
+        if human {
+            orchestrator::native_user_message_source::with_source(
+                orchestrator::native_user_message_source::human(),
+                run,
+            )
+            .await;
+        } else {
+            run.await;
+        }
     }
 
     async fn run_queued_turn(
@@ -1543,10 +1551,12 @@ mod tests {
                         goal_retry_id: None,
                         text: "first".into(),
                         is_meta: false,
+                        turn_companion: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_origin: None,
                         prompt_source: None,
                         message_id: None,
+                        trailing_history_rows: Vec::new(),
                         transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
@@ -1556,10 +1566,12 @@ mod tests {
                         goal_retry_id: None,
                         text: "second".into(),
                         is_meta: false,
+                        turn_companion: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_origin: None,
                         prompt_source: None,
                         message_id: None,
+                        trailing_history_rows: Vec::new(),
                         transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,

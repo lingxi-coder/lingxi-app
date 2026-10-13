@@ -110,6 +110,11 @@ export class SettingsStore {
     return this.settings.activeProject;
   }
 
+  /** Read the strict local Insights policy for `/insights` (defaults enabled). */
+  getInsightsAllowed(): boolean {
+    return this.settings.allowInsights ?? true;
+  }
+
   addProject(canonical: string): void {
     this.settings = withAddedProject(this.settings, canonical);
     this.persist();

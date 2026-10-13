@@ -62,6 +62,22 @@ test('settings parser fails closed and migrates legacy workspaces into bounded p
   assert.equal(explicitlyEmpty.activeProject, undefined);
 });
 
+test('local Insights policy defaults enabled and only accepts booleans', () => {
+  assert.equal(defaultSettings().allowInsights, true);
+  assert.equal(parseSettings({ version: 1 }).allowInsights, true);
+  assert.equal(parseSettings({ version: 1, allowInsights: false }).allowInsights, false);
+  assert.equal(parseSettings({ version: 1, allowInsights: 'false' }).allowInsights, true);
+});
+
+test('SettingsStore exposes the local Insights policy without publishing it to renderer settings', () => {
+  const userData = temporaryDirectory();
+  assert.equal(new SettingsStore(userData).getInsightsAllowed(), true);
+  writeFileSync(join(userData, 'settings.v1.json'), JSON.stringify({ version: 1, allowInsights: false }));
+  const store = new SettingsStore(userData);
+  assert.equal(store.getInsightsAllowed(), false);
+  assert.equal('allowInsights' in store.getPublic(), false);
+});
+
 test("parseSettings keeps 'system' and still rejects garbage", () => {
   assert.equal(parseSettings({ version: 1, theme: 'system', projects: [] }).theme, 'system');
   assert.equal(parseSettings({ version: 1, theme: 'dark', projects: [] }).theme, 'dark');
@@ -326,6 +342,14 @@ test('bridge arguments carry trust and stdin intent but never credential materia
   ]);
   assert.equal(trusted.some((argument) => argument.includes('credential-value')), false);
   assert.equal(buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', hasApiKey: false, trusted: false }).includes('--trusted-workspace'), false);
+});
+
+test('private bridge arguments carry explicit local Insights policy without a user CLI switch', () => {
+  const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: true });
+  const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: false });
+  assert.deepEqual(allowed.slice(-2), ['--host-insights-policy-gate', 'true']);
+  assert.deepEqual(denied.slice(-2), ['--host-insights-policy-gate', 'false']);
+  assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true }).includes('--host-insights-policy-gate'));
 });
 
 test('packaged bridge arguments enforce stdin-only credentials without embedding secrets', () => {

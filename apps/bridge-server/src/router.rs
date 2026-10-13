@@ -1439,6 +1439,11 @@ impl CommandRouter for EngineCommandRouter {
                         lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
                             (prompt, false)
                         }
+                        lingxi_core::host::SlashDispatchResult::RunSkillAsTurn { .. } => (
+                            "This skill expands to separate command and body messages and requires the conversation turn driver."
+                                .into(),
+                            true,
+                        ),
                         lingxi_core::host::SlashDispatchResult::ParseFailure { .. } => {
                             ("Commands are in the form `/command [args]`".into(), true)
                         }

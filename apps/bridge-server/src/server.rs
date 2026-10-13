@@ -179,6 +179,28 @@ pub trait TurnDriver: Send + Sync + 'static {
         inputs: Vec<orchestrator::QueuedPromptInput>,
         cancel: CancellationToken,
     ) {
+        // Simple test drivers may lower ordinary user rows to text, but a
+        // companion envelope or typed Native history row needs a real batch
+        // consumer. Never silently erase those fields in the fallback.
+        if inputs.iter().any(|input| {
+            input.is_meta
+                || input.turn_companion
+                || !input.trailing_history_rows.is_empty()
+                || input.goal_retry_id.is_some()
+                || input.mod_origin.is_some()
+                || input.message_origin.is_some()
+                || input.prompt_source.is_some()
+                || input.message_id.is_some()
+                || input.transcript_row_token.is_some()
+                || input.queue_priority.is_some()
+                || input.scheduled_task_id.is_some()
+                || input.scheduled_fire_id.is_some()
+        }) {
+            tracing::error!(
+                "source-preserving prompt rows require a TurnDriver batch implementation"
+            );
+            return;
+        }
         let human = inputs.iter().any(|input| !input.is_meta);
         let prompt = join_source_text(
             &inputs
@@ -274,6 +296,7 @@ type QuestionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
 struct QueuedPromptPayload {
     images: Vec<ImageRefDto>,
     turn_id: Option<u64>,
+    prompt_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
 }
 
 /// A [`ClientEventSink`] that forwards each lowered [`ClientEvent`] out as a
@@ -1277,10 +1300,19 @@ struct ModQueueDrain {
 
 struct QueuedModTurn {
     prompt: Utf16JsonProjection,
+    prompt_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
     as_user: bool,
     origin: serde_json::Value,
     generation: u64,
     cancel: CancellationToken,
+}
+
+fn skill_prompt_inputs(
+    command: Utf16JsonProjection,
+    body: Utf16JsonProjection,
+    hook_messages: Vec<Utf16JsonProjection>,
+) -> Vec<orchestrator::QueuedPromptInput> {
+    orchestrator::skill_prompt_inputs(command, body, hook_messages)
 }
 
 struct TransitionScope(Arc<AtomicBool>);
@@ -1363,6 +1395,7 @@ async fn run_queued_mod_command(
             .send(Ok(text_object_projection(prompt.clone())));
         return Some(QueuedModTurn {
             prompt,
+            prompt_inputs: None,
             as_user: pending.as_user,
             origin: if pending.as_user {
                 serde_json::json!({"kind":"plugin","name":pending.plugin,"asUser":true})
@@ -1422,7 +1455,33 @@ async fn run_queued_mod_command(
                 begin_owned_turn(active_turn, driver, None).await
             };
             queued_turn = Some(QueuedModTurn {
-                prompt,
+                prompt: Utf16JsonProjection::from(""),
+                prompt_inputs: Some(vec![orchestrator::QueuedPromptInput {
+                    text: prompt,
+                    ..Default::default()
+                }]),
+                as_user: false,
+                origin: serde_json::json!({"kind":"plugin","name":plugin}),
+                generation,
+                cancel,
+            });
+            Ok(Utf16JsonProjection::object(Vec::new())
+                .expect("generated command result is an empty object"))
+        }
+        lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } => {
+            let (generation, cancel) = if transition_owns_handoff {
+                begin_owned_turn(active_turn, driver, None).await
+            } else {
+                let _handoff = turn_handoff.lock().await;
+                begin_owned_turn(active_turn, driver, None).await
+            };
+            queued_turn = Some(QueuedModTurn {
+                prompt: Utf16JsonProjection::from(""),
+                prompt_inputs: Some(skill_prompt_inputs(command, body, hook_messages)),
                 as_user: false,
                 origin: serde_json::json!({"kind":"plugin","name":plugin}),
                 generation,
@@ -1441,20 +1500,50 @@ async fn run_queued_mod_command(
                     is_error: true,
                 })
                 .await;
-            Err(display)
-        }
-        lingxi_core::host::SlashDispatchResult::ParseFailure { .. } => {
-            Err("Commands are in the form `/command [args]`".into())
+            Err(display.string_at("").unwrap_or_default().to_owned())
         }
         lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
             Err(format!("{plugin}: queued command was not a slash command").into())
         }
+        lingxi_core::host::SlashDispatchResult::ParseFailure { input } => Err(format!(
+            "could not parse slash command {}",
+            input.string_at("").unwrap_or_default()
+        )),
     };
     for event in outcome.authority_events {
         mod_drain.events.emit(event).await;
     }
     let _ = settle.send(result);
     queued_turn
+}
+
+async fn drive_queued_mod_turn(driver: &Arc<dyn TurnDriver>, turn: QueuedModTurn) {
+    let QueuedModTurn {
+        prompt,
+        prompt_inputs,
+        as_user,
+        origin,
+        cancel,
+        ..
+    } = turn;
+    orchestrator::mod_prompt_origin::with_origin(origin, async move {
+        if let Some(inputs) = prompt_inputs {
+            let human = inputs.iter().any(|input| !input.is_meta);
+            let run = driver.run_queued_batch(inputs, cancel);
+            if human {
+                orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    run,
+                )
+                .await;
+            } else {
+                run.await;
+            }
+        } else {
+            driver.run_queued_turn(prompt, as_user, cancel).await;
+        }
+    })
+    .await;
 }
 
 /// Drain every queued MAIN-THREAD prompt as a follow-up turn, coalescing
@@ -1528,49 +1617,56 @@ async fn drain_main_thread(
                             )
                             .await
                             {
-                                orchestrator::mod_prompt_origin::with_origin(
-                                    turn.origin,
-                                    driver.run_queued_turn(turn.prompt, turn.as_user, turn.cancel),
-                                )
-                                .await;
-                                finish_turn(
-                                    active_turn,
-                                    turn.generation,
-                                    interactions,
-                                    turn_handoff,
-                                )
-                                .await;
+                                let generation = turn.generation;
+                                drive_queued_mod_turn(driver, turn).await;
+                                finish_turn(active_turn, generation, interactions, turn_handoff)
+                                    .await;
                             }
                         }
                         continue;
                     }
                     if let Some(payload) = payload {
                         let (generation, cancel) = owned_turn.expect("complete prompt owns a turn");
-                        let prompt = cmd
-                            .text_projection()
-                            .cloned()
-                            .unwrap_or_else(|| Utf16JsonProjection::from(""));
-                        tag_loop_tick_in_flight(loop_runtime, false, &prompt);
                         let native_source =
                             if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
                                 orchestrator::native_user_message_source::human()
                             } else {
                                 Default::default()
                             };
-                        orchestrator::native_user_message_source::with_source(
-                            native_source,
-                            orchestrator::mod_prompt_origin::with_origin(
-                                serde_json::json!({"kind":"bridge"}),
-                                driver.run_queued_turn_with_images(
-                                    cmd.text_projection()
-                                        .cloned()
-                                        .unwrap_or_else(|| Utf16JsonProjection::from("")),
-                                    payload.images,
-                                    cancel,
+                        if let Some(inputs) = payload.prompt_inputs {
+                            if payload.images.is_empty() {
+                                orchestrator::native_user_message_source::with_source(
+                                    native_source,
+                                    orchestrator::mod_prompt_origin::with_origin(
+                                        serde_json::json!({"kind":"bridge"}),
+                                        driver.run_queued_batch(inputs, cancel),
+                                    ),
+                                )
+                                .await;
+                            } else {
+                                tracing::error!(
+                                    "queued prompt batch cannot also carry image attachments"
+                                );
+                            }
+                        } else {
+                            let prompt = cmd
+                                .text_projection()
+                                .cloned()
+                                .unwrap_or_else(|| Utf16JsonProjection::from(""));
+                            tag_loop_tick_in_flight(loop_runtime, false, &prompt);
+                            orchestrator::native_user_message_source::with_source(
+                                native_source,
+                                orchestrator::mod_prompt_origin::with_origin(
+                                    serde_json::json!({"kind":"bridge"}),
+                                    driver.run_queued_turn_with_images(
+                                        prompt,
+                                        payload.images,
+                                        cancel,
+                                    ),
                                 ),
-                            ),
-                        )
-                        .await;
+                            )
+                            .await;
+                        }
                         finish_turn(active_turn, generation, interactions, turn_handoff).await;
                         continue;
                     }
@@ -1673,6 +1769,7 @@ async fn drain_main_thread(
                     .then(|| command.uuid.clone()),
                 text,
                 is_meta: command.is_meta || command.source != QueueSource::PromptInput,
+                turn_companion: false,
                 mod_origin: Some(match command.source {
                     QueueSource::PromptInput => serde_json::json!({"kind":"bridge"}),
                     QueueSource::Cron => serde_json::json!({"kind":"scheduled-trigger"}),
@@ -1684,6 +1781,7 @@ async fn drain_main_thread(
                     .and_then(|source| source.message_origin.clone()),
                 prompt_source: None,
                 message_id: None,
+                trailing_history_rows: Vec::new(),
                 transcript_row_token: None,
                 queue_priority: (command.priority == QueuePriority::Later)
                     .then(|| "later".to_string()),
@@ -1906,18 +2004,10 @@ impl BridgeConnection {
                             let turn_handoff = turn_handoff.clone();
                             let mod_drain = mod_drain.clone();
                             let task = tokio::spawn(async move {
-                                orchestrator::mod_prompt_origin::with_origin(
-                                    turn.origin,
-                                    driver.run_queued_turn(turn.prompt, turn.as_user, turn.cancel),
-                                )
-                                .await;
-                                finish_turn(
-                                    &active_turn,
-                                    turn.generation,
-                                    &interactions,
-                                    &turn_handoff,
-                                )
-                                .await;
+                                let generation = turn.generation;
+                                drive_queued_mod_turn(&driver, turn).await;
+                                finish_turn(&active_turn, generation, &interactions, &turn_handoff)
+                                    .await;
                                 loop {
                                     drain_main_thread(
                                         &driver,
@@ -2767,6 +2857,21 @@ impl BridgeConnection {
                         drop(_handoff);
                         self.handle_send_prompt(prompt, Vec::new(), turn_id).await;
                     }
+                    Some(lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+                        command,
+                        body,
+                        hook_messages,
+                    }) => {
+                        // Preserve the Native header/body/hook ordering as typed
+                        // rows through both immediate admission and the busy queue.
+                        drop(_transition);
+                        drop(_handoff);
+                        self.handle_prompt_batch_seed(
+                            skill_prompt_inputs(command, body, hook_messages),
+                            turn_id,
+                        )
+                        .await;
+                    }
                     // Display-only / unknown result: surface the SAME dispatch
                     // result's text directly. We must NOT re-`route()` here —
                     // `route(RunSlashCommand)` calls `dispatcher.dispatch()` a
@@ -2986,6 +3091,37 @@ impl BridgeConnection {
             client::protocol::controls::ReasoningSelectionDto,
         )>,
     ) {
+        self.handle_prompt_seed_with_batch(text, images, turn_id, scheduled, None)
+            .await;
+    }
+
+    async fn handle_prompt_batch_seed(
+        &self,
+        inputs: Vec<orchestrator::QueuedPromptInput>,
+        turn_id: Option<u64>,
+    ) {
+        self.handle_prompt_seed_with_batch(
+            Utf16JsonProjection::from(""),
+            Vec::new(),
+            turn_id,
+            None,
+            Some(inputs),
+        )
+        .await;
+    }
+
+    async fn handle_prompt_seed_with_batch(
+        &self,
+        text: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
+        turn_id: Option<u64>,
+        scheduled: Option<(
+            String,
+            String,
+            client::protocol::controls::ReasoningSelectionDto,
+        )>,
+        queued_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
+    ) {
         // A new seed turn is intervening work, even if the prior loop tick
         // already finished and its keepalive consumed the in-flight marker.
         self.loop_runtime.invalidate_noop_streak();
@@ -3012,14 +3148,18 @@ impl BridgeConnection {
                 return;
             }
             let mut command = prompt_command(text);
-            if !images.is_empty() || turn_id.is_some() {
+            if !images.is_empty() || turn_id.is_some() || queued_inputs.is_some() {
                 // `Later` is not consumed by the SDK's text-only mid-turn
                 // adapter. The connection restores this payload at follow-up
                 // admission instead of silently dropping images or correlation.
                 command.priority = QueuePriority::Later;
                 self.queued_prompt_payloads.lock().await.insert(
                     command.uuid.clone(),
-                    QueuedPromptPayload { images, turn_id },
+                    QueuedPromptPayload {
+                        images,
+                        turn_id,
+                        prompt_inputs: queued_inputs,
+                    },
                 );
             }
             self.queue.enqueue(command).await;
@@ -3069,6 +3209,21 @@ impl BridgeConnection {
                         error,
                     })
                     .await;
+            } else if let Some(inputs) = queued_inputs {
+                let human = inputs.iter().any(|input| !input.is_meta);
+                let native_source = if human {
+                    orchestrator::native_user_message_source::human()
+                } else {
+                    Default::default()
+                };
+                orchestrator::native_user_message_source::with_source(
+                    native_source,
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"bridge"}),
+                        driver.run_queued_batch(inputs, seed_cancel),
+                    ),
+                )
+                .await;
             } else {
                 orchestrator::native_user_message_source::with_source(
                     orchestrator::native_user_message_source::human(),

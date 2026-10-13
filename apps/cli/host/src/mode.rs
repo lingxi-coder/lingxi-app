@@ -333,10 +333,19 @@ fn slash_model_prompt(
     result: lingxi_core::host::SlashDispatchResult,
     fallback_input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
-) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+) -> Option<SlashModelTurn> {
     use lingxi_core::host::SlashDispatchResult;
     match result {
-        SlashDispatchResult::RunAsTurn { prompt } => Some(prompt),
+        SlashDispatchResult::RunAsTurn { prompt } => Some(SlashModelTurn::Prompt(prompt)),
+        SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } => Some(SlashModelTurn::Batch(skill_prompt_inputs(
+            command,
+            body,
+            hook_messages,
+        ))),
         SlashDispatchResult::Handled { display } => {
             let _ = tx.send(tui::TurnEvent::SystemNotice {
                 body: client::protocol::text::ClientTextDto::from_code_units(
@@ -349,9 +358,42 @@ fn slash_model_prompt(
         // Unknown slash commands and parser failures remain ordinary user
         // prompts in Claude Code. The dispatcher result carries the original
         // source only for ParseFailure; use the composer source for Unknown.
-        SlashDispatchResult::Unknown { .. } => Some(fallback_input),
-        SlashDispatchResult::ParseFailure { input } => Some(input),
+        SlashDispatchResult::Unknown { .. } => Some(SlashModelTurn::Prompt(fallback_input)),
+        SlashDispatchResult::ParseFailure { input } => Some(SlashModelTurn::Prompt(input)),
         SlashDispatchResult::NotASlashCommand => None,
+    }
+}
+
+enum SlashModelTurn {
+    Prompt(lingxi_core::types::utf16_json::Utf16JsonProjection),
+    Batch(Vec<orchestrator::QueuedPromptInput>),
+}
+
+fn skill_prompt_inputs(
+    command: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    body: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    hook_messages: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Vec<orchestrator::QueuedPromptInput> {
+    orchestrator::skill_prompt_inputs(command, body, hook_messages)
+}
+
+#[async_trait::async_trait]
+trait SourceBatchRunner: Send + Sync {
+    async fn run_prompt_batch(
+        &self,
+        inputs: Vec<orchestrator::QueuedPromptInput>,
+        cancel: CancellationToken,
+    ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>;
+}
+
+#[async_trait::async_trait]
+impl SourceBatchRunner for orchestrator::ConversationOrchestrator {
+    async fn run_prompt_batch(
+        &self,
+        inputs: Vec<orchestrator::QueuedPromptInput>,
+        cancel: CancellationToken,
+    ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+        self.run_queued_prompt_batch(inputs, cancel).await
     }
 }
 
@@ -735,6 +777,7 @@ async fn dequeue_after_slash_dispatch(
 async fn drain_teammate_prompts(
     queue: &msgqueue::MessageQueueManager,
     orchestrator: &dyn OrchestratorHandle,
+    source_batch_runner: Option<&dyn SourceBatchRunner>,
     turn_tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
     pending_slashes: &HostPromptQueueState,
 ) {
@@ -771,7 +814,8 @@ async fn drain_teammate_prompts(
             }
             continue;
         }
-        let mut mod_prompt = None;
+        let mut mod_prompt: Option<Ujp> = None;
+        let mut queued_inputs: Option<Vec<orchestrator::QueuedPromptInput>> = None;
         let mut mod_settle = None;
         let mut mod_as_user = false;
         let mut mod_origin = None;
@@ -823,8 +867,16 @@ async fn drain_teammate_prompts(
                     mod_prompt = Some(prompt);
                     mod_settle = Some(settle);
                 }
+                lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+                    command,
+                    body,
+                    hook_messages,
+                } => {
+                    queued_inputs = Some(skill_prompt_inputs(command, body, hook_messages));
+                    mod_settle = Some(settle);
+                }
                 lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
-                    let _ = settle.send(Err(display));
+                    let _ = settle.send(Err(display.string_at("").unwrap_or_default().to_owned()));
                     continue;
                 }
                 lingxi_core::host::SlashDispatchResult::ParseFailure { input: _ } => {
@@ -839,6 +891,19 @@ async fn drain_teammate_prompts(
                     continue;
                 }
             }
+        }
+        if queued_inputs.is_some() && source_batch_runner.is_none() {
+            if let Some(settle) = mod_settle.take() {
+                let _ = settle.send(Err("source-preserving prompt batch runner is unavailable"
+                    .to_owned()
+                    .into()));
+            }
+            let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
+                body: "Could not run prompt: the source-preserving batch runner is unavailable"
+                    .into(),
+                is_error: true,
+            });
+            continue;
         }
         if let Some(host) = pending_slashes.loop_host.get() {
             host.refresh_session().await;
@@ -905,12 +970,20 @@ async fn drain_teammate_prompts(
             });
             let in_human_turn = mod_as_user
                 || command.source == msgqueue::QueueSource::PromptInput && !command.is_meta;
-            let native_source = cli_native_source_for_queued_prompt(
-                command.source,
-                command.is_meta,
-                mod_as_user,
-            );
-            let turn_result = if let Some(row_token) = transcript_row_token {
+            let native_source =
+                cli_native_source_for_queued_prompt(command.source, command.is_meta, mod_as_user);
+            let turn_result = if let Some(inputs) = queued_inputs {
+                let runner = source_batch_runner
+                    .expect("batch runner availability was checked before turn admission");
+                orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    orchestrator::mod_prompt_origin::with_origin(
+                        origin,
+                        runner.run_prompt_batch(inputs, cancel),
+                    ),
+                )
+                .await
+            } else if let Some(row_token) = transcript_row_token {
                 orchestrator::native_user_message_source::with_source(
                     native_source,
                     orchestrator::mod_prompt_origin::with_origin(
@@ -953,6 +1026,7 @@ async fn acquire_ordered_host_turn<'a>(
     gate: &'a tokio::sync::Mutex<()>,
     queue: &msgqueue::MessageQueueManager,
     orchestrator: &dyn OrchestratorHandle,
+    source_batch_runner: Option<&dyn SourceBatchRunner>,
     tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
     state: &HostPromptQueueState,
     reservation: PendingSlashReservation,
@@ -964,7 +1038,7 @@ async fn acquire_ordered_host_turn<'a>(
     )
     .await?;
     let guard = unless_cancelled(cancel, gate.lock()).await?;
-    drain_teammate_prompts(queue, orchestrator, tx, state).await;
+    drain_teammate_prompts(queue, orchestrator, source_batch_runner, tx, state).await;
     if cancel.is_cancelled() {
         return None;
     }
@@ -2004,6 +2078,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 &turn_gate,
                 &queue,
                 orch.as_ref(),
+                Some(orch.as_ref()),
                 &tx,
                 &pending_slashes,
                 reservation,
@@ -2022,15 +2097,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
             // Image-aware entry: with no images this is byte-identical to
             // `run_turn_streaming_with_cancel`; with pasted/attached images
             // they become `ContentBlock::Image` on the user message.
-            if let Err(e) = with_cli_composer_native_source(
-                orchestrator::mod_prompt_origin::with_origin(
+            if let Err(e) =
+                with_cli_composer_native_source(orchestrator::mod_prompt_origin::with_origin(
                     serde_json::json!({"kind":"composer"}),
                     orch.run_turn_streaming_with_images_and_row_token(
                         &prompt, &images, cancel, row_token,
                     ),
-                ),
-            )
-            .await
+                ))
+                .await
             {
                 // A HARD terminal error (rate limit, auth, model-unavailable, …)
                 // propagates as `Err` WITHOUT being surfaced as an assistant
@@ -2049,7 +2123,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 host.finish(&cancel_probe).await;
             }
             queue.clear_active_turn().await;
-            drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+            drain_teammate_prompts(
+                &queue,
+                orch.as_ref(),
+                Some(orch.as_ref()),
+                &tx,
+                &pending_slashes,
+            )
+            .await;
         });
     };
     let queued_prompt_orch = concrete_orchestrator.clone();
@@ -2098,7 +2179,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
             // A local slash may finish before this enqueue task is polled.
             // The same gate/barrier makes either ordering drain exactly once.
             if let Ok(_guard) = gate.try_lock() {
-                drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+                drain_teammate_prompts(
+                    &queue,
+                    orch.as_ref(),
+                    Some(orch.as_ref()),
+                    &tx,
+                    &pending_slashes,
+                )
+                .await;
             }
         });
     };
@@ -2702,7 +2790,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     // Local results are responsive and own no model lifecycle.
                     // Ordered reservations still protect any earlier prompts.
                     if let Ok(_guard) = turn_gate.try_lock() {
-                        drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+                        drain_teammate_prompts(
+                            &queue,
+                            orch.as_ref(),
+                            Some(orch.as_ref()),
+                            &tx,
+                            &pending_slashes,
+                        )
+                        .await;
                     }
                     discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                     return;
@@ -2711,6 +2806,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     &turn_gate,
                     &queue,
                     orch.as_ref(),
+                    Some(orch.as_ref()),
                     &tx,
                     &pending_slashes,
                     reservation,
@@ -2728,12 +2824,29 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     let _ = host.begin(None, true);
                 }
                 let cancel_probe = token.clone();
-                if let Err(e) = orchestrator::mod_prompt_origin::with_origin(
-                    serde_json::json!({"kind":"composer"}),
-                    orch.run_turn_streaming_with_images(&prompt, &[], token),
-                )
-                .await
-                {
+                let turn_result = match prompt {
+                    SlashModelTurn::Prompt(prompt) => {
+                        orchestrator::native_user_message_source::with_source(
+                            orchestrator::native_user_message_source::human(),
+                            orchestrator::mod_prompt_origin::with_origin(
+                                serde_json::json!({"kind":"composer"}),
+                                orch.run_turn_streaming_with_images(&prompt, &[], token),
+                            ),
+                        )
+                        .await
+                    }
+                    SlashModelTurn::Batch(inputs) => {
+                        orchestrator::native_user_message_source::with_source(
+                            orchestrator::native_user_message_source::human(),
+                            orchestrator::mod_prompt_origin::with_origin(
+                                serde_json::json!({"kind":"composer"}),
+                                orch.run_queued_prompt_batch(inputs, token),
+                            ),
+                        )
+                        .await
+                    }
+                };
+                if let Err(e) = turn_result {
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
                         lingxi_core::host::TurnOutcome::EndTurn,
@@ -2744,7 +2857,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 }
                 queue.clear_active_turn().await;
                 drop(completion);
-                drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+                drain_teammate_prompts(
+                    &queue,
+                    orch.as_ref(),
+                    Some(orch.as_ref()),
+                    &tx,
+                    &pending_slashes,
+                )
+                .await;
             });
         };
     let on_rewake_peer = move || {
@@ -3125,7 +3245,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
             loop {
                 tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
                 if let Ok(_guard) = gate.try_lock() {
-                    drain_teammate_prompts(&queue, orch.as_ref(), &tx, &state).await;
+                    drain_teammate_prompts(&queue, orch.as_ref(), Some(orch.as_ref()), &tx, &state)
+                        .await;
                 }
             }
         })
@@ -3165,7 +3286,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                 }
                 if let Ok(_guard) = teammate_turn_gate.try_lock() {
-                    drain_teammate_prompts(&queue, orch.as_ref(), &teammate_turn_tx, &pending_slashes).await;
+                    drain_teammate_prompts(&queue, orch.as_ref(), Some(orch.as_ref()), &teammate_turn_tx, &pending_slashes).await;
                 }
             }
         });
@@ -5539,11 +5660,8 @@ mod tests {
         );
         assert!(composer.prompt_source.is_none());
 
-        let queued = cli_native_source_for_queued_prompt(
-            msgqueue::QueueSource::PromptInput,
-            false,
-            false,
-        );
+        let queued =
+            cli_native_source_for_queued_prompt(msgqueue::QueueSource::PromptInput, false, false);
         assert_eq!(
             queued
                 .message_origin
@@ -6129,7 +6247,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            drain_teammate_prompts(&queue, &RecordingHostTurns::default(), &tx, &state),
+            drain_teammate_prompts(&queue, &RecordingHostTurns::default(), None, &tx, &state),
         )
         .await
         .unwrap();
@@ -6181,7 +6299,7 @@ mod tests {
         assert!(!queued.is_meta);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let turns = RecordingHostTurns::default();
-        drain_teammate_prompts(&queue, &turns, &tx, &state).await;
+        drain_teammate_prompts(&queue, &turns, None, &tx, &state).await;
         assert_eq!(
             call.await.unwrap().unwrap(),
             harness_runtime::headless::Utf16JsonProjection::from_serde_value(
@@ -6223,7 +6341,7 @@ mod tests {
             let orchestrator = orchestrator.clone();
             let queue = queue.clone();
             let state = state.clone();
-            async move { drain_teammate_prompts(&queue, orchestrator.as_ref(), &tx, &state).await }
+            async move { drain_teammate_prompts(&queue, orchestrator.as_ref(), None, &tx, &state).await }
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
             .await
@@ -6411,7 +6529,7 @@ mod tests {
         drop(publication);
         let orch = RecordingHostTurns::default();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        drain_teammate_prompts(&queue, &orch, &tx, &state).await;
+        drain_teammate_prompts(&queue, &orch, None, &tx, &state).await;
         assert_eq!(*orch.0.lock().unwrap(), ["B"]);
     }
 
@@ -6495,7 +6613,7 @@ mod tests {
         let publication = PendingPromptEnqueue::new(&state, &command.uuid, cancel.clone());
         let second = PendingSlashReservation::new(&state);
         let first_guard =
-            acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, first, &cancel)
+            acquire_ordered_host_turn(&gate, &queue, &orch, None, &tx, &state, first, &cancel)
                 .await
                 .unwrap();
         orch.run_turn_streaming_with_cancel(&"slash1".into(), cancel.clone())
@@ -6503,7 +6621,7 @@ mod tests {
             .unwrap();
         drop(first_guard);
         let second_start =
-            acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, second, &cancel);
+            acquire_ordered_host_turn(&gate, &queue, &orch, None, &tx, &state, second, &cancel);
         tokio::pin!(second_start);
         std::future::poll_fn(|cx| {
             assert!(second_start.as_mut().poll(cx).is_pending());
@@ -6535,7 +6653,8 @@ mod tests {
         let publication = PendingPromptEnqueue::new(&state, &command.uuid, cancel.clone());
         drop(local);
         let direct = PendingSlashReservation::new(&state);
-        let start = acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, direct, &cancel);
+        let start =
+            acquire_ordered_host_turn(&gate, &queue, &orch, None, &tx, &state, direct, &cancel);
         tokio::pin!(start);
         std::future::poll_fn(|cx| {
             assert!(start.as_mut().poll(cx).is_pending());
@@ -6698,41 +6817,66 @@ mod tests {
         .is_none());
         assert!(rx.try_recv().is_err());
         let original = lingxi_core::types::utf16_json::Utf16JsonProjection::from("/   ");
-        assert_eq!(
-            slash_model_prompt(
-                lingxi_core::host::SlashDispatchResult::ParseFailure {
-                    input: original.clone(),
-                },
-                "/   ".into(),
-                &tx,
-            ),
-            Some(original)
-        );
-        assert_eq!(
-            slash_model_prompt(
-                lingxi_core::host::SlashDispatchResult::Unknown {
-                    name: "unknown".into(),
-                    display: "unknown slash".into(),
-                },
-                "/unknown fixed".into(),
-                &tx,
-            ),
-            Some("/unknown fixed".into())
-        );
+        let Some(SlashModelTurn::Prompt(parse_input)) = slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::ParseFailure {
+                input: original.clone(),
+            },
+            "/   ".into(),
+            &tx,
+        ) else {
+            panic!("parse failure should stay a source-preserving user turn");
+        };
+        assert_eq!(parse_input, original);
+        let Some(SlashModelTurn::Prompt(unknown_input)) = slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::Unknown {
+                name: "unknown".into(),
+                display: "unknown slash".into(),
+            },
+            "/unknown fixed".into(),
+            &tx,
+        ) else {
+            panic!("unknown command should retain the original composer input");
+        };
+        assert_eq!(unknown_input.string_at(""), Some("/unknown fixed"));
         assert!(rx.try_recv().is_err());
-        assert_eq!(
-            slash_model_prompt(
-                lingxi_core::host::SlashDispatchResult::RunAsTurn {
-                    prompt: "queued".into()
-                },
-                "fallback".into(),
-                &tx
-            )
-            .and_then(|prompt| prompt.string_at("").map(str::to_owned))
-            .as_deref(),
-            Some("queued")
-        );
+        let Some(SlashModelTurn::Prompt(run_as_turn_prompt)) = slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::RunAsTurn {
+                prompt: "queued".into(),
+            },
+            "fallback".into(),
+            &tx,
+        ) else {
+            panic!("expanded prompt should remain a typed input row");
+        };
+        assert_eq!(run_as_turn_prompt.string_at(""), Some("queued"));
         assert!(rx.try_recv().is_err());
+
+        let hook_row: lingxi_core::types::utf16_json::Utf16JsonProjection =
+            r#"{"type":"attachment","attachment":{"type":"hook_system_message"}}"#.into();
+        let Some(SlashModelTurn::Batch(skill_inputs)) = slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+                command: "<command-name>/demo</command-name>".into(),
+                body: "Base directory: /skills/demo\n\nExpanded".into(),
+                hook_messages: vec![hook_row.clone()],
+            },
+            "/demo".into(),
+            &tx,
+        ) else {
+            panic!("skill expansion must remain a typed input batch");
+        };
+        assert_eq!(skill_inputs.len(), 2);
+        assert_eq!(
+            skill_inputs[0].text.string_at(""),
+            Some("<command-name>/demo</command-name>")
+        );
+        assert!(!skill_inputs[0].is_meta);
+        assert_eq!(
+            skill_inputs[1].text.string_at(""),
+            Some("Base directory: /skills/demo\n\nExpanded")
+        );
+        assert!(skill_inputs[1].is_meta);
+        assert!(skill_inputs[1].turn_companion);
+        assert_eq!(skill_inputs[1].trailing_history_rows, vec![hook_row]);
     }
 
     #[tokio::test]

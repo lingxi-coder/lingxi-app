@@ -414,6 +414,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         workspace,
         sessionId: ref.sessionId,
         trusted: settings.isTrustedWorkspace(workspace),
+        allowInsights: settings.getInsightsAllowed(),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         pluginSecrets,

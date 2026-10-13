@@ -16,6 +16,16 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+/// Source-preserving runner for slash commands that expand into typed prompt rows.
+pub type SkillBatchTurnFn = Arc<
+    dyn Fn(
+            Vec<orchestrator::QueuedPromptInput>,
+            CancellationToken,
+        ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>
+        + Send
+        + Sync,
+>;
+
 /// Outcome returned by [`step`] — tells the outer loop what to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -104,6 +114,7 @@ where
         sigint,
         idle,
         None,
+        None,
         run_turn_fn,
     )
     .await
@@ -119,6 +130,7 @@ pub async fn step_with_notifications<W>(
     sigint: &SigintSource,
     idle: Option<&dyn IdleNotifier>,
     notifications: Option<&dyn TaskNotificationWake>,
+    skill_batch_fn: Option<SkillBatchTurnFn>,
     run_turn_fn: impl Fn(
         Utf16JsonProjection,
         CancellationToken,
@@ -264,7 +276,11 @@ where
             dispatcher.dispatch(source_input.clone()),
         )
         .await;
-        let prompt = match res {
+        enum ModelTurn {
+            Prompt(Utf16JsonProjection),
+            Skill(Vec<orchestrator::QueuedPromptInput>),
+        }
+        let model_turn = match res {
             SlashDispatchResult::Handled { display } => {
                 sink.command_output(input, display.string_at("").unwrap_or_default())
                     .await;
@@ -274,38 +290,63 @@ where
             // turn: feed the expanded prompt to the model instead of printing it
             // (claude-code `type: "prompt"`). This makes a typed `/loop 5m /foo`
             // actually schedule the cron + execute now.
-            SlashDispatchResult::RunAsTurn { prompt } => Some(prompt),
+            SlashDispatchResult::RunAsTurn { prompt } => Some(ModelTurn::Prompt(prompt)),
+            SlashDispatchResult::RunSkillAsTurn {
+                command,
+                body,
+                hook_messages,
+            } => Some(ModelTurn::Skill(orchestrator::skill_prompt_inputs(
+                command,
+                body,
+                hook_messages,
+            ))),
             // Native CLI falls through to a normal model turn for malformed
             // slash-only input and unknown slash commands. Keep the exact input
             // line as the user prompt; the dispatcher’s display string is a
             // local suggestion, not the model-visible content.
             SlashDispatchResult::ParseFailure { .. } | SlashDispatchResult::Unknown { .. } => {
-                Some(source_input)
+                Some(ModelTurn::Prompt(source_input))
             }
             SlashDispatchResult::NotASlashCommand => {
                 // Dispatcher contract: won't happen for "/" prefixed input.
                 None
             }
         };
-        if let Some(prompt) = prompt {
-            let token = CancellationToken::new();
-            let _sigint_guard = sigint.arm_for_turn(token.clone());
-            sink.turn_start().await;
-            let outcome = run_turn_fn(prompt, token).await;
-            _sigint_guard.abort();
-            match outcome {
-                Ok(TurnOutcome::EndTurn) => {}
-                Ok(TurnOutcome::MaxTurns) => {
-                    sink.text("[turn ended: reached MAX_TURNS_PER_CONVERSATION]\n")
-                        .await;
-                }
-                Ok(TurnOutcome::Cancelled) => {
-                    let _ = stderr
-                        .write_all(b"^C (turn cancelled; press Ctrl+C again or Ctrl+D to exit)\n")
-                        .await;
-                }
-                Err(e) => {
-                    sink.error("runtime", &e.to_string()).await;
+        if let Some(model_turn) = model_turn {
+            if matches!(&model_turn, ModelTurn::Skill(_)) && skill_batch_fn.is_none() {
+                sink.error(
+                    "slash_command",
+                    "source-preserving skill turn runner is unavailable",
+                )
+                .await;
+            } else {
+                let token = CancellationToken::new();
+                let _sigint_guard = sigint.arm_for_turn(token.clone());
+                sink.turn_start().await;
+                let outcome = match model_turn {
+                    ModelTurn::Prompt(prompt) => run_turn_fn(prompt, token).await,
+                    ModelTurn::Skill(inputs) => {
+                        skill_batch_fn.as_ref().expect("skill runner was checked")(inputs, token)
+                            .await
+                    }
+                };
+                _sigint_guard.abort();
+                match outcome {
+                    Ok(TurnOutcome::EndTurn) => {}
+                    Ok(TurnOutcome::MaxTurns) => {
+                        sink.text("[turn ended: reached MAX_TURNS_PER_CONVERSATION]\n")
+                            .await;
+                    }
+                    Ok(TurnOutcome::Cancelled) => {
+                        let _ = stderr
+                            .write_all(
+                                b"^C (turn cancelled; press Ctrl+C again or Ctrl+D to exit)\n",
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        sink.error("runtime", &e.to_string()).await;
+                    }
                 }
             }
         }
@@ -838,6 +879,7 @@ mod tests {
                 &SigintSource::spawn(),
                 None,
                 Some(wake.as_ref()),
+                None,
                 move |prompt, _| {
                     let prompts = observed.clone();
                     Box::pin(async move {
@@ -895,6 +937,7 @@ mod tests {
             &SigintSource::spawn(),
             None,
             Some(&host),
+            None,
             |_, _| panic!("human task message must not become a main model prompt"),
         )
         .await;

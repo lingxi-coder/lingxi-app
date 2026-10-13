@@ -78,6 +78,8 @@ pub struct BridgeArgs {
     pub credential_stdin: bool,
     /// Allow workspace-controlled configuration and customization sources.
     pub trusted_workspace: bool,
+    /// Private parent-provided local policy verdict for `/insights`.
+    pub insights_policy_gate: Option<bool>,
     /// Own versioned scheduled tasks for this scope independently of chat runtimes.
     pub scheduled_controller: bool,
     /// Enforce the packaged desktop credential boundary: trusted workspace
@@ -135,6 +137,14 @@ impl BridgeArgs {
                 "--api-key-stdin" => out.api_key_stdin = true,
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
+                "--host-insights-policy-gate" => {
+                    let value = it.next().ok_or_else(|| "--host-insights-policy-gate requires true or false".to_string())?;
+                    out.insights_policy_gate = Some(match value.as_ref() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err("--host-insights-policy-gate requires true or false".to_string()),
+                    });
+                }
                 "--scheduled-controller" => out.scheduled_controller = true,
                 "--packaged-credential-stdin-only" => {
                     out.packaged_credential_stdin_only = true;
@@ -616,6 +626,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         oauth_environment_lookup: None,
         verified_computer_profiles: Vec::new(),
         host_workspace_trusted: Some(trusted),
+        insights_policy_gate: args.insights_policy_gate,
         mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
         enable_automation_scheduler: args.scheduled_controller,
@@ -2316,6 +2327,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_private_insights_policy_verdict_without_public_help_switch() {
+        assert_eq!(BridgeArgs::parse(["--host-insights-policy-gate", "true"]).unwrap().insights_policy_gate, Some(true));
+        assert_eq!(BridgeArgs::parse(["--host-insights-policy-gate", "false"]).unwrap().insights_policy_gate, Some(false));
+        assert!(BridgeArgs::parse(["--host-insights-policy-gate", "yes"]).is_err());
+        assert!(!usage().contains("--host-insights-policy-gate"));
+    }
+
+    #[test]
     fn only_explicit_scope_controller_enables_automation_dispatch() {
         let ordinary = BridgeArgs::parse(["--trusted-workspace"]).unwrap();
         assert!(!ordinary.scheduled_controller);
@@ -2626,6 +2645,7 @@ mod tests {
             ),
             enable_automation_scheduler: false,
             host_workspace_trusted: Some(true),
+            insights_policy_gate: None,
             mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
             native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
             initial_teammate_team_name: None,

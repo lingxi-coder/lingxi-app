@@ -44,6 +44,8 @@ export interface BridgeLaunchConfig {
   /** Broker-owned sensitive plugin options, passed only over child stdin. */
   pluginSecrets?: Record<string, Record<string, string>>;
   trusted: boolean;
+  /** Local host policy verdict forwarded to the private bridge process. */
+  allowInsights?: boolean;
   scheduledController?: boolean;
   model?: string;
   apiBaseUrl?: string;

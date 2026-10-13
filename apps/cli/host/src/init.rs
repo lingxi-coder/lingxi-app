@@ -1016,6 +1016,7 @@ pub(crate) fn resolve_desktop_config_at(
         oauth_environment_lookup: None,
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        insights_policy_gate: None,
         mod_render_surface: None,
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.

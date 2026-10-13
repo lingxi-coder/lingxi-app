@@ -5,7 +5,9 @@
 
 use crate::argv::Argv;
 use crate::exit_codes;
-use crate::repl_loop::{step_with_notifications, StepOutcome, TaskNotificationWake};
+use crate::repl_loop::{
+    step_with_notifications, SkillBatchTurnFn, StepOutcome, TaskNotificationWake,
+};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use harness_runtime::headless::output::{JsonSink, OutputSink, PlainSink};
@@ -105,8 +107,10 @@ impl TaskNotificationWake for ReplTaskWake {
                                     .then(|| command.uuid.clone()),
                                 text: prompt.unwrap_or_else(|| raw.clone()),
                                 is_meta: true,
+                                turn_companion: false,
                                 message_origin: None,
                                 prompt_source: None,
+                                trailing_history_rows: Vec::new(),
                                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                                     serde_json::json!({"kind":"auto-continuation"})
                                 } else {
@@ -537,12 +541,41 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                     host.refresh_session().await;
                     let _ = host.begin(None, true);
                     queue.register_active_turn(token.clone()).await;
-                    let result = o.run_turn_with_cancel(&prompt, token.clone()).await;
+                    let result = orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        o.run_turn_with_cancel(&prompt, token.clone()),
+                    )
+                    .await;
                     host.finish(&token).await;
                     queue.clear_active_turn().await;
                     result
                 })
             };
+
+        let skill_batch_orch = orch.clone();
+        let skill_batch_host = loop_host.clone();
+        let skill_batch_queue = loop_queue.clone();
+        let skill_batch_fn: SkillBatchTurnFn = Arc::new(move |inputs, token| {
+            let o = skill_batch_orch.clone();
+            let host = skill_batch_host.clone();
+            let queue = skill_batch_queue.clone();
+            Box::pin(async move {
+                host.refresh_session().await;
+                let _ = host.begin(None, true);
+                queue.register_active_turn(token.clone()).await;
+                let result = orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"composer"}),
+                        o.run_queued_prompt_batch(inputs, token.clone()),
+                    ),
+                )
+                .await;
+                host.finish(&token).await;
+                queue.clear_active_turn().await;
+                result
+            })
+        });
 
         let outcome = step_with_notifications(
             stdin_reader.clone() as Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
@@ -553,6 +586,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             &sigint,
             Some(&idle_notifier),
             Some(&task_wake),
+            Some(skill_batch_fn),
             run_turn_fn,
         )
         .await;

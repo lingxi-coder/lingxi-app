@@ -80,6 +80,8 @@ export interface PersistedSettings {
   archivedSessions?: import('../shared/settings.js').ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
+  /** Local host policy for the source-backed `/insights` command gate. */
+  allowInsights?: boolean;
   collapseThoughtsByDefault?: boolean;
   model?: string;
   /** Explicit model selections are scoped to their owning session. */
@@ -128,6 +130,7 @@ interface FingerprintBudget {
 export function defaultSettings(): PersistedSettings {
   return {
     version: SETTINGS_VERSION,
+    allowInsights: true,
     projects: [],
     pinnedSessions: [],
     trustedWorkspaces: {},
@@ -170,6 +173,9 @@ export function parseSettings(value: unknown): PersistedSettings {
     value['theme'] === 'dark' || value['theme'] === 'light' || value['theme'] === 'system'
       ? value['theme']
       : undefined;
+  if (typeof value['allowInsights'] === 'boolean') {
+    settings.allowInsights = value['allowInsights'];
+  }
   if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
   }
@@ -630,6 +636,8 @@ export function buildBridgeArguments(config: {
   hasApiKey: boolean;
   hasCredentialStdin?: boolean;
   trusted: boolean;
+  /** Private parent-to-bridge verdict for the local Insights command gate. */
+  allowInsights?: boolean;
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
 }): string[] {
@@ -642,6 +650,9 @@ export function buildBridgeArguments(config: {
   if (config.hasCredentialStdin) args.push('--credential-stdin');
   else if (config.hasApiKey) args.push('--api-key-stdin');
   if (config.trusted) args.push('--trusted-workspace');
+  if (typeof config.allowInsights === 'boolean') {
+    args.push('--host-insights-policy-gate', String(config.allowInsights));
+  }
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;

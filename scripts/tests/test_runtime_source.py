@@ -2,6 +2,7 @@
 """Identity regressions independent of the network and local Cargo cache."""
 
 import copy
+import json
 from pathlib import Path
 import unittest
 
@@ -33,6 +34,25 @@ class RuntimeSourceTests(unittest.TestCase):
         result = self.inspect()
         self.assertEqual(result["root"], str(Path("/tmp/locked-harness").resolve()))
         self.assertEqual(result["revision"], self.revision)
+
+    def test_current_inventory_rejects_device_and_rooted_fs_source_drift(self):
+        inventory_path = Path(__file__).resolve().parents[1] / "lib" / "harness-runtime-packages.json"
+        inventory = json.loads(inventory_path.read_text())
+        for name in ("device-api", "rooted-fs"):
+            with self.subTest(package=name):
+                metadata = copy.deepcopy(self.metadata)
+                package = {
+                    "name": name,
+                    "source": self.source,
+                    "manifest_path": f"/tmp/locked-harness/crates/{name}/Cargo.toml",
+                    "dependencies": [],
+                }
+                metadata["packages"].append(package)
+                resolved = inspect_metadata(metadata, self.dependency, inventory)
+                self.assertIn(name, resolved["packages"])
+                package["source"] = "git+https://github.com/elsewhere/runtime?rev=" + "b" * 40
+                with self.assertRaisesRegex(ValueError, "different source"):
+                    inspect_metadata(metadata, self.dependency, inventory)
 
     def test_rejects_obsolete_runtime_layout(self):
         self.metadata["packages"][0]["manifest_path"] = "/tmp/locked-harness/crates/harness-runtime/Cargo.toml"

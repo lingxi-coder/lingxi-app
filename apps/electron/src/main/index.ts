@@ -4,7 +4,7 @@ import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,7 +17,7 @@ import {
   resolveProviderCredential,
   SessionLaunchCache,
 } from './credential-broker.js';
-import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
+import { CodexTokenManager } from './codex-tokens.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
@@ -267,6 +267,15 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
   });
   const launchCache = new SessionLaunchCache();
+  // The one refresher of the Codex session. Engines get only access tokens.
+  // The wall clock is checked every minute and on wake: a timer alone would
+  // sleep with the laptop.
+  const codexTokens = new CodexTokenManager({
+    store: credentialBroker,
+    onError: (message) => diagnostics.add('warn', 'host', message),
+  });
+  codexTokens.start();
+  powerMonitor.on('resume', () => codexTokens.check());
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
    * service and `HostNotifier` so both get the same click behaviour: restore
@@ -318,12 +327,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onModelSelected: (ref, model) => settings.setSessionModel(ref, model),
     getSavedModel: (ref) => settings.getSessionModel(ref),
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
-    resolveOpenAiOAuth: () => launchCache.openAiOAuth(credentialBroker),
-    onOpenAiOAuthUpdated: async (session) => {
-      if (!credentialBroker) throw new Error('Codex secure credential storage is unavailable');
-      await credentialBroker.set(CODEX_PROVIDER_ID, JSON.stringify(parseCodexSession(session)));
-      launchCache.invalidate();
-    },
+    codexTokens,
     invalidateLaunchConfigCache: () => launchCache.invalidate(),
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     confirmBypassPermissions: async () => {
@@ -360,8 +364,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const startedAt = Date.now();
       // A chat opens even when its credentials cannot be read. The engine
       // starts without them, and the first prompt that needs one loads it
-      // again or fails saying why. The Codex session is never part of a
-      // launch: it moves into the engine with the first Codex request.
+      // again or fails saying why. Every engine starts with the current
+      // Codex access token, whatever its model.
       const phase = async <T>(name: string, load: () => Promise<T>, fallback: T): Promise<T> => {
         const phaseStartedAt = Date.now();
         try {
@@ -385,9 +389,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           return fallback;
         }
       };
-      const [credentials, pluginSecrets] = await Promise.all([
+      const [credentials, pluginSecrets, openaiOAuth] = await Promise.all([
         phase('provider_credentials', () => launchCache.credentials(model, credentialBroker), {}),
         phase('plugin_secrets', () => launchCache.pluginSecrets(credentialBroker), {}),
+        phase('codex_session', () => codexTokens.current(), undefined),
       ]);
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
@@ -405,6 +410,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         trusted: settings.isTrustedWorkspace(workspace),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
+        ...(openaiOAuth ? { openaiOAuth } : {}),
         pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,

@@ -71,6 +71,7 @@ import {
 } from '../shared/nativeAudio.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
+import type { CodexTokenManager } from './codex-tokens.js';
 import type { SettingsStore } from './settings.js';
 
 export interface CredentialMetadata {
@@ -903,27 +904,16 @@ export class HostController {
         await this.credentialBroker.health();
         const session = await this.codexLogin({ openExternal: (url) => shell.openExternal(url), signal: abort.signal });
         this.assertNoActiveTurn();
-        const stored = await this.bridge.withCodexAuthMutation(async () => {
-          if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
-          return this.credentialBroker!.set(CODEX_PROVIDER_ID, JSON.stringify(session))
-            .catch(() => { throw new Error('Codex 登录凭据无法保存到安全存储，请重试。'); });
-        });
-        if (!stored.configured) throw new Error('Codex 登录凭据未能保存。');
+        if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
+        // Every open chat is served the new session's access tokens.
+        await this.requireCodexTokens().signIn(session)
+          .catch(() => { throw new Error('Codex 登录凭据无法保存到安全存储，请重试。'); });
         this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
         this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
         this.brokerStorageError = undefined;
         this.invalidateCredentialBrokerStatus();
         this.bridge.invalidateLaunchConfigCache();
         this.codexAccountEmail = session.email;
-        // A running chat takes the new session with its next Codex request. Only
-        // one that cannot take it in place, or that the sign-in stopped, restarts.
-        // Authentication is durable even if the unrelated engine launch fails.
-        // Keep metadata authoritative; the runtime exposes its own connection error.
-        if (!this.currentRuntime()?.movesOpenAiOAuthInPlace) {
-          await this.restartIfConfigured().catch(() => {
-            this.diagnostics.add('warn', 'host', 'Codex authentication saved; the session runtime could not restart.');
-          });
-        }
         return { credential: this.providerCredentialMetadata(CODEX_PROVIDER_ID), settings: this.settings.getPublic() };
       } finally {
         event.sender.removeListener('destroyed', cancel);
@@ -941,7 +931,7 @@ export class HostController {
       if (provider.id === CODEX_PROVIDER_ID) {
         this.codexLoginAbort?.abort();
         if (!this.credentialBroker) throw new Error('Codex 安全凭据存储不可用。');
-        await this.bridge.withCodexAuthMutation(() => this.credentialBroker!.delete(CODEX_PROVIDER_ID));
+        await this.requireCodexTokens().signOut();
         this.brokerConfiguredProviders.delete(CODEX_PROVIDER_ID);
         this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
         this.codexAccountEmail = undefined;
@@ -1553,6 +1543,12 @@ export class HostController {
     try { fingerprint = this.settings.getTrust(workspace).fingerprint; }
     catch (error) { this.diagnostics.add('warn', 'host', error); }
     return { path: workspace, trusted: this.settings.isTrustedWorkspace(workspace), ...(fingerprint ? { fingerprint } : {}) };
+  }
+
+  private requireCodexTokens(): CodexTokenManager {
+    const tokens = this.bridge.codexTokens;
+    if (!tokens) throw new Error('Codex 安全凭据存储不可用。');
+    return tokens;
   }
 
   private assertNoActiveTurn(): void {

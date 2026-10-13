@@ -2,14 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { SessionRuntime } from '../src/main/bridge.js';
-import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 
-const session = { access_token: 'test-private-token', expires_at: 123, fedramp: false };
+const session = { access_token: 'test-private-token', refresh_token: 'test-private-refresh', expires_at: 123, fedramp: false };
 const command = { type: 'run_slash_command', raw: '/fusion compare approaches' };
 function fixture(resolveOpenAiOAuth = async () => session as typeof session | undefined) {
   const calls: string[] = [];
   const runtime = new SessionRuntime({
     registerIpc: false,
+    isPackaged: true,
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     resolveOpenAiOAuth,
     resolveProviderCredential: async id => { calls.push(`key:${id}`); return undefined; },
@@ -18,9 +18,14 @@ function fixture(resolveOpenAiOAuth = async () => session as typeof session | un
   const state = runtime as any;
   const client = Object.assign(new EventEmitter(), {
     sendCommand: (value: any) => {
-      if (value.type === 'task_list') {
-        queueMicrotask(() => client.emit('event', { type: 'task_list_complete', request_id: value.request_id, active_count: 0 }));
-      } else calls.push(`old:${value.type}`);
+      if (value.type === 'set_provider_credential') {
+        assert.equal(JSON.parse(value.credential).refresh_token, undefined, 'an engine never receives the refresh token');
+        calls.push(`serve:${value.provider_id}`);
+        queueMicrotask(() => state.handleProviderCredentialStatus({
+          type: 'provider_credential_status', operation_id: value.operation_id,
+          configured_provider_ids: [value.provider_id], storage_encrypted: false,
+        }));
+      } else calls.push(`send:${value.type}`);
     },
     cancel: () => calls.push('cancel'),
   });
@@ -28,49 +33,20 @@ function fixture(resolveOpenAiOAuth = async () => session as typeof session | un
   state.activeWorkspaceTrusted = true;
   state.selectedModelReference = 'deepseek/deepseek-flash';
   state.client = client;
+  state.state = { status: 'connected' };
   state.credentialRoutingSettings = { fusion: { panelModels: [{ profile: 'openai-chatgpt', model: 'gpt-5.6-sol' }] } };
-  runtime.restart = async beforeRestart => {
-    ++state.fusionLifecycleEpoch;
-    await beforeRestart?.();
-    assert.equal(state.launchOAuthOverride, session);
-    assert.equal(state.launchOAuthModel, 'deepseek/deepseek-flash');
-    calls.push('restart');
-    ++state.generation;
-    state.pendingPromptHydrations.clear();
-    state.client = { sendCommand: (value: any) => calls.push(`new:${value.type}`) };
-    state.openAiOAuthActive = true;
-  };
-  runtime.restoreOwnedSessionIfNeeded = async () => { calls.push('restore'); };
+  runtime.restart = async () => { calls.push('restart'); };
   return { runtime, state, calls };
 }
 
-test('Fusion activates Codex OAuth and restores history without changing primary model or routing OAuth through API keys', async () => {
+test('Fusion serves the Codex access token in place without restarting or changing the primary model', async () => {
   const { runtime, state, calls } = fixture();
   await runtime.dispatchCommand(command);
-  assert.deepEqual(calls, ['restart', 'restore', 'new:run_slash_command', 'commit']);
-  assert.equal(state.launchOAuthOverride, undefined);
-  assert.equal(state.launchOAuthModel, undefined);
+  assert.deepEqual(calls, ['serve:openai-chatgpt', 'send:run_slash_command', 'commit']);
+  assert.equal(state.selectedModelReference, 'deepseek/deepseek-flash');
   assert.equal(runtime.turnActive, false);
   await runtime.dispatchCommand(command);
-  assert.equal(calls.filter(value => value === 'restart').length, 1);
-});
-
-test('Fusion does not restart or dispatch after cancellation during OAuth retrieval', async () => {
-  let resolve!: (value: typeof session) => void;
-  const { runtime, calls } = fixture(() => new Promise(done => { resolve = done; }));
-  const pending = runtime.dispatchCommand(command);
-  await Promise.resolve();
-  runtime.cancelTurn(undefined);
-  resolve(session);
-  await assert.rejects(pending, /interrupted/);
-  assert.deepEqual(calls, ['cancel']);
-});
-
-test('Fusion does not dispatch after an external lifecycle change during session restoration', async () => {
-  const { runtime, state, calls } = fixture();
-  runtime.restoreOwnedSessionIfNeeded = async () => { ++state.fusionLifecycleEpoch; };
-  await assert.rejects(runtime.dispatchCommand(command), /interrupted/);
-  assert.deepEqual(calls, ['restart']);
+  assert.equal(calls.filter(value => value === 'serve:openai-chatgpt').length, 1, 'a token already served is not sent again');
 });
 
 test('Fusion reports missing OAuth without sending or committing a command', async () => {
@@ -79,56 +55,16 @@ test('Fusion reports missing OAuth without sending or committing a command', asy
   assert.deepEqual(calls, []);
 });
 
+test('Fusion without a Codex panel never loads the Codex session', async () => {
+  const { runtime, state, calls } = fixture(async () => { throw new Error('must not load'); });
+  state.credentialRoutingSettings = { fusion: { panelModels: [{ profile: 'deepseek', model: 'deepseek-flash' }] } };
+  await runtime.dispatchCommand(command);
+  assert.deepEqual(calls.filter(value => !value.startsWith('key:')), ['send:run_slash_command', 'commit']);
+});
+
 test('Fusion setup and publication retry bypass OAuth activation and commit their persisted messages', async () => {
   const { runtime, calls } = fixture(async () => { throw new Error('must not load'); });
   await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup' });
   await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --retry-publication saved' });
-  assert.deepEqual(calls, ['old:run_slash_command', 'commit', 'old:run_slash_command']);
-});
-
-test('Fusion refuses OAuth restart while background agents are active', async () => {
-  const { runtime, calls } = fixture();
-  Object.defineProperty(runtime, 'hasActiveAgents', { get: () => true });
-  await assert.rejects(runtime.dispatchCommand(command), /Wait for active work/);
-  assert.deepEqual(calls, []);
-});
-
-test('Fusion checks registry tasks before restarting and leaves active Fusion or shell work intact', async () => {
-  const { runtime, state, calls } = fixture();
-  state.client.sendCommand = (value: any) => {
-    assert.equal(value.type, 'task_list');
-    queueMicrotask(() => state.client.emit('event', {
-      type: 'task_list_complete', request_id: value.request_id, active_count: 1,
-    }));
-  };
-  await assert.rejects(runtime.dispatchCommand(command), /Wait for background tasks/);
-  assert.deepEqual(calls, []);
-  assert.equal(state.client.listenerCount('event'), 0, 'query listener is released');
-});
-
-test('failed task checks do not authorize an OAuth restart', async () => {
-  const { runtime, state, calls } = fixture();
-  state.client.sendCommand = (value: any) => {
-    queueMicrotask(() => state.client.emit('event', {
-      type: 'task_list_complete', request_id: value.request_id, active_count: 0, error: 'registry unavailable',
-    }));
-  };
-  await assert.rejects(runtime.dispatchCommand(command), /Could not check background work/);
-  assert.deepEqual(calls, []);
-});
-
-test('taking OAuth ownership cannot release or stop another chat with active agents or registry tasks', async () => {
-  for (const agents of [true, false]) for (const inPlace of [true, false]) {
-    const manager = new SessionRuntimeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
-    let released = false;
-    (manager as any).runtimes.set('other', {
-      sessionId: 'other', hasOpenAiOAuth: true, isStarting: false, turnActive: false, movesOpenAiOAuthInPlace: inPlace,
-      hasActiveAgents: agents, pendingInteractions: 0, connectionState: { status: 'connected' },
-      assertNoBackgroundTasks: async () => { throw new Error('Wait for background tasks'); },
-      releaseOpenAiOAuth: async () => { released = true; },
-      stop: async () => { released = true; },
-    });
-    await assert.rejects((manager as any).releaseOtherCodexRuntimes('current'), /Wait/);
-    assert.equal(released, false);
-  }
+  assert.deepEqual(calls, ['send:run_slash_command', 'commit', 'send:run_slash_command']);
 });

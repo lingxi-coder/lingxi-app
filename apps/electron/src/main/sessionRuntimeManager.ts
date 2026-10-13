@@ -3,7 +3,8 @@ import type { ClientEvent } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { CodexSessionBusyError, SessionRuntime } from './bridge.js';
+import { SessionRuntime } from './bridge.js';
+import type { CodexTokenManager } from './codex-tokens.js';
 import { urlOrigin } from './bridgeEvents.js';
 import {
   CH_ANSWER_ASK_USER_QUESTION,
@@ -29,7 +30,7 @@ import type {
   SessionRuntimeManagerOptions,
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
-import { sanitizeDiagnostic } from './host-utils.js';
+import { sanitizeDiagnostic, type OpenAiOAuthSession } from './host-utils.js';
 import { VisualizationRouter } from './visualization.js';
 import {
   CH_VISUALIZATION_MOUNT,
@@ -70,10 +71,6 @@ export class SessionRuntimeManager {
   private accessSequence = 0;
   private cacheTrimScheduled = false;
   private registered = false;
-  private oauthOwner: string | undefined;
-  private oauthLifecycle: Promise<void> = Promise.resolve();
-  /** Codex claims queued on `oauthLifecycle` that have not settled, by session. */
-  private readonly pendingCodexClaims = new Map<string, Promise<void>>();
 
   /** Routes visualization documents and state writes to the session that issued the mount. */
   readonly visualizations = new VisualizationRouter({
@@ -90,7 +87,10 @@ export class SessionRuntimeManager {
       throw new Error(`maxCachedRuntimes must be between 1 and ${MAX_CONFIGURED_CACHED_RUNTIMES}`);
     }
     this.maxCachedRuntimes = requestedLimit;
+    opts.codexTokens?.subscribe((session) => { void this.serveCodexToken(session); });
   }
+
+  get codexTokens(): CodexTokenManager | undefined { return this.opts.codexTokens; }
 
   get size(): number {
     return this.runtimes.size;
@@ -436,124 +436,11 @@ export class SessionRuntimeManager {
     ));
   }
 
-  /** Host-launched work (scheduled-task controller, archive preflight) rather than a chat being opened. */
-  private isBackgroundLaunch(sessionId: string): boolean {
-    return this.backgroundSessionLeases.has(sessionId)
-      && !this.openingSessions.get(sessionId)?.activate;
-  }
-
-  /**
-   * Take the Codex session away from every other engine. One that this host
-   * spawned lets go in place and stays open; any other engine is stopped.
-   */
-  private async releaseOtherCodexRuntimes(sessionId?: string): Promise<void> {
-    const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
-    // A claimant that is still starting may be booting with the session.
-    const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
-      && (runtime.hasOpenAiOAuth || (runtime === owner && runtime.isStarting)));
-    // A background launch must not take Codex from the chat on screen; its
-    // run fails instead.
-    const background = sessionId !== undefined && this.isBackgroundLaunch(sessionId);
-    if (background && candidates.some(runtime => runtime.sessionId === this.activeSessionId)) {
-      throw new CodexSessionBusyError('The active Codex chat holds Codex authentication; background work waits for it.');
-    }
-    if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0
-      || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
-      throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.');
-    }
-    for (const runtime of candidates) {
-      if (runtime.connectionState.status === 'connected') await runtime.assertNoBackgroundTasks();
-      else if (runtime.hasOpenAiOAuth && runtime.connectionState.status !== 'idle') {
-        throw new CodexSessionBusyError('Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.');
-      }
-    }
-    if (candidates.some(runtime => runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0)) {
-      throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.');
-    }
-    for (const runtime of candidates) {
-      if (runtime.movesOpenAiOAuthInPlace) await runtime.releaseOpenAiOAuth();
-      else await runtime.stop();
-    }
-    this.oauthOwner = sessionId;
-  }
-
-  /**
-   * Starting background engines that hold Codex authentication or have queued
-   * a claim for it. Only a bare engine start (the scheduled-task controller)
-   * counts: a scheduled run or archive preflight resumes its session right
-   * after starting, and stopping it there would fail that work.
-   */
-  private startingBackgroundCodexRuntimes(sessionId: string): SessionRuntime[] {
-    return [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
-      && runtime.isStarting
-      && (runtime.hasOpenAiOAuth || runtime.sessionId === this.oauthOwner || this.pendingCodexClaims.has(runtime.sessionId))
-      && runtime.sessionId !== this.activeSessionId
-      && this.isBackgroundLaunch(runtime.sessionId)
-      && !this.openingSessions.has(runtime.sessionId));
-  }
-
-  private async claimCodexRuntime(sessionId?: string): Promise<void> {
-    // A chat being opened outranks background work. The scheduled-task engine
-    // launched with the app may still be starting when the chat on screen is
-    // restored, and a starting engine cannot be stopped. Let that start settle
-    // before queueing, so the claim stops the engine instead of refusing the
-    // chat; a start that still needs its own claim can finish it meanwhile.
-    // A claim already queued ahead counts even before it runs, a settled start
-    // may have let another queue, and with nothing to wait for this queues
-    // without yielding, so no background claim can slip in ahead of it.
-    if (sessionId !== undefined && !this.isBackgroundLaunch(sessionId)) {
-      let starting = this.startingBackgroundCodexRuntimes(sessionId);
-      while (starting.length > 0) {
-        await Promise.all(starting.map(runtime => runtime.start().catch(() => undefined)));
-        starting = this.startingBackgroundCodexRuntimes(sessionId);
-      }
-    }
-    const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.releaseOtherCodexRuntimes(sessionId));
-    this.oauthLifecycle = operation;
-    if (sessionId !== undefined) this.trackCodexClaim(sessionId, operation);
-    return operation;
-  }
-
-  private trackCodexClaim(sessionId: string, operation: Promise<void>): void {
-    this.pendingCodexClaims.set(sessionId, operation);
-    const settle = (): void => {
-      if (this.pendingCodexClaims.get(sessionId) === operation) this.pendingCodexClaims.delete(sessionId);
-    };
-    operation.then(settle, settle);
-  }
-
-  /**
-   * Move the Codex session into a connected engine this host spawned. The
-   * holder lets go first, so its last rotation is what moves.
-   */
-  private claimOpenAiOAuth(sessionId: string): Promise<void> {
-    const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
-      const runtime = this.runtimes.get(sessionId);
-      if (!runtime) throw new Error(`session runtime is not open: ${sessionId}`);
-      if (runtime.hasOpenAiOAuth) return;
-      if (!runtime.movesOpenAiOAuthInPlace) throw new Error('This chat must reconnect before it can use Codex authentication.');
-      await this.releaseOtherCodexRuntimes(sessionId);
-      const session = await this.opts.resolveOpenAiOAuth?.();
-      if (!session) throw new Error('Codex authentication is unavailable. Sign in again.');
-      await runtime.installOpenAiOAuth(session);
-    });
-    this.oauthLifecycle = operation;
-    this.trackCodexClaim(sessionId, operation);
-    return operation;
-  }
-
-  /** Serialize credential mutation with launch ownership, including broker I/O. */
-  withCodexAuthMutation<T>(mutation: () => Promise<T>): Promise<T> {
-    const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
-      await this.releaseOtherCodexRuntimes();
-      return mutation();
-    });
-    this.oauthLifecycle = operation.then(() => undefined, () => undefined);
-    return operation;
-  }
-
-  async invalidateCodexRuntimes(): Promise<void> {
-    await this.withCodexAuthMutation(async () => undefined);
+  /** Serve the host's Codex access token to every connected engine, or stop serving one. */
+  async serveCodexToken(session: OpenAiOAuthSession | undefined): Promise<void> {
+    await Promise.all([...this.runtimes.values()].map((runtime) => runtime.serveCodexToken(session).catch((error: unknown) => {
+      this.opts.diagnostics?.add('warn', 'bridge', `Codex access token was not served: ${sanitizeDiagnostic(error)}`);
+    })));
   }
 
   async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {
@@ -680,10 +567,16 @@ export class SessionRuntimeManager {
       getSavedModel,
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
+      codexTokens,
       ...base
     } = this.opts;
     return {
       ...base,
+      ...(codexTokens ? {
+        resolveOpenAiOAuth: () => codexTokens.current(),
+        renewOpenAiOAuth: () => codexTokens.renew(),
+        onOpenAiOAuthUpdated: (session: OpenAiOAuthSession) => codexTokens.adopt(session),
+      } : {}),
       sessionId: ref.sessionId,
       projectPath: ref.projectPath,
       envelopeEvents: true,
@@ -691,8 +584,6 @@ export class SessionRuntimeManager {
       launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
-      beforeOpenAiOAuthLaunch: () => this.claimCodexRuntime(ref.sessionId),
-      claimOpenAiOAuth: () => this.claimOpenAiOAuth(ref.sessionId),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       onModelChanged: (model: string) => {
         this.sessionModelHints.set(ref.sessionId, model);

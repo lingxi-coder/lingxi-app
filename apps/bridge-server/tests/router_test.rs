@@ -60,12 +60,12 @@ use orchestrator::test_support::MockOrchestratorHandle;
 #[cfg(unix)]
 use platform_posix::{
     PlainTextSecureStorage, PosixClock as NativeClock, PosixFileSystem as NativeFileSystem,
-    PosixHttp as NativeHttp, PosixRuntime as NativeRuntime,
+    PosixHttp as NativeHttp,
 };
 #[cfg(windows)]
 use platform_windows::{
     PlainTextSecureStorage, WindowsClock as NativeClock, WindowsFileSystem as NativeFileSystem,
-    WindowsHttp as NativeHttp, WindowsRuntime as NativeRuntime,
+    WindowsHttp as NativeHttp,
 };
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -947,31 +947,10 @@ async fn externally_owned_provider_credentials_stay_process_local() {
 
 /// Token refresh transport for Codex slot tests. The sessions they install
 /// expire long after the test ends, so it is never reached.
-struct NoRefreshTransport;
-
-#[async_trait]
-impl llm_runtime::Transport for NoRefreshTransport {
-    async fn send(
-        &self,
-        _request: lingxi_llm_client::HttpRequest,
-    ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError> {
-        std::future::pending().await
-    }
-}
-
-fn bound_codex_slot(
-    credentials: Arc<secret::CredentialManager>,
-) -> Arc<llm_runtime::auth::openai::OpenAiOAuthSlot> {
-    let slot = Arc::new(llm_runtime::auth::openai::OpenAiOAuthSlot::new());
-    slot.bind(llm_runtime::auth::openai::OpenAiOAuthSlotBinding {
-        config: Default::default(),
-        http: Arc::new(NoRefreshTransport),
-        clock: Arc::new(NativeClock::new()),
-        bus: None,
-        credentials: Some(credentials),
-        spawner: Arc::new(NativeRuntime::new()),
-    });
-    slot
+fn codex_host_session() -> Arc<llm_runtime::auth::openai::HostSession> {
+    Arc::new(llm_runtime::auth::openai::HostSession::new(Arc::new(
+        NativeClock::new(),
+    )))
 }
 
 fn codex_session_json(access_token: &str) -> String {
@@ -990,12 +969,12 @@ fn codex_session_json(access_token: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_codex_session_moves_through_the_engine_slot_and_never_into_storage() {
+async fn a_codex_token_the_desktop_serves_is_used_and_never_stored() {
     let (router, credentials, _temp) = router_with_credentials().await;
-    let slot = bound_codex_slot(credentials.clone());
+    let session = codex_host_session();
     let router = router
         .with_ephemeral_provider_credentials(true)
-        .with_openai_oauth_slot(Some(slot.clone()));
+        .with_openai_host_session(Some(session.clone()));
     let sink = CapturingSink::arc();
 
     router
@@ -1021,14 +1000,19 @@ async fn a_codex_session_moves_through_the_engine_slot_and_never_into_storage() 
             error: None,
         })
     );
-    assert!(slot.is_active().await);
+    let scope = llm_runtime::CredentialScope::new(llm_runtime::ProviderId::OpenAI, "chatgpt");
+    assert!(matches!(
+        llm_runtime::CredentialProvider::load(session.as_ref(), &scope).await,
+        Ok(llm_runtime::Credential::ChatGptOAuth { access_token, .. })
+            if access_token == "codex-access-secret"
+    ));
     assert!(
         credentials
             .get_openai_oauth_tokens()
             .await
             .expect("read stored session")
             .is_none(),
-        "the host owns the session; the engine only serves it"
+        "the desktop owns the session; the engine only uses its access token"
     );
     assert!(credentials
         .get_provider_key("openai-chatgpt")
@@ -1056,34 +1040,23 @@ async fn a_codex_session_moves_through_the_engine_slot_and_never_into_storage() 
             error: None,
         })
     );
-    assert!(!slot.is_active().await);
+    assert!(!session.is_active());
 }
 
 #[tokio::test]
-async fn a_codex_session_the_slot_cannot_serve_is_reported_without_its_secrets() {
-    let (_, credentials, _temp) = router_with_credentials().await;
-    let bound = bound_codex_slot(credentials);
-    let unbound = Arc::new(llm_runtime::auth::openai::OpenAiOAuthSlot::new());
+async fn an_invalid_codex_token_is_reported_without_its_secrets() {
     let cases = [
-        (
-            bound.clone(),
-            "{\"access_token\":\"codex-access-secret\"}".to_string(),
-            "invalid Codex OAuth session",
-        ),
-        (bound, codex_session_json(""), "invalid Codex OAuth session"),
-        (
-            unbound,
-            codex_session_json("codex-access-secret"),
-            "failed to install Codex OAuth session",
-        ),
+        "{\"access_token\":\"codex-access-secret\"}".to_string(),
+        codex_session_json(""),
     ];
-    for (operation_id, (slot, credential, expected)) in (61..).zip(cases) {
+    for (operation_id, credential) in (61..).zip(cases) {
+        let session = codex_host_session();
         let router = router_with(
             Arc::new(MockOrchestratorHandle::new()),
             Arc::new(MockTaskRegistry { rows: Vec::new() }),
         )
         .with_ephemeral_provider_credentials(true)
-        .with_openai_oauth_slot(Some(slot.clone()));
+        .with_openai_host_session(Some(session.clone()));
         let sink = CapturingSink::arc();
         router
             .route(
@@ -1108,8 +1081,8 @@ async fn a_codex_session_the_slot_cannot_serve_is_reported_without_its_secrets()
         assert!(configured_provider_ids.is_empty());
         assert_eq!(unavailable_provider_ids, vec!["openai-chatgpt".to_string()]);
         assert!(credential_previews.is_empty());
-        assert_eq!(error.as_deref(), Some(expected));
-        assert!(!slot.is_active().await);
+        assert_eq!(error.as_deref(), Some("invalid Codex OAuth session"));
+        assert!(!session.is_active());
     }
 }
 

@@ -11,6 +11,7 @@ import type { SessionRuntime } from './bridge.js';
 import type { ProcessCommand, listProcessCommands, readProcessCommand } from './bridgeDiscovery.js';
 import { DiagnosticBuffer } from './host-utils.js';
 import type { OpenAiOAuthSession } from './host-utils.js';
+import type { CodexTokenManager } from './codex-tokens.js';
 import type { HostNotifier } from './notifications.js';
 
 export type { HostPermissionRequest } from '../shared/permission.js';
@@ -104,14 +105,12 @@ export interface BridgeManagerOptions {
   notifier?: HostNotifier;
   /** Resolve a broker-owned credential only when this session first selects its provider. */
   resolveProviderCredential?: (providerId: string) => Promise<string | undefined>;
+  /** The host's current Codex session, refreshed first when about to expire. */
   resolveOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
+  /** An engine's Codex access token expired or was rejected: refresh it. */
+  renewOpenAiOAuth?: () => Promise<OpenAiOAuthSession | undefined>;
+  /** A Codex sign-in made inside an engine, for the host to adopt. */
   onOpenAiOAuthUpdated?: (session: OpenAiOAuthSession) => Promise<void>;
-  beforeOpenAiOAuthLaunch?: () => Promise<void>;
-  /**
-   * Move the host's one Codex session into this runtime's engine, releasing
-   * it from whichever engine holds it. Rejects with the reason it cannot move.
-   */
-  claimOpenAiOAuth?: () => Promise<void>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
@@ -150,7 +149,7 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc' | 'claimOpenAiOAuth'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
@@ -159,4 +158,6 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
+  /** The one refresher of the Codex session; every engine is served its access tokens. */
+  codexTokens?: CodexTokenManager;
 }

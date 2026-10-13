@@ -18,6 +18,7 @@ import {
   readWorkspaceFilePreview,
 } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
+import { CodexTokenManager } from '../src/main/codex-tokens';
 import { SettingsStore } from '../src/main/settings';
 
 function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; reject(error: unknown): void } {
@@ -1268,23 +1269,12 @@ test('settings model, voice and Thought patches persist without restarting a liv
   }
 });
 
-test('Codex login keeps tokens in broker and stops OAuth before logout', async () => {
+test('Codex login keeps tokens in broker and signs out through the token manager', async () => {
   const handlers = new Map<string, (...args: any[]) => any>();
   const operations: string[] = [];
   let configured = false;
   let storedSession = '';
-  const host = new HostController(
-    { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
-    { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
-      get: () => ({ connectionState: { status: 'disconnected' } }),
-      invalidateLaunchConfigCache() {},
-      restart: async () => { throw new Error('engine unavailable after credential persistence'); },
-      withCodexAuthMutation: async (mutation: () => Promise<unknown>) => { operations.push('stop-oauth'); return mutation(); },
-    } as any,
-    new DiagnosticBuffer(), undefined,
-    { handle: (channel: string, handler: any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) } as any,
-    undefined,
-    { health: async () => { operations.push('health'); },
+  const broker = { health: async () => { operations.push('health'); },
       set: async (id: string, secret: string) => {
         assert.equal(id, 'openai-chatgpt');
         assert.equal(JSON.parse(secret).refresh_token, 'private-refresh');
@@ -1295,7 +1285,22 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
       listStatus: async () => [{ providerId: 'openai-chatgpt', configured }],
       resolve: async () => (configured ? storedSession : undefined),
       preview: async () => { throw new Error('OAuth previews must never be requested'); },
+  };
+  const codexTokens = new CodexTokenManager({ store: broker });
+  const served: unknown[] = [];
+  codexTokens.subscribe((session) => served.push(session?.access_token));
+  const host = new HostController(
+    { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
+    { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
+      get: () => ({ connectionState: { status: 'disconnected' } }),
+      invalidateLaunchConfigCache() {},
+      restart: async () => { throw new Error('a sign-in must not restart the engine'); },
+      codexTokens,
     } as any,
+    new DiagnosticBuffer(), undefined,
+    { handle: (channel: string, handler: any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) } as any,
+    undefined,
+    broker as any,
     undefined,
     async () => { operations.push('login'); return { access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false, email: 'user@example.com' }; },
   );
@@ -1304,7 +1309,8 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
   const event = { sender, senderFrame: frame };
   host.registerWindow(sender as any, frame.url); host.registerIpc();
   const result = await handlers.get(CH_CODEX_LOGIN)!(event);
-  assert.deepEqual(operations, ['health', 'login', 'stop-oauth', 'store']);
+  assert.deepEqual(operations, ['health', 'login', 'store']);
+  assert.deepEqual(served, ['private-access'], 'every open chat is served the new access token');
   assert.deepEqual(result.credential, {
     providerId: 'openai-chatgpt', configured: true, encryptionAvailable: true, codexAccountEmail: 'user@example.com',
   });
@@ -1317,45 +1323,7 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
   const cleared = await handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR)!(event, 'openai-chatgpt');
   assert.equal(cleared.configured, false);
   assert.equal(cleared.codexAccountEmail, undefined);
-  assert.deepEqual(operations.slice(-2), ['stop-oauth', 'delete']);
+  assert.deepEqual(operations.slice(-1), ['delete']);
+  assert.deepEqual(served, ['private-access', undefined], 'signing out takes the token from every chat');
   await handlers.get(CH_CODEX_CANCEL)!(event);
-});
-
-test('Codex sign-in restarts only a chat that cannot take the session in place', async () => {
-  for (const inPlace of [true, false]) {
-    const handlers = new Map<string, (...args: any[]) => any>();
-    let restarts = 0;
-    const runtime = { connectionState: { status: 'connected' }, isStarting: false, movesOpenAiOAuthInPlace: inPlace };
-    const host = new HostController(
-      { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
-      { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
-        get: () => runtime,
-        invalidateLaunchConfigCache() {},
-        restart: async () => { restarts++; },
-        withCodexAuthMutation: async (mutation: () => Promise<unknown>) => mutation(),
-      } as any,
-      new DiagnosticBuffer(), undefined,
-      { handle: (channel: string, handler: any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) } as any,
-      undefined,
-      { health: async () => undefined,
-        set: async (id: string) => ({ providerId: id, configured: true }),
-        delete: async () => undefined,
-        listStatus: async () => [],
-        resolve: async () => undefined,
-        preview: async () => { throw new Error('OAuth previews must never be requested'); },
-      } as any,
-      undefined,
-      async () => ({ access_token: 'private-access', refresh_token: 'private-refresh', expires_at: 9999, fedramp: false }),
-    );
-    const frame = { url: 'http://127.0.0.1:4242' };
-    const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, removeListener() {} };
-    host.registerWindow(sender as any, frame.url); host.registerIpc();
-    try {
-      await handlers.get(CH_CODEX_LOGIN)!({ sender, senderFrame: frame });
-      // A running chat takes the new session with its next Codex request.
-      assert.equal(restarts, inPlace ? 0 : 1);
-    } finally {
-      host.dispose();
-    }
-  }
 });

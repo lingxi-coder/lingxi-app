@@ -414,10 +414,10 @@ class ChatViewModel(
             is ClientEvent.SlashCommandCatalog -> _state.update { state ->
                 state.copy(slashCommands = event.commands.map { command ->
                     ConversationSlashCommand(
-                        name = command.name,
-                        aliases = command.aliases,
-                        argumentHint = command.argumentHint,
-                        argumentNames = command.argumentNames,
+                        name = command.name.displayText(),
+                        aliases = command.aliases.map { it.displayText() },
+                        argumentHint = command.argumentHint?.displayText(),
+                        argumentNames = command.argumentNames.map { it.displayText() },
                     )
                 })
             }

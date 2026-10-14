@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.client.SlashCommandDto
 import kotlinx.coroutines.Dispatchers
@@ -27,10 +28,15 @@ class SlashCommandCatalogTest {
     @Before fun setMain() = Dispatchers.setMain(dispatcher)
     @After fun resetMain() = Dispatchers.resetMain()
 
-    private fun catalogCommand() = SlashCommandDto(
-        name = "deploy", description = "Deploy", source = "markdown",
-        aliases = listOf("ship"), argumentHint = "[target] [version]",
-        argumentNames = listOf("target", "version"), menuDescription = null, hidden = false,
+    private fun clientText(text: String) =
+        ClientTextDto(codeUnits = text.map { it.code.toUShort() })
+
+    private fun catalogCommand(
+        argumentNames: List<ClientTextDto> = listOf(clientText("target"), clientText("version")),
+    ) = SlashCommandDto(
+        name = clientText("deploy"), description = clientText("Deploy"), source = "markdown",
+        aliases = listOf(clientText("ship")), argumentHint = clientText("[target] [version]"),
+        argumentNames = argumentNames, menuDescription = null, hidden = false,
     )
 
     @Test fun subscribesBeforeRequestAndRetainsAllArgumentMetadata() = runTest(dispatcher) {
@@ -51,10 +57,37 @@ class SlashCommandCatalogTest {
         val model = ChatViewModel(source)
         assertTrue(requested)
         assertEquals(
-            listOf(ConversationSlashCommand("deploy", listOf("ship"), "[target] [version]", listOf("target", "version"))),
+            listOf(
+                ConversationSlashCommand(
+                    name = "deploy",
+                    aliases = listOf("ship"),
+                    argumentHint = "[target] [version]",
+                    argumentNames = listOf("target", "version"),
+                ),
+            ),
             model.state.value.slashCommands,
         )
         model.reduceClientEvent(ClientEvent.SlashCommandCatalog(emptyList()))
         assertTrue(model.state.value.slashCommands.isEmpty())
+    }
+
+    @Test fun convertsCatalogTextOnlyAtTheDisplayBoundary() = runTest(dispatcher) {
+        val malformedArgument = ClientTextDto(
+            codeUnits = listOf('t'.code.toUShort(), 0xD800.toUShort()),
+        )
+        val command = catalogCommand(argumentNames = listOf(malformedArgument))
+        assertEquals(0xD800.toUShort(), command.argumentNames.single().codeUnits.last())
+
+        val source = object : ConversationSource {
+            override fun engineSourceForBackgroundRetention(): EngineConversationSource? = null
+        }
+        val model = ChatViewModel(source)
+        model.reduceClientEvent(ClientEvent.SlashCommandCatalog(listOf(command)))
+
+        val displayed = model.state.value.slashCommands.single()
+        assertEquals("deploy", displayed.name)
+        assertEquals(listOf("ship"), displayed.aliases)
+        assertEquals("[target] [version]", displayed.argumentHint)
+        assertEquals(listOf("t\uFFFD"), displayed.argumentNames)
     }
 }

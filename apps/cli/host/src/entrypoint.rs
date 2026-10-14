@@ -125,7 +125,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     ) || (parsed.command.is_none()
         && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui));
     startup_trace::mark("mode_decide_for_logging");
-    logging::init(parsed.debug_enabled(), interactive_tui);
+    logging::init_for_launch(&parsed, interactive_tui);
     let telemetry_records_session = parsed.command.is_none()
         || matches!(
             parsed.command.as_ref(),

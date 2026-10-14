@@ -1,6 +1,5 @@
 use super::EngineCommandRouter;
 use crate::settings_bridge::apply_patch;
-use crate::settings_bridge::build_snapshot;
 use crate::settings_bridge::lower_snapshot;
 use crate::settings_bridge::permission_destination;
 use crate::settings_bridge::permission_paths;
@@ -12,6 +11,7 @@ use client::protocol::commands::WritableScopeDto;
 use client::protocol::controls::NativeProactivityControlStateDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
+use client::protocol::text::ClientTextDto;
 use std::path::PathBuf;
 
 /// Decode a `ClientCommand::UpdateSettings.patch_json` wire string into the
@@ -115,18 +115,35 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "settings listing unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
         };
 
-        let snapshot = build_snapshot(
-            &context.paths,
-            context.active_snapshot(),
-            context.managed.clone(),
-        );
-        let lowered = lower_snapshot(&snapshot);
+        let snapshot = match context.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: settings_listing_error_message(&error),
+                })
+                .await;
+                return;
+            }
+        };
+        let lowered = match lower_snapshot(&snapshot) {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: settings_listing_error_message(&error),
+                })
+                .await;
+                return;
+            }
+        };
         sink.emit(ClientEvent::SettingsSnapshot {
             effective_json: lowered.effective_json,
             provenance_json: lowered.provenance_json,
@@ -158,7 +175,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "settings update unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -169,7 +187,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message,
+                    message: message.into(),
                 })
                 .await;
                 return;
@@ -190,7 +208,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await;
             }
@@ -212,7 +230,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "permission update unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return None;
@@ -257,7 +276,7 @@ impl EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("failed to persist permission rules: {error}"),
+                        message: format!("failed to persist permission rules: {error}").into(),
                     })
                     .await;
                     // `add` and `remove` are two SEPARATE transactions. If the
@@ -287,7 +306,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Rejected,
                 message: "no permission rule changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
         }
@@ -317,7 +337,8 @@ impl EngineCommandRouter {
                     kind: ErrorKindDto::Rejected,
                     message: "`bypassPermissions` is session-scoped and is deliberately never \
                               persisted as the default mode"
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
@@ -327,14 +348,15 @@ impl EngineCommandRouter {
                     message: format!(
                         "default permission mode was not persisted: `{mode}` is unrecognized, \
                          or already the current default"
-                    ),
+                    )
+                    .into(),
                 })
                 .await;
             }
             Err(error) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message: format!("failed to persist default permission mode: {error}"),
+                    message: format!("failed to persist default permission mode: {error}").into(),
                 })
                 .await;
             }
@@ -368,7 +390,7 @@ impl EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("failed to persist workspace directories: {error}"),
+                        message: format!("failed to persist workspace directories: {error}").into(),
                     })
                     .await;
                     // Same honesty property as `apply_permission_rule_update`:
@@ -391,9 +413,42 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Rejected,
                 message: "no workspace directory changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
         }
+    }
+}
+fn settings_listing_error_message(error: &lingxi_core::settings::SettingsError) -> ClientTextDto {
+    let mut units: Vec<u16> = "settings listing failed: ".encode_utf16().collect();
+    units.extend(
+        error
+            .message_projection()
+            .string_units("")
+            .expect("settings error message is a root string"),
+    );
+    ClientTextDto::from_code_units(units)
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::settings_listing_error_message;
+    use lingxi_core::settings::SettingsError;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn settings_listing_error_keeps_source_surrogate_after_prefix() {
+        let message = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let diagnostics = Utf16JsonProjection::object(Vec::new()).unwrap();
+        let error = SettingsError::source_failure("managed", message, diagnostics, None);
+
+        assert_eq!(
+            settings_listing_error_message(&error).code_units,
+            "settings listing failed: "
+                .encode_utf16()
+                .chain([0xd800])
+                .collect::<Vec<_>>(),
+        );
     }
 }

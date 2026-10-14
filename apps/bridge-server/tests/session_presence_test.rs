@@ -66,6 +66,20 @@ impl OrchestratorHandle for SwitchHandle {
         Ok(())
     }
 
+    async fn validate_model_selection(
+        &self,
+        _request: &lingxi_core::host::ModelSelectionRequest,
+    ) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    async fn select_model(
+        &self,
+        _request: lingxi_core::host::ModelSelectionRequest,
+    ) -> Result<(), HandleError> {
+        Ok(())
+    }
+
     async fn request_exit(&self) {}
 
     async fn current_should_exit(&self) -> bool {

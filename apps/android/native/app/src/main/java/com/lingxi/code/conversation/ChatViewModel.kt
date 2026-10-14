@@ -4,10 +4,12 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.R
+import com.lingxi.code.bindings.client.AskUserQuestionAnswersDto
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.android.MobileLinuxEventFfi
 import com.lingxi.code.bindings.android.MobileLinuxEventKindFfi
 import com.lingxi.code.bindings.android.MobileLinuxTaskSnapshotFfi
@@ -470,18 +472,21 @@ class ChatViewModel(
                     ),
                 )
             }
-            is ClientEvent.Error -> _state.update { state ->
-                val previous = state.compaction
-                if (previous?.status != CompactionProgressStatus.Running ||
-                    !event.message.startsWith("force_compact failed:", ignoreCase = true)) {
-                    state
-                } else {
-                    state.copy(
-                        compaction = previous.copy(
-                            status = CompactionProgressStatus.Failed,
-                            detail = compactFailureDetail(event.message),
-                        ),
-                    )
+            is ClientEvent.Error -> {
+                val message = event.message.displayText()
+                _state.update { state ->
+                    val previous = state.compaction
+                    if (previous?.status != CompactionProgressStatus.Running ||
+                        !message.startsWith("force_compact failed:", ignoreCase = true)) {
+                        state
+                    } else {
+                        state.copy(
+                            compaction = previous.copy(
+                                status = CompactionProgressStatus.Failed,
+                                detail = compactFailureDetail(message),
+                            ),
+                        )
+                    }
                 }
             }
                 is ClientEvent.TaskRow -> _state.update {
@@ -1058,7 +1063,7 @@ class ChatViewModel(
      * [answers] maps each question's full text to the selected label(s)
      * comma-joined or the free-text entry — see `assembleAskAnswers`.
      */
-    fun answerQuestion(requestId: ULong, answers: Map<String, String>) {
+    fun answerQuestion(requestId: ULong, answers: AskUserQuestionAnswersDto) {
         _state.update { s ->
             s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == requestId })
         }
@@ -1545,7 +1550,8 @@ class ChatViewModel(
     internal fun applyModelState(engine: EngineModelState) {
         if (!engine.hasCatalog) return
         val options = EngineModelCatalog.options(engine.available, engine.details)
-        val active = options.firstOrNull { it.id == engine.active } ?: options.first()
+        val activeRoute = options.firstOrNull { it.id == engine.active } ?: options.first()
+        val active = engine.activeSourceDisplay?.let { activeRoute.copy(name = it) } ?: activeRoute
         _state.update { it.copy(availableModels = options, model = active) }
     }
 
@@ -1941,6 +1947,9 @@ class ChatViewModel(
     ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        val isBashInput = text.startsWith("!")
+        val submittedText = if (isBashInput) text.substring(1) else trimmed
+        val promptMode = if (isBashInput) PromptModeDto.BASH else null
         if (refuseWhileDurableTurnParked()) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
@@ -1999,8 +2008,8 @@ class ChatViewModel(
                 runCatching {
                     source.submitClientCommand(
                         ClientCommand.SendPrompt(
-                            text = ClientTextDto(codeUnits = trimmed.map { it.code.toUShort() }),
-                            promptMode = null,
+                            text = submittedText.toClientTextDto(),
+                            promptMode = promptMode,
                             images = images,
                             turnId = null,
                             visualizationContext = visualizationChip?.reference?.toDto(),
@@ -2060,7 +2069,7 @@ class ChatViewModel(
         setBackgroundTurnActive(true)
 
         turnJob = viewModelScope.launch {
-            source.submit(trimmed, images, submittedTurnId, visualizationChip?.reference).collect { event ->
+            source.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode).collect { event ->
                 reduce(event, token)
                 if (
                     event is ReplyEvent.DurableTurnReplayAcknowledged &&

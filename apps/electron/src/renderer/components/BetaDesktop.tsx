@@ -1497,6 +1497,10 @@ function modelLabel(model?: string | null): string {
   return modelReference(model).label;
 }
 
+function activeModelLabel(model?: string | null, source?: string | null): string {
+  return modelLabel(source ?? model);
+}
+
 function reasoningSelectionKey(selection: ReasoningSelectionDto): string {
   return JSON.stringify(selection);
 }
@@ -3450,7 +3454,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               disabled={!modelControlReady}
               aria-haspopup="menu"
               aria-expanded={modelOpen}
-              aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${modelLabel(bridge.desktop.currentModel)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
+              aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
               onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
               style={{ ...composerPillStyle(t, modelOpen), maxWidth: '100%', width: '100%', color: t.text }}
@@ -3458,7 +3462,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}
               {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.accent, fontSize: 11.5, fontWeight: 700 }}>Fast</span>}
               {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.text4 }}>·</span>}
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{modelLabel(bridge.desktop.currentModel)}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource)}</span>
               <span style={{ color: t.text4 }}>·</span>
               <span style={{ color: t.text3, fontSize: 11.5 }}>{reasoningSelectionLabel(selectedReasoning)}</span>
               <Icon name="chevron" size={14} color={t.text3} />
@@ -3478,7 +3482,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 {pickerSubmenus.map((submenu) => {
                   const labels = { model: 'Model', effort: 'Effort', speed: 'Speed' };
                   const values = {
-                    model: modelLabel(bridge.desktop.currentModel),
+                    model: activeModelLabel(bridge.desktop.currentModel, bridge.desktop.currentModelSource),
                     effort: reasoningSelectionLabel(selectedReasoning),
                     speed: fastModeAvailable && bridge.desktop.fastMode ? 'Fast' : 'Standard',
                   };

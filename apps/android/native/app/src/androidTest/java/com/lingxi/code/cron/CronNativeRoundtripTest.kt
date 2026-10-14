@@ -3,6 +3,7 @@ package com.lingxi.code.cron
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.bindings.client.*
+import com.lingxi.code.conversation.displayText
 import com.lingxi.code.bindings.runtime.*
 import com.lingxi.code.bindings.android.*
 import com.lingxi.code.clipboard.AndroidClipboardAdapter
@@ -97,7 +98,7 @@ class CronNativeRoundtripTest {
                                     assertEquals(id, event.sessionId.removePrefix("sess:"))
                                     return@withTimeout
                                 }
-                                is ClientEvent.Error -> error(event.message)
+                                is ClientEvent.Error -> error(event.message.displayText())
                                 else -> Unit
                             }
                         }

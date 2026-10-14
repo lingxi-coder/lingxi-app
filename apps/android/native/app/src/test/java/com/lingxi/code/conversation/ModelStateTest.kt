@@ -112,11 +112,11 @@ class ModelStateTest {
     fun nonModelEvent_returnsPrevUnchanged_identity() {
         val prev = EngineModelState(available = listOf("claude-opus-4"), active = "claude-opus-4")
         // TextDelta / Error / TurnStarted must NOT disturb the model state.
-        assertSame(prev, reduceModelEvent(prev, ClientEvent.TextDelta("hi")))
+        assertSame(prev, reduceModelEvent(prev, ClientEvent.TextDelta("hi".toClientTextDto())))
         assertSame(prev, reduceModelEvent(prev, ClientEvent.TurnStarted(turnId = null)))
         assertSame(
             prev,
-            reduceModelEvent(prev, ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "x")),
+            reduceModelEvent(prev, ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "x".toClientTextDto())),
         )
     }
 

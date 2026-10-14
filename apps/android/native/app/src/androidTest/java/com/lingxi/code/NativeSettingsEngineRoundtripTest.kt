@@ -3,6 +3,7 @@ package com.lingxi.code
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.bindings.client.*
+import com.lingxi.code.conversation.displayText
 import com.lingxi.code.bindings.runtime.*
 import com.lingxi.code.bindings.android.*
 import com.lingxi.code.clipboard.AndroidClipboardAdapter
@@ -59,7 +60,7 @@ class NativeSettingsEngineRoundtripTest {
                 suspend fun snapshot(layer: String? = null, value: String? = null): ClientEvent.SettingsSnapshot = withTimeout(20_000) {
                     while (true) {
                         when (val event = events.receive()) {
-                            is ClientEvent.Error -> error("Real engine rejected settings command: ${event.message}")
+                            is ClientEvent.Error -> error("Real engine rejected settings command: ${event.message.displayText()}")
                             is ClientEvent.SettingsSnapshot -> {
                                 if (layer == null || JSONObject(event.layersJson ?: "{}").optJSONObject(layer)?.optString("outputStyle") == value) return@withTimeout event
                             }

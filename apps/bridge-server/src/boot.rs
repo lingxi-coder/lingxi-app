@@ -47,7 +47,10 @@ use crate::driver::OrchestratorTurnDriver;
 use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
-use crate::settings_bridge::{active_settings_baseline, SettingsContext, SettingsPaths};
+use crate::settings_bridge::{
+    active_settings_baseline, empty_settings_source, settings_error_message, SettingsContext,
+    SettingsPaths,
+};
 
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
@@ -935,16 +938,40 @@ impl BoundServer {
         self.runtime.session_lifecycle.clone()
     }
 
-    /// Observe the existing authenticated RequestExit command without exposing
-    /// the runtime's broad handles or borrowing the moved connection.
+    /// Observe a source-scoped failure to validate a required Native policy
+    /// semantic. Kept separate from the Native refusal and RequestExit paths.
+    pub fn wait_for_policy_semantic_worker_failure(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = std::sync::Arc<
+                        harness_runtime::desktop::NativePolicySemanticWorkerFailure,
+                    >,
+                > + Send,
+        >,
+    > {
+        let mut probe = self.runtime.policy_helper_semantic_worker_failure.clone();
+        Box::pin(async move { probe.wait().await })
+    }
+
+    /// Observe authenticated RequestExit or a managed-policy refusal without
+    /// borrowing the moved connection. A refusal retains its typed source error.
     pub fn wait_for_exit_requested(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<harness_runtime::desktop::PolicyHelperStartupError>,
+                > + Send,
+        >,
+    > {
         let orchestrator = self.runtime.orchestrator.clone();
+        let refusal = self.runtime.policy_helper_refusal.clone();
         Box::pin(async move {
             loop {
                 if orchestrator.current_should_exit() {
-                    return;
+                    return refusal.current();
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
@@ -1447,12 +1474,27 @@ pub async fn assemble_with_credentials(
         // here, and reused for both `active`'s one-time bake-in below and the
         // `managed` field every later listing re-applies to `effective` — the
         // same map both places, so the two can never drift apart.
-        let managed = harness_runtime::desktop::managed_settings_overlay().await;
-        let active = active_settings_baseline(&paths, &managed);
+        let (managed, managed_diagnostics) =
+            match harness_runtime::desktop::managed_settings_overlay(&cfg).await {
+                Ok(Some(managed)) => (managed, None),
+                Ok(None) => (empty_settings_source(), None),
+                Err(lingxi_core::settings::SettingsError::SourceFailure {
+                    diagnostics,
+                    effective,
+                    ..
+                }) => (
+                    effective.unwrap_or_else(empty_settings_source),
+                    Some(diagnostics),
+                ),
+                Err(error) => return Err(settings_error_message(&error)),
+            };
+        let active = active_settings_baseline(&paths, &managed)
+            .map_err(|error| settings_error_message(&error))?;
         SettingsContext {
             paths,
             active: Arc::new(std::sync::RwLock::new(active)),
             managed,
+            managed_diagnostics,
         }
     };
 
@@ -1539,7 +1581,8 @@ pub async fn assemble_with_credentials(
     ));
     let provider_model_catalog_listings = desktop_provider_catalog_listings(
         &cfg,
-        harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed),
+        harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
+            .map_err(|error| settings_error_message(&error))?,
     );
 
     let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
@@ -1824,6 +1867,7 @@ pub async fn assemble_with_credentials(
     );
 
     let connection = connection
+        .with_policy_helper_refusal(runtime.policy_helper_refusal.clone())
         .bind(gate, driver)
         .bind_router(router)
         .bind_computer_access(computer_access_broker, computer_access_rx)
@@ -2851,9 +2895,13 @@ mod tests {
             "an idle session must not request process exit"
         );
         bound.runtime.orchestrator.request_exit().await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), requested_exit)
+        let refusal = tokio::time::timeout(std::time::Duration::from_secs(1), requested_exit)
             .await
             .expect("authenticated RequestExit must wake host teardown");
+        assert!(
+            refusal.is_none(),
+            "ordinary RequestExit is not a policy refusal"
+        );
         let report = bound.session_lifecycle().shutdown_and_drain().await;
         assert!(report.complete, "shutdown errors: {:?}", report.errors);
     }

@@ -40,6 +40,23 @@ mod events;
 mod input;
 mod render;
 
+trait AppEventDriver {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
+    fn read(&mut self) -> io::Result<Event>;
+}
+
+struct CrosstermEventDriver;
+
+impl AppEventDriver for CrosstermEventDriver {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        event::poll(timeout)
+    }
+
+    fn read(&mut self) -> io::Result<Event> {
+        event::read()
+    }
+}
+
 /// How the [`run_app`] event loop exited.
 ///
 /// The historical loop only ever ended one way (the user quit), so `run`
@@ -50,7 +67,8 @@ mod render;
 /// across files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppExit {
-    /// The user quit (`/exit`, `/stop`, Ctrl-C twice): the embedder tears down.
+    /// The user (`/exit`, `/stop`, Ctrl-C twice) or host probe requested
+    /// normal shutdown: the embedder tears down.
     Quit,
     /// Exit after a successful durable background handoff.
     Backgrounded(String),
@@ -472,8 +490,8 @@ impl<'cb> RataApp<'cb> {
         });
     }
 
-    /// Run the event loop until the user quits. Per-tick order (locked by the
-    /// Phase 1 handoff): drain turn events into the widget, drain permission
+    /// Run the event loop until the user or host requests exit. Per-tick order
+    /// (locked by the Phase 1 handoff): drain turn events into the widget, drain permission
     /// requests into the widget, size the bottom viewport BEFORE flushing
     /// (history insertion wraps at the viewport width), flush finalized
     /// history to native scrollback, draw the widget, then route input and
@@ -482,7 +500,8 @@ impl<'cb> RataApp<'cb> {
     /// # Errors
     /// Propagates the first terminal IO error.
     pub fn run(&mut self, terminal: &mut RataTerminal) -> io::Result<AppExit> {
-        self.run_inner(terminal, None)
+        let mut event_driver = CrosstermEventDriver;
+        self.run_inner(terminal, None, None, &mut event_driver)
     }
 
     /// Production loop with access to the terminal RAII guard, allowing
@@ -493,16 +512,22 @@ impl<'cb> RataApp<'cb> {
         terminal: &mut RataTerminal,
         session: &mut TerminalSession,
     ) -> io::Result<AppExit> {
-        self.run_inner(terminal, Some(session))
+        let mut event_driver = CrosstermEventDriver;
+        self.run_inner(terminal, Some(session), None, &mut event_driver)
     }
 
     fn run_inner(
         &mut self,
         terminal: &mut RataTerminal,
         mut session: Option<&mut TerminalSession>,
+        exit_request_probe: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        event_driver: &mut dyn AppEventDriver,
     ) -> io::Result<AppExit> {
         let mut need_draw = true;
         loop {
+            if exit_request_probe.is_some_and(|probe| probe()) {
+                return Ok(AppExit::Quit);
+            }
             let mut dirty = false;
             dirty |= self.drain_mod_ui_render_results();
             dirty |= self.drain_mod_ui_render_generation();
@@ -578,9 +603,9 @@ impl<'cb> RataApp<'cb> {
             } else {
                 self.redraw_interval
             };
-            if event::poll(poll_timeout)? {
+            if event_driver.poll(poll_timeout)? {
                 need_draw = true;
-                let outcome = match event::read()? {
+                let outcome = match event_driver.read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
                     Event::Paste(text) => self.on_paste(&text),
                     Event::Mouse(mouse) if self.fullscreen => {
@@ -827,6 +852,11 @@ impl<'cb> RataApp<'cb> {
 /// multi-provider catalog at startup); `/connect` reads clones to build its
 /// picker. Empty maps (the default) render an empty picker.
 ///
+/// `exit_request_probe` lets an embedder request normal loop unwinding while
+/// the UI is otherwise idle. The probe is checked before each tick can draw or
+/// wait for terminal input; returning `true` yields [`AppExit::Quit`], so the
+/// terminal session guard follows the same restore path as a user-requested exit.
+///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
 #[allow(clippy::too_many_arguments)]
@@ -900,6 +930,7 @@ pub fn run_app(
     on_task_action: impl FnMut(TaskAction),
     on_dispatch_slash: impl FnMut(Utf16JsonProjection, crate::chat_widget::PendingSlashDispatch),
     on_rewake_peer: impl FnMut(),
+    exit_request_probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -1078,7 +1109,13 @@ pub fn run_app(
             (app.callbacks.on_submit)(prompt, row_token, images, token);
         }
     }
-    let result = app.run_with_session(&mut terminal, &mut session_guard);
+    let mut event_driver = CrosstermEventDriver;
+    let result = app.run_inner(
+        &mut terminal,
+        Some(&mut session_guard),
+        exit_request_probe.as_deref(),
+        &mut event_driver,
+    );
     app.chat_widget.set_mod_ui_selection(None);
     app.chat_widget.cancel_active_turn();
     result

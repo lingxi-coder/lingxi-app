@@ -1,6 +1,7 @@
 //! Bounded stdin/stdout service for host audio without booting an Agent.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, io::Read};
@@ -64,9 +65,13 @@ async fn execute(envelope: Envelope) -> String {
             packaged_credential_stdin_only: true,
             ..Default::default()
         });
-        match harness_runtime::desktop::resolve_provider_region(&cfg, &BTreeMap::new()) {
-            llm_runtime::Region::ChinaMainland => "china".into(),
-            llm_runtime::Region::International => "international".into(),
+        match harness_runtime::desktop::resolve_provider_region(
+            &cfg,
+            &crate::settings_bridge::empty_settings_source(),
+        ) {
+            Ok(llm_runtime::Region::ChinaMainland) => "china".into(),
+            Ok(llm_runtime::Region::International) => "international".into(),
+            Err(error) => return settings_failure_json(&error),
         }
     });
     let host = match audio_provider::AudioProviderHost::new(
@@ -118,5 +123,38 @@ async fn execute(envelope: Envelope) -> String {
         }
         _ => audio_provider::failure("invalid_request", "unknown audio service operation")
             .to_string(),
+    }
+}
+fn settings_failure_json(error: &lingxi_core::settings::SettingsError) -> String {
+    let error = Utf16JsonProjection::object(vec![
+        ("kind".into(), Utf16JsonProjection::from("unavailable")),
+        ("message".into(), error.message_projection()),
+    ])
+    .expect("audio settings error has unique JSON object fields");
+    Utf16JsonProjection::object(vec![("error".into(), error)])
+        .expect("audio settings error has a valid response object")
+        .to_json_string()
+        .expect("audio settings response serializes")
+}
+
+#[cfg(test)]
+mod source_error_tests {
+    use super::settings_failure_json;
+    use lingxi_core::settings::SettingsError;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn settings_failure_stdout_json_keeps_source_surrogate() {
+        let message = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let diagnostics = Utf16JsonProjection::object(Vec::new()).unwrap();
+        let error = SettingsError::source_failure("managed", message, diagnostics, None);
+        let json = settings_failure_json(&error);
+
+        assert_eq!(
+            json,
+            r#"{"error":{"kind":"unavailable","message":"\ud800"}}"#
+        );
+        let parsed = Utf16JsonProjection::parse(&json).unwrap();
+        assert_eq!(parsed.string_units("/error/message"), Some(vec![0xd800]));
     }
 }

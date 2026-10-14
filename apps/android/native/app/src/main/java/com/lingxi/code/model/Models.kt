@@ -595,6 +595,7 @@ object MockData {
 data class EngineModelState(
     val available: List<String> = emptyList(),
     val active: String = "",
+    val activeSourceDisplay: String? = null,
     val details: Map<String, CatalogModelDetails> = emptyMap(),
 ) {
     val hasCatalog: Boolean get() = available.isNotEmpty()

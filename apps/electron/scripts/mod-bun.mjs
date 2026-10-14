@@ -3,6 +3,9 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync, realpathSync, writeFi
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
+export const MOD_BUN_VERSION = '1.4.3';
+export const MOD_BUN_REVISION = 'c6da4a4d3010e5553438c60f6bd76d981976867c';
+
 const manifestName = 'mod-bun.json';
 const noticeName = 'Bun-LICENSE.md';
 const inspectExpression = `JSON.stringify({
@@ -38,6 +41,12 @@ export function inspectModBun(executable, platform, arch) {
     || typeof identity.transformed !== 'string' || !identity.transformed.includes('h(Text')) {
     throw new Error('Mod compiler did not expose the required Bun.Transpiler contract');
   }
+  if (identity.version !== MOD_BUN_VERSION) {
+    throw new Error(`Mod compiler must use Bun ${MOD_BUN_VERSION}; received ${identity.version}`);
+  }
+  if (identity.revision !== MOD_BUN_REVISION) {
+    throw new Error(`Mod compiler must use Bun revision ${MOD_BUN_REVISION}; received ${identity.revision}`);
+  }
   return {
     executable: realpathSync(identity.executable),
     version: identity.version, revision: identity.revision, platform, arch,
@@ -58,6 +67,12 @@ export async function prepareModBun({ platform, arch, configuredPath = process.e
 }
 
 export function stageModBun(resources, compiler) {
+  if (compiler.version !== MOD_BUN_VERSION) {
+    throw new Error(`Mod compiler must use Bun ${MOD_BUN_VERSION}; received ${compiler.version}`);
+  }
+  if (compiler.revision !== MOD_BUN_REVISION) {
+    throw new Error(`Mod compiler must use Bun revision ${MOD_BUN_REVISION}; received ${compiler.revision}`);
+  }
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });
   const filename = modBunFilename(compiler.platform);

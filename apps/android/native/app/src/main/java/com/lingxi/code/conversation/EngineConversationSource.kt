@@ -9,6 +9,7 @@ import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
@@ -292,7 +293,7 @@ class EngineConversationSource private constructor(
         if (id.isBlank()) return
         // Let the caller surface delivery/rejection errors; only ModelChanged
         // advances modelState, so a failed switch retains the confirmed model.
-        handle.submit(ClientCommand.SetModel(model = id))
+        handle.submit(ClientCommand.SetModel(model = id.toClientTextDto()))
     }
 
     /**
@@ -339,7 +340,7 @@ class EngineConversationSource private constructor(
         submit(text, images, nextFallbackTurnId())
 
     override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
-        submit(text, images, turnId, null)
+        submit(text, images, turnId, null, null)
 
     override val visualizationHost: VisualizationHost? by lazy {
         runCatching { handle.visualizationHost(VISUALIZATION_ORIGIN) }.getOrNull()
@@ -350,6 +351,7 @@ class EngineConversationSource private constructor(
         images: List<ImageRefDto>,
         turnId: Long,
         visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?,
     ): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
         // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
@@ -368,8 +370,8 @@ class EngineConversationSource private constructor(
                     }
                     handle.submit(
                         ClientCommand.SendPrompt(
-                            text = ClientTextDto(codeUnits = text.map { it.code.toUShort() }),
-                            promptMode = null,
+                            text = text.toClientTextDto(),
+                            promptMode = promptMode,
                             images = images,
                             turnId = turnId.toULong(),
                             visualizationContext = visualizationContext?.toDto(),
@@ -386,7 +388,7 @@ class EngineConversationSource private constructor(
                                 R.string.chat_error_engine_submit_failed,
                                 "引擎错误：%1\$s",
                                 "${t.message ?: t::class.simpleName}",
-                            ),
+                            ).toClientTextDto(),
                         ),
                     )
                 }

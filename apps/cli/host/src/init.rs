@@ -68,6 +68,10 @@ pub struct Runtime {
     /// Ordered producer/cost/session/outbox drain retained across the desktop
     /// runtime projection.
     pub session_lifecycle: Arc<harness_runtime::desktop::DesktopSessionLifecycle>,
+    /// Latched managed-policy refusal observed by the host's exit path.
+    pub policy_helper_refusal: harness_runtime::desktop::PolicyHelperRefusalProbe,
+    /// Current source-scoped failure to validate a required Native policy JS semantic.
+    pub policy_helper_semantic_worker_failure: harness_runtime::desktop::PolicySemanticWorkerProbe,
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
@@ -296,8 +300,7 @@ pub struct TuiBuild {
 /// Errors surfaced while building a [`Runtime`].
 ///
 /// F2-01: the underlying assembly moved to [`harness_runtime::desktop::build`]; this enum
-/// is a thin projection of [`harness_runtime::desktop::BuildError`] kept for source
-/// compatibility with the CLI's existing call sites.
+/// is the CLI projection of [`harness_runtime::desktop::BuildError`].
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
     /// API base URL resolution / construction failed.
@@ -344,6 +347,16 @@ pub enum InitError {
     /// Structured output schema could not be compiled for the active request.
     #[error("structured output JSON Schema compilation failed: {0}")]
     StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
+    /// A managed-policy startup refusal retains its source diagnostic until
+    /// the CLI renders the error.
+    #[error("{0}")]
+    PolicyHelperStartup(#[source] harness_runtime::desktop::PolicyHelperStartupError),
+    /// The pinned Bun semantic worker required by Native policy validation is
+    /// unavailable or failed its source-keyed protocol.
+    #[error("Native policy semantic worker failed: {0}")]
+    NativePolicySemanticWorker(
+        #[source] lingxi_core::settings::native_policy_regex::NativePolicyRegexWorkerError,
+    ),
 }
 
 impl From<harness_runtime::desktop::BuildError> for InitError {
@@ -368,6 +381,12 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
             harness_runtime::desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
             harness_runtime::desktop::BuildError::StructuredOutputSchema(error) => {
                 Self::StructuredOutputSchema(error)
+            }
+            harness_runtime::desktop::BuildError::PolicyHelperStartup(error) => {
+                Self::PolicyHelperStartup(error)
+            }
+            harness_runtime::desktop::BuildError::NativePolicySemanticWorker(error) => {
+                Self::NativePolicySemanticWorker(error)
             }
         }
     }
@@ -1001,6 +1020,8 @@ pub(crate) fn resolve_desktop_config_at(
         let mut __desktop_config = DesktopConfig::default();
         __desktop_config.build_info = build_info;
         __desktop_config.diagnostics = Some(Arc::new(CliDesktopDiagnostics));
+        __desktop_config.native_policy_warning_logger =
+            crate::logging::native_policy_warning_logger(argv);
         __desktop_config.composition = None;
         __desktop_config.defer_session_start = false;
         __desktop_config.connect_mcp_in_background = false;
@@ -1599,6 +1620,8 @@ pub async fn build_runtime_from_config(
         fusion_recorder: rt.fusion_recorder,
         fusion_recorder_factory: rt.fusion_recorder_factory,
         session_lifecycle: rt.session_lifecycle,
+        policy_helper_refusal: rt.policy_helper_refusal,
+        policy_helper_semantic_worker_failure: rt.policy_helper_semantic_worker_failure,
         dispatcher: rt.dispatcher,
         mod_command_catalog: rt.mod_command_catalog,
         auth: rt.auth,

@@ -355,6 +355,18 @@ fn slash_model_prompt(
             });
             None
         }
+        SlashDispatchResult::Failed { diagnostic } => {
+            let display = slash_failure_display(&diagnostic);
+            let _ = tx.send(tui::TurnEvent::SystemNotice {
+                body: client::protocol::text::ClientTextDto::from_code_units(
+                    display
+                        .string_units("")
+                        .expect("slash failure display is a root string"),
+                ),
+                is_error: true,
+            });
+            None
+        }
         // Unknown slash commands and parser failures remain ordinary user
         // prompts in Claude Code. The dispatcher result carries the original
         // source only for ParseFailure; use the composer source for Unknown.
@@ -367,6 +379,22 @@ fn slash_model_prompt(
 enum SlashModelTurn {
     Prompt(lingxi_core::types::utf16_json::Utf16JsonProjection),
     Batch(Vec<orchestrator::QueuedPromptInput>),
+}
+
+/// Extract the Native-facing error message while keeping its exact UTF-16
+/// units in the client protocol carrier. The terminal renderer is the final
+/// UTF-8 display boundary.
+pub(crate) fn slash_failure_display(
+    diagnostic: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let units = diagnostic
+        .string_units("/message")
+        .expect("settings diagnostics carry their source message");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&units),
+        units,
+    )
+    .expect("display string matches its exact UTF-16 units")
 }
 
 fn skill_prompt_inputs(
@@ -861,6 +889,19 @@ async fn drain_teammate_prompts(
                             .expect("generated object contains one valid source JSON value")
                     };
                     let _ = settle.send(Ok(settlement.unwrap_or_else(fallback)));
+                    continue;
+                }
+                lingxi_core::host::SlashDispatchResult::Failed { diagnostic } => {
+                    let display = slash_failure_display(&diagnostic);
+                    let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
+                        body: client::protocol::text::ClientTextDto::from_code_units(
+                            display
+                                .string_units("")
+                                .expect("slash failure display is a root string"),
+                        ),
+                        is_error: true,
+                    });
+                    let _ = settle.send(Err(diagnostic));
                     continue;
                 }
                 lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
@@ -1534,6 +1575,9 @@ pub(crate) struct RemountState {
     /// Active `(request_model, provider_profile)` — `None` resolves the model
     /// by-id (no profile). Applied via `switch_model`.
     pub model: Option<(String, Option<String>)>,
+    /// Exact explicit user model source for a hot in-process remount. Configured
+    /// source remains owned by the rebuilt runtime's current settings.
+    pub user_model_setting: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// `/fast` toggle. Applied via `set_fast_mode`.
     pub fast_mode: bool,
     /// `/plan` mode. Applied via `set_plan_mode`.
@@ -1623,6 +1667,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
 ) -> RunOutcome {
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
+    let policy_helper_refusal = tui_build.runtime.policy_helper_refusal.clone();
+    let policy_semantic_worker_failure = tui_build
+        .runtime
+        .policy_helper_semantic_worker_failure
+        .clone();
+    let exit_request_probe = {
+        let refusal = policy_helper_refusal.clone();
+        let semantic_worker_failure = policy_semantic_worker_failure.clone();
+        Arc::new(move || refusal.current().is_some() || semantic_worker_failure.current().is_some())
+            as Arc<dyn Fn() -> bool + Send + Sync>
+    };
     let exit_task_registry = tui_build.runtime.task_registry.clone();
     let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
     let teammate_turn_gate = Arc::new(tokio::sync::Mutex::new(()));
@@ -3358,6 +3413,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_task_action,
             on_dispatch_slash,
             on_rewake_peer,
+            Some(exit_request_probe),
         )
     })
     .await;
@@ -3447,6 +3503,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
             );
         }
     }
+    if let Some(refusal) = policy_helper_refusal.current() {
+        eprintln!("lingxi-cli: {refusal}");
+        return RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+    }
+    if let Some(failure) = policy_semantic_worker_failure.current() {
+        eprintln!("lingxi-cli: {failure}");
+        return RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+    }
     // (/rewind, /resume, /branch re-mount) Capture the in-session live state
     // (model + fast-mode + plan-mode) so the re-mount can carry it into the
     // rebuilt runtime — see [`RemountState`] for why this is in-memory (not a
@@ -3454,8 +3518,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // drops it.
     let carried_state = {
         let status = summary_orch.get_status_snapshot().await;
+        let user_model_setting = {
+            let session = summary_orch.session();
+            let session = session.lock().await;
+            (session.user_model_setting_source
+                == lingxi_core::session::SessionModelSettingSource::UserSelection)
+                .then(|| session.user_model_setting.clone())
+                .flatten()
+        };
         Some(RemountState {
             model: Some((status.model, status.model_profile)),
+            user_model_setting,
             fast_mode: summary_orch.fast_mode().await,
             plan_mode: summary_orch.plan_mode().await,
             permission_mode: carried_mode_gate.as_ref().and_then(|g| g.permission_mode()),
@@ -6089,6 +6162,53 @@ mod tests {
             self.0.lock().unwrap().push(model.to_string());
             Ok(())
         }
+        async fn validate_model_selection(
+            &self,
+            request: &lingxi_core::host::ModelSelectionRequest,
+        ) -> Result<(), lingxi_core::host::HandleError> {
+            let model = match request {
+                lingxi_core::host::ModelSelectionRequest::Reset { .. } => "default",
+                lingxi_core::host::ModelSelectionRequest::Select {
+                    source, route_hint, ..
+                } => route_hint
+                    .as_ref()
+                    .map(|route| route.model.as_str())
+                    .or_else(|| source.string_at(""))
+                    .unwrap_or_default(),
+            };
+            if model == "blocked-model" {
+                return Err(lingxi_core::host::HandleError::ActionFailed(
+                    "blocked by hook".into(),
+                ));
+            }
+            Ok(())
+        }
+        async fn select_model(
+            &self,
+            request: lingxi_core::host::ModelSelectionRequest,
+        ) -> Result<(), lingxi_core::host::HandleError> {
+            match request {
+                lingxi_core::host::ModelSelectionRequest::Reset { .. } => {
+                    self.switch_model("default", None).await
+                }
+                lingxi_core::host::ModelSelectionRequest::Select {
+                    source, route_hint, ..
+                } => {
+                    let model = route_hint
+                        .as_ref()
+                        .map(|route| route.model.as_str())
+                        .or_else(|| source.string_at(""))
+                        .unwrap_or_default();
+                    self.switch_model(
+                        model,
+                        route_hint
+                            .as_ref()
+                            .and_then(|route| route.profile.as_deref()),
+                    )
+                    .await
+                }
+            }
+        }
         async fn request_exit(&self) {
             unreachable!("unused recording handle method")
         }
@@ -6838,6 +6958,24 @@ mod tests {
             panic!("unknown command should retain the original composer input");
         };
         assert_eq!(unknown_input.string_at(""), Some("/unknown fixed"));
+        assert!(rx.try_recv().is_err());
+        let failure = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"kind":"settings_projection","message":"bad\ud800","sourceValue":"other"}"#,
+        )
+        .unwrap();
+        assert!(slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::Failed {
+                diagnostic: failure,
+            },
+            "/context".into(),
+            &tx,
+        )
+        .is_none());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            tui::TurnEvent::SystemNotice { body, is_error: true }
+                if body.code_units == vec![b'b' as u16, b'a' as u16, b'd' as u16, 0xd800]
+        ));
         assert!(rx.try_recv().is_err());
         let Some(SlashModelTurn::Prompt(run_as_turn_prompt)) = slash_model_prompt(
             lingxi_core::host::SlashDispatchResult::RunAsTurn {

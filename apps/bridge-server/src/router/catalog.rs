@@ -27,6 +27,7 @@ use serde_json::Value;
 pub(super) struct SlashAuthoritySnapshot {
     pub(super) session_id: String,
     pub(super) model: String,
+    pub(super) model_source: Option<ClientTextDto>,
     pub(super) permission_mode: Option<String>,
     pub(super) auth: AuthStateDto,
     pub(super) catalog: Option<Vec<SlashCommandDto>>,
@@ -160,6 +161,10 @@ impl EngineCommandRouter {
                 &snapshot.model,
                 snapshot.model_profile.as_deref(),
             ),
+            model_source: snapshot
+                .model_source
+                .as_ref()
+                .and_then(|source| ClientTextDto::from_projection(source).ok()),
             permission_mode: self.handle.permission_mode().await,
             auth: lower_auth_state(self.auth.current_user().await),
             catalog: self.slash_command_catalog().await,
@@ -183,9 +188,10 @@ impl EngineCommandRouter {
         if before.session_id != after.session_id {
             events.push(ClientEvent::SessionEnded);
         }
-        if before.model != after.model {
+        if before.model != after.model || before.model_source != after.model_source {
             events.push(ClientEvent::ModelChanged {
                 model: after.model.clone(),
+                model_source: after.model_source.clone(),
             });
         }
         if before.permission_mode != after.permission_mode {
@@ -250,6 +256,10 @@ impl EngineCommandRouter {
                 sink.emit(ClientEvent::ModelList {
                     models,
                     current,
+                    current_model_source: snapshot
+                        .model_source
+                        .as_ref()
+                        .and_then(|source| ClientTextDto::from_projection(source).ok()),
                     details: curated
                         .iter()
                         .map(client::adapter::lowering::lower_model_details)

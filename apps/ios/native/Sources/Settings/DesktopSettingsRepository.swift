@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
+#endif
 import Observation
 
 /// Settings file destinations deliberately exclude MCP's independent scopes.
@@ -346,8 +349,9 @@ final class DesktopSettingsRepository {
                 }
             }
         case let .error(_, message):
-            if saving { fail(message) }
-            else if connected && !readRequests.isEmpty { errorMessage = message; readRequests = [] }
+            let displayMessage = message.displayText
+            if saving { fail(displayMessage) }
+            else if connected && !readRequests.isEmpty { errorMessage = displayMessage; readRequests = [] }
         default: break
         }
     }

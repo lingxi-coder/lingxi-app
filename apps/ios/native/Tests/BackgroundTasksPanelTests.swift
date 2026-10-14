@@ -41,7 +41,7 @@ visionDelegationEnabled: true
                 taskId: id,
                 taskType: "local_workflow",
                 status: status,
-                description: description,
+                description: description.clientTextDto,
                 canResume: canResume,
                 startedAtMs: nil,
                 error: error,

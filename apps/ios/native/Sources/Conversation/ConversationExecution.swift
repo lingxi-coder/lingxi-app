@@ -453,6 +453,7 @@ struct ConversationAskOption: Equatable, Hashable {
     let label: String
     let description: String
     let preview: String?
+    var sourceLabelCodeUnits: [UInt16]? = nil
 }
 
 /// One question of an interactive questionnaire — mirrors `AskQuestionDto`.
@@ -462,6 +463,7 @@ struct ConversationAskQuestion: Equatable, Hashable {
     let header: String
     let options: [ConversationAskOption]
     let multiSelect: Bool
+    var sourceQuestionCodeUnits: [UInt16]? = nil
 }
 
 /// One background task announced by the engine — a Workflow build segment,

@@ -97,6 +97,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 
 [dev-dependencies]
+# Enable the deterministic policy-refusal probe only in Bridge tests.
+harness-runtime = { workspace = true, default-features = true, features = ["desktop", "test-support"] }
 client = { workspace = true, features = ["test-support"] }
 # Codex slot router tests implement the token refresh transport.
 lingxi-llm-client = { workspace = true }

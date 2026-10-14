@@ -1,9 +1,11 @@
 package com.lingxi.code.settings
 
+import com.lingxi.code.conversation.toClientTextDto
 import com.lingxi.code.bindings.client.*
 import com.lingxi.code.bindings.runtime.*
 import com.lingxi.code.bindings.android.*
 import com.lingxi.code.conversation.ConversationSource
+import com.lingxi.code.conversation.displayText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -85,7 +87,7 @@ class SettingsEngineBridge {
             is ClientEvent.ModelList -> mutable.value = mutable.value.copy(models = event.details)
             is ClientEvent.Error -> {
                 pendingPatch = null
-                mutable.value = mutable.value.copy(pending = null, savingSettings = false, notice = event.message)
+                mutable.value = mutable.value.copy(pending = null, savingSettings = false, notice = event.message.displayText())
             }
             is ClientEvent.McpConfigurationSnapshot -> catalog("mcp", event.snapshotJson)
             is ClientEvent.SkillCatalog -> catalog("skills", event.catalogJson)

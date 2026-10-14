@@ -49,7 +49,7 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
                 if let event = await listener.pop() {
                     if case let .error(_, message) = event {
                         throw NSError(domain: "Native admin command failed", code: 1,
-                                      userInfo: [NSLocalizedDescriptionKey: message])
+                                      userInfo: [NSLocalizedDescriptionKey: message.displayText])
                     }
                     if predicate(event) { return event }
                 }

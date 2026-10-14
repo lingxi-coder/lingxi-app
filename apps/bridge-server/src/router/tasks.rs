@@ -64,7 +64,7 @@ pub(super) async fn emit_task_rows(
         Err(e) => {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: format!("task list failed: {e}"),
+                message: format!("task list failed: {e}").into(),
             })
             .await;
         }

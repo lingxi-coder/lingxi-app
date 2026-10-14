@@ -53,7 +53,7 @@ import SwiftUI
             source.expectSessionResumeForTesting("loop-restored")
             source.applyForTesting(.sessionResumed(sessionId: "loop-restored", mode: .code, messages: [
                 MessageDto(role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "first", companion: nil, streak: 0, sinceMs: 0)),
-                MessageDto(role: "assistant", blocks: [.text(text: "quiet")]),
+                MessageDto(role: "assistant", blocks: [.text(text: "quiet".clientTextDto)]),
                 MessageDto(role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "second", companion: "healthy", streak: 1, sinceMs: 1)),
             ]))
             let visible = source.model.selectedAgentItems.compactMap { item -> String? in
@@ -71,7 +71,7 @@ import SwiftUI
             XCTAssertNil(source.model.messages.last?.loopWakeupStreak)
             XCTAssertTrue(source.model.messages.last?.loopFoldedItemIDs.isEmpty ?? false)
             XCTAssertFalse(source.model.streaming)
-            source.applyForTesting(.systemNotice(message: "Scheduled task text cannot bypass turn gating", isError: false))
+            source.applyForTesting(.systemNotice(message: "Scheduled task text cannot bypass turn gating".clientTextDto, isError: false))
             XCTAssertEqual(source.model.messages.count, 1)
             XCTAssertEqual(source.model.messages.last?.text, "Fixed task is ready")
         }
@@ -94,17 +94,17 @@ import SwiftUI
             source.beginTurnForTesting(turnId: 901, sessionId: "retraction")
             source.applyForTesting(.turnStarted(turnId: 901))
             source.applyForTesting(.thinkingDelta(thinking: "failed reasoning", signature: nil))
-            source.applyForTesting(.textDelta(text: "failed"))
+            source.applyForTesting(.textDelta(text: "failed".clientTextDto))
             source.applyForTesting(.messageIdentity(messageId: "failed-id"))
             source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(
-                role: "assistant", blocks: [.text(text: "failed")]
+                role: "assistant", blocks: [.text(text: "failed".clientTextDto)]
             )))
-            source.applyForTesting(.systemNotice(message: "unrelated notice", isError: false))
+            source.applyForTesting(.systemNotice(message: "unrelated notice".clientTextDto, isError: false))
             source.applyForTesting(.thinkingDelta(thinking: "retained reasoning", signature: nil))
-            source.applyForTesting(.textDelta(text: "retained"))
+            source.applyForTesting(.textDelta(text: "retained".clientTextDto))
             source.applyForTesting(.messageIdentity(messageId: "retained-id"))
             source.applyForTesting(.messageComplete(stopReason: "end_turn", message: MessageDto(
-                role: "assistant", blocks: [.text(text: "retained")]
+                role: "assistant", blocks: [.text(text: "retained".clientTextDto)]
             )))
             source.applyForTesting(.messageRetracted(messageId: "unknown"))
             XCTAssertTrue(source.model.messages.contains { $0.text == "failed" })
@@ -225,11 +225,12 @@ import SwiftUI
             let source = makeSource()
 
             source.applyForTesting(.modelList(
-                models: ["openai/current-model"], current: "openai/current-model", details: []))
+                models: ["openai/current-model"], current: "openai/current-model",
+                currentModelSource: nil, details: []))
             XCTAssertEqual(source.model.activeModelId, "openai/current-model")
             XCTAssertEqual(Keychain.get(.model), "anthropic/legacy-model")
 
-            source.applyForTesting(.modelChanged(model: "other-profile/confirmed-model"))
+            source.applyForTesting(.modelChanged(model: "other-profile/confirmed-model", modelSource: nil))
             XCTAssertEqual(source.model.activeModelId, "other-profile/confirmed-model")
             XCTAssertEqual(Keychain.get(.model), "anthropic/legacy-model")
         }
@@ -245,10 +246,11 @@ import SwiftUI
             await waitForSubmittedCommands(1, commands: submitted)
             XCTAssertEqual(source.model.activeModelId, "provider/old")
             XCTAssertTrue(source.model.streaming)
-            guard case .setModel(model: "provider/new")? = submitted.first else {
+            guard case let .setModel(model)? = submitted.first else {
                 return XCTFail("expected the qualified model switch command")
             }
-            source.applyForTesting(.modelChanged(model: "provider/new"))
+            XCTAssertEqual(model.codeUnits, Array("provider/new".utf16))
+            source.applyForTesting(.modelChanged(model: "provider/new", modelSource: nil))
             XCTAssertEqual(source.model.activeModelId, "provider/new")
             XCTAssertTrue(source.model.streaming)
         }
@@ -452,8 +454,8 @@ import SwiftUI
             source.applyForTesting(.thinkingDelta(thinking: "workspace", signature: nil))
             source.applyForTesting(.toolUseStarted(
                 id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil))
-            source.applyForTesting(.textDelta(text: "result text"))
-            source.applyForTesting(.systemNotice(message: "waiting", isError: false))
+            source.applyForTesting(.textDelta(text: "result text".clientTextDto))
+            source.applyForTesting(.systemNotice(message: "waiting".clientTextDto, isError: false))
 
             guard case let .run(run)? = source.model.items.first(where: {
                 if case .run = $0 { return true }
@@ -478,20 +480,20 @@ import SwiftUI
             let source = makeSource()
             source.beginTurnForTesting(turnId: 81, sessionId: "session-a")
             source.applyForTesting(.turnStarted(turnId: 81))
-            source.applyForTesting(.textDelta(text: "A"))
+            source.applyForTesting(.textDelta(text: "A".clientTextDto))
             source.applyForTesting(.toolUseStarted(
                 id: "tool-a",
                 tool: "Read",
                 inputJson: #"{"path":"a"}"#,
                 header: nil
             ))
-            source.applyForTesting(.textDelta(text: "B"))
+            source.applyForTesting(.textDelta(text: "B".clientTextDto))
             source.applyForTesting(.messageComplete(
                 stopReason: "tool_use",
                 message: MessageDto(role: "assistant", blocks: [
-                    .text(text: "A"),
+                    .text(text: "A".clientTextDto),
                     .toolUse(id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil),
-                    .text(text: "B"),
+                    .text(text: "B".clientTextDto),
                 ])
             ))
 
@@ -534,7 +536,7 @@ import SwiftUI
             source.applyForTesting(.turnStarted(turnId: 33))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [.text(text: "完成")])
+                message: MessageDto(role: "assistant", blocks: [.text(text: "完成".clientTextDto)])
             ))
             source.applyForTesting(.taskStatusChanged(
                 taskId: "late-task", status: .completed, originSessionId: nil, error: nil))
@@ -564,7 +566,7 @@ import SwiftUI
             source.applyForTesting(.coordinatorStatus(activeWorkers: 1, team: "review"))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [.text(text: "Delegated")])
+                message: MessageDto(role: "assistant", blocks: [.text(text: "Delegated".clientTextDto)])
             ))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
@@ -615,7 +617,7 @@ import SwiftUI
 
             source.applyForTesting(.turnStarted(turnId: 3))
             source.applyForTesting(.thinkingDelta(thinking: "reasoning", signature: nil))
-            source.applyForTesting(.systemNotice(message: "still working", isError: false))
+            source.applyForTesting(.systemNotice(message: "still working".clientTextDto, isError: false))
             source.applyForTesting(
                 .usageUpdate(isSnapshot: nil, inputTokens: 11, outputTokens: 22, cacheReadTokens: 3, cacheCreationTokens: 4))
             source.applyForTesting(.apiRetry(message: "429", attempt: 2, maxRetries: 5, delayMs: 1200))
@@ -661,13 +663,13 @@ import SwiftUI
                 inputJson: #"{"path":"/tmp/a"}"#,
                 header: nil
             ))
-            source.applyForTesting(.textDelta(text: "正文"))
+            source.applyForTesting(.textDelta(text: "正文".clientTextDto))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
                 message: MessageDto(role: "assistant", blocks: [
                     .thinking(thinking: "推理", signature: nil),
                     .toolUse(id: "t1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: nil),
-                    .text(text: "正文"),
+                    .text(text: "正文".clientTextDto),
                     .toolResult(id: "t1", tool: "Read", resultJson: #"{"result":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
                 ])))
 
@@ -703,11 +705,11 @@ import SwiftUI
             let source = makeSource()
             source.beginTurnForTesting(turnId: 10, sessionId: "session-a")
 
-            source.applyForTesting(.textDelta(text: "Hel"))
+            source.applyForTesting(.textDelta(text: "Hel".clientTextDto))
             let initialMessageID = source.model.messages[0].id
             let initialRenderID = source.model.items[0].id
 
-            source.applyForTesting(.textDelta(text: "lo"))
+            source.applyForTesting(.textDelta(text: "lo".clientTextDto))
 
             XCTAssertEqual(source.model.messages[0].id, initialMessageID)
             XCTAssertEqual(source.model.items[0].id, initialRenderID)
@@ -715,7 +717,7 @@ import SwiftUI
 
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [.text(text: "Hello!")])
+                message: MessageDto(role: "assistant", blocks: [.text(text: "Hello!".clientTextDto)])
             ))
 
             XCTAssertEqual(source.model.messages[0].id, initialMessageID)
@@ -1132,9 +1134,9 @@ import SwiftUI
                 sessionId: "session-a",
                 mode: .code,
                 messages: [
-                    MessageDto(role: "user", blocks: [.text(text: "run")]),
+                    MessageDto(role: "user", blocks: [.text(text: "run".clientTextDto)]),
                     MessageDto(role: "assistant", blocks: [
-                        .text(text: "terminal answer"),
+                        .text(text: "terminal answer".clientTextDto),
                         .toolUse(id: "tool-702", tool: "Read", inputJson: "{}", header: nil),
                     ]),
                     MessageDto(role: "user", blocks: [
@@ -1347,7 +1349,7 @@ import SwiftUI
             source.beginTurnForTesting(turnId: 49, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
 
-            source.applyForTesting(.error(kind: .internal, message: "boom"))
+            source.applyForTesting(.error(kind: .internal, message: "boom".clientTextDto))
 
             XCTAssertEqual(source.model.pendingPermissions, [permission])
             XCTAssertEqual(source.model.error?.kind, .internal)
@@ -1460,7 +1462,7 @@ import SwiftUI
                 if case .cancel = command { throw CancelFailure.rejected }
             }
             source.beginTurnForTesting(turnId: 45, sessionId: "session-a")
-            source.applyForTesting(.textDelta(text: "still owned"))
+            source.applyForTesting(.textDelta(text: "still owned".clientTextDto))
             let originalItems = source.model.items
 
             source.resumeSession("session-b")

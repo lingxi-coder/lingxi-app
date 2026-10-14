@@ -1,5 +1,6 @@
 package com.lingxi.code
 
+import com.lingxi.code.conversation.toClientTextDto
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -41,7 +42,7 @@ import org.junit.runner.RunWith
  *     engine host is constructed and the foreign listener is registered (the
  *     "handshake"). Construction does NOT touch the network and does NOT require
  *     a key.
- *   * `submit(ClientCommand.SendPrompt(...))` returns once the turn is queued —
+ *   * `submit(ClientCommand.SendPrompt(....toClientTextDto()))` returns once the turn is queued —
  *     per the binding contract a turn failure is NOT thrown from `submit`; it is
  *     spawned on the engine's runtime and streams to the listener.
  *   * the keyless turn uses the production empty-provider allowlist and resolves
@@ -173,7 +174,7 @@ class EngineRoundtripTest {
         // must carry a human-readable, engine-originated message. We do NOT assert
         // the key value or print any secret.
         (terminalEvent as? ClientEvent.Error)?.let {
-            assertFalse("the terminal error must carry a message", it.message.isEmpty())
+            assertFalse("the terminal error must carry a message", it.message.codeUnits.isEmpty())
         }
     }
 

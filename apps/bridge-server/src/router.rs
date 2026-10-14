@@ -90,6 +90,7 @@ use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
 use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::mcp_bridge::McpPaths;
 use crate::settings_bridge::SettingsContext;
@@ -97,6 +98,32 @@ use crate::settings_bridge::SettingsContext;
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
 const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
+
+fn split_model_selection_source(
+    source: Utf16JsonProjection,
+    listings: &[lingxi_core::host::ModelListing],
+) -> (
+    Utf16JsonProjection,
+    Option<lingxi_core::host::ModelRouteAnchor>,
+) {
+    let Some(units) = source.string_units("") else {
+        return (source, None);
+    };
+    let Ok(text) = String::from_utf16(&units) else {
+        return (source, None);
+    };
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(&text);
+    let (model, profile) = lingxi_core::host::parse_model_ref(&trimmed, listings);
+    let route_hint = profile.map(|profile| lingxi_core::host::ModelRouteAnchor {
+        model: model.clone(),
+        profile: Some(profile),
+    });
+    if route_hint.is_some() || model != trimmed {
+        (Utf16JsonProjection::from(model), route_hint)
+    } else {
+        (source, route_hint)
+    }
+}
 
 /// Inputs needed to enumerate and replay the persisted JSONL session store.
 ///
@@ -220,10 +247,49 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// decide whether to PRINT it (display-only `type: "local"` commands) or run
     /// it AS a turn (`type: "prompt"` commands like `/loop`, plus Markdown /
     /// Plugin prompt commands — claude-code injects the expanded prompt as the
-    /// user message). Returns `None` when no dispatcher is wired (the connection
-    /// then falls back to the display-only `route` path).
-    async fn dispatch_slash(&self, _raw: Utf16JsonProjection) -> Option<SlashDispatchOutcome> {
+    /// user message). Returns `None` when no dispatcher is wired; callers must
+    /// not retry expansion through the display-only `route` path.
+    async fn dispatch_slash(
+        &self,
+        _raw: Utf16JsonProjection,
+        _cancellation: CancellationToken,
+    ) -> Option<SlashDispatchOutcome> {
         None
+    }
+}
+
+pub(crate) fn slash_failure_display(diagnostic: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let units = diagnostic
+        .string_units("/message")
+        .expect("settings diagnostics carry their source message");
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display string matches its exact UTF-16 units")
+}
+
+#[cfg(test)]
+mod slash_failure_display_tests {
+    use super::*;
+
+    #[test]
+    fn slash_failure_display_keeps_the_exact_message_units() {
+        let diagnostic = Utf16JsonProjection::parse(
+            r#"{"kind":"settings_projection","message":"invalid\ud800","sourceValue":"other"}"#,
+        )
+        .unwrap();
+        let display = slash_failure_display(&diagnostic);
+        assert_eq!(
+            display.string_units(""),
+            Some(vec![
+                b'i' as u16,
+                b'n' as u16,
+                b'v' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'd' as u16,
+                0xd800,
+            ])
+        );
     }
 }
 
@@ -790,11 +856,15 @@ impl CommandRouter for EngineCommandRouter {
         Ok(events)
     }
 
-    async fn dispatch_slash(&self, raw: Utf16JsonProjection) -> Option<SlashDispatchOutcome> {
+    async fn dispatch_slash(
+        &self,
+        raw: Utf16JsonProjection,
+        cancellation: CancellationToken,
+    ) -> Option<SlashDispatchOutcome> {
         let before = self.capture_slash_authority().await;
         let result = match self.dispatch_desktop_slash(&raw).await {
             Some(result) => result,
-            None => self.dispatcher.as_ref()?.dispatch(raw).await,
+            None => self.dispatcher.as_ref()?.dispatch(raw, cancellation).await,
         };
         // Display-only feedback belongs to the client's command surface. Persist
         // actual task turns and command effects through their existing paths.
@@ -1297,7 +1367,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Rejected,
-                            message: format!("set_permission_mode failed: {e}"),
+                            message: format!("set_permission_mode failed: {e}").into(),
                         })
                         .await;
                     }
@@ -1316,7 +1386,7 @@ impl CommandRouter for EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("initialize_proactivity failed: {error}"),
+                        message: format!("initialize_proactivity failed: {error}").into(),
                     })
                     .await;
                 }
@@ -1343,7 +1413,7 @@ impl CommandRouter for EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("set_proactivity_level failed: {error}"),
+                        message: format!("set_proactivity_level failed: {error}").into(),
                     })
                     .await;
                 }
@@ -1367,7 +1437,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(message) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Rejected,
-                            message,
+                            message: message.into(),
                         })
                         .await;
                     }
@@ -1375,17 +1445,32 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
-                let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);
+                let model_selection = model.into_projection();
+                let (source, route_hint) = split_model_selection_source(model_selection, &listings);
                 match self
                     .handle
-                    .switch_model(&model_id, profile.as_deref())
+                    .select_model(lingxi_core::host::ModelSelectionRequest::Select {
+                        source,
+                        route_hint,
+                        origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                        validation:
+                            lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+                    })
                     .await
                 {
                     Ok(()) => {
-                        let selected =
-                            lingxi_core::host::qualified_model_ref(&model_id, profile.as_deref());
-                        sink.emit(ClientEvent::ModelChanged { model: selected })
-                            .await;
+                        let current = self.handle.get_status_snapshot().await;
+                        let selected = lingxi_core::host::qualified_model_ref(
+                            &current.model,
+                            current.model_profile.as_deref(),
+                        );
+                        sink.emit(ClientEvent::ModelChanged {
+                            model: selected,
+                            model_source: current.model_source.as_ref().and_then(|source| {
+                                client::protocol::text::ClientTextDto::from_projection(source).ok()
+                            }),
+                        })
+                        .await;
                         if self.persisted_reasoning_selection().is_some() {
                             if self.restore_persisted_reasoning_selection().await.is_err() {
                                 let _ = self
@@ -1414,7 +1499,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("switch_model failed: {e}"),
+                            message: format!("switch_model failed: {e}").into(),
                         })
                         .await;
                     }
@@ -1438,7 +1523,7 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(error) = self.handle.set_reasoning_selection(requested).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("set_reasoning_selection failed: {error}"),
+                        message: format!("set_reasoning_selection failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1478,7 +1563,7 @@ impl CommandRouter for EngineCommandRouter {
                     let _ = self.persist_reasoning_selection(&previous_default);
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("persist reasoning selection failed: {error}"),
+                        message: format!("persist reasoning selection failed: {error}").into(),
                     })
                     .await;
                 }
@@ -1488,7 +1573,7 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(error) = self.handle.set_fast_mode(enabled).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("set_fast_mode failed: {error}"),
+                        message: format!("set_fast_mode failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1501,68 +1586,15 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Slash commands ──────────────────────────────────────────────
-            ClientCommand::RunSlashCommand { raw, turn_id } => {
-                if let Some(dispatcher) = self.dispatcher.as_ref() {
-                    let before = self.capture_slash_authority().await;
-                    let context = command_api::ModCommandRunContext {
-                        origin: serde_json::json!({"kind":"bridge"}),
-                        is_fullscreen: false,
-                        columns: 80,
-                    };
-                    let (display, is_error) = match command_api::with_mod_command_context(
-                        context,
-                        dispatcher.dispatch(raw.clone().into_projection()),
-                    )
-                    .await
-                    {
-                        lingxi_core::host::SlashDispatchResult::Handled { display } => {
-                            (display, false)
-                        }
-                        lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
-                            (display, true)
-                        }
-                        // A `type: "prompt"` command reached the display-only
-                        // fallback (the connection should have intercepted it via
-                        // `dispatch_slash` and run it as a turn). Surface the
-                        // expanded prompt so nothing is silently dropped.
-                        lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
-                            (prompt, false)
-                        }
-                        lingxi_core::host::SlashDispatchResult::RunSkillAsTurn { .. } => (
-                            "This skill expands to separate command and body messages and requires the conversation turn driver."
-                                .into(),
-                            true,
-                        ),
-                        lingxi_core::host::SlashDispatchResult::ParseFailure { .. } => {
-                            ("Commands are in the form `/command [args]`".into(), true)
-                        }
-                        lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
-                            let mut units =
-                                "not a slash command: ".encode_utf16().collect::<Vec<_>>();
-                            units.extend_from_slice(&raw.code_units);
-                            (
-                                ClientTextDto::from_code_units(units).into_projection(),
-                                true,
-                            )
-                        }
-                    };
-                    sink.emit(ClientEvent::SlashCommandResult {
-                        turn_id,
-                        display: ClientTextDto::from_projection(&display)
-                            .expect("slash command display is a root string"),
-                        is_error,
-                    })
-                    .await;
-                    let after = self.capture_slash_authority().await;
-                    self.emit_slash_authority_changes(&before, &after, &*sink)
-                        .await;
-                } else {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: "no slash-command dispatcher wired".into(),
-                    })
-                    .await;
-                }
+            ClientCommand::RunSlashCommand { turn_id: _, .. } => {
+                // Slash expansion is admitted by BridgeConnection, which owns
+                // the cancellation token and the active-turn identity. A router
+                // fallback has neither authority and must never expand work.
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "slash command requires connection-owned admission".into(),
+                })
+                .await;
             }
 
             // ── Listings ─────────────────────────────────────────────────────
@@ -1680,7 +1712,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("login failed: {e}"),
+                            message: format!("login failed: {e}").into(),
                         })
                         .await;
                         lower_auth_state(self.auth.current_user().await)
@@ -1704,7 +1736,7 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(e) = self.auth.logout().await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("logout failed: {e}"),
+                        message: format!("logout failed: {e}").into(),
                     })
                     .await;
                 }
@@ -1731,7 +1763,7 @@ impl CommandRouter for EngineCommandRouter {
                 Err(e) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("force_compact failed: {e}"),
+                        message: format!("force_compact failed: {e}").into(),
                     })
                     .await;
                 }
@@ -1771,7 +1803,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("clear_session failed: {e}"),
+                            message: format!("clear_session failed: {e}").into(),
                         })
                         .await;
                     }
@@ -1791,11 +1823,37 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
 
+                let requested_model = match model {
+                    Some(model) => {
+                        let listings = self.handle.list_model_listings().await;
+                        let (source, route_hint) =
+                            split_model_selection_source(model.into_projection(), &listings);
+                        Some(lingxi_core::host::ModelSelectionRequest::Select {
+                            source,
+                            route_hint,
+                            origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                            validation:
+                                lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(request) = requested_model.as_ref() {
+                    if let Err(error) = self.handle.validate_model_selection(request).await {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("new session model validation failed: {error}").into(),
+                        })
+                        .await;
+                        return;
+                    }
+                }
+
                 let previous_session_id = self.handle.current_session_id().await;
                 if let Err(error) = self.handle.clear_session().await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("new session (clear_session) failed: {error}"),
+                        message: format!("new session (clear_session) failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1805,17 +1863,11 @@ impl CommandRouter for EngineCommandRouter {
                     .refresh_process_session_presence(previous_session_id, current_session_id)
                     .await;
 
-                if let Some(model) = model {
-                    let listings = self.handle.list_model_listings().await;
-                    let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);
-                    if let Err(error) = self
-                        .handle
-                        .switch_model(&model_id, profile.as_deref())
-                        .await
-                    {
+                if let Some(request) = requested_model {
+                    if let Err(error) = self.handle.select_model(request).await {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("new session model switch failed: {error}"),
+                            message: format!("new session model switch failed: {error}").into(),
                         })
                         .await;
                         return;
@@ -1854,7 +1906,8 @@ impl CommandRouter for EngineCommandRouter {
                             kind: ErrorKindDto::Protocol,
                             message: format!(
                                 "resume: malformed session id {session_id:?}: {error}"
-                            ),
+                            )
+                            .into(),
                         })
                         .await;
                         return;
@@ -1882,7 +1935,8 @@ impl CommandRouter for EngineCommandRouter {
                     Err(error) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Protocol,
-                            message: format!("resume: session {session_id} not resumable: {error}"),
+                            message: format!("resume: session {session_id} not resumable: {error}")
+                                .into(),
                         })
                         .await;
                         return;
@@ -1908,7 +1962,7 @@ impl CommandRouter for EngineCommandRouter {
                     if let Err(error) = self.handle.set_permission_mode("plan").await {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("resume plan permission mode failed: {error}"),
+                            message: format!("resume plan permission mode failed: {error}").into(),
                         })
                         .await;
                         return;
@@ -1920,7 +1974,7 @@ impl CommandRouter for EngineCommandRouter {
                             .await;
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("resume plan mode failed: {error}"),
+                            message: format!("resume plan mode failed: {error}").into(),
                         })
                         .await;
                         return;
@@ -1954,7 +2008,7 @@ impl CommandRouter for EngineCommandRouter {
                     }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("resume_session failed: {error}"),
+                        message: format!("resume_session failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -2005,6 +2059,9 @@ impl CommandRouter for EngineCommandRouter {
                             &status.model,
                             status.model_profile.as_deref(),
                         ),
+                        model_source: status.model_source.as_ref().and_then(|source| {
+                            client::protocol::text::ClientTextDto::from_projection(source).ok()
+                        }),
                     })
                     .await;
                 }
@@ -2043,7 +2100,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("task output failed: {e}"),
+                            message: format!("task output failed: {e}").into(),
                         })
                         .await;
                     }
@@ -2074,7 +2131,7 @@ impl CommandRouter for EngineCommandRouter {
                         Err(error) => {
                             sink.emit(ClientEvent::Error {
                                 kind: ErrorKindDto::Rejected,
-                                message: format!("task message failed: {error}"),
+                                message: format!("task message failed: {error}").into(),
                             })
                             .await
                         }
@@ -2097,7 +2154,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("task stop failed: {e}"),
+                            message: format!("task stop failed: {e}").into(),
                         })
                         .await;
                     }
@@ -2111,7 +2168,9 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::ResumeWorkflow { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "resume_workflow is unavailable on this bridge".to_string(),
+                    message: "resume_workflow is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
@@ -2134,21 +2193,27 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::AttachTurn { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "attach_turn is unavailable on this bridge".to_string(),
+                    message: "attach_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
             ClientCommand::ResumeTurn { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "resume_turn is unavailable on this bridge".to_string(),
+                    message: "resume_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
             ClientCommand::PauseTurn { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "pause_turn is unavailable on this bridge".to_string(),
+                    message: "pause_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }

@@ -6,6 +6,7 @@
 use crate::idle_notify::IdleNotifier;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
+use harness_runtime::desktop::{PolicyHelperRefusalProbe, PolicySemanticWorkerProbe};
 use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -25,6 +26,146 @@ pub type SkillBatchTurnFn = Arc<
         + Send
         + Sync,
 >;
+
+/// A distinct current failure that interrupts the host input/turn loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyHelperSignalKind {
+    Refusal,
+    SemanticWorkerFailure,
+}
+
+/// A host policy signal. Kept as a small trait so the input/turn race has
+/// deterministic unit tests without constructing a full Desktop runtime.
+#[async_trait::async_trait]
+pub trait PolicyHelperRefusalSignal: Send {
+    fn is_refused(&self) -> bool;
+    async fn wait(&mut self);
+
+    fn failure_kind(&self) -> Option<PolicyHelperSignalKind> {
+        self.is_refused().then_some(PolicyHelperSignalKind::Refusal)
+    }
+
+    /// Return the kind that actually woke the waiter so a concurrently-cleared
+    /// worker status cannot be misreported as a Native refusal.
+    async fn wait_kind(&mut self) -> PolicyHelperSignalKind {
+        self.wait().await;
+        self.failure_kind()
+            .unwrap_or(PolicyHelperSignalKind::Refusal)
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyHelperRefusalSignal for PolicyHelperRefusalProbe {
+    fn is_refused(&self) -> bool {
+        self.current().is_some()
+    }
+
+    async fn wait(&mut self) {
+        let _ = PolicyHelperRefusalProbe::wait(self).await;
+    }
+}
+
+/// Combines the Native refusal and engine-capability status without conflating
+/// the two outcomes. Refusal takes precedence if both become current together.
+pub struct PolicyHelperRuntimeFailureSignal {
+    refusal: PolicyHelperRefusalProbe,
+    semantic_worker: PolicySemanticWorkerProbe,
+}
+
+impl PolicyHelperRuntimeFailureSignal {
+    pub fn new(
+        refusal: PolicyHelperRefusalProbe,
+        semantic_worker: PolicySemanticWorkerProbe,
+    ) -> Self {
+        Self {
+            refusal,
+            semantic_worker,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl PolicyHelperRefusalSignal for PolicyHelperRuntimeFailureSignal {
+    fn is_refused(&self) -> bool {
+        self.refusal.current().is_some()
+    }
+
+    fn failure_kind(&self) -> Option<PolicyHelperSignalKind> {
+        if self.refusal.current().is_some() {
+            Some(PolicyHelperSignalKind::Refusal)
+        } else if self.semantic_worker.current().is_some() {
+            Some(PolicyHelperSignalKind::SemanticWorkerFailure)
+        } else {
+            None
+        }
+    }
+
+    async fn wait(&mut self) {
+        let _ = self.wait_kind().await;
+    }
+
+    async fn wait_kind(&mut self) -> PolicyHelperSignalKind {
+        tokio::select! {
+            biased;
+            _ = self.refusal.wait() => PolicyHelperSignalKind::Refusal,
+            _ = self.semantic_worker.wait() => PolicyHelperSignalKind::SemanticWorkerFailure,
+        }
+    }
+}
+
+enum TurnDrive {
+    Completed(Result<TurnOutcome, OrchestratorError>),
+    Refused,
+    SemanticWorkerFailure,
+}
+
+fn signal_outcome(signal: &Option<Box<dyn PolicyHelperRefusalSignal>>) -> Option<StepOutcome> {
+    signal
+        .as_ref()?
+        .failure_kind()
+        .map(outcome_for_failure_kind)
+}
+
+fn outcome_for_failure_kind(kind: PolicyHelperSignalKind) -> StepOutcome {
+    match kind {
+        PolicyHelperSignalKind::Refusal => StepOutcome::PolicyHelperRefusal,
+        PolicyHelperSignalKind::SemanticWorkerFailure => StepOutcome::PolicySemanticWorkerFailure,
+    }
+}
+
+async fn wait_for_policy_refusal(
+    signal: &mut Option<Box<dyn PolicyHelperRefusalSignal>>,
+) -> PolicyHelperSignalKind {
+    match signal.as_mut() {
+        Some(signal) => signal.wait_kind().await,
+        None => std::future::pending::<PolicyHelperSignalKind>().await,
+    }
+}
+
+async fn drive_turn_or_refusal(
+    signal: &mut Option<Box<dyn PolicyHelperRefusalSignal>>,
+    cancel: CancellationToken,
+    mut turn: BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>,
+) -> TurnDrive {
+    if let Some(signal) = signal.as_mut() {
+        tokio::select! {
+            biased;
+            kind = signal.wait_kind() => {
+                cancel.cancel();
+                // Do not drop accepted work: let the turn's existing cleanup
+                // and durable append finish before the caller tears down.
+                let _ = turn.await;
+                match kind {
+                    PolicyHelperSignalKind::SemanticWorkerFailure => TurnDrive::SemanticWorkerFailure,
+                    PolicyHelperSignalKind::Refusal => TurnDrive::Refused,
+                }
+            }
+            result = &mut turn => TurnDrive::Completed(result),
+        }
+    } else {
+        TurnDrive::Completed(turn.await)
+    }
+}
 
 /// Outcome returned by [`step`] — tells the outer loop what to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +189,10 @@ pub enum StepOutcome {
         /// must not be re-announced as `/exit`.
         undispatched: Option<String>,
     },
+    /// A live managed policy helper selected `onFailure=refuse`.
+    PolicyHelperRefusal,
+    /// Required Native policy semantics could not be checked by the pinned engine.
+    PolicySemanticWorkerFailure,
 }
 
 /// Host adapter for completion delivery while the prompt is idle.
@@ -115,6 +260,7 @@ where
         idle,
         None,
         None,
+        None,
         run_turn_fn,
     )
     .await
@@ -131,6 +277,7 @@ pub async fn step_with_notifications<W>(
     idle: Option<&dyn IdleNotifier>,
     notifications: Option<&dyn TaskNotificationWake>,
     skill_batch_fn: Option<SkillBatchTurnFn>,
+    mut policy_refusal: Option<Box<dyn PolicyHelperRefusalSignal>>,
     run_turn_fn: impl Fn(
         Utf16JsonProjection,
         CancellationToken,
@@ -139,6 +286,9 @@ pub async fn step_with_notifications<W>(
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
+    if let Some(outcome) = signal_outcome(&policy_refusal) {
+        return outcome;
+    }
     // 1. Print the "> " prompt to stderr (L1 + L2 byte-lock from T0).
     let _ = stderr.write_all(b"> ").await;
     let _ = stderr.flush().await;
@@ -155,11 +305,14 @@ where
         Signal,
         Idle,
         Completion,
+        PolicyFailure(PolicyHelperSignalKind),
     }
     loop {
         let event = {
             let mut reader = stdin.lock().await;
             tokio::select! {
+                biased;
+                kind = wait_for_policy_refusal(&mut policy_refusal) => InputEvent::PolicyFailure(kind),
                 result = reader.read_until(b'\n', &mut line_bytes) => InputEvent::Read(result),
                 () = sigint.wait() => InputEvent::Signal,
                 () = &mut idle_timer => InputEvent::Idle,
@@ -172,6 +325,7 @@ where
             }
         };
         match event {
+            InputEvent::PolicyFailure(kind) => return outcome_for_failure_kind(kind),
             InputEvent::Read(Ok(0)) => {
                 let _ = tokio::io::stdout().write_all(b"\n").await;
                 return StepOutcome::Eof;
@@ -203,13 +357,39 @@ where
             InputEvent::Completion => {
                 let cancel = CancellationToken::new();
                 let signal = sigint.arm_for_turn(cancel.clone());
+                if let Some(outcome) = signal_outcome(&policy_refusal) {
+                    signal.abort();
+                    return outcome;
+                }
                 sink.turn_start().await;
+                if let Some(outcome) = signal_outcome(&policy_refusal) {
+                    signal.abort();
+                    return outcome;
+                }
                 if let Some(wake) = notifications {
-                    if let Err(error) = wake.run(cancel).await {
+                    let run = wake.run(cancel.clone());
+                    tokio::pin!(run);
+                    let result = tokio::select! {
+                        biased;
+                        () = wait_for_policy_refusal(&mut policy_refusal) => {
+                            cancel.cancel();
+                            // Keep polling accepted work through its cleanup before
+                            // leaving the idle input loop.
+                            let _ = run.await;
+                            signal.abort();
+                            return signal_outcome(&policy_refusal)
+                                .unwrap_or(StepOutcome::PolicyHelperRefusal);
+                        }
+                        result = &mut run => result,
+                    };
+                    if let Err(error) = result {
                         sink.error("runtime", &error.to_string()).await;
                     }
                 }
                 signal.abort();
+                if let Some(outcome) = signal_outcome(&policy_refusal) {
+                    return outcome;
+                }
             }
         }
     }
@@ -221,6 +401,9 @@ where
     let input = line.trim_end_matches('\n').trim_end_matches('\r');
     if input.is_empty() {
         return StepOutcome::Continue;
+    }
+    if let Some(outcome) = signal_outcome(&policy_refusal) {
+        return outcome;
     }
 
     // A real line arrived — clear any pending idle-armed state.
@@ -276,6 +459,9 @@ where
             dispatcher.dispatch(source_input.clone()),
         )
         .await;
+        if let Some(outcome) = signal_outcome(&policy_refusal) {
+            return outcome;
+        }
         enum ModelTurn {
             Prompt(Utf16JsonProjection),
             Skill(Vec<orchestrator::QueuedPromptInput>),
@@ -284,6 +470,16 @@ where
             SlashDispatchResult::Handled { display } => {
                 sink.command_output(input, display.string_at("").unwrap_or_default())
                     .await;
+                None
+            }
+            SlashDispatchResult::Failed { diagnostic } => {
+                let display = crate::mode::slash_failure_display(&diagnostic);
+                let display_text = String::from_utf16_lossy(
+                    &display
+                        .string_units("")
+                        .expect("slash failure display is a root string"),
+                );
+                sink.error("slash_command", &display_text).await;
                 None
             }
             // A prompt-expanding command (`/loop`, Markdown/Plugin) runs AS a
@@ -323,14 +519,29 @@ where
                 let token = CancellationToken::new();
                 let _sigint_guard = sigint.arm_for_turn(token.clone());
                 sink.turn_start().await;
-                let outcome = match model_turn {
-                    ModelTurn::Prompt(prompt) => run_turn_fn(prompt, token).await,
-                    ModelTurn::Skill(inputs) => {
-                        skill_batch_fn.as_ref().expect("skill runner was checked")(inputs, token)
-                            .await
+                let turn = match model_turn {
+                    ModelTurn::Prompt(prompt) => run_turn_fn(prompt, token.clone()),
+                    ModelTurn::Skill(inputs) => skill_batch_fn
+                        .as_ref()
+                        .expect("skill runner was checked")(
+                        inputs, token.clone()
+                    ),
+                };
+                let outcome = match drive_turn_or_refusal(&mut policy_refusal, token, turn).await {
+                    TurnDrive::Refused => {
+                        _sigint_guard.abort();
+                        return StepOutcome::PolicyHelperRefusal;
                     }
+                    TurnDrive::SemanticWorkerFailure => {
+                        _sigint_guard.abort();
+                        return StepOutcome::PolicySemanticWorkerFailure;
+                    }
+                    TurnDrive::Completed(outcome) => outcome,
                 };
                 _sigint_guard.abort();
+                if let Some(outcome) = signal_outcome(&policy_refusal) {
+                    return outcome;
+                }
                 match outcome {
                     Ok(TurnOutcome::EndTurn) => {}
                     Ok(TurnOutcome::MaxTurns) => {
@@ -345,7 +556,9 @@ where
                             .await;
                     }
                     Err(e) => {
-                        sink.error("runtime", &e.to_string()).await;
+                        if signal_outcome(&policy_refusal).is_none() {
+                            sink.error("runtime", &e.to_string()).await;
+                        }
                     }
                 }
             }
@@ -362,8 +575,27 @@ where
     // when this scope exits, ensuring the next iteration gets a fresh one.
     let _sigint_guard = sigint.arm_for_turn(token.clone());
     sink.turn_start().await;
-    let outcome = run_turn_fn(Utf16JsonProjection::from(input), token).await;
+    let outcome = match drive_turn_or_refusal(
+        &mut policy_refusal,
+        token.clone(),
+        run_turn_fn(Utf16JsonProjection::from(input), token),
+    )
+    .await
+    {
+        TurnDrive::Refused => {
+            _sigint_guard.abort();
+            return StepOutcome::PolicyHelperRefusal;
+        }
+        TurnDrive::SemanticWorkerFailure => {
+            _sigint_guard.abort();
+            return StepOutcome::PolicySemanticWorkerFailure;
+        }
+        TurnDrive::Completed(outcome) => outcome,
+    };
     _sigint_guard.abort();
+    if let Some(outcome) = signal_outcome(&policy_refusal) {
+        return outcome;
+    }
     match outcome {
         Ok(TurnOutcome::EndTurn) => {}
         Ok(TurnOutcome::MaxTurns) => {
@@ -377,7 +609,9 @@ where
                 .await;
         }
         Err(e) => {
-            sink.error("runtime", &e.to_string()).await;
+            if signal_outcome(&policy_refusal).is_none() {
+                sink.error("runtime", &e.to_string()).await;
+            }
         }
     }
     StepOutcome::Continue
@@ -405,6 +639,11 @@ mod tests {
                 undispatched: Some("/exit".to_string())
             }
         );
+        assert_ne!(StepOutcome::PolicyHelperRefusal, StepOutcome::Continue);
+        assert_ne!(
+            StepOutcome::PolicySemanticWorkerFailure,
+            StepOutcome::PolicyHelperRefusal
+        );
     }
 
     /// Verify all four variants are reachable and `Clone` works.
@@ -418,6 +657,8 @@ mod tests {
             StepOutcome::ExitCommand {
                 undispatched: Some("/quit".to_string()),
             },
+            StepOutcome::PolicyHelperRefusal,
+            StepOutcome::PolicySemanticWorkerFailure,
         ];
         for v in &variants {
             assert_eq!(v, &v.clone());
@@ -439,7 +680,61 @@ mod tests {
     use orchestrator::test_support::MockOrchestratorHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{duplex, AsyncBufRead, AsyncWriteExt, BufReader};
-    use tokio::sync::Mutex;
+    use tokio::sync::{watch, Mutex, Notify};
+
+    struct TestPolicyRefusalSignal(watch::Receiver<bool>);
+
+    #[async_trait::async_trait]
+    impl PolicyHelperRefusalSignal for TestPolicyRefusalSignal {
+        fn is_refused(&self) -> bool {
+            *self.0.borrow()
+        }
+
+        async fn wait(&mut self) {
+            loop {
+                if self.is_refused() {
+                    return;
+                }
+                if self.0.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+
+    fn test_policy_refusal_signal() -> (Box<dyn PolicyHelperRefusalSignal>, watch::Sender<bool>) {
+        let (sender, receiver) = watch::channel(false);
+        (Box::new(TestPolicyRefusalSignal(receiver)), sender)
+    }
+
+    struct TestSemanticWorkerSignal(watch::Receiver<bool>);
+
+    #[async_trait::async_trait]
+    impl PolicyHelperRefusalSignal for TestSemanticWorkerSignal {
+        fn is_refused(&self) -> bool {
+            false
+        }
+
+        fn failure_kind(&self) -> Option<PolicyHelperSignalKind> {
+            (*self.0.borrow()).then_some(PolicyHelperSignalKind::SemanticWorkerFailure)
+        }
+
+        async fn wait(&mut self) {
+            loop {
+                if self.failure_kind().is_some() {
+                    return;
+                }
+                if self.0.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+
+    fn test_semantic_worker_signal() -> (Box<dyn PolicyHelperRefusalSignal>, watch::Sender<bool>) {
+        let (sender, receiver) = watch::channel(false);
+        (Box::new(TestSemanticWorkerSignal(receiver)), sender)
+    }
 
     /// Wrap a duplex client end in the shared `Arc<Mutex<BufReader<_>>>` the
     /// refactored `step` expects (upcast to the `dyn AsyncBufRead` trait object).
@@ -493,6 +788,127 @@ mod tests {
         CancellationToken,
     ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>> {
         |_prompt, _token| Box::pin(async { Ok(TurnOutcome::EndTurn) })
+    }
+
+    #[tokio::test]
+    async fn live_policy_refusal_wakes_idle_prompt_without_admitting_a_turn() {
+        let (_writer, client) = duplex(64);
+        let (signal, refusal) = test_policy_refusal_signal();
+        let trigger = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            refusal.send(true).unwrap();
+        });
+        let mut stderr = Vec::new();
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            step_with_notifications(
+                shared_stdin(client),
+                &mut stderr,
+                &NoopDispatcher,
+                Arc::new(MockOrchestratorHandle::new()),
+                sink,
+                &SigintSource::spawn(),
+                None,
+                None,
+                None,
+                Some(signal),
+                |_, _| panic!("refusal while idle must not admit a turn"),
+            ),
+        )
+        .await
+        .expect("policy refusal must wake an idle input read");
+        trigger.await.unwrap();
+        assert_eq!(outcome, StepOutcome::PolicyHelperRefusal);
+    }
+
+    #[tokio::test]
+    async fn semantic_worker_failure_wakes_idle_prompt_as_a_distinct_status() {
+        let (_writer, client) = duplex(64);
+        let (signal, failure) = test_semantic_worker_signal();
+        let trigger = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            failure.send(true).unwrap();
+        });
+        let mut stderr = Vec::new();
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            step_with_notifications(
+                shared_stdin(client),
+                &mut stderr,
+                &NoopDispatcher,
+                Arc::new(MockOrchestratorHandle::new()),
+                sink,
+                &SigintSource::spawn(),
+                None,
+                None,
+                None,
+                Some(signal),
+                |_, _| panic!("semantic-worker failure while idle must not admit a turn"),
+            ),
+        )
+        .await
+        .expect("semantic-worker failure must wake the idle input read");
+        trigger.await.unwrap();
+        assert_eq!(outcome, StepOutcome::PolicySemanticWorkerFailure);
+    }
+
+    #[tokio::test]
+    async fn live_policy_refusal_cancels_and_joins_the_active_turn() {
+        let (mut writer, client) = duplex(64);
+        writer.write_all(b"hello\n").await.unwrap();
+        let (signal, refusal) = test_policy_refusal_signal();
+        let turn_started = Arc::new(Notify::new());
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let trigger_started = turn_started.clone();
+        let trigger = tokio::spawn(async move {
+            trigger_started.notified().await;
+            refusal.send(true).unwrap();
+        });
+        let turn_started = turn_started.clone();
+        let turn_settled = settled.clone();
+        let mut stderr = Vec::new();
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            step_with_notifications(
+                shared_stdin(client),
+                &mut stderr,
+                &NoopDispatcher,
+                Arc::new(MockOrchestratorHandle::new()),
+                sink,
+                &SigintSource::spawn(),
+                None,
+                None,
+                None,
+                Some(signal),
+                move |_, cancel| {
+                    let turn_started = turn_started.clone();
+                    let turn_settled = turn_settled.clone();
+                    Box::pin(async move {
+                        turn_started.notify_one();
+                        cancel.cancelled().await;
+                        turn_settled.store(true, Ordering::SeqCst);
+                        Ok(TurnOutcome::Cancelled)
+                    })
+                },
+            ),
+        )
+        .await
+        .expect("refusal should cancel and settle the active turn");
+        trigger.await.unwrap();
+        assert_eq!(outcome, StepOutcome::PolicyHelperRefusal);
+        assert!(settled.load(Ordering::SeqCst));
     }
 
     /// Run `step` over a duplex stdin pipe whose line is written only AFTER the
@@ -841,6 +1257,74 @@ mod tests {
         }
     }
 
+    struct CancellableTaskWake {
+        ready: Notify,
+        started: Notify,
+        cancelled: std::sync::atomic::AtomicBool,
+        settled: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskNotificationWake for CancellableTaskWake {
+        async fn wait(&self) {
+            self.ready.notified().await;
+        }
+
+        async fn run(&self, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError> {
+            self.started.notify_one();
+            cancel.cancelled().await;
+            self.cancelled.store(true, Ordering::SeqCst);
+            self.settled.store(true, Ordering::SeqCst);
+            Ok(TurnOutcome::Cancelled)
+        }
+    }
+
+    #[tokio::test]
+    async fn live_policy_refusal_cancels_and_joins_task_notification_wake() {
+        let (_writer, client) = duplex(64);
+        let (signal, refusal) = test_policy_refusal_signal();
+        let wake = Arc::new(CancellableTaskWake {
+            ready: Notify::new(),
+            started: Notify::new(),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            settled: std::sync::atomic::AtomicBool::new(false),
+        });
+        let wake_for_trigger = wake.clone();
+        let trigger = tokio::spawn(async move {
+            wake_for_trigger.started.notified().await;
+            refusal.send(true).unwrap();
+        });
+        wake.ready.notify_one();
+        let mut stderr = Vec::new();
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            step_with_notifications(
+                shared_stdin(client),
+                &mut stderr,
+                &NoopDispatcher,
+                Arc::new(MockOrchestratorHandle::new()),
+                sink,
+                &SigintSource::spawn(),
+                None,
+                Some(wake.as_ref()),
+                None,
+                Some(signal),
+                |_, _| panic!("task wake cancellation must not admit a human turn"),
+            ),
+        )
+        .await
+        .expect("refusal must cancel and settle an active task wake");
+        trigger.await.unwrap();
+        assert_eq!(outcome, StepOutcome::PolicyHelperRefusal);
+        assert!(wake.cancelled.load(Ordering::SeqCst));
+        assert!(wake.settled.load(Ordering::SeqCst));
+    }
+
     #[tokio::test]
     async fn task_completion_wakes_stdio_without_losing_partial_human_input() {
         let (mut writer, reader) = duplex(64);
@@ -879,6 +1363,7 @@ mod tests {
                 &SigintSource::spawn(),
                 None,
                 Some(wake.as_ref()),
+                None,
                 None,
                 move |prompt, _| {
                     let prompts = observed.clone();
@@ -937,6 +1422,7 @@ mod tests {
             &SigintSource::spawn(),
             None,
             Some(&host),
+            None,
             None,
             |_, _| panic!("human task message must not become a main model prompt"),
         )

@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::mcp_bridge::McpPaths;
 use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
@@ -45,6 +45,7 @@ use client::protocol::commands::{
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::SessionModeDto;
 use client::protocol::permission::PermissionRequest;
+use client::protocol::text::ClientTextDto;
 use futures_util::{SinkExt, StreamExt};
 use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::{
@@ -68,8 +69,8 @@ use platform_windows::{
     WindowsHttp as NativeHttp,
 };
 use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 #[path = "router_test/resume_usage.rs"]
 mod resume_usage;
@@ -831,13 +832,11 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
         )
         .await;
 
-    assert!(
-        credentials
-            .get_provider_key("deepseek")
-            .await
-            .expect("read after delete")
-            .is_none()
-    );
+    assert!(credentials
+        .get_provider_key("deepseek")
+        .await
+        .expect("read after delete")
+        .is_none());
     assert_eq!(
         sink.events().await.last(),
         Some(&ClientEvent::ProviderCredentialStatus {
@@ -876,13 +875,11 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
             sink,
         )
         .await;
-    assert!(
-        credentials
-            .get_anthropic_api_key()
-            .await
-            .expect("read Anthropic key after delete")
-            .is_none()
-    );
+    assert!(credentials
+        .get_anthropic_api_key()
+        .await
+        .expect("read Anthropic key after delete")
+        .is_none());
 }
 
 #[tokio::test]
@@ -942,13 +939,11 @@ async fn externally_owned_provider_credentials_stay_process_local() {
             sink,
         )
         .await;
-    assert!(
-        credentials
-            .get_provider_key("openrouter")
-            .await
-            .expect("read after process-cache delete")
-            .is_none()
-    );
+    assert!(credentials
+        .get_provider_key("openrouter")
+        .await
+        .expect("read after process-cache delete")
+        .is_none());
 }
 
 /// Token refresh transport for Codex slot tests. The sessions they install
@@ -1140,11 +1135,9 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
         credential_previews.get("deepseek").map(String::as_str),
         Some("••••seek")
     );
-    assert!(
-        error
-            .as_deref()
-            .is_some_and(|message| message.contains("openrouter"))
-    );
+    assert!(error
+        .as_deref()
+        .is_some_and(|message| message.contains("openrouter")));
 }
 
 #[tokio::test]
@@ -1152,11 +1145,16 @@ async fn set_model_routes() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
+    let model_units = "claude-opus-4-8"
+        .encode_utf16()
+        .chain([0xD800])
+        .collect::<Vec<_>>();
+    let display_model = String::from_utf16_lossy(&model_units);
 
     router
         .route(
             ClientCommand::SetModel {
-                model: "claude-opus-4-8".into(),
+                model: ClientTextDto::from_code_units(model_units.clone()),
             },
             sink.clone(),
         )
@@ -1166,7 +1164,14 @@ async fn set_model_routes() {
     assert_eq!(handle.switch_model_call_count(), 1);
     assert_eq!(
         handle.last_switched_model().as_deref(),
-        Some("claude-opus-4-8")
+        Some(display_model.as_str())
+    );
+    assert_eq!(
+        handle
+            .last_switch_model_selection()
+            .and_then(|source| source.string_units("")),
+        Some(model_units),
+        "the public command source must retain exact UTF-16 through route parsing"
     );
 
     // …and the reply is a `ModelChanged` carrying the new model.
@@ -1175,7 +1180,8 @@ async fn set_model_routes() {
     assert_eq!(
         events[0],
         ClientEvent::ModelChanged {
-            model: "claude-opus-4-8".into()
+            model: display_model.into(),
+            model_source: None,
         }
     );
 }
@@ -1287,6 +1293,7 @@ async fn set_model_keeps_provider_in_acknowledgement() {
         sink.events().await,
         vec![ClientEvent::ModelChanged {
             model: "github-copilot/gpt-5.5".into(),
+            model_source: None,
         }]
     );
 }
@@ -1495,6 +1502,7 @@ async fn list_models_routes() {
         ClientEvent::ModelList {
             models: vec!["a".into(), "b".into()],
             current: "a".into(),
+            current_model_source: None,
             details: Vec::new(),
         }
     );
@@ -1579,6 +1587,7 @@ async fn list_models_curates_and_preserves_provider_identity() {
     let ClientEvent::ModelList {
         models,
         current,
+        current_model_source: _,
         details,
     } = &events[1]
     else {
@@ -1889,7 +1898,10 @@ async fn desktop_plan_enables_plan_state_and_runs_the_argument_as_a_turn() {
     );
 
     let outcome = router
-        .dispatch_slash("/plan design the migration".into())
+        .dispatch_slash(
+            "/plan design the migration".into(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("Desktop /plan must not require the TUI dispatcher");
 
@@ -1921,7 +1933,10 @@ async fn desktop_diff_runs_as_a_read_only_turn_instead_of_returning_tui_only() {
     );
 
     let outcome = router
-        .dispatch_slash("/diff renderer".into())
+        .dispatch_slash(
+            "/diff renderer".into(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("Desktop /diff must not require the TUI dispatcher");
 
@@ -1945,6 +1960,7 @@ impl SlashCommandDispatcher for MutatingDispatcher {
     async fn dispatch(
         &self,
         raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) -> SlashDispatchResult {
         use command_api::model::{
             CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
@@ -1994,7 +2010,10 @@ async fn display_only_slash_results_are_not_persisted_in_task_history() {
     );
 
     for raw in ["/usage", "/status", "/help", "/cron list"] {
-        let outcome = router.dispatch_slash(raw).await.expect("dispatch");
+        let outcome = router
+            .dispatch_slash(raw, tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("dispatch");
         assert_eq!(
             outcome.result,
             SlashDispatchResult::Handled {
@@ -2336,10 +2355,10 @@ async fn list_sessions_reports_corrupt_catalog_as_error() {
             events.as_slice(),
             [ClientEvent::Error { kind, message }]
                 if *kind == ErrorKindDto::Internal
-                    && message.contains("session catalog")
-                    && message.contains("retry")
-                    && !message.contains(&root.path().display().to_string())
-                    && !message.contains(corrupt_session_id)
+                    && message.display().contains("session catalog")
+                    && message.display().contains("retry")
+                    && !message.display().contains(&root.path().display().to_string())
+                    && !message.display().contains(corrupt_session_id)
         ),
         "unexpected corrupt-catalog response: {events:?}"
     );
@@ -2382,10 +2401,10 @@ async fn list_sessions_preserves_readable_rows_when_one_transcript_is_corrupt() 
         &events[1],
         ClientEvent::Error { kind, message }
             if *kind == ErrorKindDto::Internal
-                && message.contains("unreadable sessions were skipped")
-                && message.contains("retry")
-                && !message.contains(&root.path().display().to_string())
-                && !message.contains(corrupt_session_id)
+                && message.display().contains("unreadable sessions were skipped")
+                && message.display().contains("retry")
+                && !message.display().contains(&root.path().display().to_string())
+                && !message.display().contains(corrupt_session_id)
     ));
 }
 
@@ -2397,12 +2416,17 @@ async fn new_session_clears_applies_model_and_emits_started() {
         .to_string();
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
+    let model_units = "claude-opus-4-8"
+        .encode_utf16()
+        .chain([0xD800])
+        .collect::<Vec<_>>();
+    let display_model = String::from_utf16_lossy(&model_units);
 
     router
         .route(
             ClientCommand::NewSession {
                 cwd: None,
-                model: Some("claude-opus-4-8".into()),
+                model: Some(ClientTextDto::from_code_units(model_units.clone())),
             },
             sink.clone(),
         )
@@ -2411,7 +2435,14 @@ async fn new_session_clears_applies_model_and_emits_started() {
     assert!(handle.was_clear_session_called());
     assert_eq!(
         handle.last_switched_model().as_deref(),
-        Some("claude-opus-4-8")
+        Some(display_model.as_str())
+    );
+    assert_eq!(
+        handle
+            .last_switch_model_selection()
+            .and_then(|source| source.string_units("")),
+        Some(model_units),
+        "the exact NewSession model source must survive route parsing"
     );
     assert_eq!(
         sink.events().await,
@@ -2461,7 +2492,7 @@ async fn new_and_resume_are_rejected_mid_turn_and_bad_resume_is_honest() {
     let events = sink.events().await;
     assert!(matches!(
         events.as_slice(),
-        [ClientEvent::Error { message, .. }] if message.contains("malformed session id")
+        [ClientEvent::Error { message, .. }] if message.display().contains("malformed session id")
     ));
 }
 
@@ -2513,8 +2544,8 @@ fn seed_session_agent_transcript(
 }
 
 #[tokio::test]
-async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rewriting_native_bytes()
- {
+async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rewriting_native_bytes(
+) {
     let root = tempfile::tempdir().unwrap();
     let handle = Arc::new(MockOrchestratorHandle::new());
     let session_id = handle.current_session_id().await;
@@ -2548,13 +2579,11 @@ async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rew
         )
         .await;
     let events = sink.events().await;
-    let [
-        ClientEvent::SessionAgentTranscript {
-            messages,
-            next_message_index,
-            ..
-        },
-    ] = events.as_slice()
+    let [ClientEvent::SessionAgentTranscript {
+        messages,
+        next_message_index,
+        ..
+    }] = events.as_slice()
     else {
         panic!("expected main transcript snapshot: {events:?}");
     };
@@ -2578,12 +2607,10 @@ async fn session_agent_routes_list_nested_transcripts_and_load_real_messages() {
         .route(ClientCommand::ListSessionAgents, list_sink.clone())
         .await;
     let list_events = list_sink.events().await;
-    let [
-        ClientEvent::SessionAgentList {
-            session_id: emitted_session,
-            agents,
-        },
-    ] = list_events.as_slice()
+    let [ClientEvent::SessionAgentList {
+        session_id: emitted_session,
+        agents,
+    }] = list_events.as_slice()
     else {
         panic!("expected one session-agent list, got {list_events:?}");
     };
@@ -2673,7 +2700,7 @@ async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
     assert!(matches!(
         missing_sink.events().await.as_slice(),
         [ClientEvent::Error { kind: ErrorKindDto::Rejected, message }]
-            if message.contains("not found")
+            if message.display().contains("not found")
     ));
 
     let (corrupt_id, corrupt_path) = seed_session_agent_transcript(root.path(), session_id, false);
@@ -2690,7 +2717,7 @@ async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
     assert!(matches!(
         corrupt_sink.events().await.as_slice(),
         [ClientEvent::Error { kind: ErrorKindDto::Internal, message }]
-            if message.contains("corrupt")
+            if message.display().contains("corrupt")
     ));
 }
 
@@ -2755,7 +2782,7 @@ async fn session_agent_route_never_follows_a_symlinked_transcript_root() {
         matches!(events.first(), Some(ClientEvent::SessionAgentList { agents, .. }) if agents.len() == 1 && agents[0].agent_id == "main")
     );
     assert!(
-        matches!(events.get(1), Some(ClientEvent::Error { message, .. }) if message.contains("skipped"))
+        matches!(events.get(1), Some(ClientEvent::Error { message, .. }) if message.display().contains("skipped"))
     );
 }
 
@@ -2823,22 +2850,18 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     // history messages lower to 2 client messages — this assertion still
     // expected the pre-fold count.
     let events = sink.events().await;
-    let [
-        ClientEvent::SessionResumed {
-            session_id: emitted_id,
-            mode,
-            messages,
-        },
-        ClientEvent::UsageUpdate {
-            is_snapshot: Some(true),
-            input_tokens: 1200,
-            output_tokens: 80,
-            cache_read_tokens: 3000,
-            cache_creation_tokens: 500,
-        },
-        ClientEvent::StatusSnapshot { .. },
-        ClientEvent::ModelChanged { model },
-    ] = events.as_slice()
+    let [ClientEvent::SessionResumed {
+        session_id: emitted_id,
+        mode,
+        messages,
+    }, ClientEvent::UsageUpdate {
+        is_snapshot: Some(true),
+        input_tokens: 1200,
+        output_tokens: 80,
+        cache_read_tokens: 3000,
+        cache_creation_tokens: 500,
+    }, ClientEvent::StatusSnapshot { .. }, ClientEvent::ModelChanged { model, .. }] =
+        events.as_slice()
     else {
         panic!("expected SessionResumed followed by its model, got {events:?}");
     };
@@ -2978,7 +3001,7 @@ async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
     assert!(!handle.current_plan_mode().await);
     assert!(matches!(
         sink.events().await.as_slice(),
-        [ClientEvent::Error { message, .. }] if message.contains("resume plan mode failed")
+        [ClientEvent::Error { message, .. }] if message.display().contains("resume plan mode failed")
     ));
 }
 
@@ -3028,7 +3051,7 @@ async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
     assert!(matches!(
         sink.events().await.as_slice(),
         [ClientEvent::Error { message, .. }]
-            if message.contains("resume plan permission mode failed")
+            if message.display().contains("resume plan permission mode failed")
     ));
 }
 
@@ -3086,7 +3109,7 @@ async fn resume_session_rolls_back_plan_state_when_replay_fails() {
     assert!(!handle.current_plan_mode().await);
     assert!(matches!(
         sink.events().await.as_slice(),
-        [ClientEvent::Error { message, .. }] if message.contains("resume_session failed")
+        [ClientEvent::Error { message, .. }] if message.display().contains("resume_session failed")
     ));
 }
 
@@ -3226,7 +3249,7 @@ async fn set_model_routes_over_ws() {
 
     // The reply is framed back as a `Frame::Event(ModelChanged)`.
     match next_frame(&mut ws).await {
-        Frame::Event(ClientEvent::ModelChanged { model }) => {
+        Frame::Event(ClientEvent::ModelChanged { model, .. }) => {
             assert_eq!(model, "claude-opus-4-8");
         }
         other => panic!("expected Frame::Event(ModelChanged) over WS, got {other:?}"),
@@ -3434,7 +3457,7 @@ async fn the_settings_listing_reports_a_missing_context_instead_of_staying_silen
     let message = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { message, .. } => Some(message.clone()),
+            ClientEvent::Error { message, .. } => Some(message.display()),
             _ => None,
         })
         .expect("a missing settings context must be reported, not swallowed");
@@ -3546,7 +3569,7 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
     let (kind, message) = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.display())),
             _ => None,
         })
         .expect("a non-object patch must be reported, not swallowed");
@@ -3595,7 +3618,7 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
     let (kind, message) = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.display())),
             _ => None,
         })
         .expect("invalid JSON must be reported, not swallowed");
@@ -3733,7 +3756,7 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
     let (kind, message) = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.display())),
             _ => None,
         })
         .expect("a no-op request must be reported, not silently resent as a snapshot");
@@ -3898,7 +3921,7 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
     let (kind, message) = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.display())),
             _ => None,
         })
         .expect("the refusal must be reported, not swallowed");
@@ -3996,7 +4019,7 @@ async fn update_permission_rules_reports_a_missing_context_instead_of_staying_si
     let message = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { message, .. } => Some(message.clone()),
+            ClientEvent::Error { message, .. } => Some(message.display()),
             _ => None,
         })
         .expect("a missing settings context must be reported, not swallowed");
@@ -4032,7 +4055,7 @@ async fn set_default_permission_mode_reports_a_missing_context_instead_of_stayin
     let message = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { message, .. } => Some(message.clone()),
+            ClientEvent::Error { message, .. } => Some(message.display()),
             _ => None,
         })
         .expect("a missing settings context must be reported, not swallowed");
@@ -4066,7 +4089,7 @@ async fn update_workspace_directories_reports_a_missing_context_instead_of_stayi
     let message = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { message, .. } => Some(message.clone()),
+            ClientEvent::Error { message, .. } => Some(message.display()),
             _ => None,
         })
         .expect("a missing settings context must be reported, not swallowed");
@@ -4180,7 +4203,7 @@ async fn upsert_mcp_server_rejects_a_non_object_config_with_protocol_error() {
     let (kind, message) = events
         .iter()
         .find_map(|e| match e {
-            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.display())),
             _ => None,
         })
         .expect("a non-object config must be reported, not swallowed");
@@ -4226,7 +4249,7 @@ async fn mcp_commands_report_a_missing_context_instead_of_staying_silent() {
         let message = events
             .iter()
             .find_map(|e| match e {
-                ClientEvent::Error { message, .. } => Some(message.clone()),
+                ClientEvent::Error { message, .. } => Some(message.display()),
                 _ => None,
             })
             .expect("a missing MCP context must be reported, not swallowed");
@@ -4267,7 +4290,7 @@ async fn upsert_mcp_server_rejects_an_empty_name_with_protocol_error() {
         let (kind, message) = events
             .iter()
             .find_map(|e| match e {
-                ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+                ClientEvent::Error { kind, message } => Some((kind.clone(), message.display())),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("an empty name ({empty_name:?}) must be reported"));
@@ -4333,7 +4356,7 @@ async fn durable_turn_recovery_commands_are_explicitly_rejected_not_silently_dro
             sink.events().await,
             vec![ClientEvent::Error {
                 kind: ErrorKindDto::Rejected,
-                message: expected_message.to_string(),
+                message: expected_message.to_string().into(),
             }],
             "{command:?} must be answered with one typed rejection naming the command"
         );
@@ -4365,7 +4388,9 @@ async fn attach_turn_without_a_sequence_is_rejected_the_same_way() {
         sink.events().await,
         vec![ClientEvent::Error {
             kind: ErrorKindDto::Rejected,
-            message: "attach_turn is unavailable on this bridge".to_string(),
+            message: "attach_turn is unavailable on this bridge"
+                .to_string()
+                .into(),
         }]
     );
 }
@@ -4394,7 +4419,9 @@ async fn resume_workflow_is_explicitly_rejected() {
         sink.events().await,
         vec![ClientEvent::Error {
             kind: ErrorKindDto::Rejected,
-            message: "resume_workflow is unavailable on this bridge".to_string(),
+            message: "resume_workflow is unavailable on this bridge"
+                .to_string()
+                .into(),
         }]
     );
 }

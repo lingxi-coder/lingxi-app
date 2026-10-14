@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { discoverLatestLockfile, readLockfile, type LockfileBody } from '../src/lockfile.js';
+import { CLIENT_PROTOCOL_VERSION } from '../src/protocol.js';
 import { versionCompatible } from '../src/version.js';
 
 function writeLock(dir: string, port: number, token: string): string {
@@ -86,6 +87,10 @@ test('discoverLatestLockfile ignores .tmp shadows', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('client DTO protocol version tracks the source contract major', () => {
+  assert.equal(CLIENT_PROTOCOL_VERSION, '25.0.0');
 });
 
 test('versionCompatible matches the Rust major-version rule (fail-closed)', () => {

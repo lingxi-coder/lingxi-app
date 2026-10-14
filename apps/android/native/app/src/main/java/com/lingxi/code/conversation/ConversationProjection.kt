@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.McpServerDto
 import com.lingxi.code.bindings.client.McpStatusDto
 import com.lingxi.code.bindings.client.MessageDto
@@ -34,13 +35,23 @@ fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelSta
         is ClientEvent.ModelList -> EngineModelState(
             available = event.models,
             active = event.current,
+            activeSourceDisplay = event.currentModelSource.displayTextOrNull(),
             details = event.details.associate { detail ->
                 detail.reference to com.lingxi.code.model.CatalogModelDetails.fromDto(detail)
             },
         )
-        is ClientEvent.ModelChanged -> prev.copy(active = event.model)
+        is ClientEvent.ModelChanged -> prev.copy(
+            active = event.model,
+            activeSourceDisplay = event.modelSource.displayTextOrNull(),
+        )
         else -> prev
     }
+
+private fun ClientTextDto?.displayTextOrNull(): String? = this?.let { source ->
+    buildString(source.codeUnits.size) {
+        source.codeUnits.forEach { append(it.toInt().toChar()) }
+    }
+}
 
 /**
  * PURE reducer for the out-of-band SESSION events — the exact sibling of

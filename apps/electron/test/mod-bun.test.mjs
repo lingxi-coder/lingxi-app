@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
-import { inspectModBun, stageModBun, verifyModBun } from '../scripts/mod-bun.mjs';
+import { MOD_BUN_VERSION, MOD_BUN_REVISION, inspectModBun, stageModBun, verifyModBun } from '../scripts/mod-bun.mjs';
 import { DEFAULT_SECRET_CANARY, scanTreeForForbiddenContent } from '../scripts/package-support.mjs';
 
 const configured = process.env.LINGXI_MOD_BUN_EXECUTABLE || 'bun';
@@ -43,6 +43,24 @@ test('staged Bun compiler executes classic JSX with its recorded identity', { sk
     writeFileSync(executable, original);
     appendFileSync(join(resources, 'Bun-LICENSE.md'), 'changed');
     assert.throws(() => verifyModBun(resources, process.platform, process.arch), /recorded identity/);
+  } finally {
+    rmSync(resources, { recursive: true, force: true });
+  }
+});
+
+test('staging rejects a compiler from another Bun release before creating package files', () => {
+  const resources = mkdtempSync(join(tmpdir(), 'lingxi-mod-bun-version-'));
+  try {
+    assert.equal(MOD_BUN_VERSION, '1.4.3');
+    assert.throws(() => stageModBun(resources, {
+      version: '1.3.11', executable: '/nonexistent/compiler', platform: process.platform,
+    }), /must use Bun 1\.4\.3; received 1\.3\.11/);
+    assert.throws(() => stageModBun(resources, {
+      version: MOD_BUN_VERSION, revision: '0000000', executable: '/nonexistent/compiler',
+      platform: process.platform,
+    }), /must use Bun revision/);
+    assert.equal(MOD_BUN_REVISION, 'c6da4a4d3010e5553438c60f6bd76d981976867c');
+    assert.throws(() => readFileSync(join(resources, 'mod-bun.json')), /ENOENT/);
   } finally {
     rmSync(resources, { recursive: true, force: true });
   }

@@ -16,7 +16,7 @@ private actor SettingsRoundtripListener: IosEventListener {
         switch event {
         case let .settingsSnapshot(effective, _, _, _, _, layers, _):
             replies.append(.snapshot(SettingsRoundtripSnapshot(effective: effective, layers: layers)))
-        case let .error(_, message): replies.append(.failure(message))
+        case let .error(_, message): replies.append(.failure(message.displayText))
         default: break
         }
     }

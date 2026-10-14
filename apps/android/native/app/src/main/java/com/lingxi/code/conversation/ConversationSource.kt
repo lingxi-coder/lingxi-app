@@ -4,6 +4,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.client.PermissionRequest
 import com.lingxi.code.bindings.client.PermissionResponseDto
@@ -97,6 +98,15 @@ interface ConversationSource {
         turnId: Long,
         visualizationContext: VisualizationRef?,
     ): Flow<ReplyEvent> = submit(text, images, turnId)
+
+    /** Submit one prompt with its current Native input mode. */
+    fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> = submit(text, images, turnId, visualizationContext)
 
     /** Serves the dedicated visualization WebView; null without an engine. */
     val visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? get() = null

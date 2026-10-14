@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
+import com.lingxi.code.bindings.client.AskUserQuestionAnswersDto
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.modeColor
@@ -159,7 +160,7 @@ fun ChatScreen(
     /** Opens the full-screen terminal with [initCommand] prefilled, not run. */
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
     /** Submit the answers for the pending questionnaire card. */
-    onAnswerQuestion: (requestId: ULong, answers: Map<String, String>) -> Unit = { _, _ -> },
+    onAnswerQuestion: (requestId: ULong, answers: AskUserQuestionAnswersDto) -> Unit = { _, _ -> },
     /** Dismiss the pending questionnaire card. */
     onCancelQuestion: (requestId: ULong) -> Unit = {},
     /** Resume a paused workflow directly from the execution card. */

@@ -112,14 +112,14 @@ class VisualizationTest {
                 MessageDto(
                     role = "assistant",
                     blocks = listOf(
-                        MessageBlockDto.Text("Chart:"),
+                        MessageBlockDto.Text("Chart:".toClientTextDto()),
                         MessageBlockDto.Visualization(VisualizationRefDto("chart", 1u)),
                         MessageBlockDto.Visualization(null),
                     ),
                 ),
                 MessageDto(
                     role = "user",
-                    blocks = listOf(MessageBlockDto.Text("Why the dip?")),
+                    blocks = listOf(MessageBlockDto.Text("Why the dip?".toClientTextDto())),
                     visualizationContext = VisualizationContextDto("chart", 1u, "Sales"),
                 ),
             ),

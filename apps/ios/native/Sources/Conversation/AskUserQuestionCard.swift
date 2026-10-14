@@ -1,4 +1,5 @@
 import SwiftUI
+import harness_runtimeFFI
 
 /// The interactive AskUserQuestion form shown in a native sheet. All questions
 /// stay in view as an accordion: answered rows retain the question and answer,
@@ -9,12 +10,12 @@ struct AskUserQuestionCard: View {
 
     let question: ConversationPendingQuestion
     /// Returns whether the answer command was submitted; false enables retry.
-    let onSubmit: ([String: String]) async -> Bool
+    let onSubmit: (AskUserQuestionAnswersDto) async -> Bool
     let onCancel: () async -> Bool
 
     @State private var expandedQuestion: Int? = 0
     /// Selected option labels per question index, in tap order.
-    @State private var selected: [Int: [String]] = [:]
+    @State private var selected: [Int: [Int]] = [:]
     /// The free-text answer per question index.
     @State private var custom: [Int: String] = [:]
     @State private var submitting = false
@@ -34,39 +35,51 @@ struct AskUserQuestionCard: View {
 
     /// Toggle an option. Single-select replaces the selection; multi-select
     /// toggles membership while preserving tap order.
-    static func toggled(_ label: String, in current: [String], multiSelect: Bool) -> [String] {
-        if let index = current.firstIndex(of: label) {
+    static func toggled(_ optionIndex: Int, in current: [Int], multiSelect: Bool) -> [Int] {
+        if let index = current.firstIndex(of: optionIndex) {
             var copy = current
             copy.remove(at: index)
             return copy
         }
-        return multiSelect ? current + [label] : [label]
+        return multiSelect ? current + [optionIndex] : [optionIndex]
     }
 
     /// Build the wire answer map, joining selected options and custom text.
     static func answers(
         questions: [ConversationAskQuestion],
-        selected: [Int: [String]],
+        selected: [Int: [Int]],
         custom: [Int: String]
-    ) -> [String: String] {
-        var out: [String: String] = [:]
+    ) -> AskUserQuestionAnswersDto {
+        var pairs: [AskUserQuestionAnswerDto] = []
         for (index, question) in questions.enumerated() {
-            var labels = selected[index] ?? []
+            var parts = (selected[index] ?? []).compactMap { optionIndex -> [UInt16]? in
+                guard question.options.indices.contains(optionIndex) else { return nil }
+                let option = question.options[optionIndex]
+                return option.sourceLabelCodeUnits ?? Array(option.label.utf16)
+            }
             let free = (custom[index] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !free.isEmpty { labels.append(free) }
-            guard !labels.isEmpty else { continue }
-            out[question.question] = labels.joined(separator: ", ")
+            if !free.isEmpty { parts.append(Array(free.utf16)) }
+            guard !parts.isEmpty else { continue }
+            var answerUnits: [UInt16] = []
+            for (partIndex, units) in parts.enumerated() {
+                if partIndex > 0 { answerUnits.append(contentsOf: [44, 32]) }
+                answerUnits.append(contentsOf: units)
+            }
+            pairs.append(AskUserQuestionAnswerDto(
+                question: ClientTextDto(codeUnits: question.sourceQuestionCodeUnits ?? Array(question.question.utf16)),
+                answer: ClientTextDto(codeUnits: answerUnits)
+            ))
         }
-        return out
+        return AskUserQuestionAnswersDto(pairs: pairs)
     }
 
     /// Every question needs at least one selected option or custom answer.
     static func isComplete(
         questions: [ConversationAskQuestion],
-        selected: [Int: [String]],
+        selected: [Int: [Int]],
         custom: [Int: String]
     ) -> Bool {
-        answers(questions: questions, selected: selected, custom: custom).count == questions.count
+        answers(questions: questions, selected: selected, custom: custom).pairs.count == questions.count
     }
 
     var body: some View {
@@ -194,11 +207,11 @@ struct AskUserQuestionCard: View {
             }
             ForEach(current.options.indices, id: \.self) { optionIndex in
                 let option = current.options[optionIndex]
-                let active = (selected[index] ?? []).contains(option.label)
+                let active = (selected[index] ?? []).contains(optionIndex)
                 Button {
                     guard !submitting else { return }
                     let next = Self.toggled(
-                        option.label,
+                        optionIndex,
                         in: selected[index] ?? [],
                         multiSelect: current.multiSelect
                     )

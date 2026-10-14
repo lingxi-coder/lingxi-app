@@ -6,7 +6,8 @@
 use crate::argv::Argv;
 use crate::exit_codes;
 use crate::repl_loop::{
-    step_with_notifications, SkillBatchTurnFn, StepOutcome, TaskNotificationWake,
+    step_with_notifications, PolicyHelperRuntimeFailureSignal, SkillBatchTurnFn, StepOutcome,
+    TaskNotificationWake,
 };
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
@@ -101,6 +102,7 @@ impl TaskNotificationWake for ReplTaskWake {
                     self.orchestrator
                         .run_queued_prompt_batch(
                             vec![orchestrator::QueuedPromptInput {
+                                images: Vec::new(),
                                 goal_retry_id: command
                                     .uuid
                                     .starts_with("goal-retry-")
@@ -117,6 +119,7 @@ impl TaskNotificationWake for ReplTaskWake {
                                     serde_json::json!({"kind":"scheduled-trigger"})
                                 }),
                                 message_id: None,
+                                pending_prompt_identity: None,
                                 transcript_row_token: None,
                                 queue_priority: Some("later".into()),
                                 scheduled_task_id: command.scheduled_task_id.clone(),
@@ -587,13 +590,26 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             Some(&idle_notifier),
             Some(&task_wake),
             Some(skill_batch_fn),
+            Some(Box::new(PolicyHelperRuntimeFailureSignal::new(
+                runtime.policy_helper_refusal.clone(),
+                runtime.policy_helper_semantic_worker_failure.clone(),
+            ))),
             run_turn_fn,
         )
         .await;
 
-        loop_host.refresh_session().await;
-        turn_count += 1;
+        if !matches!(
+            outcome,
+            StepOutcome::PolicyHelperRefusal | StepOutcome::PolicySemanticWorkerFailure
+        ) {
+            loop_host.refresh_session().await;
+            turn_count += 1;
+        }
         if outcome != StepOutcome::Continue
+            && !matches!(
+                outcome,
+                StepOutcome::PolicyHelperRefusal | StepOutcome::PolicySemanticWorkerFailure
+            )
             && !confirm_repl_exit(
                 &stdin_reader,
                 handle.as_ref(),
@@ -615,6 +631,16 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             StepOutcome::DoubleSigintExit => {
                 ended_via = "double_sigint";
                 exit_code = exit_codes::SIGINT;
+                break;
+            }
+            StepOutcome::PolicyHelperRefusal => {
+                ended_via = "policy_helper_refusal";
+                exit_code = exit_codes::RUNTIME_ERROR;
+                break;
+            }
+            StepOutcome::PolicySemanticWorkerFailure => {
+                ended_via = "policy_semantic_worker_failure";
+                exit_code = exit_codes::RUNTIME_ERROR;
                 break;
             }
             StepOutcome::ExitCommand { undispatched } => {
@@ -664,10 +690,26 @@ async fn finish_repl_lifecycle(
     sink: &dyn OutputSink,
     exit_code: i32,
 ) -> i32 {
+    let semantic_worker_failure_at_exit = runtime.policy_helper_semantic_worker_failure.current();
     runtime.orchestrator.request_exit().await;
     let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
     for error in &shutdown.errors {
         sink.error("session_shutdown", error).await;
+    }
+    if let Some(refusal) = runtime.policy_helper_refusal.current() {
+        if let Some(diagnostic) = refusal.diagnostic() {
+            sink.source_error("policy_helper", diagnostic).await;
+        } else {
+            sink.error("policy_helper", &refusal.to_string()).await;
+        }
+        return exit_codes::RUNTIME_ERROR;
+    }
+    if let Some(failure) = semantic_worker_failure_at_exit
+        .or_else(|| runtime.policy_helper_semantic_worker_failure.current())
+    {
+        sink.error("policy_semantic_worker", &failure.to_string())
+            .await;
+        return exit_codes::RUNTIME_ERROR;
     }
     if exit_code == exit_codes::SUCCESS && (!shutdown.complete || !shutdown.errors.is_empty()) {
         exit_codes::RUNTIME_ERROR

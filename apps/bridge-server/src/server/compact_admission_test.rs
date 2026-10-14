@@ -18,6 +18,7 @@ impl crate::router::CommandRouter for AdmissionRouter {
     async fn dispatch_slash(
         &self,
         _: Utf16JsonProjection,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) -> Option<crate::router::SlashDispatchOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Some(crate::router::SlashDispatchOutcome {

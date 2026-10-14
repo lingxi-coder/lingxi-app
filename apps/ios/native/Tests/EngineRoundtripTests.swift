@@ -142,10 +142,10 @@ import XCTest
 
         func onEvent(event: ClientEvent) async {
             switch event {
-            case let .modelList(models, current, _):
+            case let .modelList(models, current, _, _):
                 lock.lock(); modelList = (models, current); lock.unlock()
                 gotList.fulfill()
-            case let .modelChanged(model):
+            case let .modelChanged(model, _):
                 lock.lock(); changedModel = model; lock.unlock()
                 gotChanged.fulfill()
             default:
@@ -345,7 +345,7 @@ import XCTest
                            "the listener must receive at least one ClientEvent over UniFFI")
 
             let errorEvents: [(ErrorKindDto, String)] = received.compactMap { ev in
-                if case let .error(kind, message) = ev { return (kind, message) }
+                if case let .error(kind, message) = ev { return (kind, message.displayText) }
                 return nil
             }
             let modelErrorEnds = received.compactMap { ev -> String? in
@@ -446,7 +446,7 @@ import XCTest
             // SetModel→ModelChanged: pick a different real id from the catalog and
             // confirm the engine echoes it back (a turn would then send THIS id).
             let target = list.models.first(where: { $0 != list.current }) ?? list.models[0]
-            try await handle.submit(command: .setModel(model: target))
+            try await handle.submit(command: .setModel(model: target.clientTextDto))
             await fulfillment(of: [gotChanged], timeout: 30)
             XCTAssertEqual(listener.changedModel, target,
                            "ModelChanged must echo the SetModel id (the real id a turn will send)")

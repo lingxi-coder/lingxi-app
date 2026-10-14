@@ -19,6 +19,7 @@ struct Composer: View {
     var availableModels: [String] = []
     var availableModelDetails: [String: ModelRuntimeDetails] = [:]
     var activeModelId: String = ""
+    var activeModelDisplay: String? = nil
     var providerConfigured: Bool
     var onSelectModel: (String) -> Void = { _ in }
     var reasoningModelId: String? = nil
@@ -116,6 +117,7 @@ struct Composer: View {
         availableModels: [String] = [],
         availableModelDetails: [String: ModelRuntimeDetails] = [:],
         activeModelId: String = "",
+        activeModelDisplay: String? = nil,
         providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
         reasoningModelId: String? = nil,
@@ -176,6 +178,7 @@ struct Composer: View {
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
+        self.activeModelDisplay = activeModelDisplay
         self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
         self.reasoningModelId = reasoningModelId
@@ -555,21 +558,23 @@ struct Composer: View {
         Self.modelChipLabel(
             providerConfigured: providerConfigured,
             availableModels: availableModels,
-            activeModelId: activeModelId
+            activeModelId: activeModelId,
+            activeModelDisplay: activeModelDisplay
         )
     }
 
     static func modelChipLabel(
         providerConfigured: Bool,
         availableModels: [String],
-        activeModelId: String
+        activeModelId: String,
+        activeModelDisplay: String? = nil
     ) -> String {
         guard providerConfigured else {
             return String(localized: "settings_provider_unconfigured")
         }
         return availableModels.isEmpty
             ? String(localized: "composer_loading_model")
-            : ModelDisplay.shortName(for: activeModelId)
+            : activeModelDisplay ?? ModelDisplay.shortName(for: activeModelId)
     }
 
     private var attachmentButton: some View {

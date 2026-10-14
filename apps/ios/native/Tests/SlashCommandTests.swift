@@ -196,7 +196,7 @@ import XCTest
             XCTAssertNotNil(turnId)
 
             submitted.removeAll()
-            source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output", isError: false))
+            source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output".clientTextDto, isError: false))
             XCTAssertNotNil(source.send("  /help spaced topic  "))
             await flushTasks()
             guard case let .runSlashCommand(spacedRaw, spacedTurnId) = try XCTUnwrap(submitted.first) else {
@@ -207,7 +207,7 @@ import XCTest
             submitted.removeAll()
             source.applyForTesting(.slashCommandResult(
                 turnId: spacedTurnId,
-                display: "spaced help output",
+                display: "spaced help output".clientTextDto,
                 isError: false
             ))
             XCTAssertNotNil(source.send("/unknown"))
@@ -326,7 +326,7 @@ import XCTest
 
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
-                display: "Available commands",
+                display: "Available commands".clientTextDto,
                 isError: false
             ))
 
@@ -379,7 +379,7 @@ import XCTest
                 messagesBefore: 20,
                 messagesAfter: 7,
                 bytesSaved: 4096,
-                summary: "kept context"
+                summary: "kept context".clientTextDto
             ))
             XCTAssertEqual(source.model.compactionStatus, .completed(
                 messagesBefore: 20,
@@ -398,7 +398,7 @@ import XCTest
 
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
-                display: "Compacted (ctrl+o to see full summary)",
+                display: "Compacted (ctrl+o to see full summary)".clientTextDto,
                 isError: false
             ))
             XCTAssertEqual(source.model.compactionStatus, .completed(
@@ -434,7 +434,7 @@ import XCTest
             await flushTasks()
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
-                display: "Not enough messages to compact.",
+                display: "Not enough messages to compact.".clientTextDto,
                 isError: false
             ))
 
@@ -467,7 +467,7 @@ import XCTest
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
             XCTAssertFalse(source.model.slashCommandPending)
             XCTAssertTrue(source.model.streaming)
-            source.applyForTesting(.textDelta(text: "review result"))
+            source.applyForTesting(.textDelta(text: "review result".clientTextDto))
             source.applyForTesting(.turnEnded(
                 outcome: .endTurn,
                 stopReason: "end_turn",

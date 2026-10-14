@@ -523,9 +523,15 @@ pub(super) async fn mount_resumed_tui_inner(
     if let Some(state) = carried_state {
         let orch = &tui_build.runtime.orchestrator;
         if let Some((model, profile)) = state.model {
-            let _ = orch
-                .switch_model_with_source(&model, profile.as_deref(), "resume")
-                .await;
+            let _ = orch.switch_model(&model, profile.as_deref()).await;
+        }
+        if let Some(user_model_setting) = state.user_model_setting {
+            let session = orch.session();
+            let mut session = session.lock().await;
+            session.user_model_setting = Some(user_model_setting);
+            session.user_model_setting_provenance = lingxi_core::host::ModelProvenance::UserOrEnv;
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::UserSelection;
         }
         let _ = orch.set_fast_mode(state.fast_mode).await;
         if state.permission_mode.is_none() {

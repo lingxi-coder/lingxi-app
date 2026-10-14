@@ -21,21 +21,21 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client::adapter::AdapterPermissionGate;
 use client::protocol::commands::ClientCommand;
 use client::protocol::permission::PermissionRequest;
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 const TEST_TOKEN: &str = "ver-e2e-token-32chars00000000000";
 
@@ -226,9 +226,9 @@ async fn bridge_version_mismatch_refuses() {
                 .error
                 .expect("a bridge-version mismatch must be refused with an error");
             assert!(
-                err.message.to_lowercase().contains("version"),
+                err.message.display().to_lowercase().contains("version"),
                 "the refusal message must mention the version mismatch, got: {}",
-                err.message
+                err.message.display()
             );
         }
         other => panic!("expected a refusal Frame::Response, got {other:?}"),
@@ -270,9 +270,9 @@ async fn client_protocol_version_mismatch_refuses() {
                 .error
                 .expect("a client-protocol-version mismatch must be refused with an error");
             assert!(
-                err.message.to_lowercase().contains("version"),
+                err.message.display().to_lowercase().contains("version"),
                 "the refusal message must mention the version mismatch, got: {}",
-                err.message
+                err.message.display()
             );
         }
         other => panic!("expected a refusal Frame::Response, got {other:?}"),
@@ -362,7 +362,7 @@ async fn command_before_hello_is_rejected() {
     match next_frame(&mut ws).await {
         Frame::Response(response) => {
             let error = response.error.expect("pre-hello command must be rejected");
-            assert!(error.message.contains("hello"));
+            assert!(error.message.display().contains("hello"));
         }
         other => panic!("expected pre-hello error response, got {other:?}"),
     }
@@ -402,7 +402,7 @@ async fn second_client_is_rejected_while_first_remains_active() {
     match next_frame(&mut second).await {
         Frame::Response(response) => {
             let error = response.error.expect("second client must be rejected");
-            assert!(error.message.contains("active client"));
+            assert!(error.message.display().contains("active client"));
         }
         other => panic!("expected second-client error response, got {other:?}"),
     }

@@ -36,6 +36,25 @@ test('session and model events replace authoritative host state', () => {
   assert.equal(state.permissionMode, 'auto');
 });
 
+test('model source companion carries the displayed logical model without replacing its route', () => {
+  const listed = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'model_list',
+    models: ['anthropic/known-route'],
+    current: 'anthropic/known-route',
+    current_model_source: 'claude-custom-2026',
+  });
+  assert.equal(listed.currentModel, 'anthropic/known-route');
+  assert.equal(listed.currentModelSource, 'claude-custom-2026');
+
+  const changed = reduceDesktopEvent(listed, {
+    type: 'model_changed',
+    model: 'anthropic/known-route',
+    model_source: 'claude-custom-next',
+  });
+  assert.equal(changed.currentModel, 'anthropic/known-route');
+  assert.equal(changed.currentModelSource, 'claude-custom-next');
+});
+
 test('a started session stays visible until the file-backed catalog catches up', () => {
   const started = reduceDesktopEvent(emptyDesktopState(), {
     type: 'session_started',

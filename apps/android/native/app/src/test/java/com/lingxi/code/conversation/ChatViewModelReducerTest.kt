@@ -5,6 +5,7 @@ import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.SessionAgentSummaryDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.HeadlineKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
@@ -93,6 +94,7 @@ class ChatViewModelReducerTest {
         val commands = mutableListOf<ClientCommand>()
         val cancelledTurnIds = mutableListOf<Long?>()
         var submittedTurnId: Long? = null
+        val submittedPromptModes = mutableListOf<PromptModeDto?>()
         var cancelCount = 0
         private val never = MutableSharedFlow<ReplyEvent>()
         /** Drivable so a test can make a permission request arrive and settle. */
@@ -113,6 +115,17 @@ class ChatViewModelReducerTest {
             turnId: Long,
         ): Flow<ReplyEvent> {
             submittedTurnId = turnId
+            return submit(text)
+        }
+        override fun submit(
+            text: String,
+            images: List<ImageRefDto>,
+            turnId: Long,
+            visualizationContext: VisualizationRef?,
+            promptMode: PromptModeDto?,
+        ): Flow<ReplyEvent> {
+            submittedTurnId = turnId
+            submittedPromptModes += promptMode
             return submit(text)
         }
         override suspend fun cancel(turnId: Long?) {
@@ -314,7 +327,7 @@ class ChatViewModelReducerTest {
         assertEquals(null, message.loopWakeupStreak)
         assertTrue(message.loopFoldedItemIds.isEmpty())
         assertFalse(vm.state.value.streaming)
-        vm.reduceClientEvent(ClientEvent.SystemNotice("Scheduled task text is still turn-scoped", false))
+        vm.reduceClientEvent(ClientEvent.SystemNotice("Scheduled task text is still turn-scoped".toClientTextDto(), false))
         assertEquals(listOf(message), vm.state.value.messages)
     }
 
@@ -406,6 +419,36 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun leadingBangInitialPromptUsesBashAndPreservesCommandBody() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+
+        vm.send("!  printf !!  ")
+        runCurrent()
+
+        assertEquals(listOf(PromptModeDto.BASH), source.submittedPromptModes)
+        assertEquals("  printf !!  ", source.submitted.single())
+        assertEquals("!  printf !!", vm.state.value.messages.last().text)
+    }
+
+    @Test
+    fun leadingBangQueuedPromptKeepsItsOwnBashModeAndCommandBody() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+
+        vm.send("first")
+        runCurrent()
+        vm.send("!  printf !!  ")
+        runCurrent()
+
+        assertEquals(listOf(null), source.submittedPromptModes)
+        val queued = source.commands.filterIsInstance<ClientCommand.SendPrompt>().last()
+        assertEquals("  printf !!  ", queued.text.displayText())
+        assertEquals(PromptModeDto.BASH, queued.promptMode)
+        assertEquals("!  printf !!", vm.state.value.messages.last().text)
+    }
+
+    @Test
     fun compactCommandFailureSettlesTheVisibleProgress() = runTest(dispatcher) {
         val source = RecordingSource()
         val vm = ChatViewModel(source)
@@ -414,7 +457,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(ClientEvent.Error(
             kind = com.lingxi.code.bindings.client.ErrorKindDto.INTERNAL,
-            message = "force_compact failed: handle action failed: rate limited",
+            message = "force_compact failed: handle action failed: rate limited".toClientTextDto(),
         ))
 
         assertEquals(CompactionProgressStatus.Failed, vm.state.value.compaction?.status)
@@ -454,7 +497,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "agent", TaskStatusDto.RUNNING, "Reindex the docs", false, null, null),
+                TaskRowDto("task-1", "agent", TaskStatusDto.RUNNING, "Reindex the docs".toClientTextDto(), false, null, null),
             ),
         )
         vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null, null))
@@ -548,7 +591,7 @@ class ChatViewModelReducerTest {
         )
         // ResumeTurn emits its own state and closes the attach replay window.
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
-        vm.reduceClientEvent(ClientEvent.TextDelta("live"))
+        vm.reduceClientEvent(ClientEvent.TextDelta("live".toClientTextDto()))
         vm.reduceClientEvent(
             ClientEvent.TurnEventReplay(
                 sessionId = "session-a",
@@ -654,7 +697,7 @@ class ChatViewModelReducerTest {
             ),
         )
         vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
-        vm.reduceClientEvent(ClientEvent.TextDelta("live"))
+        vm.reduceClientEvent(ClientEvent.TextDelta("live".toClientTextDto()))
         vm.reduceClientEvent(
             ClientEvent.TurnEventReplay(
                 sessionId = "session-a",
@@ -822,7 +865,7 @@ class ChatViewModelReducerTest {
         )
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review", false, null, null),
+                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review".toClientTextDto(), false, null, null),
             ),
         )
         val waiting = TurnRecoverySnapshotDto(
@@ -1048,7 +1091,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test", false, null, null),
+                TaskRowDto("task-1", "shell", TaskStatusDto.RUNNING, "npm test".toClientTextDto(), false, null, null),
             ),
         )
         runCurrent()
@@ -1056,7 +1099,7 @@ class ChatViewModelReducerTest {
 
         vm.reduceClientEvent(
             ClientEvent.TaskRow(
-                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test", false, null, null),
+                TaskRowDto("task-1", "shell", TaskStatusDto.COMPLETED, "npm test".toClientTextDto(), false, null, null),
             ),
         )
         runCurrent()
@@ -2107,7 +2150,7 @@ class ChatViewModelReducerTest {
         val vm = newVm()
         vm.driveWire(
             ClientEvent.TurnStarted(turnId = null),
-            ClientEvent.TextDelta("好的"),
+            ClientEvent.TextDelta("好的".toClientTextDto()),
             ClientEvent.ToolUseStarted(
                 id = "e1",
                 tool = "Edit",
@@ -2120,13 +2163,13 @@ class ChatViewModelReducerTest {
             ),
             ClientEvent.MessageComplete(
                 stopReason = "end_turn",
-                message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的"))),
+                message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的".toClientTextDto()))),
             ),
         )
 
         // Premise check: the wire message really does arrive with no tool block.
         val wireOnly = messageDtoToMessage(
-            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的"))),
+            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的".toClientTextDto()))),
         )
         assertTrue(wireOnly.blocks.none { it is MessageContent.Tool })
 
@@ -2149,7 +2192,7 @@ class ChatViewModelReducerTest {
             val vm = newVm()
             vm.driveWire(
                 ClientEvent.TurnStarted(turnId = null),
-                ClientEvent.TextDelta("查完了"),
+                ClientEvent.TextDelta("查完了".toClientTextDto()),
                 ClientEvent.ToolUseStarted(id = "g1", tool = "Grep", inputJson = "{}", header = wireHeader()),
                 ClientEvent.ToolUseResult(
                     id = "g1", tool = "Grep", resultJson = """"ok"""", isError = false,
@@ -2175,7 +2218,7 @@ class ChatViewModelReducerTest {
         val vm = ChatViewModel(source)
         vm.driveWire(
             ClientEvent.TurnStarted(turnId = null),
-            ClientEvent.TextDelta("改好了"),
+            ClientEvent.TextDelta("改好了".toClientTextDto()),
             ClientEvent.ToolUseStarted(id = "e1", tool = "Edit", inputJson = "{}", header = wireHeader()),
             ClientEvent.ToolUseResult(
                 id = "e1", tool = "Edit", resultJson = """"ok"""", isError = false, display = wireDisplay(),
@@ -2219,7 +2262,7 @@ class ChatViewModelReducerTest {
         val vm = newVm()
         vm.driveWire(
             ClientEvent.TurnStarted(turnId = null),
-            ClientEvent.TextDelta("跑一下"),
+            ClientEvent.TextDelta("跑一下".toClientTextDto()),
             ClientEvent.ToolUseStarted(
                 id = "sh1",
                 tool = "bash",

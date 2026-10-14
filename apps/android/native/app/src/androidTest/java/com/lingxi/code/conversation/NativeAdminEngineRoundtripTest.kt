@@ -47,13 +47,13 @@ class NativeAdminEngineRoundtripTest {
         suspend fun response(command: ClientCommand, matches: (ClientEvent) -> Boolean): ClientEvent {
             while (true) {
                 val pending = events.tryReceive().getOrNull() ?: break
-                if (pending is ClientEvent.Error) error("Engine startup failed: ${pending.message}")
+                if (pending is ClientEvent.Error) error("Engine startup failed: ${pending.message.displayText()}")
             }
             engine.submit(command)
             return withTimeout(20_000) {
                 while (true) {
                     val event = events.receive()
-                    if (event is ClientEvent.Error) error("Admin command failed: ${event.message}")
+                    if (event is ClientEvent.Error) error("Admin command failed: ${event.message.displayText()}")
                     if (matches(event)) return@withTimeout event
                 }
                 @Suppress("UNREACHABLE_CODE") error("No admin response")

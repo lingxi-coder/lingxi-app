@@ -7,6 +7,9 @@ use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::history_cell::attachments::UserImageCell;
 use crate::history_cell::message::{AssistantTextCell, UserTextCell};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -18,6 +21,35 @@ fn ctrl(code: KeyCode) -> KeyEvent {
 
 fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
+}
+
+#[derive(Default)]
+struct FakeEventDriver {
+    queued: VecDeque<Event>,
+    polls: usize,
+    reads: usize,
+}
+
+impl AppEventDriver for FakeEventDriver {
+    fn poll(&mut self, _timeout: Duration) -> io::Result<bool> {
+        self.polls += 1;
+        Ok(!self.queued.is_empty())
+    }
+
+    fn read(&mut self) -> io::Result<Event> {
+        self.reads += 1;
+        self.queued.pop_front().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "fake event queue is empty")
+        })
+    }
+}
+
+struct FakeTerminalRestoreGuard(Arc<AtomicBool>);
+
+impl Drop for FakeTerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 /// An app over dummy (immediately closed) channels and no-op callbacks:
@@ -60,6 +92,58 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         },
     );
     app
+}
+
+#[test]
+fn idle_exit_probe_unwinds_app_and_releases_the_terminal_restore_scope() {
+    let mut app = test_app(Vec::new());
+    let mut terminal = inline_test_terminal(app.viewport_height(80));
+    let mut event_driver = FakeEventDriver::default();
+    let probe_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = probe_calls.clone();
+    let exit_probe: Arc<dyn Fn() -> bool + Send + Sync> =
+        Arc::new(move || observed_calls.fetch_add(1, Ordering::SeqCst) >= 1);
+    let restore_dropped = Arc::new(AtomicBool::new(false));
+
+    let result = {
+        // Production `run_app` keeps TerminalSession in this enclosing scope;
+        // returning AppExit::Quit must take this ordinary drop path.
+        let _restore_guard = FakeTerminalRestoreGuard(restore_dropped.clone());
+        app.run_inner(
+            &mut terminal,
+            None,
+            Some(exit_probe.as_ref()),
+            &mut event_driver,
+        )
+    };
+
+    assert_eq!(result.unwrap(), AppExit::Quit);
+    assert_eq!(event_driver.polls, 1, "the loop first waited while idle");
+    assert_eq!(event_driver.reads, 0, "no input event was needed to exit");
+    assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
+    assert!(
+        restore_dropped.load(Ordering::SeqCst),
+        "the normal exit unwinds the enclosing terminal restore guard"
+    );
+}
+
+#[test]
+fn no_exit_probe_preserves_the_existing_idle_double_ctrl_c_exit() {
+    let mut app = test_app(Vec::new());
+    let mut terminal = inline_test_terminal(app.viewport_height(80));
+    let mut event_driver = FakeEventDriver {
+        queued: VecDeque::from([
+            Event::Key(ctrl(KeyCode::Char('c'))),
+            Event::Key(ctrl(KeyCode::Char('c'))),
+        ]),
+        ..Default::default()
+    };
+
+    let result = app.run_inner(&mut terminal, None, None, &mut event_driver);
+
+    assert_eq!(result.unwrap(), AppExit::Quit);
+    assert_eq!(event_driver.polls, 2);
+    assert_eq!(event_driver.reads, 2);
 }
 
 #[test]

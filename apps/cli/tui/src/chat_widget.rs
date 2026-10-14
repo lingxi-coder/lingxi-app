@@ -4962,6 +4962,22 @@ impl ChatWidget {
             let usage = handle.context_usage_snapshot().await;
             (snap.model, usage)
         });
+        let usage = match usage {
+            Ok(usage) => usage,
+            Err(lingxi_core::host::HandleError::Settings(diagnostic)) => {
+                let mut units = "/context failed: ".encode_utf16().collect::<Vec<_>>();
+                units.extend(
+                    diagnostic
+                        .string_units("/message")
+                        .expect("settings diagnostics carry their source message"),
+                );
+                let message = String::from_utf16_lossy(&units);
+                return self.show_system_text(&message, true);
+            }
+            Err(error) => {
+                return self.show_system_text(&format!("/context failed: {error}"), true);
+            }
+        };
         self.bottom_pane
             .show_view(Box::new(ScreenView::context(&model, &usage)));
         ChatOutcome::Continue

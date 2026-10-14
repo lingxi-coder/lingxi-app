@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.toUi
@@ -146,13 +147,13 @@ fun clientEventToReply(
     strings: ConversationStrings = DefaultConversationStrings,
 ): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
-    is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
+    is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text.displayText())
     is ClientEvent.VisualizationBlock ->
         ReplyEvent.Visualization(event.status.toUi(), event.reference?.toUi())
     is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)
     // Reduced on the session-level raw event stream, including before TurnStarted.
     is ClientEvent.ScheduledTaskFire -> null
-    is ClientEvent.SystemNotice -> ReplyEvent.Notice(event.message, event.isError)
+    is ClientEvent.SystemNotice -> ReplyEvent.Notice(event.message.displayText(), event.isError)
     is ClientEvent.ToolUseStarted ->
         if (isShellTool(event.tool)) {
             ReplyEvent.ShellTool(shellStarted(event.id, event.inputJson))
@@ -337,11 +338,12 @@ private fun retainedTurnOutcome(event: JSONObject): String? {
  */
 internal fun userFacingEngineError(
     kind: ErrorKindDto,
-    message: String,
+    message: ClientTextDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): String {
-    if (kind != ErrorKindDto.TRANSPORT) return message
-    val normalized = message.lowercase()
+    val displayMessage = message.displayText()
+    if (kind != ErrorKindDto.TRANSPORT) return displayMessage
+    val normalized = displayMessage.lowercase()
     return when {
         listOf(
             "dns",
@@ -366,7 +368,7 @@ internal fun userFacingEngineError(
         ).any(normalized::contains) ->
             strings.resolve(R.string.chat_error_connect_failed, "无法连接模型服务。请检查当前网络或 VPN 后重试。")
 
-        else -> message
+        else -> displayMessage
     }
 }
 

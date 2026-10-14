@@ -212,8 +212,11 @@ mod skill_identity_source_tests {
                 lingxi_home: home_dir,
                 project_dir,
             },
-            active: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-            managed: std::collections::BTreeMap::new(),
+            active: Arc::new(std::sync::RwLock::new(
+                crate::settings_bridge::empty_settings_source(),
+            )),
+            managed: crate::settings_bridge::empty_settings_source(),
+            managed_diagnostics: None,
         };
         let router = EngineCommandRouter::new(
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
@@ -359,7 +362,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "MCP server update unavailable: this connection was built without an \
                           MCP context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -375,7 +379,7 @@ impl EngineCommandRouter {
             // `server_gate`'s own allowlist.)
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Protocol,
-                message: "MCP server name must not be empty".to_string(),
+                message: "MCP server name must not be empty".to_string().into(),
             })
             .await;
             return;
@@ -386,7 +390,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message,
+                    message: message.into(),
                 })
                 .await;
                 return;
@@ -396,7 +400,7 @@ impl EngineCommandRouter {
         if let Err(message) = crate::mcp_bridge::upsert_server(mcp, scope, name, config) {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message,
+                message: message.into(),
             })
             .await;
         }
@@ -415,7 +419,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "MCP server update unavailable: this connection was built without an \
                           MCP context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -424,7 +429,7 @@ impl EngineCommandRouter {
         if let Err(message) = crate::mcp_bridge::remove_server(mcp, scope, name) {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message,
+                message: message.into(),
             })
             .await;
         }
@@ -453,7 +458,7 @@ impl EngineCommandRouter {
         let Some(context) = self.skills_admin_context() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "skill catalog unavailable: this connection was built without a settings context".to_string(),
+                message: "skill catalog unavailable: this connection was built without a settings context".to_string().into(),
             }).await;
             return;
         };
@@ -642,7 +647,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await
             }
@@ -656,7 +661,7 @@ impl EngineCommandRouter {
         let Some(context) = self.skills_admin_context() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "skill document unavailable: this connection was built without a settings context".to_string(),
+                message: "skill document unavailable: this connection was built without a settings context".to_string().into(),
             }).await;
             return;
         };
@@ -815,7 +820,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await
             }
@@ -864,7 +869,7 @@ impl EngineCommandRouter {
                 let Some(skill_id) = command.target.as_ref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "skill document target is required".to_string(),
+                        message: "skill document target is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -876,7 +881,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "skill mutation operation_id is required".to_string(),
+                        message: "skill mutation operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -954,7 +959,7 @@ impl EngineCommandRouter {
             action => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message: format!("unsupported skill admin action: {action}"),
+                    message: format!("unsupported skill admin action: {action}").into(),
                 })
                 .await
             }
@@ -965,7 +970,8 @@ impl EngineCommandRouter {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
                 message: "MCP configuration snapshot unavailable: missing settings or MCP context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -1025,7 +1031,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await
             }
@@ -1042,7 +1048,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP save operation_id is required".to_string(),
+                        message: "MCP save operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1050,7 +1056,7 @@ impl EngineCommandRouter {
                 let Some(revision_sha256) = command.revision.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP save revision is required".to_string(),
+                        message: "MCP save revision is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1058,7 +1064,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP save payload is required".to_string(),
+                        message: "MCP save payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1121,7 +1127,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP remove operation_id is required".to_string(),
+                        message: "MCP remove operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1129,7 +1135,7 @@ impl EngineCommandRouter {
                 let Some(revision_sha256) = command.revision.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP remove revision is required".to_string(),
+                        message: "MCP remove revision is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1137,7 +1143,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP remove payload is required".to_string(),
+                        message: "MCP remove payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1200,7 +1206,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP approval operation_id is required".to_string(),
+                        message: "MCP approval operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1208,7 +1214,7 @@ impl EngineCommandRouter {
                 let Some(revision_sha256) = command.revision.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP approval revision is required".to_string(),
+                        message: "MCP approval revision is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1216,7 +1222,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "MCP approval payload is required".to_string(),
+                        message: "MCP approval payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1288,7 +1294,7 @@ impl EngineCommandRouter {
             action => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message: format!("unsupported MCP admin action: {action}"),
+                    message: format!("unsupported MCP admin action: {action}").into(),
                 })
                 .await
             }
@@ -1298,7 +1304,9 @@ impl EngineCommandRouter {
         let Some(context) = self.settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "plugin catalog unavailable: missing settings context".to_string(),
+                message: "plugin catalog unavailable: missing settings context"
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -1308,7 +1316,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await
             }
@@ -1348,7 +1356,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin preview operation_id is required".to_string(),
+                        message: "plugin preview operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1356,7 +1364,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin preview payload is required".to_string(),
+                        message: "plugin preview payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1398,7 +1406,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin apply operation_id is required".to_string(),
+                        message: "plugin apply operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1406,7 +1414,7 @@ impl EngineCommandRouter {
                 let Some(revision_sha256) = command.revision.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin apply revision is required".to_string(),
+                        message: "plugin apply revision is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1414,7 +1422,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin apply payload is required".to_string(),
+                        message: "plugin apply payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1489,7 +1497,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin save operation_id is required".to_string(),
+                        message: "plugin save operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1497,7 +1505,7 @@ impl EngineCommandRouter {
                 let Some(revision_sha256) = command.revision.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin save revision is required".to_string(),
+                        message: "plugin save revision is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1505,7 +1513,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "plugin save payload is required".to_string(),
+                        message: "plugin save payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1581,7 +1589,7 @@ impl EngineCommandRouter {
             action => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message: format!("unsupported plugin admin action: {action}"),
+                    message: format!("unsupported plugin admin action: {action}").into(),
                 })
                 .await
             }
@@ -1591,7 +1599,9 @@ impl EngineCommandRouter {
         let Some(context) = self.settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "hook document unavailable: missing settings context".to_string(),
+                message: "hook document unavailable: missing settings context"
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -1612,7 +1622,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await
             }
@@ -1632,7 +1642,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "hook validate operation_id is required".to_string(),
+                        message: "hook validate operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1640,7 +1650,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "hook validate payload is required".to_string(),
+                        message: "hook validate payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1676,7 +1686,7 @@ impl EngineCommandRouter {
                 let Some(operation_id) = command.operation_id else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "hook save operation_id is required".to_string(),
+                        message: "hook save operation_id is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1684,7 +1694,7 @@ impl EngineCommandRouter {
                 let Some(revision_sha256) = command.revision.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "hook save revision is required".to_string(),
+                        message: "hook save revision is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1692,7 +1702,7 @@ impl EngineCommandRouter {
                 let Some(payload_json) = command.payload_json.as_deref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
-                        message: "hook save payload is required".to_string(),
+                        message: "hook save payload is required".to_string().into(),
                     })
                     .await;
                     return;
@@ -1774,7 +1784,7 @@ impl EngineCommandRouter {
             action => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message: format!("unsupported hook admin action: {action}"),
+                    message: format!("unsupported hook admin action: {action}").into(),
                 })
                 .await
             }

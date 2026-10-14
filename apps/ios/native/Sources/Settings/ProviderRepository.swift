@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
+#endif
 import Observation
 import SwiftUI
 
@@ -1110,14 +1113,14 @@ final class ProviderRepository {
 
     func handle(event: ClientEvent) {
         switch event {
-        case .modelList(let models, let current, _):
+        case .modelList(let models, let current, _, _):
             updateRuntimeSnapshot(
                 models: models,
                 activeModelID: current,
                 activeProfileID: profileID(fromQualifiedModel: current)
             )
             return
-        case .modelChanged(let model):
+        case .modelChanged(let model, _):
             runtimeSnapshot.activeModelID = model
             runtimeSnapshot.activeProfileID = profileID(fromQualifiedModel: model)
             runtimeSnapshot.lastError = nil
@@ -1130,7 +1133,7 @@ final class ProviderRepository {
             return
         case .systemNotice(let message, let isError):
             if isError {
-                runtimeSnapshot.lastError = message
+                runtimeSnapshot.lastError = message.displayText
                 bumpSyncRevision()
             }
             return

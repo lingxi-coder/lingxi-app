@@ -28,6 +28,8 @@ use std::sync::Arc;
 
 use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
+use client::adapter::ClientEventSink;
+use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -132,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
     // the session claim and discovery record are released.
     let session_lifecycle = bound.session_lifecycle();
     let requested_exit = bound.wait_for_exit_requested();
+    let semantic_worker_failure = bound.wait_for_policy_semantic_worker_failure();
+    let semantic_failure_sink = bound.connection.policy_semantic_worker_failure_sink();
 
     // (3) Start the loopback WebSocket endpoint on an ephemeral port.
     let endpoint =
@@ -199,9 +203,23 @@ async fn main() -> anyhow::Result<()> {
     // Desktop hosts terminate sidecars with SIGTERM on Unix. Listen for both
     // interactive Ctrl-C and host termination so the lockfile guard and socket
     // endpoint always receive a graceful teardown opportunity.
+    let mut policy_refusal = None;
+    let mut semantic_worker_error = None;
     let shutdown_signal = match tokio::select! {
+        biased;
+        failure = semantic_worker_failure => {
+            semantic_failure_sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: failure.to_string().into(),
+            }).await;
+            semantic_worker_error = Some(failure);
+            Ok("policy-semantic-worker-failure")
+        },
         signal = wait_for_shutdown_signal() => signal,
-        () = requested_exit => Ok("request-exit"),
+        refusal = requested_exit => {
+            policy_refusal = refusal;
+            Ok("request-exit")
+        },
     } {
         Ok(signal) => signal,
         Err(error) => {
@@ -218,6 +236,12 @@ async fn main() -> anyhow::Result<()> {
     endpoint.shutdown().await;
     drain_session_lifecycle(&session_lifecycle).await;
     drop(lock_guard);
+    if let Some(refusal) = policy_refusal {
+        return Err(anyhow::Error::new(refusal));
+    }
+    if let Some(failure) = semantic_worker_error {
+        return Err(anyhow::Error::new((*failure).clone()));
+    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 //! Durable interactive model picks. SDK overrides remain session-scoped.
 use lingxi_core::host::{HandleError, OrchestratorHandle};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -13,8 +14,17 @@ pub(crate) async fn apply(
     profile: Option<&str>,
     settings_path: Option<&Path>,
 ) -> Result<(), HandleError> {
+    let model_selection = Utf16JsonProjection::from(model);
     orchestrator
-        .switch_model_with_source(model, profile, "picker")
+        .select_model(lingxi_core::host::ModelSelectionRequest::Select {
+            source: model_selection,
+            route_hint: profile.map(|profile| lingxi_core::host::ModelRouteAnchor {
+                model: model.to_owned(),
+                profile: Some(profile.to_owned()),
+            }),
+            origin: lingxi_core::host::ModelSelectionOrigin::Picker,
+            validation: lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+        })
         .await?;
     if let Some(path) = settings_path {
         if let Err(error) = remember_at(path, model, profile) {

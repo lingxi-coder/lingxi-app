@@ -57,7 +57,7 @@ class EngineReplyStreamTest {
         }
         runCurrent() // collector is subscribed before the callback burst starts
 
-        repeat(1_000) { relay.offer(ClientEvent.TextDelta("$it")) }
+        repeat(1_000) { relay.offer(ClientEvent.TextDelta("$it".toClientTextDto())) }
         relay.offer(
             ClientEvent.TurnEnded(
                 outcome = TurnOutcomeDto.END_TURN,
@@ -69,8 +69,8 @@ class EngineReplyStreamTest {
 
         val values = received.await()
         assertEquals(1_001, values.size)
-        assertEquals("0", (values.first() as ClientEvent.TextDelta).text)
-        assertEquals("999", (values[999] as ClientEvent.TextDelta).text)
+        assertEquals("0", (values.first() as ClientEvent.TextDelta).text.displayText())
+        assertEquals("999", (values[999] as ClientEvent.TextDelta).text.displayText())
         assertTrue(values.last() is ClientEvent.TurnEnded)
         relay.close()
     }
@@ -94,8 +94,8 @@ class EngineReplyStreamTest {
         // listener thread firing the first token in the old race window.
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("first")) // the would-be-dropped delta
-                emit(ClientEvent.TextDelta("-second"))
+                emit(ClientEvent.TextDelta("first".toClientTextDto())) // the would-be-dropped delta
+                emit(ClientEvent.TextDelta("-second".toClientTextDto()))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost))
             },
         )
@@ -133,10 +133,10 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("partial"))
-                emit(ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "boom"))
+                emit(ClientEvent.TextDelta("partial".toClientTextDto()))
+                emit(ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "boom".toClientTextDto()))
                 // Anything after the terminal must NOT appear — the stream has stopped.
-                emit(ClientEvent.TextDelta("late"))
+                emit(ClientEvent.TextDelta("late".toClientTextDto()))
             },
         )
 
@@ -160,7 +160,7 @@ class EngineReplyStreamTest {
         val stream = mapReplyStream(
             events.onSubscription {
                 emit(ClientEvent.UsageUpdate(isSnapshot = null, inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u))
-                emit(ClientEvent.TextDelta("hi"))
+                emit(ClientEvent.TextDelta("hi".toClientTextDto()))
                 emit(ClientEvent.ModelChanged(model = "opus"))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
             },
@@ -182,14 +182,14 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val message = com.lingxi.code.bindings.client.MessageDto(
             role = "assistant",
-            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text("first")),
+            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text("first".toClientTextDto())),
             images = emptyList(),
         )
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("first"))
+                emit(ClientEvent.TextDelta("first".toClientTextDto()))
                 emit(ClientEvent.MessageComplete(stopReason = "end_turn", message = message))
-                emit(ClientEvent.TextDelta("second"))
+                emit(ClientEvent.TextDelta("second".toClientTextDto()))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost))
             },
         )
@@ -210,7 +210,7 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("live"))
+                emit(ClientEvent.TextDelta("live".toClientTextDto()))
                 emit(
                     ClientEvent.TurnEventReplay(
                         sessionId = "session-a",

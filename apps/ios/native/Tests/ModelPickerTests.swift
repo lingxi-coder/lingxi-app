@@ -38,6 +38,18 @@ final class ModelPickerTests: XCTestCase {
         )
     }
 
+    func testComposerPrefersEffectiveModelSourceForDisplay() {
+        XCTAssertEqual(
+            Composer.modelChipLabel(
+                providerConfigured: true,
+                availableModels: catalog,
+                activeModelId: "anthropic/known-route",
+                activeModelDisplay: "claude-custom-2026"
+            ),
+            "claude-custom-2026"
+        )
+    }
+
     func testComposerKeepsLoadingStateWhileConfiguredCatalogIsPending() {
         XCTAssertEqual(
             Composer.modelChipLabel(

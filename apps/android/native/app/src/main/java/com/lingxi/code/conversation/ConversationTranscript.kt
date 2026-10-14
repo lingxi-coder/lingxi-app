@@ -195,7 +195,7 @@ private class MessageBuild(
         orphanHost: () -> MessageBuild?,
     ) {
         when (block) {
-            is MessageBlockDto.Text -> addText(block.text)
+            is MessageBlockDto.Text -> addText(block.text.displayText())
             // Only live reasoning has a Thinking row. Ignoring these blocks
             // also keeps tool groups contiguous across historical reasoning.
             is MessageBlockDto.Thinking, is MessageBlockDto.RedactedThinking -> Unit
@@ -291,7 +291,7 @@ fun messageDtoText(
 ): String =
     blocks.mapNotNull { block ->
         val line: String = when (block) {
-            is MessageBlockDto.Text -> block.text
+            is MessageBlockDto.Text -> block.text.displayText()
             is MessageBlockDto.Thinking -> block.thinking
             is MessageBlockDto.RedactedThinking -> strings.resolve(R.string.chat_redacted_thinking, "[已折叠的思考]")
             is MessageBlockDto.CompactBoundary -> strings.resolve(R.string.chat_compacted_label, "对话已压缩")

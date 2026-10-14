@@ -141,6 +141,8 @@ impl CliLoopHost {
                     serde_json::json!({"kind":"scheduled-trigger"})
                 }),
                 message_id: None,
+                pending_prompt_identity: None,
+                images: Vec::new(),
                 transcript_row_token: None,
                 queue_priority: Some("later".into()),
                 scheduled_task_id: command.scheduled_task_id.clone(),

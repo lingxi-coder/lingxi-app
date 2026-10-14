@@ -16,12 +16,12 @@ impl SlashCommandDispatcher for CompactDispatcher {
     async fn dispatch(
         &self,
         raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _cancellation: CancellationToken,
     ) -> SlashDispatchResult {
-        assert!(
-            raw.string_at("")
-                .unwrap_or_default()
-                .starts_with("/compact")
-        );
+        assert!(raw
+            .string_at("")
+            .unwrap_or_default()
+            .starts_with("/compact"));
         self.0.fetch_add(1, Ordering::SeqCst);
         SlashDispatchResult::Handled {
             display: "idle compact dispatched".into(),
@@ -106,7 +106,7 @@ async fn active_compact_refusals_keep_ws_permission_and_cancel_processing_live()
     send_command(&mut ws, &ClientCommand::ForceCompact).await;
     assert!(matches!(next_frame(&mut ws).await,
         Frame::Event(ClientEvent::Error { kind: ErrorKindDto::Protocol, message })
-            if message.contains("compact") && message.contains("turn")));
+            if message.display().contains("compact") && message.display().contains("turn")));
     for raw in ["/compact", "/compact preserve API decisions"] {
         send_command(
             &mut ws,
@@ -162,7 +162,7 @@ async fn active_compact_refusals_keep_ws_permission_and_cancel_processing_live()
     send_command(&mut ws, &ClientCommand::ForceCompact).await;
     assert!(matches!(next_frame(&mut ws).await,
         Frame::Event(ClientEvent::Error { kind: ErrorKindDto::Internal, message })
-            if message.contains("idle compact sentinel")));
+            if message.display().contains("idle compact sentinel")));
     send_command(&mut ws, &ClientCommand::ForceCompact).await;
     assert!(matches!(
         next_frame(&mut ws).await,

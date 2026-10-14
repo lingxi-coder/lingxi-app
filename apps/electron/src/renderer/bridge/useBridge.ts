@@ -1845,7 +1845,7 @@ export function useBridge(): UseBridge {
     setPendingSession(target);
     setError(null);
     try {
-      const snapshot = await host.newSession(projectPath, desktop.currentModel ?? undefined);
+      const snapshot = await host.newSession(projectPath, desktop.currentModelSource ?? desktop.currentModel ?? undefined);
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
         setSessionReady(false);
@@ -1862,7 +1862,7 @@ export function useBridge(): UseBridge {
       setPendingSession(null);
       capture(cause);
     }
-  }, [addProject, applyBootstrap, beginNavigationOperation, bootstrap?.settings.activeProject, capture, desktop.currentModel, host, isCurrentNavigationOperation]);
+  }, [addProject, applyBootstrap, beginNavigationOperation, bootstrap?.settings.activeProject, capture, desktop.currentModel, desktop.currentModelSource, host, isCurrentNavigationOperation]);
 
   const resumeSession = useCallback(async (sessionId: string) => {
     const projectPath = activeSession?.projectPath ?? bootstrap?.settings.activeProject;

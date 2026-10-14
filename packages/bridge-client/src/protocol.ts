@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '24.0.0';
+export const CLIENT_PROTOCOL_VERSION = '25.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -1378,6 +1378,7 @@ export interface MemoryEntryDto {
 export interface StatusSnapshotDto {
   session_id: string;
   model: string;
+  model_source?: string;
   n_messages: number;
   total_cost_usd: number;
   input_tokens: number;
@@ -1676,7 +1677,7 @@ export type ClientEvent =
     }
   | { type: 'session_agent_tombstone'; session_id: string; agent_id: string; message_uuid: string; display_only: boolean }
   // ── Listing / screen events ─────────────────────────────────────────────────
-  | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
+  | { type: 'model_list'; models: string[]; current: string; current_model_source?: string; details?: ModelDetailsDto[] }
   | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
   | { type: 'query_model_change'; to_model: string }
   | {
@@ -1690,7 +1691,7 @@ export type ClientEvent =
   | { type: 'tombstone'; message: ServerFallbackTombstoneMessageDto; display_only: boolean }
   | { type: 'user_transcript_row_identity'; row_token: string; uuid: string }
   | { type: 'compaction_status'; phase: string; error?: string }
-  | { type: 'model_changed'; model: string }
+  | { type: 'model_changed'; model: string; model_source?: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | {
       type: 'typescript_lsp_mode_changed';

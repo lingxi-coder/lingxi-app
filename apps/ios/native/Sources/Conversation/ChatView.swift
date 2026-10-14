@@ -1,5 +1,6 @@
 import SwiftUI
 import OSLog
+import harness_runtimeFFI
 
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
@@ -185,6 +186,7 @@ struct ChatView: View {
                          availableModels: convo.availableModels,
                          availableModelDetails: convo.availableModelDetails,
                          activeModelId: convo.activeModelId,
+                         activeModelDisplay: convo.activeModelSource,
                          providerConfigured: convo.providerConfigured,
                          onSelectModel: { reference in
                              source.setModel(reference)
@@ -483,7 +485,7 @@ struct ChatView: View {
     private var activeModelName: String {
         let id = convo.activeModelId
         guard !id.isEmpty else { return "—" }
-        return convo.availableModelDetails[id]?.displayName ?? id
+        return convo.activeModelSource ?? convo.availableModelDetails[id]?.displayName ?? id
     }
 
     private var effortLabel: String {
@@ -720,7 +722,7 @@ struct ChatView: View {
     /// 提交 for a pending questionnaire. The card stays disabled until the
     /// engine confirms with `askUserQuestionResolved` (which removes it);
     /// returning `false` re-enables the card for a retry.
-    private func answerQuestion(_ requestId: UInt64, answers: [String: String]) async -> Bool {
+    private func answerQuestion(_ requestId: UInt64, answers: AskUserQuestionAnswersDto) async -> Bool {
         #if canImport(harness_runtimeFFI)
             do {
                 try await source.submitEngineCommand(

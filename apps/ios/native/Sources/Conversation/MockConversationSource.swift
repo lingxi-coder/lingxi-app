@@ -315,7 +315,11 @@ final class MockConversationSource: ConversationSource {
                 let trace = ConversationToolTrace(
                     id: "mock-ask:\(requestId)", tool: "AskUserQuestion", status: .completed,
                     inputSummary: nil, outputSummary: nil, elapsedMs: nil,
-                    questionAnswers: question.questions.map { .init(question: $0.question, answer: answers[$0.question]) })
+                    questionAnswers: question.questions.map { item in
+                        let questionUnits = item.sourceQuestionCodeUnits ?? Array(item.question.utf16)
+                        let answer = answers.pairs.last(where: { $0.question.codeUnits == questionUnits })?.answer.displayText
+                        return .init(question: item.question, answer: answer)
+                    })
                 model.items.append(.run(ConversationExecutionRun(
                     id: "mock-question:\(requestId)", sessionId: model.activeSessionId ?? "mock-session", turnId: nil,
                     status: .completed, tools: [trace], activities: [.tool(id: trace.id)])))

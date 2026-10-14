@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use client::adapter::{lowering::lower_cost_snapshot, ClientEventSink};
 use client::protocol::commands::{ImageRefDto, UiSurfaceDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
+use client::protocol::text::ClientTextDto;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 // `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
@@ -680,10 +681,16 @@ impl OrchestratorTurnDriver {
             OrchestratorError::MaxTurnsReached { .. } => ErrorKindDto::MaxTurns,
             _ => ErrorKindDto::Internal,
         };
-        ClientEvent::Error {
-            kind,
-            message: err.to_string(),
-        }
+        let message = match err {
+            OrchestratorError::Settings(settings) => ClientTextDto::from_code_units(
+                settings
+                    .message_projection()
+                    .string_units("")
+                    .expect("settings error message is a root string"),
+            ),
+            _ => ClientTextDto::from_utf8(&err.to_string()),
+        };
+        ClientEvent::Error { kind, message }
     }
 
     /// Convert the wire [`ImageRefDto`]s (uniform inline `{media_type, base64}`,
@@ -1202,6 +1209,25 @@ mod tests {
     use super::OrchestratorTurnDriver;
     use crate::server::TurnDriver;
 
+    #[test]
+    fn settings_turn_error_keeps_exact_source_utf16_message() {
+        let source_message = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let diagnostics = Utf16JsonProjection::object(Vec::new()).unwrap();
+        let error = orchestrator::OrchestratorError::Settings(
+            lingxi_core::settings::SettingsError::source_failure(
+                "managed",
+                source_message,
+                diagnostics,
+                None,
+            ),
+        );
+
+        let ClientEvent::Error { message, .. } = OrchestratorTurnDriver::error_event(&error) else {
+            panic!("settings failure must map to an error event");
+        };
+        assert_eq!(message.code_units, vec![0xd800]);
+    }
+
     /// A mock streaming client scripting ONE minimal turn (assistant text, then
     /// `end_turn`) so a `run_turn*` call drives to completion and captures the
     /// outgoing request via `captured_calls()`.
@@ -1556,6 +1582,8 @@ mod tests {
                         message_origin: None,
                         prompt_source: None,
                         message_id: None,
+                        pending_prompt_identity: None,
+                        images: Vec::new(),
                         trailing_history_rows: Vec::new(),
                         transcript_row_token: None,
                         queue_priority: None,
@@ -1571,6 +1599,8 @@ mod tests {
                         message_origin: None,
                         prompt_source: None,
                         message_id: None,
+                        pending_prompt_identity: None,
+                        images: Vec::new(),
                         trailing_history_rows: Vec::new(),
                         transcript_row_token: None,
                         queue_priority: None,

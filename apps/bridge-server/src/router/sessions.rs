@@ -237,7 +237,7 @@ impl EngineCommandRouter {
                     );
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: "Some unreadable sessions were skipped. Repair or remove damaged session files, then retry.".to_string(),
+                        message: "Some unreadable sessions were skipped. Repair or remove damaged session files, then retry.".to_string().into(),
                     })
                     .await;
                 }
@@ -252,7 +252,7 @@ impl EngineCommandRouter {
                 tracing::warn!(%error, "bridge-server: session catalog unavailable");
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message: "session catalog is unavailable. Repair or remove unreadable session files, then retry.".to_string(),
+                    message: "session catalog is unavailable. Repair or remove unreadable session files, then retry.".to_string().into(),
                 })
                 .await;
             }
@@ -267,7 +267,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message:
                     "session agent listing unavailable: persisted session store is unavailable"
-                        .to_string(),
+                        .to_string()
+                        .into(),
             })
             .await;
             return;
@@ -407,7 +408,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: format!(
                     "{unreadable} unreadable or corrupt session agent transcript(s) were skipped"
-                ),
+                )
+                .into(),
             })
             .await;
         }
@@ -425,7 +427,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message:
                     "session agent transcript unavailable: persisted session store is unavailable"
-                        .to_string(),
+                        .to_string()
+                        .into(),
             })
             .await;
             return;
@@ -455,7 +458,8 @@ impl EngineCommandRouter {
                                 kind: ErrorKindDto::Internal,
                                 message:
                                     "load main agent transcript failed: transcript is unreadable"
-                                        .to_string(),
+                                        .to_string()
+                                        .into(),
                             })
                             .await;
                             return;
@@ -479,7 +483,7 @@ impl EngineCommandRouter {
                         Err(message) => {
                             sink.emit(ClientEvent::Error {
                                 kind: ErrorKindDto::Internal,
-                                message,
+                                message: message.into(),
                             })
                             .await;
                             return;
@@ -494,7 +498,7 @@ impl EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("load main agent transcript failed: {error}"),
+                        message: format!("load main agent transcript failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -504,7 +508,7 @@ impl EngineCommandRouter {
             let Some(parsed) = lingxi_core::types::AgentId::parse_prefixed(&agent_id) else {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message: format!("malformed session agent id: {agent_id:?}"),
+                    message: format!("malformed session agent id: {agent_id:?}").into(),
                 })
                 .await;
                 return;
@@ -524,7 +528,7 @@ impl EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("load session agent transcript failed: {error}"),
+                        message: format!("load session agent transcript failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -543,7 +547,8 @@ impl EngineCommandRouter {
                                 kind: ErrorKindDto::Internal,
                                 message:
                                     "load session agent transcript failed: transcript is unreadable"
-                                        .to_string(),
+                                        .to_string()
+                                        .into(),
                             })
                             .await;
                             return;
@@ -566,7 +571,7 @@ impl EngineCommandRouter {
                     }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: "session agent transcript was not found".to_string(),
+                        message: "session agent transcript was not found".to_string().into(),
                     })
                     .await;
                     return;
@@ -578,7 +583,7 @@ impl EngineCommandRouter {
                 ) {
                     Ok(rows) => rows,
                     Err(message) => {
-                        sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: format!("load session agent transcript failed: transcript is corrupt ({message})") }).await;
+                        sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: format!("load session agent transcript failed: transcript is corrupt ({message})").into() }).await;
                         return;
                     }
                 };
@@ -587,7 +592,7 @@ impl EngineCommandRouter {
             ).await {
                 Ok(next) => next,
                 Err(error) => {
-                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: error.to_string() }).await;
+                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: error.to_string().into() }).await;
                     return;
                 }
             };

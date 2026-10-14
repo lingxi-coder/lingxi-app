@@ -530,6 +530,7 @@ async fn update_settings_refuses_to_clobber_a_broken_layer_file() {
 
     match next_frame(&mut ws).await {
         Frame::Event(ClientEvent::Error { kind, message }) => {
+            let message = message.display();
             assert_eq!(
                 kind,
                 ErrorKindDto::Internal,

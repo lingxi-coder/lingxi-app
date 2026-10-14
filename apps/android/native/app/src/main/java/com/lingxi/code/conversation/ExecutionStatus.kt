@@ -41,7 +41,7 @@ enum class WorkflowResumeUiState {
 fun TaskRowDto.toBackgroundTaskUi(): BackgroundTaskUi = BackgroundTaskUi(
     taskId = taskId,
     taskType = taskType,
-    description = description,
+    description = description.displayText(),
     status = status,
     canResume = canResume,
     startedAtMs = startedAtMs,

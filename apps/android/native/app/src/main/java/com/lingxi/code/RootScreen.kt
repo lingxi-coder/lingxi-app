@@ -342,6 +342,7 @@ fun RootScreen(
                         sessionMode = activeSessionMode,
                         linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
                             ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
+                        replaceProcessSource = true,
                     )
             }
         }

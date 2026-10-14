@@ -1293,6 +1293,12 @@ class ChatViewModel(
             }
             return
         }
+        // Closing the source we were handed back would leave the chat on a
+        // destroyed engine; there is nothing to replace.
+        if (replacement === source) {
+            reconnectGeneration = generation
+            return
+        }
         val previous = source
         reconnectGeneration = generation
         sourceGeneration++

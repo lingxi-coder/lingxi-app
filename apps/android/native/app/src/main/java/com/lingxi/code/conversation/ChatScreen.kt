@@ -312,8 +312,9 @@ fun ChatScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                // The way back for a reader who scrolled up.
-                if (!followsLatest) {
+                // The way back for a reader who scrolled up. An empty chat has
+                // nothing to jump to, even when its hero overflows a short screen.
+                if (!followsLatest && renderItems.none { it is ChatRenderItem.Empty }) {
                     JumpToLatestButton(
                         onClick = rearmTail,
                         modifier = Modifier

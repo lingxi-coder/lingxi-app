@@ -460,6 +460,12 @@ class EngineConversationSource private constructor(
             sessionMode: SessionMode = SessionMode.Code,
             linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             reuseProcessSource: Boolean = true,
+            /**
+             * A reconnect: build a fresh engine although the UI already holds
+             * this scope's source. [ConversationHeadlessRecovery.register] then
+             * moves the scope to the new source, so closing the old one is safe.
+             */
+            replaceProcessSource: Boolean = false,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(
                 projectId = projectWorkspace?.projectId,
@@ -468,7 +474,7 @@ class EngineConversationSource private constructor(
                 linuxRuntimeMode = linuxRuntimeMode,
                 workspaceKey = workspaceKey,
             )
-            if (reuseProcessSource) {
+            if (reuseProcessSource && !replaceProcessSource) {
                 when (
                     val claim = ConversationHeadlessRecovery.acquireForUi(
                         recoverySpec = recoverySpec,

@@ -11,7 +11,7 @@ enum VoiceHoldGesturePolicy {
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
     @Environment(\.theme) private var t
-    @FocusState.Binding var inputFocused: Bool
+    @Binding var inputFocused: Bool
     @Binding var model: ModelOption
     // The picker is driven exclusively by the engine's curated, provider-qualified
     // refs. Empty means the catalog is still loading; no mock rows are invented.
@@ -99,12 +99,8 @@ struct Composer: View {
     var voiceCapturePhase: VoiceCapturePhase = .idle
     var voiceInteractionMode: VoiceInteractionMode? = nil
 
-    /// Owned by the chat so the session panel can open the same pickers.
-    @Binding var modelOpen: Bool
-    @Binding var controlsOpen: Bool
-    /// A Chat session has no file permissions to ask about, so only Code
-    /// sessions get the permission chip.
-    var showsPermissionChip: Bool = true
+    @State private var modelOpen = false
+    @State private var controlsOpen = false
     @State private var holding = false
     @State private var cancellingHold = false
     @State private var suppressMicTap = false
@@ -152,7 +148,7 @@ struct Composer: View {
         sendEnabled: Bool = true,
         onStop: @escaping () -> Void = {},
         onCameraClick: @escaping () -> Void = {},
-        inputFocused: FocusState<Bool>.Binding,
+        inputFocused: Binding<Bool>,
         attachment: ComposerAttachment? = nil,
         onRemoveAttachment: @escaping () -> Void = {},
         visualizationChip: VisualizationContextChip? = nil,
@@ -163,15 +159,9 @@ struct Composer: View {
         onMicTap: @escaping () -> Void = {},
         onFlowModeTap: @escaping () -> Void = {},
         voiceCapturePhase: VoiceCapturePhase = .idle,
-        voiceInteractionMode: VoiceInteractionMode? = nil,
-        modelOpen: Binding<Bool>,
-        controlsOpen: Binding<Bool>,
-        showsPermissionChip: Bool = true
+        voiceInteractionMode: VoiceInteractionMode? = nil
     ) {
         self._model = model
-        self._modelOpen = modelOpen
-        self._controlsOpen = controlsOpen
-        self.showsPermissionChip = showsPermissionChip
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
@@ -252,25 +242,19 @@ struct Composer: View {
                         .padding(.horizontal, 4)
                 }
 
-                if let slashArgumentHint {
-                    Text(slashArgumentHint)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(t.text3)
-                        .padding(.horizontal, 4)
-                        .accessibilityLabel("slash_command_argument_hint")
-                        .accessibilityValue(slashArgumentHint)
-                }
-
-                TextField("", text: $draft, prompt: Text(visibleSuggestion == nil ? String(localized: "composer_placeholder") : "").foregroundColor(t.text4), axis: .vertical)
-                    .font(.scaledSystem(15.5, relativeTo: .body))
-                    .foregroundStyle(t.text)
-                    .lineLimit(1...5)
-                    .focused($inputFocused)
-                    .submitLabel(.send)
-                    .onSubmit {
-                        send()
-                    }
-                    .accessibilityIdentifier("composer.input")
+                ComposerTextInput(
+                    text: $draft,
+                    isFocused: $inputFocused,
+                    placeholder: visibleSuggestion == nil ? String(localized: "composer_placeholder") : "",
+                    textColor: t.text,
+                    hintColor: t.text4,
+                    argumentHint: { text, cursor in
+                        guard slashCommandsLoaded else { return nil }
+                        return SlashCommandMatcher.argumentHint(for: text, catalog: slashCommands, cursor: cursor)
+                    },
+                    onSubmit: send,
+                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
+                )
                     .padding(.horizontal, 4).padding(.vertical, 2)
                     .onChange(of: draft) { _, newValue in
                         if dismissedSlashDraft != newValue {
@@ -279,11 +263,6 @@ struct Composer: View {
                     }
                     .onAppear { recordSuggestionPresentation() }
                     .onChange(of: suggestionTurnKey) { _, _ in recordSuggestionPresentation() }
-                    .onKeyPress(keys: [.tab, .rightArrow]) { press in
-                        guard visibleSuggestion != nil, press.modifiers.isEmpty else { return .ignored }
-                        acceptSuggestion()
-                        return .handled
-                    }
                     .overlay(alignment: .topLeading) {
                         if let visibleSuggestion {
                             Button(action: acceptSuggestion) {
@@ -673,12 +652,12 @@ struct Composer: View {
     private var configurationSummary: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 0) {
-                if showsPermissionChip { permissionChip }
+                permissionChip
                 Spacer(minLength: 8)
                 modelChip
             }
             VStack(alignment: .leading, spacing: 0) {
-                if showsPermissionChip { permissionChip }
+                permissionChip
                 modelChip
             }
         }
@@ -710,11 +689,6 @@ struct Composer: View {
         return SlashCommandMatcher.suggestions(for: draft, catalog: slashCommands)
     }
 
-    private var slashArgumentHint: String? {
-        guard slashCommandsLoaded else { return nil }
-        return SlashCommandMatcher.argumentHint(for: draft, catalog: slashCommands)
-    }
-
     private var shouldShowSlashPanel: Bool {
         guard dismissedSlashDraft != draft else { return false }
         if isWaitingForSlashCatalog { return true }
@@ -744,7 +718,7 @@ struct Composer: View {
     }
 
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
-        let accepted = command.canonicalTrigger
+        let accepted = SlashCommandMatcher.completedInput(for: command, in: draft)
         draft = accepted
         dismissedSlashDraft = accepted
         inputFocused = true

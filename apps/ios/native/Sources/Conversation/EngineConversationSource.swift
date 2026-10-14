@@ -4036,6 +4036,7 @@ final class EngineConversationSource: ConversationSource {
                 description: command.description,
                 aliases: command.aliases,
                 argumentHint: command.argumentHint,
+                argumentNames: command.argumentNames,
                 menuDescription: command.menuDescription,
                 source: command.source,
                 hidden: command.hidden

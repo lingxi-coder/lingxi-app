@@ -312,7 +312,9 @@ pub fn command_items_merged<'a>(
     );
     candidates.retain(|c| {
         bare(c.name()).contains(&query)
-            || c.aliases().iter().any(|a| bare(a).contains(&query))
+            || c.aliases()
+                .iter()
+                .any(|a| bare(a).to_lowercase().contains(&query))
             || bare(c.name())
                 .split(['-', '_', ':'])
                 .any(|part| part.starts_with(&query))
@@ -328,7 +330,7 @@ pub fn command_items_merged<'a>(
         if name == query {
             return (0, 0);
         }
-        if c.aliases().iter().any(|a| bare(a) == query) {
+        if c.aliases().iter().any(|a| bare(a).to_lowercase() == query) {
             return (1, 0);
         }
         if name.starts_with(&query) {
@@ -337,7 +339,7 @@ pub fn command_items_merged<'a>(
         if let Some(alias) = c
             .aliases()
             .iter()
-            .filter(|a| bare(a).starts_with(&query))
+            .filter(|a| bare(a).to_lowercase().starts_with(&query))
             .min_by_key(|a| a.len())
         {
             return (3, alias.len());
@@ -353,9 +355,18 @@ pub fn command_items_merged<'a>(
             let matched_alias = c
                 .aliases()
                 .into_iter()
-                .find(|a| bare(a).starts_with(&query))
+                .find(|a| bare(a).to_lowercase().starts_with(&query))
                 .map(|a| a[1..].to_string());
-            item(c.name(), c.display_desc(), matched_alias.as_deref())
+            let mut suggestion = item(c.name(), c.display_desc(), matched_alias.as_deref());
+            // Native HK keeps an alias only when resolving it still returns
+            // this selected command. A different canonical name (or an earlier
+            // alias owner) must never turn completion into another command.
+            if matched_alias.is_some()
+                && resolve_catalog_name(&suggestion.insert, registry) != Some(c.name())
+            {
+                suggestion.insert = c.name().to_string();
+            }
+            suggestion
         })
         .collect();
     if let Some(hidden) = hidden_exact {
@@ -366,9 +377,50 @@ pub fn command_items_merged<'a>(
     items
 }
 
+pub(super) fn resolve_catalog_name<'a>(
+    name: &str,
+    registry: &'a [RegistrySlashRow],
+) -> Option<&'a str> {
+    let replaces_builtin = |name: &str| {
+        registry
+            .iter()
+            .any(|row| row.replaces_builtin && row.name == name)
+    };
+    let available = |row: &&RegistrySlashRow| {
+        row.replaces_builtin
+            || !crate::command::BUILTIN
+                .iter()
+                .any(|builtin| builtin.name == row.name)
+    };
+    registry
+        .iter()
+        .filter(available)
+        .find(|row| row.name == name)
+        .map(|row| row.name.as_str())
+        .or_else(|| {
+            crate::command::BUILTIN
+                .iter()
+                .find(|command| command.name == name && !replaces_builtin(command.name))
+                .map(|command| command.name)
+        })
+        .or_else(|| {
+            registry
+                .iter()
+                .filter(available)
+                .find(|row| row.aliases.iter().any(|alias| alias == name))
+                .map(|row| row.name.as_str())
+        })
+        .or_else(|| {
+            crate::command::BUILTIN
+                .iter()
+                .find(|command| !replaces_builtin(command.name) && command.aliases.contains(&name))
+                .map(|command| command.name)
+        })
+}
+
 /// Build one popup row (claude-code `createCommandSuggestionItem`). `name`
 /// carries the leading `/`; `matched_alias` (without slash) is appended in
-/// parens when the user typed the alias.
+/// parens when the user typed the alias, and preserved by completion (native HK).
 fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem {
     let label = match matched_alias {
         Some(alias) => format!("{name} ({alias})"),
@@ -376,7 +428,7 @@ fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem
     };
     CompletionItem {
         label,
-        insert: name.to_string(),
+        insert: matched_alias.map_or_else(|| name.to_string(), |alias| format!("/{alias}")),
         desc,
     }
 }
@@ -604,6 +656,31 @@ mod tests {
             v.iter().find(|i| i.insert == "/verify").unwrap().desc,
             "Verify a code change end-to-end"
         );
+    }
+
+    #[test]
+    fn completion_preserves_an_alias_only_when_it_resolves_to_the_selected_command() {
+        let mut reg = rows(&[("/deploy", "Deploy"), ("/ship-prod", "Canonical owner")]);
+        reg[0].aliases = vec!["/ship-prod".into()];
+        let items = command_items_merged("/ship-p", &reg);
+        let selected = items
+            .iter()
+            .find(|item| item.label.starts_with("/deploy "))
+            .unwrap();
+        assert_eq!(
+            selected.insert, "/deploy",
+            "a canonical owner wins over the alias"
+        );
+
+        reg.pop();
+        reg[0].aliases = vec!["/SHIP-prod".into()];
+        let items = command_items_merged("/ship-p", &reg);
+        // Native alias matching ignores case; insertion preserves its bytes.
+        let selected = items
+            .iter()
+            .find(|item| item.label.starts_with("/deploy "))
+            .unwrap();
+        assert_eq!(selected.insert, "/SHIP-prod");
     }
 
     #[test]

@@ -6286,7 +6286,11 @@ fn registry_slash_rows(
             hidden: false,
             replaces_builtin: false,
             argument_hint: c.argument_hint.clone(),
-            argument_names: c.argument_names.clone(),
+            argument_names: if matches!(c.kind, SlashCommandKind::Builtin { .. }) {
+                Vec::new()
+            } else {
+                c.argument_names.clone()
+            },
         })
         .collect()
 }

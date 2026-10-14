@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,8 +48,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -113,8 +118,10 @@ fun Composer(
     onRemoveVisualizationChip: () -> Unit = {},
     /** True while a turn streams — the trailing action becomes a Stop button. */
     isStreaming: Boolean = false,
-    /** False until the visible engine session has been confirmed. */
+    /** Whether session-dependent actions, including Send, can execute. */
     enabled: Boolean = true,
+    /** Editing can stay available while session-dependent actions are blocked. */
+    inputEnabled: Boolean = enabled,
     /** True when no enabled Provider/model choice has been persisted yet. */
     modelSetupRequired: Boolean = false,
     /** Opens the LLM Provider settings page from the chip or send action. */
@@ -129,6 +136,7 @@ fun Composer(
     showDiscardRecovery: Boolean = false,
     promptSuggestion: String? = null,
     promptSuggestionNotice: String? = null,
+    slashCommands: List<ConversationSlashCommand> = emptyList(),
     suggestionTurnKey: String = "",
     onSuggestionFeedback: (String) -> Unit = {},
     /** Discards the recovered turn after the host confirms cancellation. */
@@ -136,6 +144,16 @@ fun Composer(
 ) {
     val t = LingXiTheme.palette
     val hasText = text.trim().isNotEmpty()
+    var editorValue by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+    // A programmatic draft replacement (send, voice, or follow-up) moves the
+    // caret to its end; ordinary edits retain selection and IME composition.
+    val fieldValue = if (editorValue.text == text) editorValue else TextFieldValue(text, TextRange(text.length))
+    SideEffect { if (editorValue != fieldValue) editorValue = fieldValue }
+    val slashHint = remember(text, fieldValue.selection.end, slashCommands) {
+        slashArgumentHint(text, fieldValue.selection.end, slashCommands)
+    }
+    val textMeasurer = rememberTextMeasurer()
+    val composerTextStyle = LocalTextStyle.current.merge(TextStyle(color = t.text, fontSize = 15.5f.sp))
     var suggestionShown by remember(suggestionTurnKey) { mutableStateOf(false) }
     var suggestionRejected by remember(suggestionTurnKey) { mutableStateOf(false) }
     val visibleSuggestion = promptSuggestion?.takeIf {
@@ -187,7 +205,16 @@ fun Composer(
             }
 
             // Text field (1..5 lines), brand-styled with a placeholder.
-            Box(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
+            BoxWithConstraints(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
+                // Native Claude clips the suffix to the current line. Measuring
+                // the original draft first keeps the hint from growing or
+                // scrolling the editor, including on narrow phone layouts.
+                val displayedHint = remember(text, slashHint, composerTextStyle, constraints.maxWidth, textMeasurer) {
+                    fitSlashArgumentHint(text, slashHint, constraints.maxWidth, composerTextStyle, textMeasurer)
+                }
+                val slashTransformation = remember(displayedHint, t.text4) {
+                    SlashArgumentHintTransformation(displayedHint, t.text4)
+                }
                 if (text.isEmpty() && visibleSuggestion == null) {
                     Text(
                         text = stringResource(R.string.composer_placeholder),
@@ -196,12 +223,14 @@ fun Composer(
                     )
                 }
                 BasicTextField(
-                    value = text,
-                    onValueChange = { onTextChange(it) },
-                    enabled = enabled,
-                    textStyle = LocalTextStyle.current.merge(
-                        TextStyle(color = t.text, fontSize = 15.5f.sp),
-                    ),
+                    value = fieldValue,
+                    onValueChange = {
+                        editorValue = it
+                        if (it.text != text) onTextChange(it.text)
+                    },
+                    visualTransformation = slashTransformation,
+                    enabled = inputEnabled,
+                    textStyle = composerTextStyle,
                     cursorBrush = SolidColor(t.accent),
                     maxLines = 5,
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(

@@ -17,6 +17,7 @@ import {
 
 const projectPath = '/tmp/composer-draft-project';
 const mentionsFixture = new URLSearchParams(location.search).has('mentions');
+const slashHintsFixture = new URLSearchParams(location.search).has('slash-hints');
 const suggestionFeedback: Array<{ sessionId: string; uuid: string; action: string }> = [];
 const suggestionContexts: Array<Record<string, unknown>> = [];
 const openedSettings: string[] = [];
@@ -173,7 +174,11 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
       conversationControls: null,
       fastMode: false,
       permissionMode: 'default',
-      slashCommands: mentionsFixture ? [{ name: 'goal', description: 'Set a goal to keep pursuing', source: 'builtin', aliases: [], hidden: false }, { name: 'plan', description: 'Turn plan mode on', source: 'builtin', aliases: [], hidden: false }] : [],
+      slashCommands: slashHintsFixture ? [
+        { name: 'code-review', description: 'Review code', source: 'builtin', argument_hint: '[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]' },
+        { name: 'deploy', description: 'Deploy', source: 'project', aliases: ['ship'], argument_hint: '[environment] [version] [region]', argument_names: ['environment', 'version', 'region'] },
+        { name: 'raw', description: 'Raw hint', source: 'project', argument_hint: '  <文件>\t[选项]  ' },
+      ] : mentionsFixture ? [{ name: 'goal', description: 'Set a goal to keep pursuing', source: 'builtin', aliases: [], hidden: false }, { name: 'plan', description: 'Turn plan mode on', source: 'builtin', aliases: [], hidden: false }] : [],
       tasks: {},
       taskOutput: {},
       status: null,

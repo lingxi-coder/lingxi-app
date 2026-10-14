@@ -1364,6 +1364,7 @@ export interface SlashCommandDto {
   source: string;
   aliases?: string[];
   argument_hint?: string;
+  argument_names?: string[];
   menu_description?: string;
   hidden?: boolean;
 }

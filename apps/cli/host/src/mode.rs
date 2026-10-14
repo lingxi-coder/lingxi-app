@@ -3554,7 +3554,14 @@ async fn described_tui_commands(
                 hidden,
                 replaces_builtin: false,
                 argument_hint: command.argument_hint,
-                argument_names: command.argument_names,
+                argument_names: if matches!(
+                    command.kind,
+                    command_api::SlashCommandKind::Builtin { .. }
+                ) {
+                    Vec::new()
+                } else {
+                    command.argument_names
+                },
             },
             input,
         ));
@@ -5281,6 +5288,12 @@ mod tests {
             },
             ..SlashCommand::default()
         });
+        registry.register_command(SlashCommand {
+            name: "local-command".into(),
+            description: "Local command with declared arguments".into(),
+            argument_names: vec!["not-a-prompt-argument".into()],
+            ..SlashCommand::default()
+        });
         let registry = Arc::new(tokio::sync::RwLock::new(registry));
         let handle = orchestrator::test_support::MockOrchestratorHandle::new();
         handle.set_mod_describe_rewrite("deploy", "launch safely", Some("<target>"), true);
@@ -5298,6 +5311,12 @@ mod tests {
         assert!(catalog
             .iter()
             .any(|entry| entry.name == "/help" && entry.replaces_builtin));
+        assert!(catalog
+            .iter()
+            .find(|entry| entry.name == "/local-command")
+            .unwrap()
+            .argument_names
+            .is_empty());
         let inputs = handle.mod_describe_inputs();
         assert!(inputs.iter().any(|input| {
             input["command"] == "help"

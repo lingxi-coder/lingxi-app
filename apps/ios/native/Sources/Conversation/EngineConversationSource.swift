@@ -433,6 +433,7 @@ final class EngineConversationSource: ConversationSource {
         replayProjectionState = nil
         hasConfirmedSessionState = false
         model.clearAgentState()
+        model.contextUsage = nil
         if isNew {
             model.messages = []
             model.items = []
@@ -3255,14 +3256,14 @@ final class EngineConversationSource: ConversationSource {
 
         case let .usageUpdate(_, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
             guard acceptTurnEvent(event) else { return }
-            updateActiveRun {
-                $0.usage = ConversationUsageSnapshot(
-                    inputTokens: inputTokens,
-                    outputTokens: outputTokens,
-                    cacheReadTokens: cacheReadTokens,
-                    cacheCreationTokens: cacheCreationTokens
-                )
-            }
+            let usage = ConversationUsageSnapshot(
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                cacheReadTokens: cacheReadTokens,
+                cacheCreationTokens: cacheCreationTokens
+            )
+            model.contextUsage = usage
+            updateActiveRun { $0.usage = usage }
 
         case let .apiRetry(message, attempt, maxRetries, delayMs):
             guard acceptTurnEvent(event) else { return }

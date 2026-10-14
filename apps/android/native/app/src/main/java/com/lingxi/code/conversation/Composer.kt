@@ -103,6 +103,9 @@ fun Composer(
     modifier: Modifier = Modifier,
     /** The real engine catalog the model chip's dropdown shows. */
     availableModels: List<ModelOption> = emptyList(),
+    contextUsage: AgentRunUsage? = null,
+    effectivePermissionMode: String = "auto",
+    onOpenPermissionSettings: () -> Unit = {},
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
@@ -264,7 +267,22 @@ fun Composer(
                 Text(promptSuggestionNotice, color = t.text4, fontSize = 11.sp)
             }
 
-            // Action row: attach · model chip · spacer · mic|send.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
+                Spacer(Modifier.weight(1f))
+                ComposerContextWindow(contextUsage, model.details?.contextWindowTokens)
+                ModelChip(
+                    model = model,
+                    models = availableModels,
+                    modelSetupRequired = modelSetupRequired,
+                    onOpenModelSettings = onOpenModelSettings,
+                    providerStatuses = modelProviderStatuses,
+                    onOpenProviderSettings = onOpenProviderSettings,
+                    onModelChange = onModelChange,
+                )
+            }
+
+            // Action row: attach · spacer · mic|send.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconHit(onClick = {}) {
                     LXIcon(
@@ -291,15 +309,6 @@ fun Composer(
                         contentDescription = stringResource(R.string.composer_camera),
                     )
                 }
-                ModelChip(
-                    model = model,
-                    models = availableModels,
-                    modelSetupRequired = modelSetupRequired,
-                    onOpenModelSettings = onOpenModelSettings,
-                    providerStatuses = modelProviderStatuses,
-                    onOpenProviderSettings = onOpenProviderSettings,
-                    onModelChange = onModelChange,
-                )
                 Spacer(Modifier.weight(1f))
                 val stopGeneratingDescription = stringResource(R.string.composer_stop_generating)
                 // The Discard affordance is a DIFFERENT action from Stop: it

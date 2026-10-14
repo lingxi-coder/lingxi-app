@@ -1624,6 +1624,7 @@ class ChatViewModel(
                 statusLine = null,
                 shellTools = emptyList(),
                 agentRun = null,
+                contextUsage = null,
                 agentRunsByMessageId = reconstructTerminalAgentRuns(restored.transcript),
                 error = null,
                 activeBackgroundTaskIds = emptySet(),
@@ -1834,6 +1835,7 @@ class ChatViewModel(
                 compaction = null,
                 shellTools = emptyList(),
                 agentRun = null,
+                contextUsage = null,
                 agentRunsByMessageId = emptyMap(),
                 error = null,
                 planTasks = emptyList(),
@@ -2381,6 +2383,7 @@ class ChatViewModel(
 
             is ReplyEvent.Usage -> _state.update {
                 it.copy(
+                    contextUsage = event.usage,
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
                         .updateUsage(event.usage),
                 )

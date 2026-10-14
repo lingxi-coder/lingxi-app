@@ -64,6 +64,8 @@ data class ChatState(
     val computerUseRequestKey: String? = null,
     /** The latest turn's live trace; terminal copies are anchored in the transcript. */
     val agentRun: AgentRunState? = null,
+    /** Latest API input footprint, retained between turns and cleared on session switches. */
+    val contextUsage: AgentRunUsage? = null,
     /** Terminal Agent results, anchored after the assistant message they produced. */
     val agentRunsByMessageId: Map<String, AgentRunState> = emptyMap(),
     /** Out-of-band tasks that remain alive after their initiating turn ended. */

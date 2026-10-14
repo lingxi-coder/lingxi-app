@@ -827,6 +827,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // Electron renders inline widgets (`lingxi-viz://visualization`), so
         // the `Visualization` tool and `/visualize` skill are offered here.
         inline_visualization: true,
+        // Desktop has no Apps page for the built-in library yet; the
+        // local-app-builder plugin builds and opens apps in the browser.
+        local_apps: false,
     }
 }
 
@@ -2754,6 +2757,7 @@ mod tests {
             // engine's audio calls reach.
             audio: None,
             inline_visualization: false,
+            local_apps: false,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         assert!(bound.runtime.orchestrator.workspace_trusted().await);

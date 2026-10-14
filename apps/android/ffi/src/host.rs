@@ -127,6 +127,8 @@ pub fn build_mobile_engine(
             memory_provider: Some(orchestrator::prompt::real_provider()),
             // The native WebView host renders inline widgets.
             inline_visualization: true,
+            // The Apps page and the card under the tool call open local apps.
+            local_apps: true,
             ..MobileConfig::default()
         };
         let mobile_linux_config = impls.mobile_linux.as_ref().ok_or_else(|| {
@@ -307,6 +309,8 @@ pub fn build_android_engine(
             memory_provider: Some(orchestrator::prompt::real_provider()),
             // The native WebView host renders inline widgets.
             inline_visualization: true,
+            // The Apps page and the card under the tool call open local apps.
+            local_apps: true,
             ..MobileConfig::default()
         };
         if !api_base.is_empty() {

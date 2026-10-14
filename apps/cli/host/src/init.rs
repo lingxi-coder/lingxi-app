@@ -896,6 +896,8 @@ pub(crate) fn resolve_desktop_config_at(
     DesktopConfig {
         // Inline visualization is a bridge/desktop surface; the CLI never renders it.
         inline_visualization: false,
+        // Nor does it open local apps.
+        local_apps: false,
         diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
         composition: None,
         defer_session_start: false,

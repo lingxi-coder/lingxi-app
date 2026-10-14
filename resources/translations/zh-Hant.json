@@ -2026,5 +2026,16 @@
   "plugins_detail_agents": "子代理程式",
   "plugins_detail_hooks": "掛鉤",
   "plugins_detail_mcp": "MCP 伺服器",
-  "plugins_detail_settings": "設定"
+  "plugins_detail_settings": "設定",
+  "composer_effort": "思考強度",
+  "composer_effort_auto": "自動",
+  "composer_effort_off": "關閉",
+  "composer_effort_on": "開啟",
+  "composer_effort_budget": "%1$s tokens",
+  "composer_effort_minimal": "極低",
+  "composer_effort_low": "低",
+  "composer_effort_medium": "中",
+  "composer_effort_high": "高",
+  "composer_effort_xhigh": "超高",
+  "composer_effort_max": "最大"
 }

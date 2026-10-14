@@ -70,6 +70,7 @@ import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption
@@ -103,6 +104,9 @@ fun Composer(
     modifier: Modifier = Modifier,
     /** The real engine catalog the model chip's dropdown shows. */
     availableModels: List<ModelOption> = emptyList(),
+    /** The active model's effort control, shown at the top of the model menu. */
+    reasoning: ReasoningControl? = null,
+    onReasoningChange: (String) -> Unit = {},
     contextUsage: AgentRunUsage? = null,
     effectivePermissionMode: String = "auto",
     onOpenPermissionSettings: () -> Unit = {},
@@ -279,6 +283,8 @@ fun Composer(
                     providerStatuses = modelProviderStatuses,
                     onOpenProviderSettings = onOpenProviderSettings,
                     onModelChange = onModelChange,
+                    reasoning = reasoning,
+                    onReasoningChange = onReasoningChange,
                 )
             }
 
@@ -547,6 +553,8 @@ private fun ModelChip(
     providerStatuses: List<ModelProviderStatus>,
     onOpenProviderSettings: (String?) -> Unit,
     onModelChange: (ModelOption) -> Unit,
+    reasoning: ReasoningControl?,
+    onReasoningChange: (String) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
@@ -622,6 +630,9 @@ private fun ModelChip(
                 .width(330.dp)
                 .heightIn(max = 600.dp),
         ) {
+            reasoning?.let { control ->
+                EffortPicker(control = control, onSelect = onReasoningChange)
+            }
             ModelSearchField(
                 query = query,
                 onQueryChange = { query = it },

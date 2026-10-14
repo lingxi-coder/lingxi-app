@@ -10,6 +10,7 @@ import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer
+import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.model.SessionCatalogStrings
@@ -27,7 +28,11 @@ import com.lingxi.code.model.toUi
  *
  *  - `ModelList`    → replace the catalog with the engine's real ids; adopt
  *                     `current` as the active id.
- *  - `ModelChanged` → keep the catalog, swap the active id to the new model.
+ *  - `ModelChanged` → keep the catalog, swap the active id to the new model;
+ *                     a different model drops the old effort control.
+ *  - `ConversationControlsChanged` → the active model's effort control. The
+ *                     engine sends it right after `ModelChanged`; a snapshot
+ *                     for another model is stale and ignored.
  *  - anything else  → unchanged (`#[non_exhaustive]`, so an `else` is required).
  */
 fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelState =
@@ -39,11 +44,19 @@ fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelSta
             details = event.details.associate { detail ->
                 detail.reference to com.lingxi.code.model.CatalogModelDetails.fromDto(detail)
             },
+            reasoning = prev.reasoning.takeIf { event.current == prev.active },
         )
         is ClientEvent.ModelChanged -> prev.copy(
             active = event.model,
             activeSourceDisplay = event.modelSource.displayTextOrNull(),
+            reasoning = prev.reasoning.takeIf { event.model == prev.active },
         )
+        is ClientEvent.ConversationControlsChanged ->
+            if (prev.active.isEmpty() || prev.active == event.controls.qualifiedModel) {
+                prev.copy(reasoning = ReasoningControl.from(event.controls))
+            } else {
+                prev
+            }
         else -> prev
     }
 

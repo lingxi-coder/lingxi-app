@@ -52,6 +52,7 @@ object UiTags {
 
     /** The normal composer model chip that opens the searchable model picker. */
     const val MODEL_PICKER_CHIP = "tag.modelPickerChip"
+    const val COMPOSER_EFFORT = "tag.composerEffort"
 
     /** The model picker's inline search field. */
     const val MODEL_PICKER_SEARCH = "tag.modelPickerSearch"

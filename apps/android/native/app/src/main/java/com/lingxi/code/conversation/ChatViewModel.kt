@@ -1570,6 +1570,7 @@ class ChatViewModel(
      * leaves the pending selection untouched. Extracted for reducer tests.
      */
     internal fun applyModelState(engine: EngineModelState) {
+        _state.update { it.copy(reasoning = engine.reasoning) }
         if (!engine.hasCatalog) return
         val options = EngineModelCatalog.options(engine.available, engine.details)
         val activeRoute = options.firstOrNull { it.id == engine.active } ?: options.first()
@@ -1897,6 +1898,20 @@ class ChatViewModel(
         viewModelScope.launch {
             try {
                 source.setModel(model.id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                reportHostError(error.message ?: error.toString())
+            }
+        }
+    }
+
+    /** The engine's controls snapshot confirms the effort shown in the picker. */
+    fun selectReasoning(id: String) {
+        if (id == _state.value.reasoning?.selection) return
+        viewModelScope.launch {
+            try {
+                source.setReasoningSelection(id)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {

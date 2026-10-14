@@ -158,7 +158,7 @@ struct ConversationEffortControl: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Effort")
+                Text("composer_effort")
                 Spacer(minLength: 12)
                 Text(currentTitle)
                     .foregroundStyle(.secondary)
@@ -251,7 +251,7 @@ struct ConversationEffortControl: View {
         .opacity(isDisabled ? 0.5 : 1)
         .disabled(isDisabled)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Effort")
+        .accessibilityLabel(Text("composer_effort"))
         .accessibilityValue(currentTitle)
         .accessibilityHint(disabledReason ?? "Adjust the reasoning effort for the selected model")
         .accessibilityIdentifier("composer.reasoning.slider")

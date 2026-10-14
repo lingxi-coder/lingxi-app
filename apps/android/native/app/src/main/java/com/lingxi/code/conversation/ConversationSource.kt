@@ -177,6 +177,14 @@ interface ConversationSource {
     suspend fun setModel(id: String) {}
 
     /**
+     * Ask the engine for effort [id] (see [com.lingxi.code.model.ReasoningControl]),
+     * submitting `ClientCommand.SetReasoningSelection`. The engine confirms with
+     * `ConversationControlsChanged`, which updates [modelState]. A no-op for
+     * sources with no engine.
+     */
+    suspend fun setReasoningSelection(id: String) {}
+
+    /**
      * The engine's REAL resumable-session catalog — the SEPARATE, out-of-band
      * session-state path, the exact sibling of [modelState]. `SessionList` (the
      * reply to `ListSessions`) is NOT part of a text turn, so it flows here (a

@@ -19,6 +19,7 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.Message
+import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.sessionCatalogStrings
@@ -295,6 +296,11 @@ class EngineConversationSource private constructor(
         // Let the caller surface delivery/rejection errors; only ModelChanged
         // advances modelState, so a failed switch retains the confirmed model.
         handle.submit(ClientCommand.SetModel(model = id.toClientTextDto()))
+    }
+
+    override suspend fun setReasoningSelection(id: String) {
+        // Like setModel: only the engine's controls snapshot moves the selection.
+        handle.submit(ClientCommand.SetReasoningSelection(selection = ReasoningControl.selection(id)))
     }
 
     /**
@@ -621,6 +627,7 @@ class EngineConversationSource private constructor(
             CoroutineScope(Dispatchers.Default).launch {
                 try {
                     handle.submit(ClientCommand.ListModels)
+                    handle.submit(ClientCommand.GetConversationControls)
                 } catch (_: Throwable) {
                     // benign: the picker keeps its current selection until a
                     // later catalog refresh succeeds.

@@ -147,3 +147,21 @@ def test_generate_check_rejects_orphan_catalog_keys(tmp_path):
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main(sys.argv))
+
+def test_plural_values_become_ios_variations(tmp_path):
+    locales = {
+        "zh-Hans": {"chat_asked %lld": "已询问 %lld 个问题"},
+        "en": {"chat_asked %lld": {"plural": {"one": "Asked %lld question", "other": "Asked %lld questions"}}},
+    }
+    write_ios(locales, tmp_path)
+    write_android(locales, tmp_path / "android")
+    entry = json.load(open(tmp_path / "Localizable.xcstrings"))["strings"]["chat_asked %lld"]["localizations"]
+    assert entry["zh-Hans"] == {"stringUnit": {"state": "translated", "value": "已询问 %lld 个问题"}}
+    assert entry["en"]["variations"]["plural"]["one"]["stringUnit"]["value"] == "Asked %lld question"
+    assert entry["en"]["variations"]["plural"]["other"]["stringUnit"]["value"] == "Asked %lld questions"
+
+def test_plural_values_are_rejected_for_android_keys(tmp_path):
+    import pytest
+    locales = {"zh-Hans": {"chat_asked": {"plural": {"other": "%d"}}}}
+    with pytest.raises(ValueError):
+        write_android(locales, tmp_path)

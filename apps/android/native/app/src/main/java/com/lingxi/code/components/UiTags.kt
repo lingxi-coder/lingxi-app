@@ -136,6 +136,27 @@ object UiTags {
 
     fun projectRow(projectId: String): String = PROJECT_ROW_PREFIX + projectId
 
+    /** 应用: the drawer entry, the page with its 我的 / 市场 tabs, an app's page and the running app. */
+    const val DRAWER_ENTRY_APPS = "tag.drawerEntryApps"
+    const val DRAWER_RECENT_APP_PREFIX = "tag.drawerRecentApp."
+    const val APPS_PAGE = "tag.appsPage"
+    const val APPS_TAB_PREFIX = "tag.appsTab."
+    const val APPS_SEARCH = "tag.appsSearch"
+    const val APPS_MARKET_LIST = "tag.appsMarketList"
+    const val APP_TILE_PREFIX = "tag.appTile."
+    const val MARKET_ROW_PREFIX = "tag.marketRow."
+    const val MARKET_APP_PAGE = "tag.marketAppPage"
+    const val MARKET_APP_ACTION = "tag.marketAppAction"
+    const val MARKET_APP_UNINSTALL = "tag.marketAppUninstall"
+    const val APP_RUNTIME_PAGE = "tag.appRuntimePage"
+    const val APP_RUNTIME_MORE = "tag.appRuntimeMore"
+    const val APP_RUNTIME_CLOSE = "tag.appRuntimeClose"
+
+    fun drawerRecentApp(appId: String): String = DRAWER_RECENT_APP_PREFIX + appId
+    fun appsTab(name: String): String = APPS_TAB_PREFIX + name
+    fun appTile(appId: String): String = APP_TILE_PREFIX + appId
+    fun marketRow(appId: String): String = MARKET_ROW_PREFIX + appId
+
     /** The drawer's bottom account row and its settings button. */
     const val DRAWER_ACCOUNT = "tag.drawerAccount"
     const val DRAWER_SETTINGS = "tag.drawerSettings"

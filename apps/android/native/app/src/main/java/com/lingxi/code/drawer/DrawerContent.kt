@@ -42,12 +42,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
+import com.lingxi.code.apps.AppCover
+import com.lingxi.code.apps.MyApp
+import com.lingxi.code.apps.matchingApps
+import com.lingxi.code.apps.recentApps
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
@@ -133,6 +139,10 @@ fun DrawerContent(
     /** Scheduled-task results the user has not looked at yet. */
     newCronResults: Int = 0,
     account: DrawerAccount? = null,
+    /** Installed apps, most recently opened first: the 应用 row's covers and search hits. */
+    apps: List<MyApp> = emptyList(),
+    onOpenApps: () -> Unit = {},
+    onOpenApp: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -149,10 +159,13 @@ fun DrawerContent(
     // The local calendar day is part of the key so "今天" rolls over at midnight
     // even if no session data changed while the drawer stayed composed.
     val localDay = Math.floorDiv(nowSeconds + utcOffsetSeconds, 86_400L)
+    // The chips are hidden while searching, so a search covers every session;
+    // a mode chosen before must not silently narrow it.
+    val listFilter = if (searching) RecentsFilter.All else ui.filter
     val groups = remember(
         engineSessions.rows,
         projects,
-        ui.filter,
+        listFilter,
         query,
         ui.pinnedSessions,
         runningSessionId,
@@ -163,7 +176,7 @@ fun DrawerContent(
             globalName = globalName,
             globalSessions = engineSessions.rows,
             projects = projects,
-            filter = ui.filter,
+            filter = listFilter,
             query = query,
             pinnedSessions = ui.pinnedSessions,
             statusFor = { id ->
@@ -186,6 +199,8 @@ fun DrawerContent(
     val matchingCrons = remember(productionData.crons, query) {
         if (query.isBlank()) emptyList() else filterCrons(productionData.crons.orEmpty(), query)
     }
+    val matchingApps = remember(apps, query) { matchingApps(apps, query) }
+    val recentApps = remember(apps) { recentApps(apps) }
 
     fun open(session: RecentSession) {
         ui.selectSession(session.uuid)
@@ -206,6 +221,31 @@ fun DrawerContent(
         SearchBar(query = query, onQueryChange = { query = it })
 
         if (!searching) {
+            EntryRow(
+                icon = LXIconName.Apps,
+                label = stringResource(R.string.apps_title),
+                tag = UiTags.DRAWER_ENTRY_APPS,
+                onClick = onOpenApps,
+                trailing = if (recentApps.isEmpty()) null else {
+                    {
+                        // The last apps opened, one tap from the drawer.
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            recentApps.forEach { app ->
+                                AppCover(
+                                    name = app.name,
+                                    category = app.category,
+                                    size = 26.dp,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .testTag(UiTags.drawerRecentApp(app.appId))
+                                        .semantics { contentDescription = app.name }
+                                        .clickable { onOpenApp(app.appId) },
+                                )
+                            }
+                        }
+                    }
+                },
+            )
             EntryRow(
                 icon = LXIconName.Clock,
                 label = stringResource(R.string.settings_title_cron),
@@ -236,10 +276,12 @@ fun DrawerContent(
             if (searching) {
                 SearchResults(
                     groups = groups,
+                    apps = matchingApps,
                     projects = matchingProjects,
                     crons = matchingCrons,
                     activeSession = ui.activeSession,
                     onOpenSession = ::open,
+                    onOpenApp = onOpenApp,
                     onOpenProject = onOpenProject,
                     onOpenCron = onOpenCron,
                     isPinned = { ui.sessionPinnedAt(it) != null },
@@ -365,6 +407,7 @@ private fun EntryRow(
     onClick: () -> Unit,
     count: Int? = null,
     badge: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
     val t = LingXiTheme.palette
     Row(
@@ -380,7 +423,9 @@ private fun EntryRow(
     ) {
         LXIcon(name = icon, size = 18.dp, color = t.text2, stroke = 1.7f)
         Text(label, color = t.text, fontSize = 15.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-        if (badge != null) {
+        if (trailing != null) {
+            trailing()
+        } else if (badge != null) {
             Text(
                 badge,
                 color = t.accent,
@@ -647,10 +692,12 @@ private fun StatusPill(label: String, color: Color) {
 @Composable
 private fun SearchResults(
     groups: List<RecentGroup>,
+    apps: List<MyApp>,
     projects: List<Project>,
     crons: List<Cron>,
     activeSession: String,
     onOpenSession: (RecentSession) -> Unit,
+    onOpenApp: (String) -> Unit,
     onOpenProject: (String) -> Unit,
     onOpenCron: (String) -> Unit,
     isPinned: (String) -> Boolean,
@@ -658,7 +705,7 @@ private fun SearchResults(
     onContinue: (ConversationScope, SessionRow, SessionMode) -> Unit,
 ) {
     val t = LingXiTheme.palette
-    if (groups.isEmpty() && projects.isEmpty() && crons.isEmpty()) {
+    if (groups.isEmpty() && apps.isEmpty() && projects.isEmpty() && crons.isEmpty()) {
         Text(
             text = stringResource(R.string.drawer_no_match),
             color = t.text4,
@@ -679,6 +726,17 @@ private fun SearchResults(
                 onClick = { onOpenSession(session) },
                 onTogglePinned = { onTogglePinned(session.uuid) },
                 onContinue = onContinue,
+            )
+        }
+    }
+    if (apps.isNotEmpty()) {
+        SectionHeader(stringResource(R.string.apps_title))
+        apps.forEach { app ->
+            ResultRow(
+                icon = LXIconName.Apps,
+                title = app.name,
+                subtitle = "",
+                onClick = { onOpenApp(app.appId) },
             )
         }
     }

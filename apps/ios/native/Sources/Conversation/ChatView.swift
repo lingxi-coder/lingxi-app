@@ -33,6 +33,9 @@ struct ChatView: View {
     var onMakeScheduled: () -> Void = {}
     var onOpenTerminal: () -> Void = {}
     var onArchive: () -> Void = {}
+    /// Replaces the plain fresh-conversation start of the new-chat button;
+    /// nil starts the new chat in the current workspace.
+    var onNewChat: (() -> Void)? = nil
 
     /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
     /// published `model` and forwards user input to it — it no longer owns the
@@ -103,6 +106,7 @@ struct ChatView: View {
          onMakeScheduled: @escaping () -> Void = {},
          onOpenTerminal: @escaping () -> Void = {},
          onArchive: @escaping () -> Void = {},
+         onNewChat: (() -> Void)? = nil,
          onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenSessionDetails: @escaping () -> Void = {},
          onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
@@ -119,6 +123,7 @@ struct ChatView: View {
         self.onMakeScheduled = onMakeScheduled
         self.onOpenTerminal = onOpenTerminal
         self.onArchive = onArchive
+        self.onNewChat = onNewChat
         self._draft = draft
         self.voiceInteraction = voiceInteraction
         self.source = source
@@ -360,6 +365,7 @@ struct ChatView: View {
                 effortLabel: effortLabel,
                 permissionLabel: sessionMode == .code ? permissionLabel : nil,
                 isPinned: isPinned,
+                canPin: !convo.isNew,
                 canArchive: canArchive && !convo.isNew,
                 onAction: { action in
                     sessionPanelFollowUp = action
@@ -951,7 +957,11 @@ struct ChatView: View {
 
     private func newChat() {
         voiceInteraction.handleContextChange()
-        source.startNewConversation()
+        if let onNewChat {
+            onNewChat()
+        } else {
+            source.startNewConversation()
+        }
     }
 
     private func send(_ txt: String, selectedSlashCommand: ConversationSlashCommand? = nil) {

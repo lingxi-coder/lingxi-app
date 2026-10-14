@@ -254,7 +254,7 @@ pub struct CredentialEnvelope {
     /// Provider id to API key/bearer token mappings.
     #[serde(default)]
     pub provider_keys: BTreeMap<String, String>,
-    /// Host-owned Codex session, accepted only for the selected OAuth route.
+    /// Host-owned Codex session; the engine uses only its access token.
     #[serde(default)]
     pub openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
     /// Sensitive plugin configuration, keyed by plugin identity then manifest
@@ -320,21 +320,45 @@ pub(crate) fn validate_openai_oauth_session(
     Ok(())
 }
 
-/// The engine's form of a validated host-delivered Codex session.
-pub(crate) fn openai_oauth_tokens(
+/// The access token of a Codex session the desktop serves. A refresh token
+/// in it is ignored: the desktop is the session's one refresher.
+pub(crate) fn openai_host_token(
     session: &client::protocol::events::OpenAiOAuthSessionDto,
-) -> secret::credential::OpenAiOAuthTokens {
-    secret::credential::OpenAiOAuthTokens {
+) -> llm_runtime::auth::openai::HostToken {
+    llm_runtime::auth::openai::HostToken {
         access_token: lingxi_core::types::Secret::new(session.access_token.clone()),
-        refresh_token: session
-            .refresh_token
-            .clone()
-            .map(lingxi_core::types::Secret::new),
         expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(session.expires_at),
-        scopes: vec![],
         account_id: session.account_id.clone(),
         fedramp: session.fedramp,
-        email: session.email.clone(),
+    }
+}
+
+/// `operation_id` of a credential status no command asked for: this engine's
+/// Codex access token expired and it needs the desktop to serve the next one.
+/// Desktop credential operations are numbered from 1.
+pub(crate) const CODEX_TOKEN_REQUEST_OPERATION_ID: u64 = 0;
+
+/// Asks the desktop for the next Codex access token.
+struct CodexTokenRequester {
+    sink: Arc<dyn client::adapter::ClientEventSink>,
+}
+
+impl llm_runtime::auth::openai::HostRefreshRequester for CodexTokenRequester {
+    fn request_refresh(&self) {
+        let sink = self.sink.clone();
+        tokio::spawn(async move {
+            sink.emit(
+                client::protocol::events::ClientEvent::ProviderCredentialStatus {
+                    operation_id: CODEX_TOKEN_REQUEST_OPERATION_ID,
+                    configured_provider_ids: Vec::new(),
+                    unavailable_provider_ids: vec![CODEX_PROVIDER_ID.to_string()],
+                    storage_encrypted: false,
+                    credential_previews: std::collections::HashMap::new(),
+                    error: Some("Codex access token expired".to_string()),
+                },
+            )
+            .await;
+        });
     }
 }
 
@@ -1367,9 +1391,6 @@ pub async fn assemble_with_credentials(
     provider_keys: BTreeMap<String, String>,
     openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
 ) -> Result<BoundServer, String> {
-    if openai_oauth.is_some() && !cfg.default_model.starts_with("openai-chatgpt/") {
-        return Err("Codex OAuth credentials require the selected openai-chatgpt route".into());
-    }
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
@@ -1528,24 +1549,32 @@ pub async fn assemble_with_credentials(
     )
     .await
     .map_err(|error| error.to_string())?;
-    // A desktop that owns credential persistence moves its one Codex session
-    // between engines while they run, so this engine serves ChatGPT through a
-    // slot the router fills and empties. Its rotations always reach the host.
-    let openai_oauth_slot = provider_credentials_ephemeral
-        .then(|| Arc::new(llm_runtime::auth::openai::OpenAiOAuthSlot::new()));
-    shared.openai_oauth_slot = openai_oauth_slot.clone();
-    if openai_oauth_slot.is_some() {
+    // A desktop that owns credential persistence refreshes its one Codex
+    // session itself and serves every engine only access tokens, so any
+    // number of them use the account at once. This engine never refreshes
+    // the session; once its token expires it asks the desktop for the next.
+    // A session signed in from inside this engine still reaches the desktop.
+    let openai_host_session = provider_credentials_ephemeral.then(|| {
+        let session = Arc::new(llm_runtime::auth::openai::HostSession::new(Arc::new(
+            platform_posix::PosixClock::new(),
+        )));
+        session.request_refreshes_through(Arc::new(CodexTokenRequester {
+            sink: event_sink.clone(),
+        }));
+        session
+    });
+    shared.openai_host_session = openai_host_session.clone();
+    if openai_host_session.is_some() {
         shared
             .credentials
             .set_openai_oauth_observer(Arc::new(OpenAiOAuthHostObserver {
                 sink: event_sink.clone(),
             }));
     }
-    let mut boot_openai_oauth = None;
     if let Some(session) = openai_oauth {
         validate_openai_oauth_session(&session)?;
-        if openai_oauth_slot.is_some() {
-            boot_openai_oauth = Some(session);
+        if let Some(host) = &openai_host_session {
+            host.serve(openai_host_token(&session));
         } else {
             shared
                 .credentials
@@ -1571,18 +1600,6 @@ pub async fn assemble_with_credentials(
         harness_runtime::desktop::build_with_host_automation(cfg, output, permission_sink, shared)
             .await
             .map_err(|e| e.to_string())?;
-    // The engine bound the slot while it was built; only now can it serve the
-    // session the host delivered at launch.
-    if let (Some(slot), Some(session)) = (&openai_oauth_slot, boot_openai_oauth) {
-        slot.install(openai_oauth_tokens(&session))
-            .await
-            .map_err(|_| "failed to install Codex OAuth session".to_string())?;
-        refresh_fusion_catalog_bounded(
-            &runtime.catalog_registry,
-            vec![CODEX_PROVIDER_ID.to_string()],
-        )
-        .await;
-    }
     receive_gate.set(runtime.orchestrator.clone());
     // The runtime cloned the exact construction-only lease into its hydrated
     // coordinator. Do not let the bridge's process-registration guard pin the
@@ -1784,7 +1801,7 @@ pub async fn assemble_with_credentials(
     .with_catalog_registry(runtime.catalog_registry.clone())
     .with_provider_model_catalog_listings(provider_model_catalog_listings)
     .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
-    .with_openai_oauth_slot(openai_oauth_slot)
+    .with_openai_host_session(openai_host_session)
     .with_http(runtime.http.clone())
     .with_session_store(
         session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()),

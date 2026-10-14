@@ -136,7 +136,8 @@ struct ProjectPage: View {
     let isPinned: Bool
     let activeSession: String
     let onTogglePinned: () -> Void
-    let onNewSession: (SessionMode) -> Void
+    /// nil while the list shows every mode: the caller keeps its current mode.
+    let onNewSession: (SessionMode?) -> Void
     let onOpenSession: (SessionMode, String) -> Void
     /// `(scopeID, taskID)`; `(nil, nil)` opens the full task list.
     let onOpenCron: (String?, String?) -> Void
@@ -155,7 +156,7 @@ struct ProjectPage: View {
         isPinned: Bool,
         activeSession: String,
         onTogglePinned: @escaping () -> Void,
-        onNewSession: @escaping (SessionMode) -> Void,
+        onNewSession: @escaping (SessionMode?) -> Void,
         onOpenSession: @escaping (SessionMode, String) -> Void,
         onOpenCron: @escaping (String?, String?) -> Void,
         onOpenTerminal: @escaping () -> Void
@@ -225,7 +226,7 @@ struct ProjectPage: View {
         List {
             Section {
                 HStack(spacing: 8) {
-                    Button { onNewSession(filter.mode ?? .code) } label: {
+                    Button { onNewSession(filter.mode) } label: {
                         Label("chat_new_chat", systemImage: "square.and.pencil")
                             .font(.system(size: 14, weight: .semibold))
                             .frame(maxWidth: .infinity)

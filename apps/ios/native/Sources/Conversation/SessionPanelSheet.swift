@@ -28,6 +28,8 @@ struct SessionPanelSheet: View {
     /// nil hides the row: a Chat session has no file permissions to ask about.
     let permissionLabel: String?
     let isPinned: Bool
+    /// false hides the pin row: a chat that has not started has no id to pin.
+    let canPin: Bool
     let canArchive: Bool
     let onAction: (SessionPanelAction) -> Void
 
@@ -75,11 +77,13 @@ struct SessionPanelSheet: View {
                 }
 
                 Section {
-                    actionRow(
-                        icon: isPinned ? "pin.slash" : "pin",
-                        title: String(localized: isPinned ? "drawer_session_unpin" : "drawer_session_pin"),
-                        identifier: "session-panel.pin"
-                    ) { onAction(.togglePinned) }
+                    if canPin {
+                        actionRow(
+                            icon: isPinned ? "pin.slash" : "pin",
+                            title: String(localized: isPinned ? "drawer_session_unpin" : "drawer_session_pin"),
+                            identifier: "session-panel.pin"
+                        ) { onAction(.togglePinned) }
+                    }
                     actionRow(
                         icon: "clock.badge",
                         title: String(localized: "session_panel_make_scheduled"),

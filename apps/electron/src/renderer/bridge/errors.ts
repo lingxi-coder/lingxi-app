@@ -17,11 +17,6 @@ export function classifyDesktopError(raw: string): ActionableError {
   if (/credential required|no accepted credential source|configure a trusted credential source/i.test(message)) {
     return { title: 'Provider credential missing', detail: 'Reconnect this provider in Settings, then retry.' };
   }
-  // One chat at a time holds Codex authentication. Refusing to move it is not
-  // a credential failure, and the refusal already says what to wait for.
-  if (/(?:other|active) Codex chat|before (?:changing|activating) Codex authentication/i.test(message)) {
-    return { title: 'Codex authentication is busy', detail: message };
-  }
   // Codex signs in with OAuth; it has no stored API key to replace.
   if (/Codex authentication.*Sign in again/i.test(message)) {
     return { title: 'Codex sign-in required', detail: message };

@@ -33,8 +33,14 @@ struct Drawer: View {
     let onOpenSession: (ConversationScope, SessionMode, String) -> Void
     let onToggleSessionPinned: (String) -> Void
     let onContinueInMode: (ConversationScope, String, SessionMode, SessionMode) -> Void
+    /// Read on each render rather than observed, so a download's progress
+    /// never redraws the sidebar; installs and opens change [appInfo] anyway.
+    let appMarket: LocalAppMarket?
+    let openApps: () -> Void
+    let openApp: (String) -> Void
 
     @ObservedObject private var convo: ConversationModel
+    @ObservedObject private var appInfo: InstalledAppInfoStore
     @Binding private var filter: RecentsFilter
     @State private var query = ""
     @FocusState private var searchFocused: Bool
@@ -58,7 +64,11 @@ struct Drawer: View {
         closeSidebar: @escaping () -> Void,
         onOpenSession: @escaping (ConversationScope, SessionMode, String) -> Void,
         onToggleSessionPinned: @escaping (String) -> Void = { _ in },
-        onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in }
+        onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in },
+        appMarket: LocalAppMarket? = nil,
+        appInfo: InstalledAppInfoStore,
+        openApps: @escaping () -> Void = {},
+        openApp: @escaping (String) -> Void = { _ in }
     ) {
         self.projectStore = projectStore
         self.activeScope = activeScope
@@ -79,6 +89,10 @@ struct Drawer: View {
         self.onOpenSession = onOpenSession
         self.onToggleSessionPinned = onToggleSessionPinned
         self.onContinueInMode = onContinueInMode
+        self.appMarket = appMarket
+        self.appInfo = appInfo
+        self.openApps = openApps
+        self.openApp = openApp
         convo = source.model
     }
 
@@ -137,7 +151,8 @@ struct Drawer: View {
     private var groups: [RecentGroup] {
         RecentSessionsBuilder.groups(
             seeds: seeds,
-            filter: filter,
+            // The chips are hidden while searching, so they must not narrow it.
+            filter: searching ? .all : filter,
             query: query,
             pinnedAt: sessionPinnedAt,
             statusFor: status(of:)
@@ -149,6 +164,10 @@ struct Drawer: View {
         guard !needle.isEmpty else { return [] }
         return RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: [:])
             .filter { $0.record.name.localizedStandardContains(needle) }
+    }
+
+    private var installedApps: [MyApp] {
+        appMarket?.myApps(info: appInfo.apps) ?? []
     }
 
     private var matchingCrons: [CronScopedTask] {
@@ -240,12 +259,32 @@ struct Drawer: View {
         let sessions = sessionGroups.flatMap(\.sessions)
         let projects = matchingProjects
         let crons = matchingCrons
-        if sessions.isEmpty && projects.isEmpty && crons.isEmpty {
+        let apps = AppsModel.matchingApps(installedApps, query: query)
+        if sessions.isEmpty && apps.isEmpty && projects.isEmpty && crons.isEmpty {
             emptyState(text: String(localized: "drawer_no_match"), icon: .search)
         }
         if !sessions.isEmpty {
             sectionHeader(String(localized: "drawer_search_section_sessions"))
             ForEach(sessions) { sessionRow($0) }
+        }
+        if !apps.isEmpty {
+            sectionHeader(String(localized: "apps_title"))
+            ForEach(apps) { app in
+                Button { openApp(app.appId) } label: {
+                    HStack(spacing: 10) {
+                        AppCover(name: app.name, category: app.category, size: 22)
+                        Text(app.name)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundColor(t.text2)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(9)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("drawer.app.\(app.appId)")
+            }
         }
         if !projects.isEmpty {
             sectionHeader(String(localized: "drawer_entry_projects"))
@@ -291,6 +330,7 @@ struct Drawer: View {
 
     private var entries: some View {
         VStack(spacing: 2) {
+            appsEntry
             entryRow(
                 icon: .clock,
                 title: String(localized: "settings_title_cron"),
@@ -309,6 +349,41 @@ struct Drawer: View {
             ) { openProjects() }
         }
         .padding(.bottom, 6)
+    }
+
+    /// 应用, with the last apps opened one tap away.
+    private var appsEntry: some View {
+        HStack(spacing: 8) {
+            Button(action: openApps) {
+                HStack(spacing: 12) {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(t.text2)
+                        .frame(width: 22)
+                    Text("apps_title").font(.system(size: 14.5, weight: .medium)).foregroundColor(t.text)
+                    Spacer(minLength: 8)
+                }
+                .padding(.vertical, 11)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("drawer.entry.apps")
+            ForEach(AppsModel.recentApps(installedApps)) { app in
+                Button { openApp(app.appId) } label: {
+                    AppCover(name: app.name, category: app.category, size: 26)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(app.name)
+                .accessibilityIdentifier("drawer.recent-app.\(app.appId)")
+            }
+            Button(action: openApps) {
+                LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 1.7)
+                    .padding(.vertical, 11)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 10)
     }
 
     private func entryRow(

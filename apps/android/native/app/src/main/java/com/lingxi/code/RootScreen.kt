@@ -21,6 +21,8 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -83,12 +85,18 @@ import com.lingxi.code.conversation.WorkspacePickerSheet
 import com.lingxi.code.conversation.permissionModeLabel
 import com.lingxi.code.project.ProjectPage
 import com.lingxi.code.project.ProjectsPage
+import com.lingxi.code.apps.AppRuntimePage
+import com.lingxi.code.apps.AppsPage
+import com.lingxi.code.apps.LocalApps
+import com.lingxi.code.apps.MarketAppPage
+import com.lingxi.code.apps.myApps
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.ModelProviderStatus
+import com.lingxi.code.model.Project
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.SessionCatalogPhase
 import com.lingxi.code.model.SessionRef
@@ -146,6 +154,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1483,6 +1493,29 @@ fun RootScreen(
     LaunchedEffect(conflictSignature) {
         if (conflictSignature == null) dismissedConflictSignature = null
     }
+    var projectsPageOpen by rememberSaveable { mutableStateOf(false) }
+    var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
+    // 应用: the page, one app's page and the running app, each drawn over the last.
+    var appsPageOpen by rememberSaveable { mutableStateOf(false) }
+    var marketAppId by rememberSaveable { mutableStateOf<String?>(null) }
+    var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
+    val localApps = remember(appContext) { LocalApps.get(appContext) }
+    // The drawer needs only what is installed and what is known about it, so a
+    // download's progress never recomposes this screen; the pages collect the
+    // whole market state themselves.
+    val installedApps by remember(localApps) {
+        localApps.market.store.state.map { it.installed }.distinctUntilChanged()
+    }.collectAsState(initial = localApps.market.store.state.value.installed)
+    val installedAppInfo by localApps.info.state.collectAsState()
+    val drawerApps = remember(installedApps, installedAppInfo) {
+        myApps(installedApps, installedAppInfo, updates = emptyList(), operations = emptyMap())
+    }
+    // Leaves the projects pages, e.g. once a project was created or imported from
+    // them and the conversation has moved into it.
+    fun closeProjectPages() {
+        projectPageId = null
+        projectsPageOpen = false
+    }
     val importProjectLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
@@ -1494,7 +1527,10 @@ fun RootScreen(
             scope.launch {
                 runCatching { projectStore.importSaf(name, uri) }
                     .onSuccess { created ->
-                        if (switchEngineScope(created, null, true)) closeDrawer()
+                        if (switchEngineScope(created, null, true)) {
+                            closeDrawer()
+                            closeProjectPages()
+                        }
                 }
             }
         } else if (uri != null && reauthorizeProjectId != null) {
@@ -1527,8 +1563,6 @@ fun RootScreen(
             email = user.email,
         )
     }
-    var projectsPageOpen by rememberSaveable { mutableStateOf(false) }
-    var projectPageId by rememberSaveable { mutableStateOf<String?>(null) }
     var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
     var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
     // A scheduled-task workspace is not a place to start chatting: new chats from
@@ -1539,10 +1573,6 @@ fun RootScreen(
         is ConversationScope.Project ->
             drawerProductionData.projects.orEmpty().firstOrNull { it.id == current.projectId }?.name
                 ?: stringResource(R.string.drawer_entry_projects)
-    }
-    fun closeProjectPages() {
-        projectPageId = null
-        projectsPageOpen = false
     }
 
     /**
@@ -1750,6 +1780,15 @@ fun RootScreen(
                         },
                         newCronResults = newCronResults,
                         account = drawerAccount,
+                        apps = drawerApps,
+                        onOpenApps = {
+                            closeDrawer()
+                            appsPageOpen = true
+                        },
+                        onOpenApp = { appId ->
+                            closeDrawer()
+                            runtimeAppId = appId
+                        },
                     )
                 }
             },
@@ -1787,7 +1826,17 @@ fun RootScreen(
                     // engine call is a no-op, so this still behaves like newChat.
                     onNewChat = {
                         voiceSpeechPlayer.stop()
-                        runConversationAction(chatViewModel::startNewSession)
+                        runConversationAction {
+                            // A scheduled-task run is not a place to start chatting
+                            // (see `newChatScope`): the new chat goes to Global, so
+                            // it shows up in the recents and matches the workspace
+                            // the new-chat bar names.
+                            if (sourceScope == ConversationScope.Scheduled) {
+                                startNewSessionIn(newChatScope, activeSessionMode)
+                            } else {
+                                chatViewModel.startNewSession()
+                            }
+                        }
                     },
                     onSelectModel = chatViewModel::selectModel,
                     isDark = isDark,
@@ -1946,15 +1995,17 @@ fun RootScreen(
             onResolve = ComputerUseFeatureProvider::resolveApproval,
         )
 
+        // The list stays underneath an opened project, so a project page slides
+        // over it and back reveals it, like any pushed page.
         AnimatedVisibility(
-            visible = projectsPageOpen && projectPageId == null,
+            visible = projectsPageOpen,
             enter = slideInHorizontally(initialOffsetX = { it }),
             exit = slideOutHorizontally(targetOffsetX = { it }),
         ) {
             BackHandler { projectsPageOpen = false }
             ProjectsPage(
                 projects = drawerProductionData.projects.orEmpty(),
-                pinnedAtEpochMillis = { key -> drawerUi.pinnedWorkspaces[key] },
+                pinnedWorkspaces = drawerUi.pinnedWorkspaces,
                 statusMessage = drawerProductionData.projectStatusMessage,
                 onBack = { projectsPageOpen = false },
                 onOpenProject = { projectPageId = it },
@@ -1969,13 +2020,17 @@ fun RootScreen(
         val openedProject = projectPageId?.let { id ->
             drawerProductionData.projects.orEmpty().firstOrNull { it.id == id }
         }
+        // `openedProject` is already null while the page slides out; the page
+        // keeps drawing the last project until the exit animation is done.
+        // Read only inside the page, so updating it never recomposes this screen.
+        var lastOpenedProject by remember { mutableStateOf<Project?>(null) }
+        LaunchedEffect(openedProject) { if (openedProject != null) lastOpenedProject = openedProject }
         AnimatedVisibility(
             visible = openedProject != null,
             enter = slideInHorizontally(initialOffsetX = { it }),
             exit = slideOutHorizontally(targetOffsetX = { it }),
         ) {
-            // Keep the last project while the exit animation runs.
-            val shown = remember(openedProject) { openedProject }
+            val shown = openedProject ?: lastOpenedProject
             if (shown != null) {
                 BackHandler { projectPageId = null }
                 ProjectPage(
@@ -1997,6 +2052,60 @@ fun RootScreen(
                             pendingReauthorizeProjectId = shown.id
                             importProjectLauncher.launch(null)
                         }
+                    },
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = appsPageOpen,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+        ) {
+            BackHandler { appsPageOpen = false }
+            AppsPage(
+                localApps = localApps,
+                onBack = { appsPageOpen = false },
+                onOpenApp = { runtimeAppId = it },
+                onShowDetails = { marketAppId = it },
+            )
+        }
+        // Like the project page, these keep their last app while sliding out.
+        var lastMarketAppId by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(marketAppId) { if (marketAppId != null) lastMarketAppId = marketAppId }
+        AnimatedVisibility(
+            visible = marketAppId != null,
+            enter = slideInHorizontally(initialOffsetX = { it }),
+            exit = slideOutHorizontally(targetOffsetX = { it }),
+        ) {
+            val shownId = marketAppId ?: lastMarketAppId
+            if (shownId != null) {
+                BackHandler { marketAppId = null }
+                MarketAppPage(
+                    localApps = localApps,
+                    appId = shownId,
+                    onBack = { marketAppId = null },
+                    onOpenApp = { runtimeAppId = it },
+                )
+            }
+        }
+        var lastRuntimeAppId by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(runtimeAppId) { if (runtimeAppId != null) lastRuntimeAppId = runtimeAppId }
+        AnimatedVisibility(
+            visible = runtimeAppId != null,
+            enter = slideInVertically(initialOffsetY = { it }),
+            exit = slideOutVertically(targetOffsetY = { it }),
+        ) {
+            val shownId = runtimeAppId ?: lastRuntimeAppId
+            if (shownId != null) {
+                // Its own back handler goes back inside the app first.
+                AppRuntimePage(
+                    localApps = localApps,
+                    appId = shownId,
+                    onClose = { runtimeAppId = null },
+                    onShowDetails = { appId ->
+                        runtimeAppId = null
+                        marketAppId = appId
                     },
                 )
             }
@@ -2085,7 +2194,10 @@ fun RootScreen(
                 scope.launch {
                     runCatching { projectStore.createInternal(name) }
                         .onSuccess { created ->
-                            if (switchEngineScope(created, null, true)) closeDrawer()
+                            if (switchEngineScope(created, null, true)) {
+                                closeDrawer()
+                                closeProjectPages()
+                            }
                         }
                 }
             },

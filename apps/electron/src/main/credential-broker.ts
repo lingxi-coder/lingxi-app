@@ -317,8 +317,6 @@ export class SessionLaunchCache {
   private readonly credentialPending = new Map<string, Promise<SessionLaunchCredentials>>();
   private pluginSecretsEntry?: LaunchCacheEntry<Record<string, Record<string, string>>>;
   private pluginSecretsPending?: Promise<Record<string, Record<string, string>>>;
-  private oauthEntry?: LaunchCacheEntry<CodexOAuthSession | undefined>;
-  private oauthPending?: Promise<CodexOAuthSession | undefined>;
   private generation = 0;
 
   constructor(private readonly ttlMs = 30_000) {}
@@ -362,32 +360,12 @@ export class SessionLaunchCache {
     return operation;
   }
 
-  openAiOAuth(broker?: ProviderCredentialResolver): Promise<CodexOAuthSession | undefined> {
-    const now = Date.now();
-    if (this.oauthEntry && this.oauthEntry.expiresAt > now) return Promise.resolve(this.oauthEntry.value);
-    this.oauthEntry = undefined;
-    if (this.oauthPending) return this.oauthPending;
-    const generation = this.generation;
-    const operation = resolveCodexOAuthSession(broker)
-      .then((value) => {
-        if (generation === this.generation) this.oauthEntry = { value, expiresAt: Date.now() + this.ttlMs };
-        return value;
-      })
-      .finally(() => {
-        if (this.oauthPending === operation) this.oauthPending = undefined;
-      });
-    this.oauthPending = operation;
-    return operation;
-  }
-
   invalidate(): void {
     this.generation += 1;
     this.credentialEntries.clear();
     this.pluginSecretsEntry = undefined;
-    this.oauthEntry = undefined;
     this.credentialPending.clear();
     this.pluginSecretsPending = undefined;
-    this.oauthPending = undefined;
   }
 }
 

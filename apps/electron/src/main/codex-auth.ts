@@ -2,8 +2,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 
 export const CODEX_PROVIDER_ID = 'openai-chatgpt';
-const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-const ISSUER = 'https://auth.openai.com';
+export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+export const CODEX_ISSUER = 'https://auth.openai.com';
 
 /** Main-process only: never expose this value through renderer IPC. */
 export interface CodexOAuthSession {
@@ -157,19 +157,19 @@ export async function loginCodex(options: {
     if (!address || typeof address === 'string') throw new Error('Codex 登录回调无法启动。');
     const redirect = `http://localhost:${address.port}/auth/callback`;
     const params = new URLSearchParams({
-      response_type: 'code', client_id: CLIENT_ID, redirect_uri: redirect,
+      response_type: 'code', client_id: CODEX_CLIENT_ID, redirect_uri: redirect,
       scope: 'openid profile email offline_access',
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
       code_challenge_method: 'S256', state,
       id_token_add_organizations: 'true', codex_cli_simplified_flow: 'true', originator: 'lingxi',
     });
     if (abort.signal.aborted) throw new Error('Codex 登录已取消。');
-    await options.openExternal(`${ISSUER}/oauth/authorize?${params}`);
+    await options.openExternal(`${CODEX_ISSUER}/oauth/authorize?${params}`);
     const code = await callback;
-    const response = await (options.fetch ?? fetch)(`${ISSUER}/oauth/token`, {
+    const response = await (options.fetch ?? fetch)(`${CODEX_ISSUER}/oauth/token`, {
       method: 'POST', signal: abort.signal, redirect: 'error',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CLIENT_ID,
+      body: new URLSearchParams({ grant_type: 'authorization_code', client_id: CODEX_CLIENT_ID,
         code, code_verifier: verifier, redirect_uri: redirect }),
     });
     if (!response.ok) throw new Error(`Codex 令牌交换失败（HTTP ${response.status}）。`);

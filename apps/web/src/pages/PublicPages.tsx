@@ -46,22 +46,22 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
   return (
     <>
       <section className="landing-hero" aria-labelledby="landing-title">
-        <RouteLink href="/docs" className="landing-announcement">
+        <RouteLink href="/download" className="landing-announcement">
           <span className="landing-announcement-dot" aria-hidden="true" />
-          {t('The LingXi SDKs. Built for developers.', '面向开发者的灵犀 SDK')}
+          {t('Your personal AI agent', '你的个人辅助 Agent')}
           <IconArrowRight width={14} height={14} />
         </RouteLink>
-        <h1 id="landing-title"><span>{t('Bring your ideas ', '让想法，')}</span><span className="landing-title-accent">{t('to life.', '成为现实。')}</span></h1>
+        <h1 id="landing-title"><span>{t('In tune. ', '心有灵犀，')}</span><span className="landing-title-accent">{t('Here to help.', '助你成事。')}</span></h1>
         <p className="landing-description">
           {t(
-            'An AI development workspace across desktop, mobile, and CLI. Build with the same tools in your own product.',
-            '在桌面、手机与 CLI 上，与 AI 一起开发。也将这份能力，融入你的产品。',
+            'Your personal AI agent for thinking things through, finding information, and getting everyday tasks done.',
+            '你的个人辅助 Agent。帮你梳理想法、查找资料、处理日常任务，与你一起把事情做好。',
           )}
         </p>
         <div className="landing-actions">
           <RouteLink href="/download" className="landing-entry landing-entry-primary">
             <IconDownload width={22} height={22} />
-            <span><strong>{t('Get LingXi', '获取 LingXi')}</strong><small>{t('Desktop · Mobile · CLI', '桌面 · 移动端 · CLI')}</small></span>
+            <span><strong>{t('Get LingXi', '获取灵犀')}</strong><small>{t('Desktop · Mobile · CLI', '桌面 · 移动端 · CLI')}</small></span>
             <IconArrowRight width={17} height={17} />
           </RouteLink>
           <RouteLink href="/docs" className="landing-entry">
@@ -70,12 +70,12 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
             <IconArrowRight width={17} height={17} />
           </RouteLink>
         </div>
-        <div className="landing-platforms"><span>{t('Wherever you build', '在你创造的每一处')}</span><span>macOS · Windows · Linux · iOS · Android</span></div>
+        <div className="landing-platforms"><span>{t('On the devices you use every day', '在你日常使用的设备上')}</span><span>macOS · Windows · Linux · iOS · Android</span></div>
       </section>
 
       <section className="landing-sdks" aria-labelledby="landing-sdk-title">
         <div className="landing-sdk-heading">
-          <div><span className="landing-eyebrow">Build with LingXi</span><h2 id="landing-sdk-title">{t('Make it your own.', '从你的想法开始。')}</h2></div>
+          <div><span className="landing-eyebrow">{t('For developers', '面向开发者')}</span><h2 id="landing-sdk-title">{t('Build with LingXi.', '将灵犀融入你的应用。')}</h2></div>
           <RouteLink href="/docs" className="landing-text-link">{t('All documentation', '全部文档')} <IconArrowRight width={16} height={16} /></RouteLink>
         </div>
         <div className="landing-sdk-grid">
@@ -113,7 +113,7 @@ export function DownloadPage({ locale }: { locale: Locale }) {
   ];
   return (
     <div className="page-wrap">
-      <header className="page-hero"><span className="eyebrow">Downloads</span><h1>{t('Choose the surface that fits the moment.', '选择适合当下的终端。')}</h1><p>{t('Release labels reflect the repository today. No placeholder button pretends a public build exists.', '发布标签严格对应当前仓库状态，不用占位按钮伪装正式公开版本。')}</p></header>
+      <header className="page-hero"><span className="eyebrow">{t('Downloads', '下载灵犀')}</span><h1>{t('A little help for your everyday.', '让灵犀，帮你把日常理顺。')}</h1><p>{t('Choose LingXi for the device you use. See each platform below for its available versions and release status.', '在你常用的设备上使用灵犀。各平台的可用版本与开放状态见下方。')}</p></header>
       <section className="recommended-release">
         <div><span className="eyebrow">{t('Recommended for this device', '为此设备推荐')}</span><h2>{recommended.title}</h2><p>{recommended.summary}</p></div>
         <ReleaseAction artifact={recommended} locale={locale} />
@@ -151,7 +151,7 @@ export function PricingPage({ locale, region }: { locale: Locale; region: Region
   const t = (en: string, zh: string) => pickLocaleText(locale, { en, zh });
   return (
     <div className="page-wrap">
-      <header className="page-hero compact"><div><span className="eyebrow">Pricing</span><h1>{t('Clear plans for the assistant. Clear usage for the API.', '助手套餐清楚，API 用量也清楚。')}</h1><p className="prototype-notice">{t('Interface prototype · sample plans and prices only · no checkout is connected.', '界面原型 · 仅展示样例套餐与价格 · 未接入真实结账。')}</p></div><div className="segmented-control large"><button type="button" className={!annual ? 'active' : ''} onClick={() => setAnnual(false)}>{t('Monthly', '月付')}</button><button type="button" className={annual ? 'active' : ''} onClick={() => setAnnual(true)}>{t('Annual · save 20%', '年付 · 省 20%')}</button></div></header>
+      <header className="page-hero compact"><div><span className="eyebrow">{t('Pricing', '套餐与价格')}</span><h1>{t('Choose the support that fits your day.', '为你的日常，选择合适的帮助。')}</h1><p className="prototype-notice">{t('Interface prototype · sample plans and prices only · no checkout is connected.', '界面原型 · 仅展示样例套餐与价格 · 未接入真实结账。')}</p></div><div className="segmented-control large"><button type="button" className={!annual ? 'active' : ''} onClick={() => setAnnual(false)}>{t('Monthly', '月付')}</button><button type="button" className={annual ? 'active' : ''} onClick={() => setAnnual(true)}>{t('Annual · save 20%', '年付 · 省 20%')}</button></div></header>
       <section className="plan-grid">
         {subscriptionPlans.map((plan) => {
           const price = annual ? plan.price.annualMonthlyUsd : plan.price.monthlyUsd;

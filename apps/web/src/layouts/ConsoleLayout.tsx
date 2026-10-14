@@ -71,11 +71,11 @@ export function ConsoleLayout({
         </div>
         <header className="console-header">
           <div>
-            <span className="eyebrow">Developer Console</span>
+            <span className="eyebrow">{pickLocaleText(locale, { en: 'Personal console', zh: '个人控制台' })}</span>
             <h1 className="console-title">
               {pickLocaleText(locale, {
-                en: 'Run LingXi across desktop, phone, and CLI.',
-                zh: '让 LingXi 在桌面、手机和 CLI 间连续协作。',
+                en: 'Your personal AI agent, here to help.',
+                zh: '你的个人辅助 Agent，与你一起把事情做好。',
               })}
             </h1>
           </div>

@@ -141,7 +141,7 @@ final class ChatAppRuntime: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var closing: [String: Task<Void, Never>] = [:]
     private var generations: [String: UUID] = [:]
 
-    init(registry: ChatAppRegistry = ChatAppRegistry()) { self.registry = registry }
+    init(registry: ChatAppRegistry? = nil) { self.registry = registry ?? ChatAppRegistry() }
 
     func open(_ id: String) async throws -> WKWebView {
         if let task = closing[id] { await task.value }

@@ -28778,6 +28778,108 @@
         }
       }
     },
+    "privacy_data_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话和设置保存在本地。执行任务时，相关内容及认证凭据会发送至你配置的服务；语音也可能由系统或云端服务处理。账号登录使用 Firebase。你可以在系统设置中管理权限。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對話和設定儲存在本機。執行任務時，相關內容及認證憑證會傳送至你設定的服務；語音也可能由系統或雲端服務處理。帳號登入使用 Firebase。你可以在系統設定中管理權限。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conversations and settings are stored locally. Tasks send relevant content and authentication credentials to configured services; speech may use system or cloud services. Account sign-in uses Firebase. Manage permissions in system settings."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話と設定は端末に保存されます。タスクに必要な内容と認証情報は設定したサービスに送信されます。音声はシステムやクラウドで処理される場合があります。アカウント認証には Firebase を使用します。権限はシステム設定で管理できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화와 설정은 기기에 저장됩니다. 작업에 필요한 내용과 인증 정보는 설정한 서비스로 전송됩니다. 음성은 시스템 또는 클라우드 서비스에서 처리될 수 있습니다. 계정 로그인은 Firebase를 사용합니다. 시스템 설정에서 권한을 관리할 수 있습니다."
+          }
+        }
+      }
+    },
+    "privacy_deletion_link": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据与账号删除"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "資料與帳號刪除"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Data and account deletion"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "データとアカウントの削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "데이터 및 계정 삭제"
+          }
+        }
+      }
+    },
+    "privacy_policy_link": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隐私政策"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隱私政策"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privacy policy"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プライバシーポリシー"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "개인정보 처리방침"
+          }
+        }
+      }
+    },
     "project_conflict_defer_button": {
       "localizations": {
         "zh-Hans": {
@@ -46667,31 +46769,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。"
+            "value": "对话和设置保存在本地。执行任务时，相关内容及认证凭据会发送至你配置的服务；语音也可能由系统或云端服务处理。账号登录使用 Firebase。你可以在系统设置中管理权限。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "靈犀對你的承諾：金鑰永遠不離開本機；對話預設不被用於訓練。"
+            "value": "對話和設定儲存在本機。執行任務時，相關內容及認證憑證會傳送至你設定的服務；語音也可能由系統或雲端服務處理。帳號登入使用 Firebase。你可以在系統設定中管理權限。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Our promise to you: your keys never leave this device, and your conversations aren't used for training by default."
+            "value": "Conversations and settings are stored locally. Tasks send relevant content and authentication credentials to configured services; speech may use system or cloud services. Account sign-in uses Firebase. Manage permissions in system settings."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀からのお約束：API キーが端末の外に出ることはありません。会話はデフォルトで学習には利用されません。"
+            "value": "会話と設定は端末に保存されます。タスクに必要な内容と認証情報は設定したサービスに送信されます。音声はシステムやクラウドで処理される場合があります。アカウント認証には Firebase を使用します。権限はシステム設定で管理できます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀의 약속: 키는 절대 기기 밖으로 나가지 않으며, 대화는 기본적으로 학습에 사용되지 않습니다."
+            "value": "대화와 설정은 기기에 저장됩니다. 작업에 필요한 내용과 인증 정보는 설정한 서비스로 전송됩니다. 음성은 시스템 또는 클라우드 서비스에서 처리될 수 있습니다. 계정 로그인은 Firebase를 사용합니다. 시스템 설정에서 권한을 관리할 수 있습니다."
           }
         }
       }

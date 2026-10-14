@@ -1198,7 +1198,7 @@
     <string name="settings_platform_note_1">使用 iOS 公共 API，動作會由系統展示和授權。</string>
     <string name="settings_platform_note_2">不會讀取、點選或控制其他 App 的介面。</string>
     <string name="settings_platform_note_3">跨 App 資料透過快捷指令輸入或系統分享完成。</string>
-    <string name="settings_privacy_footer">靈犀對你的承諾：金鑰永遠不離開本機；對話預設不被用於訓練。</string>
+    <string name="settings_privacy_footer">對話和設定儲存在本機。執行任務時，相關內容及認證憑證會傳送至你設定的服務；語音也可能由系統或雲端服務處理。帳號登入使用 Firebase。你可以在系統設定中管理權限。</string>
     <string name="settings_provider_added_count_fmt">已新增 · %1$d</string>
     <string name="settings_provider_advanced_footer">當前移動引擎尚未提供這兩項可配置能力；設定頁不會儲存無效開關。</string>
     <string name="settings_provider_api_key">API 金鑰</string>
@@ -1855,4 +1855,7 @@
     <string name="audio_cloud_rate_fixed">雲端語音目前僅支援 1.0× 語速，原有語速設定會保留。</string>
     <string name="audio_cloud_rate_reset">使用 1.0×</string>
     <string name="settings_section_voice_output">語音輸出</string>
+    <string name="privacy_policy_link">隱私政策</string>
+    <string name="privacy_deletion_link">資料與帳號刪除</string>
+    <string name="privacy_data_summary">對話和設定儲存在本機。執行任務時，相關內容及認證憑證會傳送至你設定的服務；語音也可能由系統或雲端服務處理。帳號登入使用 Firebase。你可以在系統設定中管理權限。</string>
 </resources>

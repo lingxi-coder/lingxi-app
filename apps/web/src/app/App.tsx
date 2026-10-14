@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { ConsoleLayout } from '../layouts/ConsoleLayout';
 import { DocsPage } from '../pages/DocsPage';
+import { PrivacyPage, DataDeletionPage } from '../pages/PrivacyPage';
 import { LoginPage } from '../pages/LoginPage';
 import {
   ApiKeysPage,
@@ -24,7 +25,9 @@ export function App() {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
     if (!route.startsWith('/docs')) {
-      document.title = locale === 'zh' ? '灵犀 LingXi — 让想法，成为现实。' : 'LingXi — Bring your ideas to life.';
+      document.title = route === '/privacy' ? (locale === 'zh' ? '隐私政策 — 灵犀 LingXi' : 'Privacy policy — LingXi')
+        : route === '/data-deletion' ? (locale === 'zh' ? '数据与账号删除 — 灵犀 LingXi' : 'Data and account deletion — LingXi')
+        : locale === 'zh' ? '灵犀 LingXi — 让想法，成为现实。' : 'LingXi — Bring your ideas to life.';
       const description = document.querySelector<HTMLMetaElement>('meta[name="description"]');
       if (description) description.content = locale === 'zh'
         ? '灵犀 LingXi：跨平台 AI 开发助手。探索 Harness Runtime、LLM Client 与 Mobile Linux SDK 和开发者文档。'
@@ -81,7 +84,11 @@ export function App() {
     );
   }
 
-  const page = route === '/download'
+  const page = route === '/privacy'
+    ? <PrivacyPage locale={locale} />
+    : route === '/data-deletion'
+      ? <DataDeletionPage locale={locale} />
+    : route === '/download'
     ? <DownloadPage locale={locale} />
     : route === '/pricing'
       ? <PricingPage locale={locale} region={region} />

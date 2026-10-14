@@ -71,6 +71,7 @@ export function LingxiAccount() {
         </div>
         <span style={{ color: t.text3, fontSize: 12 }}>Google 和 Apple 登录将在系统浏览器中完成。</span>
       </>}
+      <a href="https://lingxios.net/privacy" target="_blank" rel="noreferrer" style={{ color: t.text3, fontSize: 12 }}>隐私政策 ↗</a>
       {busy && <div role="status">正在处理… <button type="button" style={ghostButtonStyle(t)} onClick={() => void run({ type: 'cancel' })}>取消浏览器登录</button></div>}
       {(state?.error || message) && <p role={state?.error ? 'alert' : 'status'} style={{ margin: 0 }}>{state?.error || message}</p>}
       {state?.persistence === 'session' && <small style={{ color: t.text3 }}>此设备的安全存储暂不可用，关闭应用后需重新登录。</small>}

@@ -1903,4 +1903,15 @@
     <string name="plugins_detail_hooks">フック</string>
     <string name="plugins_detail_mcp">MCP サーバー</string>
     <string name="plugins_detail_settings">設定</string>
+    <string name="composer_effort">思考の深さ</string>
+    <string name="composer_effort_auto">自動</string>
+    <string name="composer_effort_off">オフ</string>
+    <string name="composer_effort_on">オン</string>
+    <string name="composer_effort_budget">%1$s トークン</string>
+    <string name="composer_effort_minimal">最小</string>
+    <string name="composer_effort_low">低</string>
+    <string name="composer_effort_medium">中</string>
+    <string name="composer_effort_high">高</string>
+    <string name="composer_effort_xhigh">最高</string>
+    <string name="composer_effort_max">最大</string>
 </resources>

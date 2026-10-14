@@ -1903,4 +1903,15 @@
     <string name="plugins_detail_hooks">钩子</string>
     <string name="plugins_detail_mcp">MCP 服务器</string>
     <string name="plugins_detail_settings">设置</string>
+    <string name="composer_effort">思考强度</string>
+    <string name="composer_effort_auto">自动</string>
+    <string name="composer_effort_off">关闭</string>
+    <string name="composer_effort_on">开启</string>
+    <string name="composer_effort_budget">%1$s tokens</string>
+    <string name="composer_effort_minimal">极低</string>
+    <string name="composer_effort_low">低</string>
+    <string name="composer_effort_medium">中</string>
+    <string name="composer_effort_high">高</string>
+    <string name="composer_effort_xhigh">超高</string>
+    <string name="composer_effort_max">最大</string>
 </resources>

@@ -1903,4 +1903,15 @@
     <string name="plugins_detail_hooks">훅</string>
     <string name="plugins_detail_mcp">MCP 서버</string>
     <string name="plugins_detail_settings">설정</string>
+    <string name="composer_effort">사고 강도</string>
+    <string name="composer_effort_auto">자동</string>
+    <string name="composer_effort_off">끔</string>
+    <string name="composer_effort_on">켬</string>
+    <string name="composer_effort_budget">%1$s 토큰</string>
+    <string name="composer_effort_minimal">최소</string>
+    <string name="composer_effort_low">낮음</string>
+    <string name="composer_effort_medium">보통</string>
+    <string name="composer_effort_high">높음</string>
+    <string name="composer_effort_xhigh">매우 높음</string>
+    <string name="composer_effort_max">최대</string>
 </resources>

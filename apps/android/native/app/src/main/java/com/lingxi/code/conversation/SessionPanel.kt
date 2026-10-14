@@ -37,6 +37,8 @@ internal data class SessionPanelModel(
     val mode: SessionMode,
     val workspaceName: String,
     val modelName: String,
+    /** The effort the engine reports for the model, already localized; null when unknown. */
+    val effortLabel: String? = null,
     /** Effective permission mode, already localized; null when unknown. */
     val permissionLabel: String?,
     val pinned: Boolean,
@@ -112,8 +114,16 @@ internal fun SessionPanel(
                     label = stringResource(R.string.session_details_model),
                     value = model.modelName,
                     chevron = false,
-                    isLast = !showsPermission,
+                    isLast = !showsPermission && model.effortLabel == null,
                 )
+                model.effortLabel?.let { effort ->
+                    SettingsRow(
+                        label = stringResource(R.string.composer_effort),
+                        value = effort,
+                        chevron = false,
+                        isLast = !showsPermission,
+                    )
+                }
                 if (showsPermission) {
                     SettingsRow(
                         label = stringResource(R.string.settings_parity_permissions),

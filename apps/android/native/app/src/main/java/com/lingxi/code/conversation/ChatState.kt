@@ -48,6 +48,8 @@ data class ChatState(
      * the engine reports a catalog. The active row is [model].
      */
     val availableModels: List<ModelOption> = emptyList(),
+    /** The active model's effort control; null until the engine reports it. */
+    val reasoning: com.lingxi.code.model.ReasoningControl? = null,
     /** Engine-owned slash metadata, including argument hints for the draft. */
     val slashCommands: List<ConversationSlashCommand> = emptyList(),
     /**

@@ -2026,5 +2026,16 @@
   "plugins_detail_agents": "サブエージェント",
   "plugins_detail_hooks": "フック",
   "plugins_detail_mcp": "MCP サーバー",
-  "plugins_detail_settings": "設定"
+  "plugins_detail_settings": "設定",
+  "composer_effort": "思考の深さ",
+  "composer_effort_auto": "自動",
+  "composer_effort_off": "オフ",
+  "composer_effort_on": "オン",
+  "composer_effort_budget": "%1$s トークン",
+  "composer_effort_minimal": "最小",
+  "composer_effort_low": "低",
+  "composer_effort_medium": "中",
+  "composer_effort_high": "高",
+  "composer_effort_xhigh": "最高",
+  "composer_effort_max": "最大"
 }

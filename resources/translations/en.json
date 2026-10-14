@@ -2031,5 +2031,16 @@
   "plugins_detail_agents": "Subagents",
   "plugins_detail_hooks": "Hooks",
   "plugins_detail_mcp": "MCP servers",
-  "plugins_detail_settings": "Settings"
+  "plugins_detail_settings": "Settings",
+  "composer_effort": "Effort",
+  "composer_effort_auto": "Auto",
+  "composer_effort_off": "Off",
+  "composer_effort_on": "On",
+  "composer_effort_budget": "%1$s tokens",
+  "composer_effort_minimal": "Minimal",
+  "composer_effort_low": "Low",
+  "composer_effort_medium": "Medium",
+  "composer_effort_high": "High",
+  "composer_effort_xhigh": "Extra high",
+  "composer_effort_max": "Max"
 }

@@ -1,6 +1,13 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ControlDisabledReasonDto
+import com.lingxi.code.bindings.client.ConversationControlsDto
+import com.lingxi.code.bindings.client.PermissionControlStateDto
+import com.lingxi.code.bindings.client.ReasoningControlSpecDto
+import com.lingxi.code.bindings.client.ReasoningControlStateDto
+import com.lingxi.code.bindings.client.ReasoningOptionDto
+import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
@@ -8,6 +15,7 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.model.ModelMetadata
+import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.model.ConnStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -84,6 +92,66 @@ class ModelStateTest {
         )
         assertEquals(listOf("claude-haiku-4"), next.available)
         assertEquals("claude-haiku-4", next.active)
+    }
+
+    // --- reduceModelEvent: ConversationControlsChanged ---------------------
+
+    @Test
+    fun controlsChanged_setsEffortForActiveModel() {
+        val prev = EngineModelState(available = listOf("a/opus"), active = "a/opus")
+        val next = reduceModelEvent(prev, controlsChanged("a/opus", effective = ReasoningSelectionDto.Level("high")))
+        val reasoning = next.reasoning!!
+        assertEquals("high", reasoning.selection)
+        // Automatic and budgets are not levels on the track.
+        assertEquals(listOf("low", "high"), reasoning.levels)
+        assertTrue(reasoning.editable)
+        assertEquals(null, reasoning.disabledReason)
+    }
+
+    @Test
+    fun controlsChanged_forAnotherModel_isIgnored() {
+        val prev = EngineModelState(available = listOf("a/opus", "a/haiku"), active = "a/opus")
+        val next = reduceModelEvent(prev, controlsChanged("a/haiku"))
+        assertSame(prev, next)
+    }
+
+    @Test
+    fun modelChanged_dropsTheOldModelsEffort_andModelListKeepsIt() {
+        val withEffort = reduceModelEvent(
+            EngineModelState(available = listOf("a/opus", "a/haiku"), active = "a/opus"),
+            controlsChanged("a/opus"),
+        )
+        val relisted = reduceModelEvent(
+            withEffort,
+            ClientEvent.ModelList(models = listOf("a/opus", "a/haiku"), current = "a/opus", details = emptyList()),
+        )
+        assertEquals(withEffort.reasoning, relisted.reasoning)
+        val switched = reduceModelEvent(relisted, ClientEvent.ModelChanged(model = "a/haiku"))
+        assertEquals(null, switched.reasoning)
+    }
+
+    @Test
+    fun reasoningIds_roundTripToTheWireSelection() {
+        listOf(
+            ReasoningSelectionDto.Automatic,
+            ReasoningSelectionDto.Disabled,
+            ReasoningSelectionDto.Enabled,
+            ReasoningSelectionDto.Level("xhigh"),
+            ReasoningSelectionDto.TokenBudget(4096uL),
+        ).forEach { selection ->
+            assertEquals(selection, ReasoningControl.selection(ReasoningControl.id(selection)))
+        }
+    }
+
+    @Test
+    fun lockedControl_carriesTheEngineReason() {
+        val prev = EngineModelState(available = listOf("a/opus"), active = "a/opus")
+        val next = reduceModelEvent(
+            prev,
+            controlsChanged("a/opus", editable = false, disabledReason = ControlDisabledReasonDto("forced", "Always on")),
+        )
+        assertFalse(next.reasoning!!.editable)
+        assertEquals("Always on", next.reasoning!!.disabledReason)
     }
 
     // --- reduceModelEvent: ModelChanged -----------------------------------
@@ -560,6 +628,35 @@ class ModelStateTest {
             capabilities = capabilities,
             contextWindow = contextWindow,
             pricing = pricing,
+        ),
+    )
+
+    private fun controlsChanged(
+        model: String,
+        effective: ReasoningSelectionDto = ReasoningSelectionDto.Automatic,
+        editable: Boolean = true,
+        disabledReason: ControlDisabledReasonDto? = null,
+    ) = ClientEvent.ConversationControlsChanged(
+        controls = ConversationControlsDto(
+            qualifiedModel = model,
+            permission = PermissionControlStateDto(requested = "auto", effective = "auto", options = emptyList()),
+            reasoning = ReasoningControlStateDto(
+                requested = effective,
+                effective = effective,
+                spec = ReasoningControlSpecDto(
+                    options = listOf(
+                        ReasoningOptionDto(ReasoningSelectionDto.Automatic, true),
+                        ReasoningOptionDto(ReasoningSelectionDto.Level("low"), true),
+                        ReasoningOptionDto(ReasoningSelectionDto.Level("high"), true),
+                        ReasoningOptionDto(ReasoningSelectionDto.TokenBudget(2048uL), false),
+                    ),
+                    budgetRange = null,
+                    providerDefault = ReasoningSelectionDto.Automatic,
+                    forcedReasoning = false,
+                    editable = editable,
+                    disabledReason = disabledReason,
+                ),
+            ),
         ),
     )
 }

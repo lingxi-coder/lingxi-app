@@ -2026,5 +2026,16 @@
   "plugins_detail_agents": "하위 에이전트",
   "plugins_detail_hooks": "훅",
   "plugins_detail_mcp": "MCP 서버",
-  "plugins_detail_settings": "설정"
+  "plugins_detail_settings": "설정",
+  "composer_effort": "사고 강도",
+  "composer_effort_auto": "자동",
+  "composer_effort_off": "끔",
+  "composer_effort_on": "켬",
+  "composer_effort_budget": "%1$s 토큰",
+  "composer_effort_minimal": "최소",
+  "composer_effort_low": "낮음",
+  "composer_effort_medium": "보통",
+  "composer_effort_high": "높음",
+  "composer_effort_xhigh": "매우 높음",
+  "composer_effort_max": "최대"
 }

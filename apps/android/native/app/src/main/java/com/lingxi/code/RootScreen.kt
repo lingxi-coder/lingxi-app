@@ -54,6 +54,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.conversation.AndroidConversationBackgroundExecution
 import com.lingxi.code.conversation.ChatScreen
+import com.lingxi.code.conversation.effortLabel
 import com.lingxi.code.conversation.ConversationTurnOrigin
 import com.lingxi.code.conversation.ConversationTurnOutcome
 import com.lingxi.code.conversation.ChatViewModel
@@ -240,7 +241,6 @@ fun RootScreen(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
-    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenVoiceSettings: () -> Unit = { onOpenSettings() },
@@ -1860,6 +1860,7 @@ fun RootScreen(
                         }
                     },
                     onSelectModel = chatViewModel::selectModel,
+                    onSelectReasoning = chatViewModel::selectReasoning,
                     isDark = isDark,
                     sessionMode = activeSessionMode,
                     workspaceName = currentWorkspaceName,
@@ -2150,6 +2151,7 @@ fun RootScreen(
                     mode = activeSessionMode,
                     workspaceName = currentWorkspaceName,
                     modelName = state.model.name,
+                    effortLabel = state.reasoning?.let { effortLabel(it.selection) },
                     permissionLabel = permissionModeLabel(settingsState.effectivePermissionMode),
                     pinned = drawerUi.sessionPinnedAt(state.session.id) != null,
                     canArchive = sourceScope != ConversationScope.Scheduled,

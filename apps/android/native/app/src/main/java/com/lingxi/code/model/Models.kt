@@ -596,8 +596,60 @@ data class EngineModelState(
     val available: List<String> = emptyList(),
     val active: String = "",
     val details: Map<String, CatalogModelDetails> = emptyMap(),
+    /** The active model's effort control; null until the engine reports it. */
+    val reasoning: ReasoningControl? = null,
 ) {
     val hasCatalog: Boolean get() = available.isNotEmpty()
+}
+
+/**
+ * The engine's effort control for the active model (`ConversationControlsChanged`).
+ * Selections use the ids `setReasoningSelection` sends: `automatic`, `disabled`,
+ * `enabled`, `budget:<tokens>`, or a provider level id such as `high`.
+ */
+data class ReasoningControl(
+    val selection: String,
+    /** The provider's discrete levels, in the engine's order. */
+    val levels: List<String>,
+    val editable: Boolean,
+    val disabledReason: String?,
+) {
+    companion object {
+        const val AUTOMATIC = "automatic"
+
+        fun id(selection: com.lingxi.code.bindings.client.ReasoningSelectionDto): String = when (selection) {
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic -> AUTOMATIC
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Disabled -> "disabled"
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Enabled -> "enabled"
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Level -> selection.id
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.TokenBudget -> "budget:${selection.tokens}"
+        }
+
+        fun selection(id: String): com.lingxi.code.bindings.client.ReasoningSelectionDto = when {
+            id == AUTOMATIC -> com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic
+            id == "disabled" -> com.lingxi.code.bindings.client.ReasoningSelectionDto.Disabled
+            id == "enabled" -> com.lingxi.code.bindings.client.ReasoningSelectionDto.Enabled
+            id.startsWith("budget:") -> com.lingxi.code.bindings.client.ReasoningSelectionDto.TokenBudget(
+                id.removePrefix("budget:").toULongOrNull() ?: 0uL,
+            )
+            else -> com.lingxi.code.bindings.client.ReasoningSelectionDto.Level(id)
+        }
+
+        fun from(controls: com.lingxi.code.bindings.client.ConversationControlsDto): ReasoningControl {
+            val spec = controls.reasoning.spec
+            // Same filter as iOS `ConversationEffortControl`: the track shows
+            // levels only; automatic/disabled/budgets are not points on it.
+            val levels = spec.options.map { id(it.selection) }
+                .filter { it.isNotEmpty() && it != AUTOMATIC && it != "disabled" && !it.startsWith("budget:") }
+                .distinct()
+            return ReasoningControl(
+                selection = id(controls.reasoning.effective),
+                levels = levels,
+                editable = spec.editable,
+                disabledReason = spec.disabledReason?.let { it.message ?: it.code },
+            )
+        }
+    }
 }
 
 /**

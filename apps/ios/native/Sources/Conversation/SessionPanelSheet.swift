@@ -64,7 +64,7 @@ struct SessionPanelSheet: View {
                         value: modelName,
                         identifier: "session-panel.model"
                     ) { onAction(.model) }
-                    row(title: "Effort", value: effortLabel, identifier: "session-panel.effort") {
+                    row(title: String(localized: "composer_effort"), value: effortLabel, identifier: "session-panel.effort") {
                         onAction(.model)
                     }
                     if let permissionLabel {

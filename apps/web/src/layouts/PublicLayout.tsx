@@ -82,7 +82,7 @@ export function PublicLayout({
         </header>
         <main id="landing-main">{children}</main>
         <footer className="landing-footer">
-          <div><Brand compact /><p>{t('Tools for ideas worth building.', '为每一个值得实现的想法。')}</p></div>
+          <div><Brand compact /><p>{t('Your personal AI agent.', '你的个人辅助 Agent。')}</p></div>
           <div className="landing-footer-links">
             <RouteLink href="/privacy">{t('Privacy', '隐私政策')}</RouteLink>
             <RouteLink href="/data-deletion">{t('Data deletion', '数据删除')}</RouteLink>
@@ -100,11 +100,11 @@ export function PublicLayout({
       <div className="ambient-grid" aria-hidden="true" />
       <header className="public-header">
         <div className="announcement-bar">
-          <span className="eyebrow">New</span>
+          <span className="eyebrow">LingXi</span>
           <span>
             {pickLocaleText(locale, {
-              en: 'Product concept: one task moving clearly across desktop, phone, and CLI.',
-              zh: '产品概念：让同一个任务在桌面、手机与 CLI 间清晰接续。',
+              en: 'Your personal AI agent, here to help with everyday tasks.',
+              zh: '心有灵犀，助你成事。你的个人辅助 Agent。',
             })}
           </span>
         </div>
@@ -147,8 +147,8 @@ export function PublicLayout({
           <div className="wordmark small"><Brand compact /></div>
           <p>
             {pickLocaleText(locale, {
-              en: 'Cross-device AI development assistance for individual builders.',
-              zh: '面向个人开发者的跨设备 AI 开发助手。',
+              en: 'Your personal AI agent, here to help with everyday life.',
+              zh: '你的个人辅助 Agent，与你一起把日常的事情做好。',
             })}
           </p>
         </div>

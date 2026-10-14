@@ -51,6 +51,10 @@ fun LingxiAccountSection(model: AccountViewModel = viewModel()) {
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.message?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("account.message")) }
+        val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+        TextButton(onClick = { uriHandler.openUri("https://lingxios.net/privacy") }) {
+            Text(androidx.compose.ui.res.stringResource(R.string.privacy_policy_link))
+        }
         HorizontalDivider()
     }
 }

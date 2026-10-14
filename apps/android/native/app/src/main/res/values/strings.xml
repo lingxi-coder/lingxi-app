@@ -1198,7 +1198,7 @@
     <string name="settings_platform_note_1">使用 iOS 公共 API，动作会由系统展示和授权。</string>
     <string name="settings_platform_note_2">不会读取、点击或控制其他 App 的界面。</string>
     <string name="settings_platform_note_3">跨 App 数据通过快捷指令输入或系统分享完成。</string>
-    <string name="settings_privacy_footer">灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。</string>
+    <string name="settings_privacy_footer">对话和设置保存在本地。执行任务时，相关内容及认证凭据会发送至你配置的服务；语音也可能由系统或云端服务处理。账号登录使用 Firebase。你可以在系统设置中管理权限。</string>
     <string name="settings_provider_added_count_fmt">已添加 · %1$d</string>
     <string name="settings_provider_advanced_footer">当前移动引擎尚未提供这两项可配置能力；设置页不会保存无效开关。</string>
     <string name="settings_provider_api_key">API 密钥</string>
@@ -1855,4 +1855,7 @@
     <string name="audio_cloud_rate_fixed">云端语音目前仅支持 1.0× 语速，原有语速设置会保留。</string>
     <string name="audio_cloud_rate_reset">使用 1.0×</string>
     <string name="settings_section_voice_output">语音输出</string>
+    <string name="privacy_policy_link">隐私政策</string>
+    <string name="privacy_deletion_link">数据与账号删除</string>
+    <string name="privacy_data_summary">对话和设置保存在本地。执行任务时，相关内容及认证凭据会发送至你配置的服务；语音也可能由系统或云端服务处理。账号登录使用 Firebase。你可以在系统设置中管理权限。</string>
 </resources>

@@ -1198,7 +1198,7 @@
     <string name="settings_platform_note_1">Uses public iOS APIs — actions are presented and authorized by the system.</string>
     <string name="settings_platform_note_2">Never reads, taps, or controls the UI of other apps.</string>
     <string name="settings_platform_note_3">Cross-app data flows through Shortcuts input or the system share sheet.</string>
-    <string name="settings_privacy_footer">Our promise to you: your keys never leave this device, and your conversations aren\'t used for training by default.</string>
+    <string name="settings_privacy_footer">Conversations and settings are stored locally. Tasks send relevant content and authentication credentials to configured services; speech may use system or cloud services. Account sign-in uses Firebase. Manage permissions in system settings.</string>
     <string name="settings_provider_added_count_fmt">Added · %1$d</string>
     <string name="settings_provider_advanced_footer">The mobile engine doesn\'t yet expose these two configurable capabilities — the settings page won\'t save an ineffective toggle.</string>
     <string name="settings_provider_api_key">API Key</string>
@@ -1855,4 +1855,7 @@
     <string name="audio_cloud_rate_fixed">Cloud speech currently supports 1.0× speed. Your saved speed is retained.</string>
     <string name="audio_cloud_rate_reset">Use 1.0×</string>
     <string name="settings_section_voice_output">Voice Output</string>
+    <string name="privacy_policy_link">Privacy policy</string>
+    <string name="privacy_deletion_link">Data and account deletion</string>
+    <string name="privacy_data_summary">Conversations and settings are stored locally. Tasks send relevant content and authentication credentials to configured services; speech may use system or cloud services. Account sign-in uses Firebase. Manage permissions in system settings.</string>
 </resources>

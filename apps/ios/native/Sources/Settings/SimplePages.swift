@@ -175,18 +175,20 @@ struct InputPage: View {
 
 // MARK: - Privacy
 struct PrivacyPage: View {
-    @State private var contribute = false
-    @State private var crash = true
+    @Environment(\.openURL) private var openURL
     var body: some View {
         VStack(spacing: 0) {
-            SettingsSection(label: String(localized: "settings_section_data")) {
-                SettingsRow(icon: .brain, label: String(localized: "settings_export_data"), onTap: {})
-                SettingsRow(icon: .x, label: String(localized: "settings_delete_account"), danger: true, isLast: true, onTap: {})
-            }
-            SettingsSection(label: String(localized: "settings_section_visibility"),
-                            footer: String(localized: "settings_privacy_footer")) {
-                SettingsRow(label: String(localized: "settings_contribute_training"), chevron: false) { LXToggle(isOn: $contribute) }
-                SettingsRow(label: String(localized: "settings_crash_report"), chevron: false, isLast: true) { LXToggle(isOn: $crash) }
+            SettingsSection(label: String(localized: "settings_section_data"),
+                            footer: String(localized: "privacy_data_summary")) {
+                SettingsRow(label: String(localized: "privacy_policy_link"), onTap: {
+                    openURL(URL(string: "https://lingxios.net/privacy")!)
+                })
+                SettingsRow(label: String(localized: "privacy_deletion_link"), onTap: {
+                    openURL(URL(string: "https://lingxios.net/data-deletion")!)
+                })
+                SettingsRow(label: "support.lingxi@gmail.com", isLast: true, onTap: {
+                    openURL(URL(string: "mailto:support.lingxi@gmail.com")!)
+                })
             }
         }
     }

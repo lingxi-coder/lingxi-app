@@ -173,6 +173,15 @@ private fun NotifToggleRow(
 internal fun NativeSystemSettingsPage(input: Boolean) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val title = androidx.compose.ui.res.stringResource(if (input) com.lingxi.code.R.string.settings_keyboard_input else com.lingxi.code.R.string.settings_data_privacy)
+    if (!input) {
+        val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(stringResource(R.string.privacy_data_summary), style = MaterialTheme.typography.bodyMedium)
+            TextButton(onClick = { uriHandler.openUri("https://lingxios.net/privacy") }) { Text(stringResource(R.string.privacy_policy_link)) }
+            TextButton(onClick = { uriHandler.openUri("https://lingxios.net/data-deletion") }) { Text(stringResource(R.string.privacy_deletion_link)) }
+            Text("support.lingxi@gmail.com", style = MaterialTheme.typography.bodySmall)
+        }
+    }
     TextButton(onClick = {
         val intent = if (input) android.content.Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS)
         else android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,android.net.Uri.parse("package:${context.packageName}"))

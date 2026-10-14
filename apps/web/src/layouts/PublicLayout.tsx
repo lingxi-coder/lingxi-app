@@ -78,6 +78,8 @@ export function PublicLayout({
         <footer className="landing-footer">
           <div><Brand compact /><p>{t('Tools for ideas worth building.', '为每一个值得实现的想法。')}</p></div>
           <div className="landing-footer-links">
+            <RouteLink href="/privacy">{t('Privacy', '隐私政策')}</RouteLink>
+            <RouteLink href="/data-deletion">{t('Data deletion', '数据删除')}</RouteLink>
             <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
             <RouteLink href="/docs">{t('Documentation', '开发者文档')}</RouteLink>
             <a href="https://github.com/lingxi-coder/lingxi-app" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
@@ -144,6 +146,8 @@ export function PublicLayout({
           </p>
         </div>
         <div className="footer-links">
+          <RouteLink href="/privacy">{locale === 'zh' ? '隐私政策' : 'Privacy'}</RouteLink>
+          <RouteLink href="/data-deletion">{locale === 'zh' ? '数据删除' : 'Data deletion'}</RouteLink>
           <RouteLink href="/download">Download</RouteLink>
           <RouteLink href="/pricing">Pricing</RouteLink>
           <RouteLink href="/docs">Docs</RouteLink>

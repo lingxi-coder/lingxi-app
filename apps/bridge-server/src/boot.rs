@@ -1491,6 +1491,10 @@ pub async fn assemble_with_credentials(
         let active = active_settings_baseline(&paths, &managed)
             .map_err(|error| settings_error_message(&error))?;
         SettingsContext {
+            fusion_layers: Some(Arc::new({
+                let config = cfg.clone();
+                move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
+            })),
             paths,
             active: Arc::new(std::sync::RwLock::new(active)),
             managed,

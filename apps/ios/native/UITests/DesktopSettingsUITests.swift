@@ -67,7 +67,7 @@ final class DesktopSettingsUITests: XCTestCase {
             attach("Tablet-Chat-Inspector-\(theme)")
             app.buttons["session-inspector-close"].tap()
             XCTAssertFalse(inspector.exists)
-            XCTAssertTrue(app.textFields["composer.input"].isHittable)
+            XCTAssertTrue(app.textViews["composer.input"].isHittable)
             attach("Tablet-Chat-\(theme)")
             app.terminate()
         }
@@ -81,7 +81,7 @@ final class DesktopSettingsUITests: XCTestCase {
                                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
         XCUIDevice.shared.orientation = .portrait
         app.launch()
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 12), app.debugDescription)
         XCTAssertGreaterThanOrEqual(input.frame.height, 40)
         for id in ["composer.model", "composer.controls", "composer.voice", "composer.flow"] {
@@ -105,7 +105,7 @@ final class DesktopSettingsUITests: XCTestCase {
         attach("Phone-LargeText-ModelSearch")
         result.tap()
         app.buttons["composer.model.close"].tap()
-        XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
     func testPhoneReducedMotionKeepsRunningControlsAccessible() throws {
@@ -116,7 +116,7 @@ final class DesktopSettingsUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_HOLD_TURN"] = "1"
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-theme", "dark"]
         app.launch()
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 12), app.debugDescription)
         input.tap()
         input.typeText("Check reduced motion")

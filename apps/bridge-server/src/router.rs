@@ -1693,6 +1693,9 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::McpAdmin { command } => {
                 self.apply_mcp_admin(command, &*sink).await;
             }
+            ClientCommand::FusionAdmin { command } => {
+                self.apply_fusion_admin(command, &*sink).await;
+            }
             ClientCommand::PluginAdmin { command } => {
                 self.apply_plugin_admin(command, &*sink).await;
             }

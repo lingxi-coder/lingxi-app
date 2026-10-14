@@ -1,5 +1,6 @@
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
 import { AudioSetupGuide } from './AudioSetupGuide';
+import { ComposerSlashArgumentHint } from './ComposerSlashArgumentHint';
 import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
@@ -8,6 +9,9 @@ import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
 import { ContextWindow } from './ContextWindow';
+import { FusionStrategyPicker } from './FusionStrategyPicker';
+import { chooseFusionStrategy, fusionInvocation } from '../../shared/fusionStrategy';
+import { parseFusionCatalog } from './settings/pages/FusionCatalog';
 import {
   useCallback,
   useEffect,
@@ -23,6 +27,7 @@ import {
 } from 'react';
 import type {
   ImageRefDto,
+  FusionStrategyRefDto,
   ModelDetailsDto,
   ReasoningSelectionDto,
   SessionRowDto,
@@ -52,6 +57,7 @@ import {
   slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
+import { slashArgumentHint } from '../bridge/slashArgumentHint';
 import {
   filterModelGroups,
   filterVisibleModelReferences,
@@ -1655,11 +1661,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [rejectedSuggestionUuid, setRejectedSuggestionUuid] = useState<string | null>(null);
   const [suggestionWindowFocused, setSuggestionWindowFocused] = useState(() => typeof document !== 'undefined' && document.hasFocus());
   const [promptComposing, setPromptComposing] = useState(false);
+  const [promptCursorOffset, setPromptCursorOffset] = useState(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
   const [modelQuery, setModelQuery] = useState('');
   const [submenuBounds, setSubmenuBounds] = useState<ModelPickerSubmenuBounds | null>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [fusionChoice, setFusionChoice] = useState<{ sessionId: string | null; reference: FusionStrategyRefDto | null } | null>(null);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
   const [fileResults, setFileResults] = useState<string[]>([]);
@@ -1706,6 +1714,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const composerDraftRevision = useRef(0);
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
+  const selectedFusion = fusionChoice?.sessionId === activeSessionId ? fusionChoice.reference : null;
+  const fusionDraft = /^\s*\/fusion(?:\s|$)/i.test(text) && !/^\s*\/fusion\s+(?:setup|clean)\s*$/i.test(text);
+  const typedFusion = useMemo(() => {
+    try { return fusionInvocation(text)?.strategy; } catch { return undefined; }
+  }, [text]);
   const audio = nativeAudioApi();
   const voicePrefs = bridge.bootstrap?.settings.voice ?? audioConfigurationDefaults();
   const inputAudioGate = audioFeatureGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot(), 'listen');
@@ -1815,7 +1828,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     emit: (output, isError) => bridge.emitCommandOutput(output, isError === true),
   }), [bridge, onOpenSettings, onOpenSettingsPage, onSetTheme]);
 
-  const slashMenuOpen = slashQuery !== null && ready;
+  const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
+  const argumentHint = useMemo(() => !promptComposing && !hasMentionTokens && !filePicker
+    ? slashArgumentHint(text, promptCursorOffset, bridge.desktop.slashCommands)
+    : undefined, [text, promptCursorOffset, bridge.desktop.slashCommands, promptComposing, hasMentionTokens, filePicker]);
+  const slashMenuOpen = slashQuery !== null && ready && !argumentHint;
 
   const fileMenuOpen = Boolean(filePicker && ready);
 
@@ -2084,6 +2101,20 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     return snapshot;
   };
 
+  useEffect(() => {
+    const updateCursor = () => {
+      const editor = input.current;
+      const selection = window.getSelection();
+      if (!editor || !selection?.focusNode || !editor.contains(selection.focusNode)) return;
+      const prefix = document.createRange();
+      prefix.selectNodeContents(editor);
+      prefix.setEnd(selection.focusNode, selection.focusOffset);
+      setPromptCursorOffset(richPromptText(prefix.cloneContents()).length);
+    };
+    document.addEventListener('selectionchange', updateCursor);
+    return () => document.removeEventListener('selectionchange', updateCursor);
+  }, []);
+
   useLayoutEffect(() => {
     imageDraftGeneration.current += 1;
     const editor = input.current;
@@ -2116,7 +2147,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
     draftSessionId.current = activeSessionId;
     const draft = activeSessionId ? draftsBySession.current.get(activeSessionId) : undefined;
-    editor.innerHTML = draft?.html ?? '';
+    // Adopting the live draft must preserve its nodes and browser selection.
+    if (!carryDraft) editor.innerHTML = draft?.html ?? '';
     setText(draft?.text ?? '');
     setSelectedFiles(draft ? [...draft.files] : []);
     const images = draft ? [...draft.images] : [];
@@ -2126,7 +2158,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setFilePicker(null);
     setPreviewPath(null);
     mentionDismissed.current = false;
-    savedEditorSelection.current = null;
+    if (!carryDraft) savedEditorSelection.current = null;
     setSlashQuery(null);
     activeMentionRange.current = null;
     activeSlashRange.current = null;
@@ -2603,7 +2635,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
       return;
     }
-    const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
+    let slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
       setImageNotice('当前任务完成后才能运行 / 命令。');
@@ -2616,6 +2648,21 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     if (isSlashCommand && imageAttachments.length) {
       setImageNotice('图片附件不能和 / 命令一起发送，请先输入普通问题。');
       return;
+    }
+    if (isSlashCommand) {
+      try {
+        const invocation = fusionInvocation(slashCommand);
+        if (invocation && !invocation.strategy) {
+          if (selectedFusion) slashCommand = chooseFusionStrategy(slashCommand, selectedFusion);
+          else if (!parseFusionCatalog(bridge.fusionCatalogEvent?.catalog_json).default_strategy) {
+            setImageNotice('请选择一个 Fusion 策略，或在设置中指定默认策略。');
+            return;
+          }
+        }
+      } catch (cause) {
+        setImageNotice(cause instanceof Error ? cause.message : '无法读取 Fusion 策略。');
+        return;
+      }
     }
     if (voiceState === 'listening') stopVoice();
     if (isSlashCommand) {
@@ -2720,7 +2767,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     const insertion = activeSlashRange.current?.cloneRange() ?? editorSelection(editor);
     insertion.deleteContents();
-    const command = document.createTextNode(slashCommandText(name));
+    const command = document.createTextNode(`${slashCommandText(name)} `);
     insertion.insertNode(command);
     const caret = document.createRange();
     caret.setStart(command, command.length);
@@ -3080,7 +3127,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     selection?.addRange(range);
   };
   const draftCommand = parseSlashCommandPrefix(text);
-  const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
   const decorateCommand = Boolean(draftCommand && !promptComposing && !hasMentionTokens);
   const promptTextStyle: CSSProperties = {
     display: 'block', width: '100%', minHeight: 56, maxHeight: 'min(144px, 24vh)', overflowY: 'auto',
@@ -3172,6 +3218,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <VisualizationContextBadge chip={visualizationChip} onDismiss={() => setVisualizationChip(null)} />
           </div>
         )}
+        {fusionDraft && <FusionStrategyPicker catalogJson={bridge.fusionCatalogEvent?.catalog_json}
+          value={typedFusion ?? selectedFusion} explicit={Boolean(typedFusion)} disabled={!ready || bridge.running}
+          onChange={(reference) => setFusionChoice({ sessionId: activeSessionId, reference })}
+          onSettings={() => onOpenSettingsPage('fusion')} />}
         <div className="composer-input-view">
           <div
             ref={input}
@@ -3216,7 +3266,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             aria-disabled={false}
             aria-autocomplete="list"
             aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'mention-results' : undefined}
-            aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : undefined}
+            aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : argumentHint ? 'composer-slash-argument-hint' : undefined}
             aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
             aria-activedescendant={slashMenuOpen && slashCommands[slashResultIndex]
               ? `slash-command-result-${slashResultIndex}`
@@ -3246,6 +3296,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               <span className="composer-command-prefix">{draftCommand.prefix}</span>{draftCommand.rest}
             </div>
           )}
+          {argumentHint && <ComposerSlashArgumentHint editor={input} text={text} hint={argumentHint} color={t.text4} />}
         </div>
         {previewPath && <FileMentionPreview key={`${activeSessionId}:${previewPath}`} path={previewPath} bridge={bridge} onClose={() => { setPreviewPath(null); focusPrompt(); }} />}
         {slashMenuOpen && (

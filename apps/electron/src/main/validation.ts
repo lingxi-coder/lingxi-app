@@ -1,6 +1,7 @@
 import type {
   ClientCommand,
   ComputerAccessResponseDto,
+  FusionAdminCommandDto,
   HookAdminCommandDto,
   ImageRefDto,
   McpAdminCommandDto,
@@ -541,6 +542,11 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       exactKeys(input, ['type', 'command']);
       return { type, command: validateAdminCommand<McpAdminCommandDto>(
         input['command'], 'mcp admin', ['get_snapshot'], ['save_server', 'remove_server', 'set_approval'],
+      ) };
+    case 'fusion_admin':
+      exactKeys(input, ['type', 'command']);
+      return { type, command: validateAdminCommand<FusionAdminCommandDto>(
+        input['command'], 'fusion admin', ['get_catalog'], ['save', 'delete', 'set_default', 'set_globals'],
       ) };
     case 'plugin_admin':
       exactKeys(input, ['type', 'command']);

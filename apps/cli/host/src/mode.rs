@@ -1938,26 +1938,28 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let sandbox_handle = handle.clone();
     let sandbox_turn_tx = turn_tx.clone();
     let widget_orch = orchestrator.clone();
-    // (/fusion setup) Preload the configured Fusion model roles from the SAME
-    // `~/.lingxi/settings.json` the engine loads. Shared between `ChatWidget::cmd_fusion` (sync read, to seed the
-    // wizard and to decide whether an unconfigured `/fusion RUN` should open it
-    // instead) and `run_fusion_setup_action` (async write-back after a save).
-    //
-    // Only the PERSISTED half lives here — the candidate models come from the
-    // session catalog at open time so a provider connected mid-session is
-    // offered without a relaunch.
-    let fusion_settings = {
-        let (roles, enabled) = tui::fusion::persist::fusion_settings_path()
-            .map(|path| tui::fusion::persist::load_fusion_settings_from(&path))
-            .unwrap_or_default();
-        std::sync::Arc::new(std::sync::Mutex::new(
-            tui::fusion::setup::FusionSettingsSnapshot {
-                roles,
-                enabled,
-                max_panel: fusion_max_panel_setting(),
+    // Setup and execution share the same admitted settings sources, while
+    // writable strategy entries retain their individual source revisions.
+    // Model candidates come from the live session catalog when setup opens.
+    let fusion_admin_context = {
+        let lingxi_home = permission_paths.lingxi_home.clone();
+        let project_dir = permission_paths.cwd.clone();
+        std::sync::Arc::new(configuration_admin::settings_bridge::SettingsContext {
+            fusion_layers: Some(tui_build.fusion_layers),
+            paths: configuration_admin::settings_bridge::SettingsPaths {
+                lingxi_home,
+                project_dir,
             },
-        ))
+            active: Default::default(),
+            managed: harness_runtime::desktop::managed_settings_overlay().await,
+        })
     };
+    let fusion_settings = std::sync::Arc::new(std::sync::Mutex::new(
+        load_fusion_setup_snapshot(&fusion_admin_context).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Could not load Fusion strategies");
+            Default::default()
+        }),
+    ));
     // (/permissions) Preload the rule snapshot from the user/project/local
     // settings files into a shared slot.
     // `ChatWidget::cmd_permissions` reads a clone to seed the editor; the async
@@ -2279,7 +2281,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // result is reported into the transcript.
     let fusion_settings_cb = fusion_settings.clone();
     let on_fusion_setup_action = move |action: tui::bottom_pane::FusionSetupAction| {
-        run_fusion_setup_action(action, &fusion_turn_tx, &fusion_settings_cb);
+        run_fusion_setup_action(
+            action,
+            &fusion_turn_tx,
+            &fusion_settings_cb,
+            &fusion_admin_context,
+        );
     };
     // (/connect async effects) The picker/
     // method/key views return a `ConnectAction` synchronously from the
@@ -3978,11 +3985,17 @@ async fn described_tui_commands(
                 hidden,
                 replaces_builtin: false,
                 argument_hint: hint,
-                argument_names: command
-                    .argument_names
-                    .iter()
-                    .map(command_source_text)
-                    .collect(),
+                argument_names: if matches!(
+                    &command.kind,
+                    command_api::SlashCommandKind::Builtin { .. }
+                ) {
+                    Vec::new()
+                } else {
+                    command.argument_names
+                        .iter()
+                        .map(command_source_text)
+                        .collect()
+                },
             },
             request,
         ));
@@ -4589,89 +4602,66 @@ pub(crate) async fn run_permission_action(
     }
 }
 
-/// `fusion.maxPanel` as the merged settings say it, for the wizard's roster
-/// ceiling. Reads the same layered settings the engine loads, so the wizard
-/// cannot let an operator build a roster the engine would then reject.
-///
-/// Falls back to the documented hard cap when settings cannot be read — the
-/// wizard would otherwise cap at zero and refuse every pick.
-fn fusion_max_panel_setting() -> u8 {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    lingxi_core::settings::Settings::load(lingxi_core::settings::LoadInputs {
-        env: &env,
-        project_dir: &project_dir,
-        defaults: lingxi_core::settings::SettingsJson::default(),
-    })
-    .ok()
-    .and_then(|effective| {
-        effective
-            .settings
-            .fusion
-            .as_ref()
-            .and_then(|fusion| fusion.max_panel)
-    })
-    .unwrap_or(lingxi_core::host::FUSION_MAX_PANEL)
+/// Read the same source-aware catalog used by Desktop, including revisions.
+fn load_fusion_setup_snapshot(
+    context: &configuration_admin::settings_bridge::SettingsContext,
+) -> Result<tui::fusion::setup::FusionSettingsSnapshot, String> {
+    tui::fusion::persist::snapshot_from_catalog(&configuration_admin::fusion_admin::catalog_json(
+        context,
+    )?)
 }
 
-/// Persist one finished `/fusion setup` and report the result.
-///
-/// Synchronous on purpose: this is a single small settings-file merge. Doing it inline
-/// keeps the "saved" notice ordered before anything the operator types next.
+/// Save the selected strategy under a single settings transaction. The revision
+/// captured when the wizard opened fences changes to any sibling strategy.
 fn run_fusion_setup_action(
     action: tui::bottom_pane::FusionSetupAction,
     turn_tx: &tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
     snapshot: &std::sync::Arc<std::sync::Mutex<tui::fusion::setup::FusionSettingsSnapshot>>,
+    context: &configuration_admin::settings_bridge::SettingsContext,
 ) {
     use tui::bottom_pane::FusionSetupAction;
     use tui_core::orchestrator_bridge::TurnEvent;
-
-    let FusionSetupAction::Save { roles, enable } = action;
-    let Some(path) = tui::fusion::persist::fusion_settings_path() else {
-        let _ = turn_tx.send(TurnEvent::SystemNotice {
-            body: "✗ Could not locate ~/.lingxi/settings.json to save the Fusion models."
-                .to_string()
-                .into(),
-            is_error: true,
-        });
-        return;
-    };
-    match tui::fusion::persist::save_fusion_settings_to(&path, &roles, Some(enable)) {
-        Ok(()) => {
-            let summary = roles
-                .panels
-                .iter()
-                .map(lingxi_core::host::FusionModelChoice::route)
-                .collect::<Vec<_>>()
-                .join(", ");
-            if let Ok(mut guard) = snapshot.lock() {
-                guard.roles = roles;
-                guard.enabled = enable;
-            }
-            let _ = turn_tx.send(TurnEvent::SystemNotice {
-                body: format!(
-                    "✓ Fusion models saved to {}.\n  Panels: {summary}",
-                    path.display()
-                )
-                .into(),
-                is_error: false,
-            });
-        }
-        Err(error) => {
-            // The in-memory snapshot is deliberately NOT updated on a failed
-            // write: it is the thing `/fusion` consults to decide whether a run
-            // is configured, and claiming success here would let the next run
-            // dispatch straight into the engine's `NotConfigured` refusal.
-            let _ = turn_tx.send(TurnEvent::SystemNotice {
-                body: format!(
-                    "✗ Could not save Fusion models to {}: {error}",
-                    path.display()
-                )
-                .into(),
-                is_error: true,
-            });
+    let FusionSetupAction::Save {
+        roles,
+        enable,
+        reference,
+        name,
+        expected_revision,
+        make_default,
+    } = action;
+    let save = (|| {
+        let catalog = configuration_admin::fusion_admin::catalog_json(context)?;
+        let payload = tui::fusion::persist::save_payload(
+            &catalog,
+            &reference,
+            &name,
+            &roles,
+            enable,
+            make_default,
+        )?;
+        configuration_admin::fusion_admin::apply_command(
+            context,
+            &client::protocol::commands::FusionAdminCommandDto {
+                action: "save".into(),
+                scope: Some(tui::fusion::setup::scope_label(reference.scope).into()),
+                target: Some(reference.id.clone()),
+                revision: Some(expected_revision),
+                payload_json: Some(payload.to_string()),
+                operation_id: None,
+            },
+        )
+    })();
+    // Refresh after a conflict as well, so opening setup again captures a new revision.
+    if let Ok(current) = load_fusion_setup_snapshot(context) {
+        if let Ok(mut guard) = snapshot.lock() {
+            *guard = current;
         }
     }
+    let (body, is_error) = match save {
+        Ok(()) => (format!("✓ Fusion strategy {name} ({reference}) saved. Run /fusion --strategy {reference} PROMPT to use it."), false),
+        Err(error) => (format!("✗ Could not save Fusion strategy {name}: {error}"), true),
+    };
+    let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
 }
 
 /// Finish the TUI's raw API-key write after the engine has decided whether
@@ -5788,6 +5778,12 @@ mod tests {
             },
             ..SlashCommand::default()
         });
+        registry.register_command(SlashCommand {
+            name: "local-command".into(),
+            description: "Local command with declared arguments".into(),
+            argument_names: vec!["not-a-prompt-argument".into()],
+            ..SlashCommand::default()
+        });
         let registry = Arc::new(tokio::sync::RwLock::new(registry));
         let handle = orchestrator::test_support::MockOrchestratorHandle::new();
         handle.set_mod_describe_rewrite("deploy", "launch safely", Some("<target>"), true);
@@ -5820,6 +5816,12 @@ mod tests {
             entry.name.code_units == "/help".encode_utf16().collect::<Vec<_>>()
                 && entry.replaces_builtin
         }));
+        assert!(catalog
+            .iter()
+            .find(|entry| entry.name.code_units == "/local-command".encode_utf16().collect::<Vec<_>>())
+            .unwrap()
+            .argument_names
+            .is_empty());
         let inputs = handle.mod_describe_inputs();
         let projection =
             |json: &str| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(json).unwrap();

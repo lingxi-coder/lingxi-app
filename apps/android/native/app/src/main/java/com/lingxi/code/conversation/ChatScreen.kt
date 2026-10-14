@@ -361,6 +361,7 @@ fun ChatScreen(
             }
             Composer(
                 text = draft,
+                slashCommands = state.slashCommands,
                 promptSuggestion = state.promptSuggestion,
                 promptSuggestionNotice = state.promptSuggestionNotice,
                 suggestionTurnKey = "${state.session.id}:${state.promptSuggestionUuid}",

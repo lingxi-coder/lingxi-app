@@ -468,7 +468,7 @@ pub fn command_items_merged<'a>(
         if let Some(alias) = c
             .aliases()
             .iter()
-            .map(|alias| lowercase_units(bare_units(&alias)))
+            .map(|alias| lowercase_units(bare_units(alias)))
             .filter(|alias| alias.starts_with(&query))
             .min_by_key(Vec::len)
         {
@@ -489,9 +489,17 @@ pub fn command_items_merged<'a>(
             let matched_alias = c
                 .aliases()
                 .into_iter()
-                .find(|alias| lowercase_units(bare_units(&alias)).starts_with(&query))
-                .map(|alias| bare_units(&alias).to_vec());
-            item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref())
+                .find(|alias| lowercase_units(bare_units(alias)).starts_with(&query))
+                .map(|alias| bare_units(alias).to_vec());
+            let mut suggestion = item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref());
+            let selected_name = c.name_units();
+            if matched_alias.is_some()
+                && resolve_catalog_name_units(&suggestion.insert.code_units, registry).as_deref()
+                    != Some(selected_name.as_slice())
+            {
+                suggestion.insert = c.source_name();
+            }
+            suggestion
         })
         .collect();
     if let Some(hidden) = hidden_exact {
@@ -503,21 +511,64 @@ pub fn command_items_merged<'a>(
     items
 }
 
-/// Build one popup row (claude-code `createCommandSuggestionItem`). `name`
-/// carries the leading `/`; `matched_alias` (without slash) is appended in
-/// parens when the user typed the alias.
-fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem {
-    let label = match matched_alias {
-        Some(alias) => format!("{name} ({alias})"),
-        None => name.to_string(),
+/// Resolve canonical names before aliases while keeping source identity in UTF-16 units.
+/// It resolves canonical names before aliases without decoding a DTO to display text.
+pub(super) fn resolve_catalog_name_units(
+    name: &[u16],
+    registry: &[RegistrySlashRow],
+) -> Option<Vec<u16>> {
+    let replaces_builtin = |builtin: &str| {
+        let builtin_units: Vec<u16> = builtin.encode_utf16().collect();
+        registry
+            .iter()
+            .any(|row| row.replaces_builtin && row.name.code_units == builtin_units)
     };
-    CompletionItem {
-        label,
-        insert: name.into(),
-        desc,
-    }
+    let available = |row: &&RegistrySlashRow| {
+        row.replaces_builtin
+            || !crate::command::BUILTIN.iter().any(|builtin| {
+                builtin
+                    .name
+                    .encode_utf16()
+                    .eq(row.name.code_units.iter().copied())
+            })
+    };
+    registry
+        .iter()
+        .filter(available)
+        .find(|row| row.name.code_units.as_slice() == name)
+        .map(|row| row.name.code_units.clone())
+        .or_else(|| {
+            crate::command::BUILTIN
+                .iter()
+                .find(|command| {
+                    command.name.encode_utf16().eq(name.iter().copied())
+                        && !replaces_builtin(command.name)
+                })
+                .map(|command| command.name.encode_utf16().collect())
+        })
+        .or_else(|| {
+            registry
+                .iter()
+                .filter(available)
+                .find(|row| row.aliases.iter().any(|alias| alias.code_units.as_slice() == name))
+                .map(|row| row.name.code_units.clone())
+        })
+        .or_else(|| {
+            crate::command::BUILTIN
+                .iter()
+                .find(|command| {
+                    !replaces_builtin(command.name)
+                        && command
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.encode_utf16().eq(name.iter().copied()))
+                })
+                .map(|command| command.name.encode_utf16().collect())
+        })
 }
 
+/// Build one popup row. The label uses safe display text, while insertion keeps
+/// either the exact canonical name or the exact source alias that was matched.
 fn item_source(
     name: &ClientTextDto,
     desc: String,
@@ -528,11 +579,12 @@ fn item_source(
         Some(alias) => format!("{display} ({})", String::from_utf16_lossy(alias)),
         None => display,
     };
-    CompletionItem {
-        label,
-        insert: name.clone(),
-        desc,
-    }
+    let insert = matched_alias.map_or_else(|| name.clone(), |alias| {
+        let mut units = vec![b'/' as u16];
+        units.extend_from_slice(alias);
+        ClientTextDto::from_code_units(units)
+    });
+    CompletionItem { label, insert, desc }
 }
 
 /// A completion popup over a candidate list.
@@ -888,6 +940,31 @@ mod tests {
                 .desc,
             "Verify a code change end-to-end"
         );
+    }
+
+    #[test]
+    fn completion_preserves_an_alias_only_when_it_resolves_to_the_selected_command() {
+        let mut reg = rows(&[("/deploy", "Deploy"), ("/ship-prod", "Canonical owner")]);
+        reg[0].aliases = vec!["/ship-prod".into()];
+        let items = command_items_merged("/ship-p", &reg);
+        let selected = items
+            .iter()
+            .find(|item| item.label.starts_with("/deploy "))
+            .unwrap();
+        assert_eq!(
+            selected.insert, "/deploy",
+            "a canonical owner wins over the alias"
+        );
+
+        reg.pop();
+        reg[0].aliases = vec!["/SHIP-prod".into()];
+        let items = command_items_merged("/ship-p", &reg);
+        // Native alias matching ignores case; insertion preserves its bytes.
+        let selected = items
+            .iter()
+            .find(|item| item.label.starts_with("/deploy "))
+            .unwrap();
+        assert_eq!(selected.insert, "/SHIP-prod");
     }
 
     #[test]

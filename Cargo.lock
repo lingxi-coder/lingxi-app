@@ -1314,6 +1314,7 @@ dependencies = [
  "orchestrator",
  "permission",
  "pulldown-cmark",
+ "rquickjs",
  "serde",
  "serde_json",
  "session",
@@ -1375,6 +1376,7 @@ dependencies = [
  "icu_collator",
  "icu_locale",
  "indexmap",
+ "migrations",
  "permission",
  "regex",
  "ryu-js",
@@ -4402,6 +4404,7 @@ source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=9cc310fd81
 dependencies = [
  "branding",
  "core",
+ "fs2",
  "llm-runtime",
  "serde_json",
  "telemetry",

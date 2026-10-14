@@ -485,23 +485,48 @@ impl BottomPane {
     /// Native typeahead uses `argumentHint` for an exact `/command `, then
     /// shows the remaining declared argument names after each completed arg.
     fn command_argument_hint(&self) -> Option<String> {
+        if self.composer.cursor_row_col() == (0, 0) {
+            return None;
+        }
         let source = self.composer.source_units();
         let separator = source.iter().position(|unit| *unit == b' ' as u16)?;
         if source.last().copied() != Some(b' ' as u16) {
             return None;
         }
         let name_units = &source[..separator];
-        if name_units.first().copied() != Some(b'/' as u16) || name_units.len() < 2 {
+        if name_units.len() < 2
+            || name_units.first().copied() != Some(b'/' as u16)
+            || !name_units[1..].iter().all(|unit| {
+                matches!(*unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
+                    || matches!(*unit, 0x2e | 0x3a | 0x5f | 0x2d)
+            })
+        {
             return None;
         }
         let args = String::from_utf16_lossy(&source[separator + 1..]);
-        if let Some(row) = self.registry_commands.iter().find(|row| {
-            row.name.code_units == name_units
-                || row
-                    .aliases
-                    .iter()
-                    .any(|alias| alias.code_units == name_units)
-        }) {
+        let decoded_name = String::from_utf16(name_units).ok();
+
+        // Native getCommand resolves canonical names across the whole catalog
+        // before considering aliases. A built-in canonical name therefore
+        // cannot be shadowed by an earlier registry alias.
+        let exact_row = self
+            .registry_commands
+            .iter()
+            .find(|row| row.name.code_units == name_units);
+        let exact_builtin = decoded_name
+            .as_deref()
+            .and_then(|name| crate::command::BUILTIN.iter().find(|command| command.name == name));
+        let alias_row = self.registry_commands.iter().find(|row| {
+            row.aliases
+                .iter()
+                .any(|alias| alias.code_units == name_units)
+        });
+        let row = exact_row.or(if exact_builtin.is_none() {
+            alias_row
+        } else {
+            None
+        });
+        if let Some(row) = row {
             if args.is_empty() {
                 if let Some(hint) = row
                     .argument_hint
@@ -515,29 +540,27 @@ impl BottomPane {
             if row.argument_names.is_empty() {
                 return None;
             }
-            let parsed = command_api::argument_substitution::parse_arguments(&args);
-            let typed = if parsed.is_empty() && !args.trim().is_empty() {
-                args.split_whitespace().map(str::to_owned).collect()
-            } else {
-                parsed
-            };
-            let argument_names = row
-                .argument_names
-                .iter()
-                .map(client::protocol::text::ClientTextDto::display)
-                .collect::<Vec<_>>();
-            return command_api::argument_substitution::generate_progressive_argument_hint(
-                &argument_names,
-                &typed,
-            );
+            let count = tui_core::slash_command_argument_count(args)? as usize;
+            let remaining = &row.argument_names[count.min(row.argument_names.len())..];
+            return (!remaining.is_empty()).then(|| {
+                remaining
+                    .iter()
+                    .map(client::protocol::text::ClientTextDto::display)
+                    .map(|name| format!("[{name}]"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
         }
         if !args.is_empty() {
             return None;
         }
-        let name = String::from_utf16(name_units).ok()?;
-        crate::command::BUILTIN
-            .iter()
-            .find(|command| command.name == name || command.aliases.contains(&name.as_str()))
+        let name = decoded_name?;
+        exact_builtin
+            .or_else(|| {
+                crate::command::BUILTIN
+                    .iter()
+                    .find(|command| command.aliases.contains(&name.as_str()))
+            })
             .map(|command| command.hint)
             .filter(|hint| !hint.is_empty())
             .map(str::to_owned)
@@ -1745,7 +1768,11 @@ impl BottomPane {
                 } else if let Some((at, _)) = self.composer.at_fragment() {
                     self.composer.complete_at(at, &insert);
                 } else {
-                    self.composer.replace_all_source_units(&source_insert);
+                    // Native HK completes the selected name/alias with one
+                    // ASCII space, making argumentHint visible immediately.
+                    let mut completed = source_insert;
+                    completed.push(b' ' as u16);
+                    self.composer.replace_all_source_units(&completed);
                 }
                 self.sync_completion();
                 Some(BottomPaneOutcome::Consumed)
@@ -1788,13 +1815,20 @@ impl BottomPane {
                     self.composer.complete_at(at, &insert);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
-                } else if self.composer.source_units() == source_insert
-                    || String::from_utf16(&self.composer.source_units())
-                        .ok()
-                        .is_some_and(|text| {
-                            crate::command::resolve(&text)
-                                .is_some_and(|(cmd, _)| cmd.name == insert)
-                        })
+                } else if {
+                    let current = self.composer.source_units();
+                    let current_resolved = completion_view::resolve_catalog_name_units(
+                        &current,
+                        &self.registry_commands,
+                    );
+                    current == source_insert
+                        || current_resolved.is_some()
+                            && current_resolved
+                                == completion_view::resolve_catalog_name_units(
+                                    &source_insert,
+                                    &self.registry_commands,
+                                )
+                }
                 {
                     // Buffer already IS the highlighted command — by name or in
                     // full as one of its aliases (`/quit` highlights `/exit
@@ -1803,7 +1837,9 @@ impl BottomPane {
                     None
                 } else {
                     // Partial/different `/command` → commit it + close the popup.
-                    self.composer.replace_all_source_units(&source_insert);
+                    let mut completed = source_insert;
+                    completed.push(b' ' as u16);
+                    self.composer.replace_all_source_units(&completed);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
                 }
@@ -3660,7 +3696,7 @@ mod tests {
         assert_eq!(popup.selected_insert(), "/mcp");
         // Tab replaces the whole buffer for a /command.
         let _ = pane.handle_key(key(KeyCode::Tab));
-        assert_eq!(pane.composer().text(), "/mcp");
+        assert_eq!(pane.composer().text(), "/mcp ");
     }
 
     #[test]
@@ -3721,7 +3757,7 @@ mod tests {
         );
         assert_eq!(
             pane.composer().text(),
-            "/mcp",
+            "/mcp ",
             "the highlighted command is committed into the buffer"
         );
         assert!(
@@ -3754,7 +3790,7 @@ mod tests {
         assert_eq!(popup.selected_insert(), last);
         // Tab completes the highlighted registry command into the buffer.
         let _ = pane.handle_key(key(KeyCode::Tab));
-        assert_eq!(pane.composer().text(), last);
+        assert_eq!(pane.composer().text(), format!("{last} "));
     }
 
     #[test]
@@ -3794,6 +3830,13 @@ mod tests {
     fn described_command_argument_hint_appears_only_before_args() {
         let mut builtin_pane = pane();
         typ(&mut builtin_pane, "/model ");
+        assert_eq!(
+            builtin_pane.command_argument_hint().as_deref(),
+            Some("<model>")
+        );
+        builtin_pane.composer.home();
+        assert_eq!(builtin_pane.command_argument_hint(), None);
+        builtin_pane.composer.move_right();
         assert_eq!(
             builtin_pane.command_argument_hint().as_deref(),
             Some("<model>")
@@ -3904,6 +3947,151 @@ mod tests {
             alias_pane.command_argument_hint().as_deref(),
             Some("[target] [mode]")
         );
+    }
+
+    #[test]
+    fn argument_hint_matches_native_name_and_ascii_space_boundaries() {
+        let mut pane = pane();
+        pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/review".into(),
+            description: "Review a change".into(),
+            menu_description: None,
+            aliases: vec!["/plugin:review.v2_1-0".into(), "/审查".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some("[low|medium|high] [--fix]".into()),
+            argument_names: Vec::new(),
+        }]);
+        for input in ["/review ", "/plugin:review.v2_1-0 "] {
+            pane.composer.replace_all(input);
+            assert_eq!(
+                pane.command_argument_hint().as_deref(),
+                Some("[low|medium|high] [--fix]"),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "/review",
+            "/review  ",
+            "/review high ",
+            "/review\t",
+            "/review\t ",
+            "/review\n ",
+            " /review ",
+            "/REVIEW ",
+            "/审查 ",
+        ] {
+            pane.composer.replace_all(input);
+            assert_eq!(pane.command_argument_hint(), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn argument_hint_prefers_canonical_names_over_earlier_aliases() {
+        let mut pane = pane();
+        let row = |name: &str, aliases: Vec<String>, hint: &str| RegistrySlashRow {
+            name: name.into(),
+            description: String::new(),
+            menu_description: None,
+            aliases,
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some(hint.into()),
+            argument_names: Vec::new(),
+        };
+        pane.set_registry_commands(vec![
+            row("/other", vec!["/review".into(), "/model".into()], "wrong"),
+            row("/review", Vec::new(), "[--fix]"),
+        ]);
+        pane.composer.replace_all("/review ");
+        assert_eq!(pane.command_argument_hint().as_deref(), Some("[--fix]"));
+        pane.composer.replace_all("/model ");
+        assert_eq!(pane.command_argument_hint().as_deref(), Some("<model>"));
+    }
+
+    #[test]
+    fn argument_hint_appears_after_completion_with_the_matched_alias() {
+        for (code, input, expected) in [
+            (KeyCode::Tab, "/z-depl", "/z-deploy "),
+            (KeyCode::Enter, "/z-depl", "/z-deploy "),
+            (KeyCode::Tab, "/ship-d", "/ship-deploy "),
+            (KeyCode::Enter, "/ship-d", "/ship-deploy "),
+        ] {
+            let mut pane = pane();
+            pane.set_registry_commands(vec![RegistrySlashRow {
+                name: "/z-deploy".into(),
+                description: String::new(),
+                menu_description: None,
+                aliases: vec!["/ship-deploy".into()],
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: Some("<target>".into()),
+                argument_names: Vec::new(),
+            }]);
+            typ(&mut pane, input);
+            assert!(matches!(
+                pane.handle_key(key(code)),
+                BottomPaneOutcome::Consumed
+            ));
+            assert_eq!(pane.composer.text(), expected);
+            assert!(pane.completion().is_none());
+            assert_eq!(pane.command_argument_hint().as_deref(), Some("<target>"));
+            assert!(matches!(
+                pane.handle_key(key(KeyCode::Enter)),
+                BottomPaneOutcome::Submitted(ref submitted) if submitted == expected.trim_end()
+            ));
+        }
+    }
+
+    #[test]
+    fn completion_enter_dispatches_exact_name_when_an_alias_shares_its_prefix() {
+        let mut pane = pane();
+        pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/foo".into(),
+            description: String::new(),
+            menu_description: None,
+            aliases: vec!["/foobar".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some("<target>".into()),
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut pane, "/foo");
+        assert_eq!(pane.completion().unwrap().selected_insert(), "/foobar");
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Enter)),
+            BottomPaneOutcome::Submitted(ref submitted) if submitted == "/foo"
+        ));
+    }
+
+    #[test]
+    fn argument_hint_counts_shell_arguments_and_preserves_multiline_drafts() {
+        let mut pane = pane();
+        pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/deploy".into(),
+            description: String::new(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: vec!["target".into(), "message".into(), "mode".into()],
+        }]);
+        for (input, expected) in [
+            ("/deploy  ", "[target] [message] [mode]"),
+            ("/deploy \"two words\" ", "[message] [mode]"),
+            ("/deploy *.ts ", "[message] [mode]"),
+            ("/deploy prod | ", "[message] [mode]"),
+            ("/deploy prod\nnext ", "[message] [mode]"),
+        ] {
+            pane.composer.replace_all(input);
+            assert_eq!(
+                pane.command_argument_hint().as_deref(),
+                Some(expected),
+                "{input:?}"
+            );
+            assert_eq!(pane.composer.text(), input);
+        }
     }
 
     #[test]

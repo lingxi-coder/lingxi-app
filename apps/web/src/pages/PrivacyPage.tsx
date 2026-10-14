@@ -43,8 +43,8 @@ const sections = [
   },
   {
     id: 'children', en: 'Children and policy changes', zh: '儿童与政策更新',
-    enText: 'LingXi is a development tool intended for a general audience, not a service directed at children. If you believe a child has supplied personal information without appropriate authorization, contact support. Changes to data handling will be reflected here with an updated date. Material changes that require consent will need to be disclosed before the affected processing begins.',
-    zhText: '灵犀是面向一般用户的开发工具，并非专门面向儿童的服务。如果你认为儿童在未经适当授权的情况下提供了个人信息，请联系支持。数据处理方式的变化会反映在本页面并更新日期；对于需要同意的重大变化，应在开始相关处理之前披露。',
+    enText: 'LingXi is a personal AI agent intended for a general audience, not a service directed at children. If you believe a child has supplied personal information without appropriate authorization, contact support. Changes to data handling will be reflected here with an updated date. Material changes that require consent will need to be disclosed before the affected processing begins.',
+    zhText: '灵犀是面向一般用户的个人辅助 Agent，并非专门面向儿童的服务。如果你认为儿童在未经适当授权的情况下提供了个人信息，请联系支持。数据处理方式的变化会反映在本页面并更新日期；对于需要同意的重大变化，应在开始相关处理之前披露。',
   },
 ];
 

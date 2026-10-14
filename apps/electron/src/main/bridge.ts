@@ -18,6 +18,8 @@ import type {
   ComputerAccessRequestDto,
   CronJobDto,
   CronRequestDto,
+  FusionStrategyRefDto,
+  FusionStrategySelectionDto,
   PermissionModeId,
   PermissionRequest,
   NativeUiControlResponse,
@@ -32,6 +34,7 @@ import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { fusionInvocation, pinFusionStrategy } from '../shared/fusionStrategy.js';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -90,8 +93,10 @@ import type {
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
 import {
+  fusionCredentialSelection,
   resolveFusionCredentialProviderIds,
   resolveModelCredentialProviderIds,
+  resolveProviderIdForModel,
 } from './credential-broker.js';
 import { GitActivityTracker } from './git-activity.js';
 import { scheduledRunIdentity } from './scheduled-run-identity.js';
@@ -2379,22 +2384,57 @@ export class SessionRuntime {
       && /^\/connect\s+(?:chatgpt|openai-chatgpt)$/i.test(validated.raw.trim())) {
       throw new Error('Sign in to Codex from Settings. Every chat uses that sign-in.');
     }
-    if (validated.type === 'run_slash_command' && /^\/fusion(?:\s|$)/i.test(validated.raw.trim())
-      && !/^\/fusion\s+setup\s*$/i.test(validated.raw.trim())
-      && !/(?:^|\s)--retry-publication(?:\s|$)/.test(validated.raw)
+    let fusion: ReturnType<typeof fusionInvocation> = null;
+    if (validated.type === 'run_slash_command') {
+      try { fusion = fusionInvocation(validated.raw); }
+      catch (cause) {
+        this.recordFusionPreparationFailure(validated, cause);
+        return;
+      }
+    }
+    if (validated.type === 'run_slash_command' && fusion
       && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth)) {
       const generation = this.generation;
       const client = this.requireClient();
       const token = Symbol('fusion credential hydration');
+      let pinnedRaw = validated.raw;
       this.pendingPromptHydrations.set(token, undefined);
       this.notifyActivityChanged();
       try {
-        await this.ensureFusionCodexToken();
-        await this.ensureFusionProviderCredentials(true);
-        if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) {
-          throw new Error('Fusion credential loading was interrupted.');
+        try {
+          const selection = await this.resolveFusionStrategy(fusion.strategy);
+          if (!this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) {
+            throw new Error('Fusion credential loading was interrupted.');
+          }
+          // Bare --models entries belong to the conversation's actual profile.
+          // Its qualified listing is authoritative even when the selected model
+          // was supplied as an alias or an unqualified id.
+          const parent = fusion.models?.some((model) => !model.includes(':'))
+            ? await this.scheduledModelCatalog() : undefined;
+          if (!this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) {
+            throw new Error('Fusion credential loading was interrupted.');
+          }
+          const credentialSelection = fusionCredentialSelection(selection, fusion,
+            parent ? (parent.current.includes('/') ? parent.current.slice(0, parent.current.indexOf('/'))
+              : resolveProviderIdForModel(parent.current)) : undefined);
+          await this.ensureFusionCodexToken(token, credentialSelection);
+          await this.ensureFusionProviderCredentials(true, credentialSelection);
+          if (parent && (await this.scheduledModelCatalog()).current !== parent.current) {
+            throw new Error('The conversation model changed while preparing Fusion; submit the command again.');
+          }
+          if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) {
+            throw new Error('Fusion credential loading was interrupted.');
+          }
+          pinnedRaw = pinFusionStrategy(validated.raw, selection);
+        } catch (cause) {
+          // Keep failures in the originating session. Cancellation and external
+          // restarts invalidate ownership; they must never publish into a new one.
+          if (this.disposed || this.archiving || !this.pendingPromptHydrations.has(token)
+            || generation !== this.generation || client !== this.client) throw cause;
+          this.recordFusionPreparationFailure(validated, cause);
+          return;
         }
-        client.sendCommand(validated);
+        client.sendCommand({ ...validated, raw: pinnedRaw });
         this.commitFusionHistory(validated);
       } finally {
         this.pendingPromptHydrations.delete(token);
@@ -2439,6 +2479,55 @@ export class SessionRuntime {
     if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) this.sessionIdentityCommitted = true;
   }
 
+  private recordFusionPreparationFailure(command: Extract<ClientCommand, { type: 'run_slash_command' }>, cause: unknown): void {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    this.requireClient().sendCommand({ type: 'fusion_admin', command: {
+      action: 'record_failure', payload_json: JSON.stringify({ raw: command.raw, error }),
+    } });
+    this.commitFusionHistory(command);
+  }
+
+  private resolveFusionStrategy(strategy?: FusionStrategyRefDto): Promise<FusionStrategySelectionDto> {
+    const client = this.requireClient();
+    const generation = this.generation;
+    const operationId = ++this.nextFusionResolutionId;
+    return new Promise((resolveSelection, reject) => {
+      const finish = (error?: Error, selection?: FusionStrategySelectionDto) => {
+        clearTimeout(timer);
+        client.off('event', onEvent);
+        if (error) reject(error);
+        else if (selection) resolveSelection(selection);
+      };
+      const onEvent = (event: ClientEvent) => {
+        if (event.type !== 'fusion_strategy_resolved' || event.operation_id !== operationId) return;
+        if (generation !== this.generation || client !== this.client || this.disposed || this.archiving) {
+          finish(new Error('Fusion strategy resolution was interrupted.'));
+          return;
+        }
+        if (event.error || !event.selection_json) {
+          finish(new Error(event.error || 'Choose a Fusion strategy before running.'));
+          return;
+        }
+        try {
+          const selection = JSON.parse(event.selection_json) as FusionStrategySelectionDto;
+          if (!selection.reference || !['user', 'project', 'local'].includes(selection.reference.scope)
+            || typeof selection.reference.id !== 'string' || typeof selection.revision !== 'string'
+            || !selection.config || typeof selection.config !== 'object' || Array.isArray(selection.config)) {
+            throw new Error('Invalid resolved Fusion strategy.');
+          }
+          finish(undefined, selection);
+        } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+      };
+      const timer = setTimeout(() => finish(new Error('Fusion strategy resolution timed out.')), 10_000);
+      client.on('event', onEvent);
+      try { client.sendCommand({ type: 'fusion_admin', command: {
+        action: 'resolve_strategy', operation_id: operationId, payload_json: JSON.stringify({ strategy }),
+      } }); } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+
+  private nextFusionResolutionId = Date.now();
+
   private async ensureProviderCredentialCached(providerId: string): Promise<void> {
     if (this.runtimeCredentialProviders.has(providerId) || !this.opts.resolveProviderCredential) return;
     const existing = this.pendingRuntimeCredentialLoads.get(providerId);
@@ -2461,13 +2550,19 @@ export class SessionRuntime {
     return loading;
   }
 
-  private async ensureFusionProviderCredentials(explicit: boolean): Promise<void> {
+  private async ensureFusionProviderCredentials(explicit: boolean, selected?: FusionStrategySelectionDto): Promise<void> {
     if (!this.opts.resolveProviderCredential) return;
     const generation = this.generation;
     const client = this.requireClient();
     if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+    // Optional default-route warming never loads the other saved strategies.
+    const selection = selected ?? await this.resolveFusionStrategy().then((resolved) => fusionCredentialSelection(resolved)).catch((error) => {
+      if (explicit) throw error;
+      return undefined;
+    });
+    if (!selection) return;
     if (generation !== this.generation || client !== this.client) throw new Error('Fusion credential loading was interrupted.');
-    await Promise.all(resolveFusionCredentialProviderIds(this.credentialRoutingSettings, explicit)
+    await Promise.all(resolveFusionCredentialProviderIds(this.credentialRoutingSettings, selection, explicit)
       .filter((providerId) => providerId !== 'openai-chatgpt')
       .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
@@ -2482,12 +2577,24 @@ export class SessionRuntime {
       .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
 
-  private async ensureFusionCodexToken(): Promise<void> {
-    if (!this.opts.resolveOpenAiOAuth) return;
+  private async ensureFusionCodexToken(token: symbol, selection: FusionStrategySelectionDto): Promise<void> {
+    const generation = this.generation;
+    const client = this.requireClient();
+    const assertCurrent = () => {
+      if (this.disposed || this.archiving || generation !== this.generation
+        || client !== this.client || !this.pendingPromptHydrations.has(token)) {
+        throw new Error('Fusion credential loading was interrupted.');
+      }
+    };
     if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
-    if (resolveFusionCredentialProviderIds(this.credentialRoutingSettings, true).includes(CODEX_PROVIDER_ID)) {
-      await this.ensureCodexToken();
-    }
+    assertCurrent();
+    if (!resolveFusionCredentialProviderIds(this.credentialRoutingSettings, selection, true).includes(CODEX_PROVIDER_ID)) return;
+    if (!this.opts.resolveOpenAiOAuth) return;
+    const session = await this.opts.resolveOpenAiOAuth();
+    assertCurrent();
+    if (!session) throw new Error(CODEX_SIGN_IN_REQUIRED);
+    await this.serveCodexToken(session);
+    assertCurrent();
   }
 
   /** Give this engine the current Codex access token before Codex work. */

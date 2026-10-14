@@ -48,6 +48,8 @@ data class ChatState(
      * the engine reports a catalog. The active row is [model].
      */
     val availableModels: List<ModelOption> = emptyList(),
+    /** Engine-owned slash metadata, including argument hints for the draft. */
+    val slashCommands: List<ConversationSlashCommand> = emptyList(),
     /**
      * A transient, user-visible status line (tool activity). `null` hides the
      * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride

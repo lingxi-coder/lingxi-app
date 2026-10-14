@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'fusion-scroll-electron.mjs');
 
-test('Fusion model menus stay bounded and support scrolling, keyboard, and upward placement', async () => {
+test('Fusion strategies support CRUD, scope isolation, guarded drafts, and bounded model menus', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-fusion-scroll-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-fusion-scroll-electron-'));
   const vite = await createServer({
@@ -55,7 +55,7 @@ test('Fusion model menus stay bounded and support scrolling, keyboard, and upwar
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron Fusion scroll fixture timed out\n${errors.join('')}`));
-      }, 20_000);
+      }, 35_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
@@ -83,6 +83,32 @@ test('Fusion model menus stay bounded and support scrolling, keyboard, and upwar
     assert.ok(placement.menuHeight > 100, 'upward placement must keep a usable model list');
     assert.ok(placement.menuTop >= 12, 'the upward menu stays inside the viewport');
     assert.ok(placement.menuBottom <= placement.triggerTop, 'the analyst menu opens above its trigger');
+    assert.equal(result.excludedLabel, true);
+    assert.equal(result.excludedEditable, true);
+    assert.equal(result.closeGuard, true);
+    assert.equal(result.navigationGuard, true);
+    assert.equal(result.created.config.panelModels.length, 2);
+    assert.equal(result.created.config.analystModel.model, 'model-69');
+    assert.equal(result.scopeImmutable, true);
+    assert.equal(result.renamed.id, result.created.id, 'renaming preserves strategy identity');
+    assert.deepEqual(result.defaultSet, { scope: 'user', id: result.created.id });
+    assert.equal(result.copyNewScope, true);
+    assert.notEqual(result.copied.id, result.created.id);
+    assert.equal(result.crossScopeNames, 2);
+    assert.equal(result.scopeFilter, true);
+    assert.equal(result.narrowOverflow, false);
+    assert.equal(result.narrowEditorOverflow, false);
+    assert.equal(result.scopeLabelsVisible, true);
+    assert.equal(result.namedRepairNoReplacement, true);
+    assert.equal(result.namedRepairPreservedScope, true);
+    assert.equal(result.conflictKeepsDraft, true);
+    assert.equal(result.deletedDefault, true);
+    assert.equal(result.oldScopeWriteSettled, true);
+    assert.equal(result.staleProjectWriteBlocked, true);
+    assert.equal(result.oldScopeWriteCanExit, true);
+    assert.equal(result.sessionRemountsEditor, true);
+    assert.equal(result.closeCount, 0);
+
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

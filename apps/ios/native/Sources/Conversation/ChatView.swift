@@ -83,7 +83,7 @@ struct ChatView: View {
     let voiceInteraction: VoiceInteractionController
     var onOpenVoiceSettings: () -> Void = {}
     private let cameraCapture = CameraCapture()
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
     // chat view so the user is told up front when the network is unavailable —

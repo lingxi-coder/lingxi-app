@@ -14,12 +14,13 @@ import { PublicLayout } from '../layouts/PublicLayout';
 import { detectInitialRegion, Locale, Region } from '../utils/locale';
 import { usePersistentState } from './usePersistentState';
 import { useRouter } from './router';
+import { useTheme } from './useTheme';
 
 export function App() {
   const route = useRouter();
   const [locale, setLocale] = usePersistentState<Locale>('lingxi.web.locale', 'zh');
   const [region, setRegion] = usePersistentState<Region>('lingxi.web.region', detectInitialRegion);
-  const [theme, setTheme] = usePersistentState<'light' | 'dark'>('lingxi.web.theme', 'light');
+  const [theme, setTheme] = useTheme();
 
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
@@ -27,11 +28,11 @@ export function App() {
     if (!route.startsWith('/docs')) {
       document.title = route === '/privacy' ? (locale === 'zh' ? '隐私政策 — 灵犀 LingXi' : 'Privacy policy — LingXi')
         : route === '/data-deletion' ? (locale === 'zh' ? '数据与账号删除 — 灵犀 LingXi' : 'Data and account deletion — LingXi')
-        : locale === 'zh' ? '灵犀 LingXi — 让想法，成为现实。' : 'LingXi — Bring your ideas to life.';
+        : locale === 'zh' ? '灵犀 LingXi — 你的个人辅助 Agent' : 'LingXi — Your personal AI agent';
       const description = document.querySelector<HTMLMetaElement>('meta[name="description"]');
       if (description) description.content = locale === 'zh'
-        ? '灵犀 LingXi：跨平台 AI 开发助手。探索 Harness Runtime、LLM Client 与 Mobile Linux SDK 和开发者文档。'
-        : 'LingXi is a cross-platform AI development assistant. Explore the Harness Runtime, LLM Client, and Mobile Linux SDKs and developer documentation.';
+        ? '灵犀是你的个人辅助 Agent。帮你梳理想法、查找资料、处理日常任务，与你一起把事情做好。'
+        : 'LingXi is your personal AI agent for thinking things through, finding information, and getting everyday tasks done.';
     }
   }, [locale, route, theme]);
 
@@ -97,7 +98,7 @@ export function App() {
         : <HomePage locale={locale} region={region} />;
 
   return (
-    <PublicLayout {...common} activeRoute={route}>
+    <PublicLayout {...common} activeRoute={route} theme={theme} onThemeToggle={() => setTheme((current) => current === 'light' ? 'dark' : 'light')}>
       {page}
     </PublicLayout>
   );

@@ -204,6 +204,8 @@ export interface PageContentProps {
   onNavigate(pageId: string, pluginId?: string): void;
   /** Lets a page protect unsaved drafts before the shared sidebar changes pages. */
   onRegisterNavigationRequest?(handler: SettingsNavigationRequest | null): void;
+  /** Lets a page protect unsaved drafts before closing the settings surface. */
+  onRegisterCloseRequest?(handler: (() => void) | null): void;
   initialPluginId?: string;
   initialProviderId?: string;
   pendingModelReference?: string;
@@ -509,6 +511,9 @@ export function SettingsScreen({
     setInitialPluginId(pluginId);
     setPage(pageId);
   }, []);
+  const closeRequestRef = useRef<(() => void) | null>(null);
+  const registerCloseRequest = useCallback((handler: (() => void) | null) => { closeRequestRef.current = handler; }, []);
+  const requestClose = () => { if (closeRequestRef.current) closeRequestRef.current(); else onClose(); };
   const navigationRequestRef = useRef<SettingsNavigationRequest | null>(null);
   const registerNavigationRequest = useCallback((handler: SettingsNavigationRequest | null) => {
     navigationRequestRef.current = handler;
@@ -594,7 +599,8 @@ export function SettingsScreen({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onCloseRef.current();
+        if (closeRequestRef.current) closeRequestRef.current();
+        else onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -665,6 +671,7 @@ export function SettingsScreen({
           onTheme={onTheme}
           onNavigate={navigatePage}
           onRegisterNavigationRequest={registerNavigationRequest}
+          onRegisterCloseRequest={registerCloseRequest}
           initialPluginId={initialPluginId}
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
@@ -706,7 +713,7 @@ export function SettingsScreen({
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflow: 'hidden',
         }}>
           <div style={{ flexShrink: 0, padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
-            <button ref={backRef} type="button" aria-label="Back to app" onClick={onClose}
+            <button ref={backRef} type="button" aria-label="Back to app" onClick={requestClose}
               className="settings-back-button"
               style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
                 marginBottom: 8, padding: '7px 10px', border: 0, borderRadius: 8, background: t.surfaceActive,

@@ -11,6 +11,7 @@ import type {
   CronJobDto,
   CronRequestDto,
   CronRunDto,
+  FusionAdminCommandDto,
   HookAdminCommandDto,
   HookDto,
   ImageRefDto,
@@ -85,6 +86,7 @@ export type SkillCatalogEvent = Extract<ClientEvent, { type: 'skill_catalog' }>;
 export type SkillDocumentEvent = Extract<ClientEvent, { type: 'skill_document' }>;
 
 export type McpConfigurationSnapshotEvent = Extract<ClientEvent, { type: 'mcp_configuration_snapshot' }>;
+export type FusionCatalogEvent = Extract<ClientEvent, { type: 'fusion_catalog' }>;
 
 export type PluginCatalogEvent = Extract<ClientEvent, { type: 'plugin_catalog' }>;
 
@@ -123,6 +125,7 @@ export interface UseBridge {
   readonly skillCatalogEvent: SkillCatalogEvent | null;
   readonly skillDocumentEvent: SkillDocumentEvent | null;
   readonly mcpConfigurationSnapshotEvent: McpConfigurationSnapshotEvent | null;
+  readonly fusionCatalogEvent: FusionCatalogEvent | null;
   readonly pluginCatalogEvent: PluginCatalogEvent | null;
   readonly configurationOperations: Readonly<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>;
   readonly activeSession: SessionRef | undefined;
@@ -293,6 +296,7 @@ export interface UseBridge {
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
+  fusionAdmin(command: FusionAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop plugin catalog/package/config administration. */
   pluginAdmin(command: PluginAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop hook document validation and persistence. */

@@ -1,3 +1,4 @@
+import { Brand } from '../components/Brand';
 import { PropsWithChildren } from 'react';
 import { AppRoute } from '../app/router';
 import { IconChart, IconDocs, IconKey, IconWallet } from '../components/Icons';
@@ -38,7 +39,7 @@ export function ConsoleLayout({
     <div className="console-shell">
       <aside className="console-sidebar">
         <RouteLink href="/" className="wordmark">
-          LingXi
+          <Brand compact />
         </RouteLink>
         <nav className="console-nav" aria-label="Console navigation">
           {consoleNav.map((item) => {
@@ -70,11 +71,11 @@ export function ConsoleLayout({
         </div>
         <header className="console-header">
           <div>
-            <span className="eyebrow">Developer Console</span>
+            <span className="eyebrow">{pickLocaleText(locale, { en: 'Personal console', zh: '个人控制台' })}</span>
             <h1 className="console-title">
               {pickLocaleText(locale, {
-                en: 'Run LingXi across desktop, phone, and CLI.',
-                zh: '让 LingXi 在桌面、手机和 CLI 间连续协作。',
+                en: 'Your personal AI agent, here to help.',
+                zh: '你的个人辅助 Agent，与你一起把事情做好。',
               })}
             </h1>
           </div>
@@ -85,7 +86,7 @@ export function ConsoleLayout({
               region={region}
               onRegionChange={onRegionChange}
             />
-            <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+            <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
           </div>
         </header>
         <main className="console-content">{children}</main>

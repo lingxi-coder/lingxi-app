@@ -2675,3 +2675,26 @@ textarea, input { font-family: inherit; }
   font-size: 11px;
   padding: 4px 12px 0;
 }
+
+.composer-slash-argument-hint {
+  position: absolute;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Tool arguments yield space to the action label and status. */
+.tool-row-title > [dir='ltr'] { flex-shrink: 0; }
+.tool-row-argument { display: inline-block; flex: 0 1 auto; }
+.tool-row-response { min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .75rem; color: var(--tool-label-color); opacity: .8; }
+.tool-row-status { flex-shrink: 0; padding: .15rem .45rem; border-radius: .4rem; font-size: .7rem; font-weight: 550; color: var(--permission-danger); background: color-mix(in oklab, var(--permission-danger) 8%, transparent); }
+.tool-result-error { font-family: inherit; font-size: .8rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; border-left: 2px solid var(--permission-danger) !important; }
+.tool-disclosure-trigger[aria-expanded='false'] .transcript-disclosure-chevron { opacity: .45; }
+.tool-disclosure-trigger[aria-expanded='false']:hover .transcript-disclosure-chevron,
+.tool-disclosure-trigger[aria-expanded='false']:focus-visible .transcript-disclosure-chevron { opacity: 1; }
+.tool-disclosure-trigger:active { transition-duration: 0ms; scale: 1; background: color-mix(in oklab, currentColor 12%, transparent) !important; }
+@media (prefers-contrast: more) {
+  .tool-row-status { background: transparent; outline: 1px solid currentColor; }
+}

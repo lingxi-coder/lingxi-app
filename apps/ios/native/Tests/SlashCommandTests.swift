@@ -34,6 +34,7 @@ import XCTest
             description: String,
             aliases: [String] = [],
             argumentHint: String? = nil,
+            argumentNames: [String] = [],
             menuDescription: String? = nil,
             hidden: Bool = false
         ) -> SlashCommandDto {
@@ -43,6 +44,7 @@ import XCTest
                 source: "builtin",
                 aliases: aliases.map(sourceText),
                 argumentHint: argumentHint.map(sourceText),
+                argumentNames: argumentNames.map(sourceText),
                 menuDescription: menuDescription,
                 hidden: hidden
             )
@@ -107,9 +109,92 @@ import XCTest
                     for: "/help topic", catalog: catalog
                 ).isEmpty
             )
+            XCTAssertNil(SlashCommandMatcher.argumentHint(for: "/help topic", catalog: catalog))
+            XCTAssertEqual(SlashCommandMatcher.argumentHint(for: "/help ", catalog: catalog), "[topic]")
+        }
+
+        func testArgumentHintMatchesNativeSlashAndCursorGatesWithoutTrimming() {
+            let rawHint = " [low|medium|high|xhigh|max|ultra] [--fix]  "
+            let catalog = [ConversationSlashCommand(
+                name: "code-review",
+                description: "Review changes",
+                aliases: ["cr"],
+                argumentHint: rawHint,
+                menuDescription: nil,
+                source: "builtin",
+                hidden: true
+            )]
+
+            for text in ["/code-review ", "/cr "] {
+                XCTAssertEqual(SlashCommandMatcher.argumentHint(for: text, catalog: catalog), rawHint)
+                XCTAssertEqual(SlashCommandMatcher.argumentHint(for: text, catalog: catalog, cursor: 1), rawHint)
+                XCTAssertNil(SlashCommandMatcher.argumentHint(for: text, catalog: catalog, cursor: 0))
+            }
+            for text in [
+                "/", "/code-review", " /code-review ", "/CODE-REVIEW ",
+                "/code-review\t", "/code-review\n", "/code-review  ",
+                "/code-review staged", "/code-review staged ", "/unknown ",
+            ] {
+                XCTAssertNil(SlashCommandMatcher.argumentHint(for: text, catalog: catalog), text)
+            }
+        }
+
+        func testArgumentHintExactNameTakesPrecedenceOverEarlierAlias() {
+            let catalog = [
+                ConversationSlashCommand(
+                    name: "other", description: "", aliases: ["review"],
+                    argumentHint: "[wrong]", menuDescription: nil, source: "builtin", hidden: false
+                ),
+                ConversationSlashCommand(
+                    name: "review", description: "", aliases: [],
+                    argumentHint: "[correct]", menuDescription: nil, source: "builtin", hidden: false
+                ),
+            ]
+            XCTAssertEqual(SlashCommandMatcher.argumentHint(for: "/review ", catalog: catalog), "[correct]")
+        }
+
+        func testCommandCompletionAddsOneSpaceAndPreservesMatchedAlias() {
+            let command = ConversationSlashCommand(
+                name: "review", description: "", aliases: ["rv"],
+                argumentHint: "[instructions]", menuDescription: nil, source: "builtin", hidden: false
+            )
+            XCTAssertEqual(SlashCommandMatcher.completedInput(for: command, in: "/rev"), "/review ")
+            XCTAssertEqual(SlashCommandMatcher.completedInput(for: command, in: "/rv"), "/rv ")
+            XCTAssertEqual(SlashCommandMatcher.completedInput(for: command, in: "/r"), "/review ")
+        }
+
+        func testNamedArgumentHintsUseNativeShellArgumentCount() {
+            let catalog = [ConversationSlashCommand(
+                name: "deploy", description: "", aliases: [],
+                argumentHint: " <environment> [options] ",
+                argumentNames: ["environment", "region", "tag"],
+                menuDescription: nil, source: "mcp", hidden: false
+            )]
+            let cases: [(String, String?)] = [
+                ("/deploy ", " <environment> [options] "),
+                ("/deploy  ", "[environment] [region] [tag]"),
+                ("/deploy production", nil),
+                ("/deploy production ", "[region] [tag]"),
+                ("/deploy \"two words\" ", "[region] [tag]"),
+                ("/deploy '' ", "[region] [tag]"),
+                ("/deploy one\\ two ", "[region] [tag]"),
+                ("/deploy \"unterminated ", "[region] [tag]"),
+                ("/deploy one; ignored two ", "[region] [tag]"),
+                ("/deploy ENV=value production ", "[region] [tag]"),
+                ("/deploy one $(echo two) three ", "[region] [tag]"),
+                ("/deploy one two ", "[tag]"),
+                ("/deploy one two three ", nil),
+            ]
+            for (text, expected) in cases {
+                XCTAssertEqual(SlashCommandMatcher.argumentHint(for: text, catalog: catalog), expected, text)
+            }
+            let namesOnly = [ConversationSlashCommand(
+                name: "named-only", description: "", aliases: [], argumentHint: nil,
+                argumentNames: ["first", "second"], menuDescription: nil, source: "mcp", hidden: false
+            )]
             XCTAssertEqual(
-                SlashCommandMatcher.argumentHint(for: "/help topic", catalog: catalog),
-                "[topic]"
+                SlashCommandMatcher.argumentHint(for: "/named-only ", catalog: namesOnly),
+                "[first] [second]"
             )
         }
 
@@ -149,6 +234,7 @@ import XCTest
                     description: "Show help",
                     aliases: ["h"],
                     argumentHint: "[topic]",
+                    argumentNames: ["topic"],
                     menuDescription: "Help",
                     hidden: false
                 ),
@@ -158,6 +244,7 @@ import XCTest
             XCTAssertEqual(source.model.slashCommands.map(\.name), ["help"])
             XCTAssertEqual(source.model.slashCommands.first?.aliases, ["h"])
             XCTAssertEqual(source.model.slashCommands.first?.argumentHint, "[topic]")
+            XCTAssertEqual(source.model.slashCommands.first?.argumentNames, ["topic"])
             XCTAssertEqual(source.model.skills.first?.triggers, ["/help", "/h"])
 
             source.applyForTesting(.commandsChanged(commands: [

@@ -1049,6 +1049,83 @@
     },
     {
       "sdk": "bridge",
+      "name": "FusionAdminCommandDto",
+      "kind": "type",
+      "signature": "export type FusionAdminCommandDto = ConfigurationAdminCommandDto;",
+      "summary": "",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1279,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1279"
+    },
+    {
+      "sdk": "bridge",
+      "name": "FusionCatalogDto",
+      "kind": "interface",
+      "signature": "export interface FusionCatalogDto",
+      "summary": "",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1313,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1313"
+    },
+    {
+      "sdk": "bridge",
+      "name": "FusionGlobalsDto",
+      "kind": "interface",
+      "signature": "export interface FusionGlobalsDto",
+      "summary": "",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1293,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1293"
+    },
+    {
+      "sdk": "bridge",
+      "name": "FusionScopeCatalogDto",
+      "kind": "interface",
+      "signature": "export interface FusionScopeCatalogDto",
+      "summary": "",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1301,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1301"
+    },
+    {
+      "sdk": "bridge",
+      "name": "FusionStrategyDto",
+      "kind": "interface",
+      "signature": "export interface FusionStrategyDto",
+      "summary": "Runtime configuration uses the engine's camelCase setting names.",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1287,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1287"
+    },
+    {
+      "sdk": "bridge",
+      "name": "FusionStrategyRefDto",
+      "kind": "interface",
+      "signature": "export interface FusionStrategyRefDto",
+      "summary": "",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1281,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1281"
+    },
+    {
+      "sdk": "bridge",
+      "name": "FusionStrategySelectionDto",
+      "kind": "interface",
+      "signature": "export interface FusionStrategySelectionDto",
+      "summary": "",
+      "file": "packages/bridge-client/src/protocol.ts",
+      "line": 1320,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/protocol.ts#L1320"
+    },
+    {
+      "sdk": "bridge",
       "name": "HeadlineKindDto",
       "kind": "type",
       "signature": "export type HeadlineKindDto =\n  | 'added' | 'removed' | 'added_removed' | 'lines_read' | 'lines_read_partial'\n  | 'files_found' | 'files_found_truncated' | 'lines_found' | 'matches_found'\n  | 'interrupted' | 'no_content' | 'failed' | 'plain';",
@@ -2322,6 +2399,17 @@
       "line": 1016,
       "sourceState": "committed",
       "url": "https://github.com/lingxi-coder/lingxi-app/blob/98f82e109509a0b0309d0684e5e09150e0125265/packages/bridge-client/src/validation.ts#L1016"
+    },
+    {
+      "sdk": "bridge",
+      "name": "validateFusionCatalog",
+      "kind": "function",
+      "signature": "export function validateFusionCatalog(value: unknown): FusionCatalogDto",
+      "summary": "Catalogs retain editable excluded scopes, while execution requires admission.",
+      "file": "packages/bridge-client/src/validation.ts",
+      "line": 997,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/lingxi-app/blob/51cb8b71a52f19b99a6976c5d2db69ce12c9c83c/packages/bridge-client/src/validation.ts#L997"
     },
     {
       "sdk": "bridge",
@@ -5094,6 +5182,17 @@
       "line": 123,
       "sourceState": "committed",
       "url": "https://github.com/lingxi-coder/harness-runtime/blob/9cc310fd81c94d8372e4b3fd5806955fd9c94925/crates/plugin/src/brand_normalize.rs#L123"
+    },
+    {
+      "sdk": "harness",
+      "name": "FusionAdminCommandDto",
+      "kind": "struct",
+      "signature": "pub struct FusionAdminCommandDto",
+      "summary": "One nested Desktop Fusion-management command.",
+      "file": "crates/client/src/protocol/commands.rs",
+      "line": 126,
+      "sourceState": "committed",
+      "url": "https://github.com/lingxi-coder/harness-runtime/blob/f4818f71d8863fc1180eb319b4bacbccdcf82f54/crates/client/src/protocol/commands.rs#L126"
     },
     {
       "sdk": "harness",

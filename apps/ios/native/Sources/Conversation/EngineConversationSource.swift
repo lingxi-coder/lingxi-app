@@ -4089,6 +4089,7 @@ final class EngineConversationSource: ConversationSource {
                 aliases: command.aliases.map(Self.displayText),
                 sourceAliasCodeUnits: command.aliases.map(\.codeUnits),
                 argumentHint: command.argumentHint.map(Self.displayText),
+                argumentNames: command.argumentNames.map(Self.displayText),
                 menuDescription: command.menuDescription,
                 source: command.source,
                 hidden: command.hidden

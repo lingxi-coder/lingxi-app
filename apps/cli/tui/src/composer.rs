@@ -962,7 +962,7 @@ impl Composer {
 /// [`crate::terminal::Frame`].
 pub struct ComposerView<'a> {
     composer: &'a Composer,
-    /// Hint displayed after an exact slash command followed by one space.
+    /// Non-editable argument hint appended after the draft's rendered text.
     argument_hint: Option<&'a str>,
     /// Session accent tint (`/color`): there is no border to tint since the
     /// borderless-composer rework (Task 3) — it now tints the `›` prompt.
@@ -1108,13 +1108,28 @@ impl Renderable for ComposerView<'_> {
             );
         }
         if let Some(hint) = self.argument_hint {
-            let display_col = self.composer.display_col_in(&rows[cursor_row]);
-            if self.composer.cursor == self.composer.chars.len()
+            // Claude Code keeps the suffix after the whole draft when the
+            // caret moves inside it, and hides it only at cursor offset zero.
+            // Use the final row, not the caret row, so a multiline draft can
+            // never have a hint painted over its existing text.
+            let end_row = rows.len() - 1;
+            let display_col = self.composer.chars[rows[end_row].start..]
+                .iter()
+                .map(|&c| char_width(c))
+                .sum::<usize>()
+                // Native renderedValue includes a synthetic blank under its
+                // end cursor. Keep the terminal cursor off the first hint byte.
+                + usize::from(self.composer.cursor == self.composer.chars.len());
+            if self.composer.cursor > 0
+                && end_row >= first_row
+                && end_row - first_row < usize::from(inner.height)
                 && display_col < usize::from(inner.width)
             {
                 let x = inner.x + u16::try_from(display_col).unwrap_or(0);
-                let y = inner.y + u16::try_from(cursor_row - first_row).unwrap_or(0);
+                let y = inner.y + u16::try_from(end_row - first_row).unwrap_or(0);
                 let remaining = inner.x.saturating_add(inner.width).saturating_sub(x);
+                let hint =
+                    tui_core::render::truncate_to_width_ellipsis(hint, usize::from(remaining));
                 buf.set_span(
                     x,
                     y,
@@ -1539,7 +1554,96 @@ mod tests {
         ComposerView::new(&composer)
             .with_argument_hint(Some("<choice>"))
             .render(area, &mut buf);
+        assert!(buffer_row(&buf, 1).contains("/model  <choice>"));
+        assert_eq!(ComposerView::new(&composer).cursor_pos(area), Some((9, 1)));
+        assert_eq!(buf[(9, 1)].symbol(), " ");
+        assert!(buf[(10, 1)]
+            .modifier
+            .contains(ratatui::style::Modifier::DIM));
+        assert_eq!(composer.text(), "/model ");
+    }
+
+    #[test]
+    fn argument_hint_remains_at_draft_end_when_cursor_moves_and_hides_at_zero() {
+        let mut composer = typed("/model ");
+        composer.move_left();
+        composer.move_left();
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("<choice>"))
+            .render(area, &mut buf);
         assert!(buffer_row(&buf, 1).contains("/model <choice>"));
+        assert_eq!(ComposerView::new(&composer).cursor_pos(area), Some((7, 1)));
+        assert_eq!(composer.text(), "/model ");
+
+        composer.home();
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("<choice>"))
+            .render(area, &mut buf);
+        assert!(!buffer_row(&buf, 1).contains("<choice>"));
+    }
+
+    #[test]
+    fn argument_hint_uses_last_visible_row_and_wide_character_width() {
+        let mut composer = typed("/deploy 中文\nnext ");
+        composer.move_left();
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("[mode]"))
+            .render(area, &mut buf);
+        assert_eq!(buf[(10, 1)].symbol(), "中");
+        assert_eq!(buf[(12, 1)].symbol(), "文");
+        assert!(buffer_row(&buf, 2).starts_with("  next [mode]"));
+
+        let composer = typed("/deploy 中文 ");
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("[mode]"))
+            .render(area, &mut buf);
+        assert_eq!(buf[(16, 1)].symbol(), "[");
+        assert_eq!(ComposerView::new(&composer).desired_height(40), 3);
+    }
+
+    #[test]
+    fn argument_hint_is_clipped_without_growing_or_overwriting_the_input() {
+        let composer = typed("/model ");
+        for width in [10, 11, 12] {
+            let area = Rect::new(0, 0, width, 3);
+            let mut buf = Buffer::empty(area);
+            let view = ComposerView::new(&composer).with_argument_hint(Some("<choice>"));
+            view.render(area, &mut buf);
+            assert!(buffer_row(&buf, 1).starts_with("› /model "));
+            assert_eq!(view.desired_height(width), 3);
+            assert_eq!(composer.text(), "/model ");
+            if width == 12 {
+                assert_eq!(buf[(10, 1)].symbol(), "…");
+            }
+        }
+        let area = Rect::new(0, 0, 18, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("<choice>"))
+            .render(area, &mut buf);
+        assert!(buffer_row(&buf, 1).contains("/model  <choic…"));
+    }
+
+    #[test]
+    fn argument_hint_does_not_overwrite_scrolled_out_draft_end() {
+        let mut composer = typed("/deploy one\ntwo\nthree ");
+        composer.home();
+        composer.cursor_line_up();
+        composer.cursor_line_up();
+        composer.move_right();
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("[mode]"))
+            .render(area, &mut buf);
+        assert!(buffer_row(&buf, 1).contains("/deploy one"));
+        assert!(!buffer_row(&buf, 1).contains("[mode]"));
     }
 
     #[test]

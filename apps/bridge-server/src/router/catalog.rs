@@ -129,6 +129,17 @@ impl EngineCommandRouter {
                     .argument_hint
                     .as_ref()
                     .map(|hint| ClientTextDto::from_projection(hint).expect("hint is text")),
+                argument_names: if matches!(
+                    &cmd.kind,
+                    command_api::SlashCommandKind::Builtin { .. }
+                ) {
+                    Vec::new()
+                } else {
+                    cmd.argument_names
+                        .iter()
+                        .map(|name| ClientTextDto::from_projection(name).expect("argument name is text"))
+                        .collect()
+                },
                 menu_description: cmd.menu_description,
             })
             .collect();
@@ -146,6 +157,7 @@ impl EngineCommandRouter {
                 source: "builtin".to_string(),
                 aliases: Vec::new(),
                 argument_hint: None,
+                argument_names: Vec::new(),
                 menu_description: None,
                 hidden: false,
             });

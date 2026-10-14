@@ -517,7 +517,11 @@ class VoiceCapture internal constructor(
                                 }
                                 is VoiceCaptureResult.Transcript -> result.text
                             },
-                            errorMessage = if (result is VoiceCaptureResult.Failed) result.message else null,
+                            errorMessage = when (result) {
+                                is VoiceCaptureResult.Failed -> result.message
+                                VoiceCaptureResult.PermissionDenied -> "permission_denied"
+                                else -> null
+                            },
                         )
                     }
                     val callback = pendingResult
@@ -658,16 +662,20 @@ internal fun cancelActiveHeldVoiceSession() {
 fun rememberVoiceCapture(
     onTranscript: (String) -> Unit,
     onPartialTranscript: (String) -> Unit = {},
+    onError: (String, String) -> Unit = { _, _ -> },
 ): Pair<() -> Unit, () -> Unit> {
     val context = androidx.compose.ui.platform.LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val owner = remember(context) { AudioOwnerKey.ui("held-voice-${UUID.randomUUID()}") }
     val currentOnPartial = rememberUpdatedState(onPartialTranscript)
     val currentOnTranscript = rememberUpdatedState(onTranscript)
+    val currentOnError = rememberUpdatedState(onError)
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { /* result observed on the next hold via hasPermission() */ }
+    ) { granted ->
+        if (!granted) currentOnError.value("permissionDenied", "Microphone permission denied")
+    }
 
     val capture = remember(context) {
         VoiceCapture(
@@ -718,9 +726,9 @@ fun rememberVoiceCapture(
         capture.stop { r ->
             when (r) {
                 is VoiceCaptureResult.Transcript -> currentOnTranscript.value(r.text)
-                is VoiceCaptureResult.PermissionDenied -> capture.ensurePermission()
-                is VoiceCaptureResult.Empty -> Unit
-                is VoiceCaptureResult.Failed -> Log.w(TAG, "transcription failed: ${r.message}")
+                is VoiceCaptureResult.PermissionDenied -> currentOnError.value("permissionDenied", "Microphone permission denied")
+                is VoiceCaptureResult.Empty -> currentOnError.value("noSpeech", "No speech recognized")
+                is VoiceCaptureResult.Failed -> currentOnError.value("", r.message)
             }
         }
     }

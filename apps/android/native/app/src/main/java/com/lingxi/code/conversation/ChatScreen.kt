@@ -122,6 +122,9 @@ fun ChatScreen(
     flowModeActive: Boolean = false,
     voiceInputSupported: Boolean = true,
     voiceConversationSupported: Boolean = true,
+    audioGuidance: com.lingxi.code.voice.AudioSetupGuidance? = null,
+    onOpenVoiceSettings: () -> Unit = {},
+    onDismissAudioGuidance: () -> Unit = {},
     flowModePanel: (@Composable () -> Unit)? = null,
     draft: String = "",
     onDraftChange: (String) -> Unit = {},
@@ -351,6 +354,9 @@ fun ChatScreen(
                     onSelectMode = onSelectNewChatMode,
                     onPickWorkspace = onPickWorkspace,
                 )
+            }
+            audioGuidance?.let { guidance ->
+                AudioSetupBanner(guidance, onOpenVoiceSettings, onDismissAudioGuidance)
             }
             Composer(
                 text = draft,

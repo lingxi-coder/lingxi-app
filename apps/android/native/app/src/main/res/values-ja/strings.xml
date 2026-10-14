@@ -1780,4 +1780,45 @@
     <string name="common_submit">送信</string>
     <string name="cron_run_section_overview">概要</string>
     <string name="computer_use_tier_click">クリック</string>
+
+    <!-- Audio recovery above the composer. -->
+    <string name="audio_guide_permission_title">音声のアクセス許可が必要です</string>
+    <string name="audio_guide_permission_detail">システム設定でマイクと音声認識を許可して、もう一度お試しください。</string>
+    <string name="audio_guide_quota_title">クラウド音声の利用枠が不足しています</string>
+    <string name="audio_guide_quota_detail">音声アカウントの利用枠を確認するか、音声設定でシステム音声または利用可能なアカウントを選択してください。</string>
+    <string name="audio_guide_configuration_title">音声の設定が必要です</string>
+    <string name="audio_guide_configuration_detail">認識言語と音声ソースを確認してください。中国語には中国語を選択し、未対応の場合は対応するモデルをインストールするか、利用可能なソースを選択してください。</string>
+    <string name="audio_guide_retry_title">音声を一時的に利用できません</string>
+    <string name="audio_guide_retry_detail">アプリを前面に表示して再試行してください。失敗が続く場合は、音声設定の言語、ソース、アクセス許可を確認してください。</string>
+    <string name="audio_guide_settings">音声設定</string>
+    <string name="audio_guide_dismiss">閉じる</string>
+    <string name="audio_language_hint">自動はシステム言語に従い、話した言語は検出しません。中国語を話す場合は中国語を選択してください。</string>
+
+    <string name="audio_offline_recognition_models">オフライン認識モデル</string>
+    <string name="audio_offline_speech_models">オフライン読み上げモデル</string>
+    <string name="audio_offline_recognition_hint">認識モデルのみ表示されます。MeloTTS と Kitten は読み上げモデルです。音声出力で選択してください。</string>
+    <string name="audio_offline_speech_hint">読み上げモデルのみ表示されます。MeloTTS は中国語と英語を読み上げます。音声認識は音声入力で設定してください。</string>
+    <string name="audio_offline_models_hint">認識モデルは音声入力、読み上げモデルは音声出力に使用します。インストール後、対応する一覧で選択してください。</string>
+    <string name="audio_model_installed">インストール済み</string>
+    <string name="audio_model_not_installed">未インストール</string>
+    <string name="audio_language_default_model">言語に合わせて選択</string>
+
+    <string name="audio_settings_input">音声入力</string>
+    <string name="audio_settings_output">読み上げ</string>
+    <string name="audio_source_title">ソース</string>
+    <string name="audio_settings_offline_models">オフラインモデル</string>
+    <string name="audio_settings_advanced">詳細設定とアクセス許可</string>
+    <string name="audio_settings_expand">表示</string>
+    <string name="audio_settings_collapse">非表示</string>
+    <string name="audio_settings_status">保存状態</string>
+    <string name="audio_settings_saving">保存中…</string>
+    <string name="audio_settings_saved">このデバイスに保存済み</string>
+    <string name="audio_settings_account">音声アカウント</string>
+    <string name="audio_settings_model">音声モデル</string>
+    <string name="audio_settings_follow_session">現在のチャットのアカウントを使用</string>
+    <string name="audio_settings_select_account">アカウントを選択</string>
+    <string name="audio_settings_default">自動</string>
+    <string name="audio_settings_connected">接続済み</string>
+    <string name="audio_source_system">システム</string>
+    <string name="audio_settings_cloud_source">クラウドサービス</string>
 </resources>

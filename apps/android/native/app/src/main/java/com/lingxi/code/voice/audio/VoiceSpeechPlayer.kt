@@ -19,6 +19,7 @@ internal class VoiceSpeechPlayer(context: Context) {
         speed: Float? = null,
         foregroundUserInitiated: Boolean = false,
         flowDuplex: Boolean = false,
+        onError: (DeviceAudioError) -> Unit = {},
     ): Boolean = when (
         val result = AndroidAudioServiceProvider.perform(
             context = appContext,
@@ -34,7 +35,10 @@ internal class VoiceSpeechPlayer(context: Context) {
         )
     ) {
         is DeviceAudioResult.PlaybackCompleted -> true
-        is DeviceAudioResult.Failed -> false
+        is DeviceAudioResult.Failed -> {
+            onError(result.error)
+            false
+        }
         else -> false
     }
 

@@ -3,7 +3,7 @@ import type { ClientEvent } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { SessionRuntime } from './bridge.js';
+import { CodexSessionBusyError, SessionRuntime } from './bridge.js';
 import { urlOrigin } from './bridgeEvents.js';
 import {
   CH_ANSWER_ASK_USER_QUESTION,
@@ -442,30 +442,38 @@ export class SessionRuntimeManager {
       && !this.openingSessions.get(sessionId)?.activate;
   }
 
-  private async stopOtherCodexRuntimes(sessionId?: string): Promise<void> {
+  /**
+   * Take the Codex session away from every other engine. One that this host
+   * spawned lets go in place and stays open; any other engine is stopped.
+   */
+  private async releaseOtherCodexRuntimes(sessionId?: string): Promise<void> {
     const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
+    // A claimant that is still starting may be booting with the session.
     const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
-      && (runtime.hasOpenAiOAuth || runtime === owner));
-    // A background launch must not stop the chat on screen; it retries once
-    // that chat lets go.
+      && (runtime.hasOpenAiOAuth || (runtime === owner && runtime.isStarting)));
+    // A background launch must not take Codex from the chat on screen; its
+    // run fails instead.
     const background = sessionId !== undefined && this.isBackgroundLaunch(sessionId);
     if (background && candidates.some(runtime => runtime.sessionId === this.activeSessionId)) {
-      throw new Error('The active Codex chat holds Codex authentication; background work waits for it.');
+      throw new CodexSessionBusyError('The active Codex chat holds Codex authentication; background work waits for it.');
     }
     if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0
       || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
-      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+      throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.');
     }
     for (const runtime of candidates) {
       if (runtime.connectionState.status === 'connected') await runtime.assertNoBackgroundTasks();
       else if (runtime.hasOpenAiOAuth && runtime.connectionState.status !== 'idle') {
-        throw new Error('Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.');
+        throw new CodexSessionBusyError('Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.');
       }
     }
     if (candidates.some(runtime => runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0)) {
-      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+      throw new CodexSessionBusyError('Wait for the other Codex chat to finish before changing Codex authentication.');
     }
-    for (const runtime of candidates) await runtime.stop();
+    for (const runtime of candidates) {
+      if (runtime.movesOpenAiOAuthInPlace) await runtime.releaseOpenAiOAuth();
+      else await runtime.stop();
+    }
     this.oauthOwner = sessionId;
   }
 
@@ -500,22 +508,44 @@ export class SessionRuntimeManager {
         starting = this.startingBackgroundCodexRuntimes(sessionId);
       }
     }
-    const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.stopOtherCodexRuntimes(sessionId));
+    const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.releaseOtherCodexRuntimes(sessionId));
     this.oauthLifecycle = operation;
-    if (sessionId !== undefined) {
-      this.pendingCodexClaims.set(sessionId, operation);
-      const settle = (): void => {
-        if (this.pendingCodexClaims.get(sessionId) === operation) this.pendingCodexClaims.delete(sessionId);
-      };
-      operation.then(settle, settle);
-    }
+    if (sessionId !== undefined) this.trackCodexClaim(sessionId, operation);
+    return operation;
+  }
+
+  private trackCodexClaim(sessionId: string, operation: Promise<void>): void {
+    this.pendingCodexClaims.set(sessionId, operation);
+    const settle = (): void => {
+      if (this.pendingCodexClaims.get(sessionId) === operation) this.pendingCodexClaims.delete(sessionId);
+    };
+    operation.then(settle, settle);
+  }
+
+  /**
+   * Move the Codex session into a connected engine this host spawned. The
+   * holder lets go first, so its last rotation is what moves.
+   */
+  private claimOpenAiOAuth(sessionId: string): Promise<void> {
+    const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
+      const runtime = this.runtimes.get(sessionId);
+      if (!runtime) throw new Error(`session runtime is not open: ${sessionId}`);
+      if (runtime.hasOpenAiOAuth) return;
+      if (!runtime.movesOpenAiOAuthInPlace) throw new Error('This chat must reconnect before it can use Codex authentication.');
+      await this.releaseOtherCodexRuntimes(sessionId);
+      const session = await this.opts.resolveOpenAiOAuth?.();
+      if (!session) throw new Error('Codex authentication is unavailable. Sign in again.');
+      await runtime.installOpenAiOAuth(session);
+    });
+    this.oauthLifecycle = operation;
+    this.trackCodexClaim(sessionId, operation);
     return operation;
   }
 
   /** Serialize credential mutation with launch ownership, including broker I/O. */
   withCodexAuthMutation<T>(mutation: () => Promise<T>): Promise<T> {
     const operation = this.oauthLifecycle.catch(() => undefined).then(async () => {
-      await this.stopOtherCodexRuntimes();
+      await this.releaseOtherCodexRuntimes();
       return mutation();
     });
     this.oauthLifecycle = operation.then(() => undefined, () => undefined);
@@ -662,6 +692,7 @@ export class SessionRuntimeManager {
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
       beforeOpenAiOAuthLaunch: () => this.claimCodexRuntime(ref.sessionId),
+      claimOpenAiOAuth: () => this.claimOpenAiOAuth(ref.sessionId),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       onModelChanged: (model: string) => {
         this.sessionModelHints.set(ref.sessionId, model);

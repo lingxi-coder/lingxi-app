@@ -33,6 +33,7 @@ pub mod composer;
 pub mod connect;
 pub mod copy;
 pub mod diff;
+mod effort_command;
 pub mod export;
 pub mod files;
 pub mod fusion;

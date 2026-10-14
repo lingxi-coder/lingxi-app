@@ -306,6 +306,9 @@ pub struct EngineCommandRouter {
     /// Packaged Desktop owns persistence in its signed credential broker; in
     /// that mode bridge credential mutations update only this process cache.
     provider_credentials_ephemeral: bool,
+    /// Packaged Desktop's Codex session slot. Credential commands for the
+    /// Codex provider fill and empty it instead of touching storage.
+    openai_oauth_slot: Option<Arc<llm_runtime::auth::openai::OpenAiOAuthSlot>>,
     /// HTTP transport used by provider connection probes. Production boot
     /// supplies the same guarded transport as the runtime's LLM clients.
     http: Option<Arc<dyn lingxi_core::host::HttpTransport>>,
@@ -474,6 +477,7 @@ impl EngineCommandRouter {
             realtime_audio: None,
             provider_model_catalog_listings: Vec::new(),
             provider_credentials_ephemeral: false,
+            openai_oauth_slot: None,
             http: None,
             settings: None,
             mcp: None,
@@ -508,6 +512,17 @@ impl EngineCommandRouter {
 
     pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Route the Codex provider's credential commands to this engine's
+    /// session slot.
+    #[must_use]
+    pub fn with_openai_oauth_slot(
+        mut self,
+        slot: Option<Arc<llm_runtime::auth::openai::OpenAiOAuthSlot>>,
+    ) -> Self {
+        self.openai_oauth_slot = slot;
         self
     }
 
@@ -967,6 +982,58 @@ impl CommandRouter for EngineCommandRouter {
                 )
                 .await;
             }
+            // The host moves its one Codex session between engines: it hands
+            // the session to this engine's slot rather than storing it, so the
+            // session's rotations reach the host exactly once, through the
+            // credential observer.
+            ClientCommand::SetProviderCredential {
+                operation_id,
+                provider_id,
+                credential,
+            } if provider_id == crate::boot::CODEX_PROVIDER_ID
+                && self.openai_oauth_slot.is_some() =>
+            {
+                let error = match &self.openai_oauth_slot {
+                    Some(slot) => {
+                        install_openai_oauth_session(slot, credential.expose_secret()).await
+                    }
+                    None => Some("Codex session slot is unavailable".to_string()),
+                };
+                // The slot is the ChatGPT delegate for this engine's whole
+                // life, so Fusion adopts the session in place. Were it ever to
+                // refuse, the session still serves the selected model and stays
+                // reported as taken: reporting it as not taken would let the
+                // host hand it to a second engine while this one refreshes it.
+                if error.is_none()
+                    && !crate::boot::refresh_fusion_catalog_bounded(
+                        &self.catalog_registry,
+                        vec![provider_id.clone()],
+                    )
+                    .await
+                {
+                    tracing::warn!("Fusion did not adopt the Codex session without a restart");
+                }
+                let applied = error.is_none();
+                sink.emit(ClientEvent::ProviderCredentialStatus {
+                    operation_id,
+                    configured_provider_ids: applied
+                        .then_some(provider_id.clone())
+                        .into_iter()
+                        .collect(),
+                    unavailable_provider_ids: (!applied)
+                        .then_some(provider_id)
+                        .into_iter()
+                        .collect(),
+                    storage_encrypted: self
+                        .credentials
+                        .as_ref()
+                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
+                    // Every part of a session is secret; it has no preview.
+                    credential_previews: HashMap::new(),
+                    error,
+                })
+                .await;
+            }
             ClientCommand::SetProviderCredential {
                 operation_id,
                 provider_id,
@@ -1036,6 +1103,35 @@ impl CommandRouter for EngineCommandRouter {
                         .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
                     credential_previews,
                     error,
+                })
+                .await;
+            }
+            // Releasing returns once a rotation in flight has reached the host,
+            // so the host can hand the session to another engine next.
+            ClientCommand::DeleteProviderCredential {
+                operation_id,
+                provider_id,
+            } if provider_id == crate::boot::CODEX_PROVIDER_ID
+                && self.openai_oauth_slot.is_some() =>
+            {
+                if let Some(slot) = &self.openai_oauth_slot {
+                    slot.release().await;
+                }
+                harness_runtime::desktop::refresh_fusion_catalog_after_credential_delete(
+                    &self.catalog_registry,
+                    &provider_id,
+                )
+                .await;
+                sink.emit(ClientEvent::ProviderCredentialStatus {
+                    operation_id,
+                    configured_provider_ids: Vec::new(),
+                    unavailable_provider_ids: Vec::new(),
+                    storage_encrypted: self
+                        .credentials
+                        .as_ref()
+                        .is_some_and(|credentials| credentials.provider_key_storage_is_encrypted()),
+                    credential_previews: HashMap::new(),
+                    error: None,
                 })
                 .await;
             }
@@ -1949,6 +2045,27 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+}
+
+/// Serve a host-delivered Codex session from this engine's slot. Returns the
+/// failure to report, if any; the session never appears in it.
+async fn install_openai_oauth_session(
+    slot: &llm_runtime::auth::openai::OpenAiOAuthSlot,
+    credential: &str,
+) -> Option<String> {
+    let session = (credential.len() <= crate::boot::MAX_STDIN_CREDENTIAL_BYTES)
+        .then(|| {
+            serde_json::from_str::<client::protocol::events::OpenAiOAuthSessionDto>(credential).ok()
+        })
+        .flatten()
+        .filter(|session| crate::boot::validate_openai_oauth_session(session).is_ok());
+    let Some(session) = session else {
+        return Some("invalid Codex OAuth session".to_string());
+    };
+    slot.install(crate::boot::openai_oauth_tokens(&session))
+        .await
+        .err()
+        .map(|_| "failed to install Codex OAuth session".to_string())
 }
 
 fn provider_id_is_valid(value: &str) -> bool {

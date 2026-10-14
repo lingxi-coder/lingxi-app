@@ -125,6 +125,29 @@ async function nextEnvelope(process: FakeHelperProcess): Promise<{ id: string; k
   return lastEnvelope(process);
 }
 
+test('snapshot previews forward the saved language or a UI override without changing saved preferences', async () => {
+  const helper = new FakeHelperProcess();
+  const saved = { ...audioConfigurationDefaults(), language: 'zh-CN' };
+  const manager = new NativeAudioManager({
+    isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper', diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => helper as any, getAudioConfiguration: () => saved,
+  });
+  try {
+    for (const override of [undefined, { ...saved, language: 'en-US' }, undefined]) {
+      helper.writes.length = 0;
+      const pending = manager.request({ type: 'get_snapshot', ...(override ? { configuration: override } : {}) });
+      const envelope = await nextEnvelope(helper);
+      assert.deepEqual(JSON.parse(helper.writes.at(-1)!).command.configuration, override ?? saved);
+      helper.stdout.write(`${JSON.stringify({ id: envelope.id, type: 'response', result: { type: 'snapshot', snapshot: snapshot() } })}\n`);
+      assert.equal((await pending).type, 'snapshot');
+      assert.equal(saved.language, 'zh-CN');
+    }
+  } finally {
+    await manager.dispose(); helper.stdin.end(); helper.stdout.end(); helper.stderr.end();
+  }
+});
+
 test('snapshot requests start the helper and return its real capabilities', async () => {
   const helper = new FakeHelperProcess();
   const manager = new NativeAudioManager({
@@ -1841,6 +1864,7 @@ test('a UI preview uses its normalized configuration override without pinning sa
   });
   try {
     await primeEngineCapabilities(manager, helper);
+    const readsBeforePreview = savedConfigurationReads;
     const preview = manager.executeUiAudioOperation(
       { type: 'synthesize', text: 'Preview' },
       'voice-settings',
@@ -1859,7 +1883,7 @@ test('a UI preview uses its normalized configuration override without pinning sa
     assert.equal(envelope.configuration?.language, 'zh-CN');
     assert.equal(envelope.configuration?.rate, 1.25);
     assert.equal(envelope.configurationRevision, 0, 'a preview override does not claim a saved configuration revision');
-    assert.equal(savedConfigurationReads, 0, 'preview must not fall back to saved Flow preferences');
+    assert.equal(savedConfigurationReads, readsBeforePreview, 'preview must not fall back to saved Flow preferences');
 
     helper.stdout.write(`${JSON.stringify({
       id: envelope.id,
@@ -1905,7 +1929,7 @@ test('a UI preview uses its normalized configuration override without pinning sa
       },
     })}\n`);
     assert.equal((await flowOperation).result.type, 'synthesized');
-    assert.equal(savedConfigurationReads, 1, 'a later Flow operation still reads saved settings');
+    assert.equal(savedConfigurationReads, readsBeforePreview + 1, 'a later Flow operation still reads saved settings');
   } finally {
     await manager.dispose();
     helper.stdin.end();
@@ -2164,6 +2188,7 @@ test('stopping a committed recording does not need a fresh saved configuration r
   });
   try {
     await primeEngineCapabilities(manager, helper);
+    const readsBeforeRecording = configurationReads;
     const owner = { type: 'session', session_id: 'recording-session' } as const;
     const startRequest = {
       identity: { id: '00000000-0000-4000-8000-00000000000b', generation: 1, service_epoch: 9 },
@@ -2190,7 +2215,7 @@ test('stopping a committed recording does not need a fresh saved configuration r
       },
     })}\n`);
     assert.deepEqual(await startResult, { type: 'recording_started', handle: 'recording-handle' });
-    assert.equal(configurationReads, 1);
+    assert.equal(configurationReads, readsBeforeRecording + 1);
 
     configurationUnavailable = true;
     const stopRequest = {
@@ -2217,7 +2242,7 @@ test('stopping a committed recording does not need a fresh saved configuration r
       },
     })}\n`);
     assert.deepEqual(await stopResult, { type: 'recording', audio_base64: 'AQI=', mime_type: 'audio/wav' });
-    assert.equal(configurationReads, 1, 'stop must not consult settings after the recording is committed');
+    assert.equal(configurationReads, readsBeforeRecording + 1, 'stop must not consult settings after the recording is committed');
   } finally {
     await manager.dispose();
     helper.stdin.end();

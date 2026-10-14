@@ -301,6 +301,10 @@ class MainActivity : ComponentActivity() {
                                 ?: SettingsRoutes.providerList(ProviderKind.Llm.name)
                             settingsOpen = true
                         },
+                        onOpenVoiceSettings = {
+                            settingsInitialRoute = SettingsRoutes.VOICE
+                            settingsOpen = true
+                        },
                         onOpenComputerUseSettings = {
                             settingsInitialRoute = SettingsRoutes.COMPUTER_USE
                             settingsOpen = true

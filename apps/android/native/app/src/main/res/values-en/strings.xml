@@ -1780,4 +1780,45 @@
     <string name="common_submit">Submit</string>
     <string name="cron_run_section_overview">Overview</string>
     <string name="computer_use_tier_click">Click</string>
+
+    <!-- Audio recovery above the composer. -->
+    <string name="audio_guide_permission_title">Audio permission needed</string>
+    <string name="audio_guide_permission_detail">Allow microphone and speech recognition in system settings, then retry.</string>
+    <string name="audio_guide_quota_title">Cloud audio quota unavailable</string>
+    <string name="audio_guide_quota_detail">Check the audio account quota, or choose system audio or an available account in audio settings.</string>
+    <string name="audio_guide_configuration_title">Audio setup needed</string>
+    <string name="audio_guide_configuration_detail">Check the recognition language and audio source. Select Chinese for Chinese speech; install a matching model or choose an available source when unsupported.</string>
+    <string name="audio_guide_retry_title">Audio temporarily unavailable</string>
+    <string name="audio_guide_retry_detail">Keep the app in the foreground and retry. If it keeps failing, check the language, source and permissions in audio settings.</string>
+    <string name="audio_guide_settings">Audio settings</string>
+    <string name="audio_guide_dismiss">Dismiss</string>
+    <string name="audio_language_hint">Auto follows the system language; it does not detect the spoken language. Select Chinese when speaking Chinese.</string>
+
+    <string name="audio_offline_recognition_models">Offline recognition model</string>
+    <string name="audio_offline_speech_models">Offline speech model</string>
+    <string name="audio_offline_recognition_hint">Only recognition models appear here. MeloTTS and Kitten are speech models; select them under audio output.</string>
+    <string name="audio_offline_speech_hint">Only speech models appear here. MeloTTS reads Chinese and English; configure recognition under audio input.</string>
+    <string name="audio_offline_models_hint">Recognition models handle audio input; speech models handle audio output. Select installed models in the matching list.</string>
+    <string name="audio_model_installed">Installed</string>
+    <string name="audio_model_not_installed">Not installed</string>
+    <string name="audio_language_default_model">Select by language</string>
+
+    <string name="audio_settings_input">Voice input</string>
+    <string name="audio_settings_output">Read aloud</string>
+    <string name="audio_source_title">Source</string>
+    <string name="audio_settings_offline_models">Offline models</string>
+    <string name="audio_settings_advanced">Advanced settings and permissions</string>
+    <string name="audio_settings_expand">Show</string>
+    <string name="audio_settings_collapse">Hide</string>
+    <string name="audio_settings_status">Save status</string>
+    <string name="audio_settings_saving">Saving…</string>
+    <string name="audio_settings_saved">Saved on this device</string>
+    <string name="audio_settings_account">Audio account</string>
+    <string name="audio_settings_model">Audio model</string>
+    <string name="audio_settings_follow_session">Use the current chat account</string>
+    <string name="audio_settings_select_account">Choose an account</string>
+    <string name="audio_settings_default">Automatic</string>
+    <string name="audio_settings_connected">Connected</string>
+    <string name="audio_source_system">System</string>
+    <string name="audio_settings_cloud_source">Cloud provider</string>
 </resources>

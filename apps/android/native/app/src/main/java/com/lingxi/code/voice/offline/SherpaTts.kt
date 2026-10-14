@@ -88,7 +88,7 @@ class SherpaTts private constructor(
             val modelCfg = OfflineTtsModelConfig().apply {
                 when (val p = entry.runtimeParams) {
                     is GeneratedSherpaRuntimeParams.Tts.Vits -> vits = OfflineTtsVitsModelConfig().apply {
-                        model = File(modelDir, "model.int8.onnx").absolutePath
+                        model = File(modelDir, "model.onnx").absolutePath
                         tokens = File(modelDir, "tokens.txt").absolutePath
                         lexicon = File(modelDir, "lexicon.txt").absolutePath
                         dir("dict")?.let { dictDir = it }

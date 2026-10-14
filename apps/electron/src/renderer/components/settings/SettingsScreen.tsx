@@ -23,7 +23,6 @@ import { Projects } from './pages/Projects';
 import { ProviderCredentials } from './pages/ProviderCredentials';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
-import { extensionHubStyle } from './pages/ExtensionHub';
 import { ExtensionGlyph } from './pages/ExtensionHubIcons';
 import { Voice } from './pages/Voice';
 import { provenanceDescription, provenanceLabel, type Provenance } from './rows';
@@ -192,6 +191,8 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   plugins: Plugins,
 };
 
+export type SettingsNavigationRequest = (pageId: string, pluginId?: string) => void;
+
 export interface PageContentProps {
   bridge: UseBridge;
   snapshot: SettingsSnapshot | null;
@@ -201,8 +202,9 @@ export interface PageContentProps {
   onTheme(value: ThemeMode): void;
   /** Jumps the shell to another nav page by id — how `General`'s cross-page entries actually navigate, rather than just naming a destination they can't reach. */
   onNavigate(pageId: string, pluginId?: string): void;
+  /** Lets a page protect unsaved drafts before the shared sidebar changes pages. */
+  onRegisterNavigationRequest?(handler: SettingsNavigationRequest | null): void;
   initialPluginId?: string;
-  scopeControls?: ReactNode;
   initialProviderId?: string;
   pendingModelReference?: string;
   /**
@@ -493,7 +495,7 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
 function NavIcon({ name, pageId }: { name: string; pageId: string }) {
   const t = useT();
   const extensionGlyph = pageId === 'plugins' ? 'plugin' : pageId === 'skills' ? 'skills' : pageId === 'mcp' ? 'mcp' : pageId === 'tools-agent' ? 'tools' : null;
-  if (extensionGlyph) return <ExtensionGlyph name={extensionGlyph} color={t.text3} />;
+  if (extensionGlyph) return <ExtensionGlyph name={extensionGlyph} size={15} color={t.text3} />;
   return <Icon name={name} size={15} color="currentColor" stroke={1.7} style={{ color: t.text3 }} />;
 }
 
@@ -503,9 +505,17 @@ export function SettingsScreen({
   const t = useT();
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
   const [initialPluginId, setInitialPluginId] = useState<string>();
-  const navigatePage = (pageId: string, pluginId?: string) => {
+  const navigatePage = useCallback((pageId: string, pluginId?: string) => {
     setInitialPluginId(pluginId);
     setPage(pageId);
+  }, []);
+  const navigationRequestRef = useRef<SettingsNavigationRequest | null>(null);
+  const registerNavigationRequest = useCallback((handler: SettingsNavigationRequest | null) => {
+    navigationRequestRef.current = handler;
+  }, []);
+  const requestNavigatePage = (pageId: string, pluginId?: string) => {
+    if (navigationRequestRef.current) navigationRequestRef.current(pageId, pluginId);
+    else navigatePage(pageId, pluginId);
   };
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
@@ -515,6 +525,7 @@ export function SettingsScreen({
   const layerLocked = layerLockCount > 0;
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const contentScrollRef = useRef<HTMLDivElement>(null);
   const backRef = useRef<HTMLButtonElement>(null);
   // A ref, not a dependency, so the mount effect below (which must run its
   // capture-focus/attach-listener logic exactly once) always calls the
@@ -527,6 +538,10 @@ export function SettingsScreen({
   const engineReady = bridge.connected && Boolean(activeSessionId);
   const activePage = SETTINGS_NAV.find((candidate) => candidate.id === page) ?? SETTINGS_NAV[0];
   const nav = useMemo(() => groupedNav(query), [query]);
+
+  useEffect(() => {
+    contentScrollRef.current?.scrollTo(0, 0);
+  }, [page]);
 
   // Editing a layer that just became unavailable (the project closed) falls
   // back to `user` — the one layer that is always editable — rather than
@@ -649,11 +664,8 @@ export function SettingsScreen({
           theme={theme}
           onTheme={onTheme}
           onNavigate={navigatePage}
+          onRegisterNavigationRequest={registerNavigationRequest}
           initialPluginId={initialPluginId}
-          scopeControls={activePage.layered ? <>
-            <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
-            <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
-          </> : undefined}
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
           onClose={onClose}
@@ -664,22 +676,7 @@ export function SettingsScreen({
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
   const showLayerSwitcher = activePage.layered && canWriteHere;
-  const isExtensionHubPage = ['plugins', 'mcp', 'skills'].includes(activePage.id);
   const pageTitle = activePage.label;
-
-  if (isExtensionHubPage) return <div ref={panelRef} className="no-drag extension-customize-window" role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1} style={{ ...extensionHubStyle(t), background: t.sidebarBg, color: t.text }}>
-    <div className="settings-window-drag-region drag-region" aria-hidden="true" />
-    <div className="extension-window-navigation no-drag"><button ref={backRef} type="button" className="extension-hub-icon-button" aria-label="Back to app" onClick={onClose}><ExtensionGlyph name="arrowLeft" size={18} /></button></div>
-    <nav className="extension-customize-rail" aria-label="App navigation">
-      <button type="button" className="extension-hub-icon-button" aria-label="Home" onClick={onClose}><ExtensionGlyph name="home" size={20} /></button>
-      <span className="extension-hub-icon-button is-active" aria-label="Customize" aria-current="page"><ExtensionGlyph name="plugin" size={20} /></span>
-      <button type="button" className="extension-hub-icon-button" aria-label="Settings" onClick={() => { const link = panelRef.current?.querySelector<HTMLButtonElement>('[aria-label="All settings"]'); if (link) link.click(); else navigatePage('general'); }}><ExtensionGlyph name="cog" size={20} /></button>
-    </nav>
-    <div className="extension-customize-shell">
-      {settingsReadError && <div role="alert" data-testid="settings-snapshot-error">{settingsReadError}</div>}
-      {body}
-    </div>
-  </div>;
 
   return (
     <div
@@ -706,9 +703,9 @@ export function SettingsScreen({
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <nav style={{
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
-          borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflowY: 'auto',
+          borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflow: 'hidden',
         }}>
-          <div style={{ padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
+          <div style={{ flexShrink: 0, padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
             <button ref={backRef} type="button" aria-label="Back to app" onClick={onClose}
               className="settings-back-button"
               style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
@@ -734,7 +731,7 @@ export function SettingsScreen({
               />
             </div>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 10px 14px' }}>
+          <div className="settings-nav-scroll settings-scroll-area">
             {nav.length === 0 && (
               <div data-testid="nav-empty-state" style={{ padding: '18px 6px', color: t.text4, fontSize: 12 }}>
                 没有匹配的设置项
@@ -752,7 +749,8 @@ export function SettingsScreen({
                       key={navPage.id}
                       type="button"
                       data-nav-page={navPage.id}
-                      onClick={() => setPage(navPage.id)}
+                      aria-current={active ? 'page' : undefined}
+                      onClick={() => requestNavigatePage(navPage.id)}
                       style={{
                         width: '100%', display: 'flex', alignItems: 'center', gap: 9,
                         padding: '7px 8px', borderRadius: 7, border: 'none', textAlign: 'left',
@@ -774,20 +772,22 @@ export function SettingsScreen({
           </div>
         </nav>
 
-        <div className="settings-content-scroll" style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 0 }}>
-          <div style={{ padding: '20px 32px 40px' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
-              <div>
-                <div style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
+        <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
+          <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
+            <div className="settings-content-inner">
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+                <div>
+                  <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
+                </div>
+                {showLayerSwitcher && (
+                  <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+                )}
               </div>
               {showLayerSwitcher && (
-                <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
               )}
+              {body}
             </div>
-            {showLayerSwitcher && (
-              <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
-            )}
-            {body}
           </div>
         </div>
 

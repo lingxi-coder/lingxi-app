@@ -60,12 +60,12 @@ use orchestrator::test_support::MockOrchestratorHandle;
 #[cfg(unix)]
 use platform_posix::{
     PlainTextSecureStorage, PosixClock as NativeClock, PosixFileSystem as NativeFileSystem,
-    PosixHttp as NativeHttp,
+    PosixHttp as NativeHttp, PosixRuntime as NativeRuntime,
 };
 #[cfg(windows)]
 use platform_windows::{
     PlainTextSecureStorage, WindowsClock as NativeClock, WindowsFileSystem as NativeFileSystem,
-    WindowsHttp as NativeHttp,
+    WindowsHttp as NativeHttp, WindowsRuntime as NativeRuntime,
 };
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -943,6 +943,174 @@ async fn externally_owned_provider_credentials_stay_process_local() {
         .await
         .expect("read after process-cache delete")
         .is_none());
+}
+
+/// Token refresh transport for Codex slot tests. The sessions they install
+/// expire long after the test ends, so it is never reached.
+struct NoRefreshTransport;
+
+#[async_trait]
+impl llm_runtime::Transport for NoRefreshTransport {
+    async fn send(
+        &self,
+        _request: lingxi_llm_client::HttpRequest,
+    ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError> {
+        std::future::pending().await
+    }
+}
+
+fn bound_codex_slot(
+    credentials: Arc<secret::CredentialManager>,
+) -> Arc<llm_runtime::auth::openai::OpenAiOAuthSlot> {
+    let slot = Arc::new(llm_runtime::auth::openai::OpenAiOAuthSlot::new());
+    slot.bind(llm_runtime::auth::openai::OpenAiOAuthSlotBinding {
+        config: Default::default(),
+        http: Arc::new(NoRefreshTransport),
+        clock: Arc::new(NativeClock::new()),
+        bus: None,
+        credentials: Some(credentials),
+        spawner: Arc::new(NativeRuntime::new()),
+    });
+    slot
+}
+
+fn codex_session_json(access_token: &str) -> String {
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+        + 24 * 60 * 60;
+    serde_json::json!({
+        "access_token": access_token,
+        "refresh_token": "codex-refresh-secret",
+        "expires_at": expires_at,
+        "fedramp": false,
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn a_codex_session_moves_through_the_engine_slot_and_never_into_storage() {
+    let (router, credentials, _temp) = router_with_credentials().await;
+    let slot = bound_codex_slot(credentials.clone());
+    let router = router
+        .with_ephemeral_provider_credentials(true)
+        .with_openai_oauth_slot(Some(slot.clone()));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetProviderCredential {
+                operation_id: 51,
+                provider_id: "openai-chatgpt".into(),
+                credential: ProviderCredentialSecretDto::new(codex_session_json(
+                    "codex-access-secret",
+                )),
+            },
+            sink.clone(),
+        )
+        .await;
+    assert_eq!(
+        sink.events().await.last(),
+        Some(&ClientEvent::ProviderCredentialStatus {
+            operation_id: 51,
+            configured_provider_ids: vec!["openai-chatgpt".into()],
+            unavailable_provider_ids: Vec::new(),
+            storage_encrypted: false,
+            credential_previews: std::collections::HashMap::new(),
+            error: None,
+        })
+    );
+    assert!(slot.is_active().await);
+    assert!(
+        credentials
+            .get_openai_oauth_tokens()
+            .await
+            .expect("read stored session")
+            .is_none(),
+        "the host owns the session; the engine only serves it"
+    );
+    assert!(credentials
+        .get_provider_key("openai-chatgpt")
+        .await
+        .expect("read provider key")
+        .is_none());
+
+    router
+        .route(
+            ClientCommand::DeleteProviderCredential {
+                operation_id: 52,
+                provider_id: "openai-chatgpt".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+    assert_eq!(
+        sink.events().await.last(),
+        Some(&ClientEvent::ProviderCredentialStatus {
+            operation_id: 52,
+            configured_provider_ids: Vec::new(),
+            unavailable_provider_ids: Vec::new(),
+            storage_encrypted: false,
+            credential_previews: std::collections::HashMap::new(),
+            error: None,
+        })
+    );
+    assert!(!slot.is_active().await);
+}
+
+#[tokio::test]
+async fn a_codex_session_the_slot_cannot_serve_is_reported_without_its_secrets() {
+    let (_, credentials, _temp) = router_with_credentials().await;
+    let bound = bound_codex_slot(credentials);
+    let unbound = Arc::new(llm_runtime::auth::openai::OpenAiOAuthSlot::new());
+    let cases = [
+        (
+            bound.clone(),
+            "{\"access_token\":\"codex-access-secret\"}".to_string(),
+            "invalid Codex OAuth session",
+        ),
+        (bound, codex_session_json(""), "invalid Codex OAuth session"),
+        (
+            unbound,
+            codex_session_json("codex-access-secret"),
+            "failed to install Codex OAuth session",
+        ),
+    ];
+    for (operation_id, (slot, credential, expected)) in (61..).zip(cases) {
+        let router = router_with(
+            Arc::new(MockOrchestratorHandle::new()),
+            Arc::new(MockTaskRegistry { rows: Vec::new() }),
+        )
+        .with_ephemeral_provider_credentials(true)
+        .with_openai_oauth_slot(Some(slot.clone()));
+        let sink = CapturingSink::arc();
+        router
+            .route(
+                ClientCommand::SetProviderCredential {
+                    operation_id,
+                    provider_id: "openai-chatgpt".into(),
+                    credential: ProviderCredentialSecretDto::new(credential),
+                },
+                sink.clone(),
+            )
+            .await;
+        let Some(ClientEvent::ProviderCredentialStatus {
+            configured_provider_ids,
+            unavailable_provider_ids,
+            credential_previews,
+            error,
+            ..
+        }) = sink.events().await.last().cloned()
+        else {
+            panic!("a credential status answers every write");
+        };
+        assert!(configured_provider_ids.is_empty());
+        assert_eq!(unavailable_provider_ids, vec!["openai-chatgpt".to_string()]);
+        assert!(credential_previews.is_empty());
+        assert_eq!(error.as_deref(), Some(expected));
+        assert!(!slot.is_active().await);
+    }
 }
 
 #[tokio::test]

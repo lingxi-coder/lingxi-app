@@ -20,5 +20,9 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util.workspace = true
 base64 = "0.22"
 
+[dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
+
 [lints]
 workspace = true

@@ -136,32 +136,33 @@ if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi
   },
 };
 
-function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean, models: string[], connected: boolean) {
+function bridgeFixture(sessionId: string | null, running: boolean, backgroundStatus: string | undefined, isCancelling: boolean, models: string[], connected: boolean, sessionLoading: boolean) {
+  const activeSession = sessionId ? { projectPath, sessionId } : null;
   return {
     // Whether anything is up to take a command — all the model control is
     // gated on, and independent of the `ready` that gates SENDING.
     hosted: true,
     loading: false,
-    connected,
-    sessionLoading: false,
+    connected: connected && !sessionLoading,
+    sessionLoading,
     audioSnapshot: defaultNativeAudioSnapshot(),
     audioRealtimeState: { phase: 'idle' },
     audioRealtimeCommand: async () => undefined,
     audioExecute: executeAudioOperation,
     audioCancel: cancelAudioOperation,
     audioFinishListen: finishAudioListen,
-    activeSession: { projectPath, sessionId },
+    activeSession,
     bootstrap: {
       revision: 1,
       settings: {
         version: 1,
         projects: [projectPath],
         activeProject: projectPath,
-        activeSession: { projectPath, sessionId },
+        activeSession,
         pinnedSessions: [],
       },
       workspace: { path: projectPath, trusted: true },
-      activeSession: { projectPath, sessionId },
+      activeSession,
       runtimes: [],
       projectCatalogs: { [projectPath]: { sessions: [] } },
       providerCredentials: [
@@ -236,7 +237,8 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
 }
 
 function Fixture() {
-  const [sessionId, setSessionId] = useState('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  const [sessionId, setSessionId] = useState<string | null>('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  const [sessionLoading, setSessionLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [suggestionState, setSuggestionState] = useState({ enabled: true, notice: null as string | null });
   const [suggestion, setSuggestion] = useState<{ text: string; turn: number; sessionId: string }>();
@@ -253,6 +255,7 @@ function Fixture() {
   useEffect(() => {
     window.__composerDraftTest = {
       switchSession: setSessionId,
+      setSessionLoading,
       setFusionDefault,
       setFusionScopeAdmitted: (scope, admitted) => setFusionAdmission((current) => ({ ...current, [scope]: admitted })),
       setSidebarWidth,
@@ -297,7 +300,7 @@ function Fixture() {
         <aside data-testid="fixture-sidebar" style={{ width: sidebarWidth, flexShrink: 0, background: '#101014' }} />
         <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
           <BetaComposer
-            bridge={{ ...bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false, models, connected),
+            bridge={{ ...bridgeFixture(sessionId, running, sessionId ? backgroundStatuses[sessionId] : undefined, sessionId ? cancellingSessions[sessionId] ?? false : false, models, connected, sessionLoading),
               fusionCatalogEvent: { type: 'fusion_catalog', catalog_json: JSON.stringify({
                 scopes: (['user', 'project', 'local'] as const).map((scope) => ({ scope, admitted: fusionAdmission[scope], path: `/fixture/${scope}/settings.json`, revision: 'r1',
                   strategies: [{ id: 'shared', name: '代码审查', config: {} }], default_strategy_id: null, globals: {}, diagnostic: null })),
@@ -310,7 +313,7 @@ function Fixture() {
                 promptSuggestionEnabled: suggestionState.enabled, promptSuggestionNotice: suggestionState.notice,
                 promptSuggestion: suggestion?.text && suggestion?.sessionId === sessionId ? { type: 'prompt_suggestion', suggestion: suggestion.text, session_id: sessionId, uuid: `suggestion-${suggestion.turn}` } : undefined },
             } as never}
-            ready={ready}
+            ready={ready && !sessionLoading}
             onOpenSettings={() => undefined}
             onOpenSettingsPage={(page) => openedSettings.push(page)}
             onSetTheme={() => undefined}
@@ -329,7 +332,8 @@ declare global {
       setSuggestionState(enabled: boolean, notice: string | null): void;
       suggestionFeedback(): Array<{ sessionId: string; uuid: string; action: string }>;
       suggestionContexts(): Array<Record<string, unknown>>;
-      switchSession(sessionId: string): void;
+      switchSession(sessionId: string | null): void;
+      setSessionLoading(loading: boolean): void;
       setFusionDefault(enabled: boolean): void;
       setFusionScopeAdmitted(scope: 'user' | 'project' | 'local', admitted: boolean): void;
       setTheme(theme: 'dark' | 'light'): void;

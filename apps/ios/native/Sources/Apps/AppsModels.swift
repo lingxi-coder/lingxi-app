@@ -24,9 +24,23 @@ enum AppOperation: Equatable, Sendable {
     }
 }
 
+/// An app the agent made in a conversation with the `LocalApp` tool. The engine
+/// keeps the library; this is its row as the pages show it.
+struct ChatApp: Equatable, Sendable {
+    let id: String
+    let name: String
+    let summary: String
+    let revision: Int
+    let updatedAt: Date
+}
+
+/// Where an app on the 应用 page comes from.
+enum AppSource: Equatable, Sendable { case market, chat }
+
 /// One installed app as the 应用 page and the sidebar show it.
 struct MyApp: Identifiable, Equatable, Sendable {
     var id: String { appId }
+    /// The market's app id, or `chat:<id>` for an app made in chat (see `AppsModel.chatAppKey`).
     let appId: String
     let name: String
     let category: String
@@ -34,6 +48,7 @@ struct MyApp: Identifiable, Equatable, Sendable {
     let updateAvailable: Bool
     /// Only a download, install or uninstall that is still running.
     let activeOperation: AppOperation?
+    var source: AppSource = .market
 }
 
 /// What an app's main button does right now.
@@ -50,15 +65,31 @@ enum AppAction: Equatable, Sendable {
 }
 
 enum AppsModel {
-    /// The installed apps, most recently opened first, then by name. An app the
-    /// pages know nothing about yet is shown by its id.
+    /// Chat apps share the pages' app ids with the market's, so they carry a
+    /// prefix no market id has: `chat:<id>`. `InstalledAppInfo` keeps their
+    /// last-opened time under the same key.
+    static let chatAppKeyPrefix = "chat:"
+
+    static func chatAppKey(_ id: String) -> String { chatAppKeyPrefix + id }
+
+    /// The engine id of a `chat:<id>` key, or nil for a market app id.
+    static func chatAppID(of key: String) -> String? {
+        guard key.hasPrefix(chatAppKeyPrefix) else { return nil }
+        let id = String(key.dropFirst(chatAppKeyPrefix.count))
+        return id.isEmpty ? nil : id
+    }
+
+    /// The installed market apps and the apps made in chat, most recently
+    /// opened first, then by name. A market app the pages know nothing about
+    /// yet is shown by its id.
     static func myApps(
         installedIDs: [String],
         info: [String: InstalledAppInfo],
         updatable: Set<String>,
-        operations: [String: AppOperation]
+        operations: [String: AppOperation],
+        chatApps: [ChatApp] = []
     ) -> [MyApp] {
-        installedIDs.map { id in
+        let market = installedIDs.map { id in
             let known = info[id]
             let name = known.map(\.name).flatMap { $0.isEmpty ? nil : $0 } ?? id
             return MyApp(
@@ -70,7 +101,19 @@ enum AppsModel {
                 activeOperation: operations[id].flatMap { $0.isActive ? $0 : nil }
             )
         }
-        .sorted { a, b in
+        let chat = chatApps.map { app in
+            let key = chatAppKey(app.id)
+            return MyApp(
+                appId: key,
+                name: app.name,
+                category: "",
+                lastOpenedAt: info[key]?.lastOpenedAt,
+                updateAvailable: false,
+                activeOperation: nil,
+                source: .chat
+            )
+        }
+        return (market + chat).sorted { a, b in
             if a.lastOpenedAt != b.lastOpenedAt {
                 return (a.lastOpenedAt ?? .distantPast) > (b.lastOpenedAt ?? .distantPast)
             }

@@ -11,6 +11,7 @@ enum SettingsPage: Hashable {
     case voice, linuxRuntime, knowledge, memory, workflows
     case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
     case skills, skillDetail(String)
+    case pluginDetail(String), pluginsAdvanced
     case mcpList, mcpEdit(String)
     case dream
 }
@@ -248,7 +249,8 @@ struct SettingsHost: View {
 
     private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
         switch page {
-        case .main, .group, .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .diagnostics, .projectsTrust, .account:
+        case .main, .group, .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
+             .pluginsAdvanced, .diagnostics, .projectsTrust, .account:
             true
         case .providerList(let kind): kind.kind == .llm
         default: false
@@ -383,6 +385,9 @@ struct SettingsHost: View {
         case .toolsAgent: return String(localized: "settings_parity_tools_agent")
         case .hooks: return String(localized: "settings_parity_hooks")
         case .plugins: return String(localized: "settings_parity_plugins")
+        case .pluginDetail(let id):
+            return DesktopSettingsRepository.shared.pluginCatalog.installed(id)?.displayName ?? String(localized: "plugins_detail_title")
+        case .pluginsAdvanced: return String(localized: "plugins_advanced")
         case .diagnostics: return String(localized: "settings_parity_diagnostics")
         case .about: return String(localized: "settings_section_about")
         case .archivedChats: return String(localized: "settings_parity_archived")

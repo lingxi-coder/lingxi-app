@@ -14,6 +14,9 @@ object SettingsRoutes {
     const val ENGINE_MCP = "settings/engine-mcp"
     const val HOOKS = "settings/hooks"
     const val PLUGINS = "settings/plugins"
+    const val PLUGIN_DETAIL = "settings/plugin/{id}"
+    /** The per-layer plugin configuration that [PLUGINS] used to be. */
+    const val PLUGINS_ADVANCED = "settings/plugins-advanced"
     const val DIAGNOSTICS = "settings/diagnostics"
     const val ABOUT = "settings/about"
     const val ARCHIVED = "settings/archived"
@@ -62,6 +65,7 @@ object SettingsRoutes {
     fun providerEdit(kind: String, id: String) = "settings/providers/$kind/edit/$id"
     fun skillDetail(id: String) = "settings/skills/$id"
     fun mcpEdit(id: String) = "settings/mcp/$id"
+    fun pluginDetail(id: String) = "settings/plugin/${android.net.Uri.encode(id)}"
     fun cron(taskKey: String? = null): String =
         taskKey?.takeIf(String::isNotBlank)
             ?.let { "$CRON/task/${android.net.Uri.encode(it)}" }

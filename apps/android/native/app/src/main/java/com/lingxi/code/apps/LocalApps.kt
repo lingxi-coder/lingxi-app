@@ -16,11 +16,12 @@ internal const val LOCAL_APP_MARKET_API_ROOT = "https://local-app-market.luoling
 
 /**
  * The process's one Local App Market (its docs ask for exactly one per storage
- * root) and what the pages remember about installed apps. Lives as long as the
- * process, like [com.lingxi.code.cron.AndroidCronRepository].
+ * root), the apps made in chat, and what the pages remember about both. Lives
+ * as long as the process, like [com.lingxi.code.cron.AndroidCronRepository].
  */
 class LocalApps private constructor(
     val market: LocalAppMarket,
+    val chat: ChatApps,
     val info: InstalledAppInfoStore,
     /** Main + SupervisorJob, as the market asks for; the pages' fire-and-forget calls run here too. */
     val scope: CoroutineScope,
@@ -42,7 +43,7 @@ class LocalApps private constructor(
             // before any page can open an app.
             market.store.initialize()
             info.load()
-            return LocalApps(market, info, scope)
+            return LocalApps(market, ChatApps(context, scope), info, scope)
         }
 
         private const val INSTALLED_APP_INFO_FILE = "local-app-info.json"

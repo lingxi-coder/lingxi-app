@@ -1036,6 +1036,8 @@ pub(crate) fn resolve_desktop_config_at(
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
         __desktop_config.inline_visualization = false;
+        // The CLI does not open local apps.
+        __desktop_config.local_apps = false;
         __desktop_config.mcp_services_factory = None;
         __desktop_config.user_agent_environment = None;
         __desktop_config.request_identity = None;

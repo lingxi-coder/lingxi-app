@@ -83,6 +83,16 @@ func uninstallApp(_ appId: String, market: LocalAppMarket, info: InstalledAppInf
     }
 }
 
+/// Deletes an app made in chat (its `chat:<id>` key), then forgets what the
+/// pages knew about it once it is gone.
+@MainActor
+func deleteChatApp(_ key: String, chat: ChatApps, info: InstalledAppInfoStore) {
+    guard let id = AppsModel.chatAppID(of: key) else { return }
+    Task { @MainActor in
+        if await chat.delete(id) { info.forget(key) }
+    }
+}
+
 private func actionTitle(_ action: AppAction) -> String {
     switch action {
     case .get: String(localized: "apps_action_get")
@@ -140,11 +150,13 @@ private struct AppActionPill: View {
 
 enum AppsTab: String, Hashable { case mine, market }
 
-/// 应用: the installed apps (我的) and the Local App Market (市场). Opening an app
-/// runs it full screen; long-press a tile for its details, update and uninstall.
+/// 应用: the installed apps and the apps made in chat (我的), and the Local App
+/// Market (市场). Opening an app runs it full screen; long-press a tile for its
+/// details, update and uninstall, or to delete an app made in chat.
 struct AppsPage: View {
     @Environment(\.theme) private var t
     let market: LocalAppMarket?
+    let chat: ChatApps
     @ObservedObject var info: InstalledAppInfoStore
     let onOpenApp: (String) -> Void
     let onShowDetails: (String) -> Void
@@ -156,6 +168,7 @@ struct AppsPage: View {
             if let market {
                 AppsPageContent(
                     market: market,
+                    chat: chat,
                     info: info,
                     tab: $tab,
                     onOpenApp: onOpenApp,
@@ -177,6 +190,7 @@ struct AppsPage: View {
 private struct AppsPageContent: View {
     @Environment(\.theme) private var t
     @ObservedObject var market: LocalAppMarket
+    let chat: ChatApps
     @ObservedObject var info: InstalledAppInfoStore
     @Binding var tab: AppsTab
     let onOpenApp: (String) -> Void
@@ -185,9 +199,10 @@ private struct AppsPageContent: View {
     @State private var query = ""
     @State private var searched = false
     @State private var lastSearch: String?
+    /// The app to uninstall, or to delete when it was made in chat.
     @State private var uninstalling: MyApp?
 
-    private var apps: [MyApp] { market.myApps(info: info.apps) }
+    private var apps: [MyApp] { market.myApps(info: info.apps, chatApps: chat.apps) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -207,6 +222,8 @@ private struct AppsPageContent: View {
         .task(id: market.installed.isEmpty) {
             if !market.installed.isEmpty { await market.checkUpdates() }
         }
+        // The agent may have made or changed apps since the list was read.
+        .task { await chat.refresh() }
         .task(id: "\(tab.rawValue)|\(query)") {
             // The market loads when first shown and follows the search as the
             // user types; a result already on screen for the same text stays.
@@ -222,13 +239,21 @@ private struct AppsPageContent: View {
             await market.search(query)
         }
         .confirmationDialog(
-            String(localized: "apps_uninstall_title \(uninstalling?.name ?? "")"),
+            uninstalling?.source == .chat
+                ? String(localized: "apps_delete_title \(uninstalling?.name ?? "")")
+                : String(localized: "apps_uninstall_title \(uninstalling?.name ?? "")"),
             isPresented: Binding(get: { uninstalling != nil }, set: { if !$0 { uninstalling = nil } }),
             titleVisibility: .visible,
             presenting: uninstalling
         ) { app in
-            Button(String(localized: "apps_action_uninstall"), role: .destructive) {
-                uninstallApp(app.appId, market: market, info: info)
+            if app.source == .chat {
+                Button(String(localized: "common_delete"), role: .destructive) {
+                    deleteChatApp(app.appId, chat: chat, info: info)
+                }
+            } else {
+                Button(String(localized: "apps_action_uninstall"), role: .destructive) {
+                    uninstallApp(app.appId, market: market, info: info)
+                }
             }
             Button("common_cancel", role: .cancel) {}
         } message: { _ in
@@ -304,18 +329,30 @@ private struct AppsPageContent: View {
         .accessibilityLabel(app.name)
         .accessibilityIdentifier("apps.tile.\(app.appId)")
         .contextMenu {
-            Button { onShowDetails(app.appId) } label: { Label("apps_details", systemImage: "info.circle") }
-            if app.activeOperation == nil {
-                if app.updateAvailable {
-                    Button {
-                        if let version = market.updates.first(where: { $0.appId == app.appId })?.currentVersionId {
-                            market.install(appId: app.appId, versionId: version)
-                        }
-                    } label: { Label("apps_action_update", systemImage: "arrow.down.circle") }
-                }
+            // An app made in chat has no market details, updates or install.
+            if app.source == .chat {
                 Button(role: .destructive) { uninstalling = app } label: {
-                    Label("apps_action_uninstall", systemImage: "trash")
+                    Label("common_delete", systemImage: "trash")
                 }
+            } else {
+                marketTileMenu(app)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func marketTileMenu(_ app: MyApp) -> some View {
+        Button { onShowDetails(app.appId) } label: { Label("apps_details", systemImage: "info.circle") }
+        if app.activeOperation == nil {
+            if app.updateAvailable {
+                Button {
+                    if let version = market.updates.first(where: { $0.appId == app.appId })?.currentVersionId {
+                        market.install(appId: app.appId, versionId: version)
+                    }
+                } label: { Label("apps_action_update", systemImage: "arrow.down.circle") }
+            }
+            Button(role: .destructive) { uninstalling = app } label: {
+                Label("apps_action_uninstall", systemImage: "trash")
             }
         }
     }
@@ -557,15 +594,17 @@ struct MarketAppPage: View {
 
 // MARK: - running app
 
-/// An installed app running full screen. The market's runtime owns the web view
-/// (its own origin and persistent store, no native bridge); this view only
-/// hosts it, pauses it with the scene and closes it on the way out. The only
-/// chrome is the capsule in the top-right corner, as in a mini program.
+/// An installed app running full screen. The market's runtime, or for an app
+/// made in chat (`appId` `chat:<id>`) the chat runtime, owns the web view (its
+/// own origin and persistent store, no native bridge); this view only hosts
+/// it, pauses it with the scene and closes it on the way out. The only chrome
+/// is the capsule in the top-right corner, as in a mini program.
 struct AppRuntimeView: View {
     @Environment(\.theme) private var t
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
     let market: LocalAppMarket
+    let chat: ChatApps
     let info: InstalledAppInfoStore
     let appId: String
     let onClose: () -> Void
@@ -574,6 +613,8 @@ struct AppRuntimeView: View {
     @State private var webView: WKWebView?
     @State private var openError: String?
     @State private var externalURL: URL?
+
+    private var chatID: String? { AppsModel.chatAppID(of: appId) }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -596,9 +637,15 @@ struct AppRuntimeView: View {
         }
         .task(id: appId) {
             let link = $externalURL
-            market.runtime.onExternalNavigation = { url in link.wrappedValue = url }
+            let onExternalNavigation: (URL) -> Void = { url in link.wrappedValue = url }
             do {
-                webView = try await market.open(appId)
+                if let chatID {
+                    chat.runtime.onExternalNavigation = onExternalNavigation
+                    webView = try await chat.runtime.open(chatID)
+                } else {
+                    market.runtime.onExternalNavigation = onExternalNavigation
+                    webView = try await market.open(appId)
+                }
                 info.markOpened(appId)
             } catch {
                 openError = error.localizedDescription
@@ -608,11 +655,20 @@ struct AppRuntimeView: View {
             // Release the view before closing: the runtime cannot delete an
             // app's store while a consumer still holds its web view.
             webView = nil
-            market.runtime.onExternalNavigation = nil
-            Task { await market.close(appId) }
+            if let chatID {
+                chat.runtime.onExternalNavigation = nil
+                Task { await chat.runtime.close(chatID) }
+            } else {
+                market.runtime.onExternalNavigation = nil
+                Task { await market.close(appId) }
+            }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { market.resume(appId) } else { market.suspend(appId) }
+            if let chatID {
+                if phase == .active { chat.runtime.resume(chatID) } else { chat.runtime.suspend(chatID) }
+            } else {
+                if phase == .active { market.resume(appId) } else { market.suspend(appId) }
+            }
         }
         .alert(
             String(localized: "apps_external_link_title"),
@@ -629,17 +685,20 @@ struct AppRuntimeView: View {
 
     private var capsule: some View {
         HStack(spacing: 0) {
-            Menu {
-                Button { onShowDetails(appId) } label: { Label("apps_details", systemImage: "info.circle") }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 15, weight: .bold))
-                    .frame(width: 46, height: 32)
-                    .contentShape(Rectangle())
+            // An app made in chat has no market details to show.
+            if chatID == nil {
+                Menu {
+                    Button { onShowDetails(appId) } label: { Label("apps_details", systemImage: "info.circle") }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 46, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(String(localized: "composer_more"))
+                .accessibilityIdentifier("app-runtime.more")
+                Rectangle().fill(t.border).frame(width: 0.5, height: 16)
             }
-            .accessibilityLabel(String(localized: "composer_more"))
-            .accessibilityIdentifier("app-runtime.more")
-            Rectangle().fill(t.border).frame(width: 0.5, height: 16)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 14, weight: .semibold))

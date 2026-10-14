@@ -351,7 +351,7 @@ private struct ConversationToolBatchRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if tools.contains(where: { $0.questionAnswers != nil }) {
+            if tools.contains(where: { $0.questionAnswers != nil || $0.localApp != nil }) {
                 ForEach(ordinaryTools) { trace in
                     ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                                  onToggle: { onToggleTool(trace.id) })

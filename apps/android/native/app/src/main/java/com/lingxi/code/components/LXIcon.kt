@@ -34,7 +34,7 @@ enum class LXIconName {
     Menu, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
-    ArrowRight, Terminal, Lightbulb, Apps,
+    ArrowRight, Terminal, Lightbulb, Apps, AppBuilder,
 }
 
 @Composable
@@ -162,6 +162,19 @@ private fun strokePaths(name: LXIconName): List<() -> Path> = when (name) {
         { roundedRect(13.5f, 3.5f, 7f, 7f, 2f) },
         { roundedRect(3.5f, 13.5f, 7f, 7f, 2f) },
         { roundedRect(13.5f, 13.5f, 7f, 7f, 2f) },
+    )
+    // An app window with a sparkle in it: the Local App Builder plugin.
+    LXIconName.AppBuilder -> listOf(
+        { roundedRect(3f, 4f, 18f, 16f, 3f) },
+        { line(listOf(3f to 8.5f, 21f to 8.5f)) },
+        {
+            line(
+                listOf(
+                    12f to 10.6f, 12.9f to 13.35f, 15.65f to 14.25f, 12.9f to 15.15f,
+                    12f to 17.9f, 11.1f to 15.15f, 8.35f to 14.25f, 11.1f to 13.35f,
+                ),
+            ).apply { close() }
+        },
     )
     LXIconName.Workflow -> listOf(
         { roundedRect(3f, 3f, 6f, 6f, 1.5f) },

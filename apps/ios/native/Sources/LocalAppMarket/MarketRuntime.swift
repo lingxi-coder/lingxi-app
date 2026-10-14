@@ -3,15 +3,31 @@ import Network
 import WebKit
 import UniformTypeIdentifiers
 
+/// What a server made with a responder answers for one request.
+struct MarketHTTPReply: Sendable {
+    let status: Int
+    let headers: [String: String]
+    let body: Data
+}
+
 /// Static server binds loopback only. No application or native bridge endpoints exist.
 final class MarketHTTPServer: @unchecked Sendable {
     private final class CompletionGate: @unchecked Sendable { var completed = false }
+    private enum Content {
+        case files(URL)
+        case responder(@Sendable (String) -> MarketHTTPReply)
+    }
     static let csp = "sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin; default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https:; style-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss:; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
-    private let root: URL
+    private let content: Content
     private let queue = DispatchQueue(label: "lingxi.market.http")
     private var listener: NWListener?
     private var connections: [UUID: NWConnection] = [:]
-    init(root: URL) { self.root = root }
+    init(root: URL) { content = .files(root) }
+    /// Answers every GET and HEAD with `responder`, given the request's decoded
+    /// path (`/` included), instead of files under a root. It runs on the
+    /// server's queue and may block. The policies it returns win over the
+    /// market's defaults.
+    init(responder: @escaping @Sendable (String) -> MarketHTTPReply) { content = .responder(responder) }
     deinit {
         listener?.cancel()
         for connection in connections.values { connection.cancel() }
@@ -83,6 +99,14 @@ final class MarketHTTPServer: @unchecked Sendable {
         let head = words[0] == "HEAD"
         let raw = String(words[1]).components(separatedBy: "?")[0]
         guard raw.hasPrefix("/"), let decoded = raw.removingPercentEncoding else { respond(connection, id: id, status: 400, body: Data()); return }
+        let root: URL
+        switch content {
+        case .responder(let responder):
+            let reply = responder(decoded)
+            respond(connection, id: id, status: reply.status, body: reply.body, headers: reply.headers, head: head)
+            return
+        case .files(let files): root = files
+        }
         let path = decoded == "/" ? "index.html" : String(decoded.dropFirst())
         do {
             let safe = try MarketRepository.safePath(path)
@@ -130,11 +154,12 @@ final class MarketHTTPServer: @unchecked Sendable {
         var headers = headers
         headers["Content-Length"] = String(body.count)
         headers["Connection"] = "close"
-        headers["Content-Security-Policy"] = Self.csp
-        headers["X-Content-Type-Options"] = "nosniff"
-        headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), display-capture=()"
-        headers["Cache-Control"] = "no-store"
-        let reasons = [200: "OK", 206: "Partial Content", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 416: "Range Not Satisfiable", 431: "Request Header Fields Too Large"]
+        // Files never carry policies of their own; a responder's are kept.
+        headers["Content-Security-Policy"] = headers["Content-Security-Policy"] ?? Self.csp
+        headers["X-Content-Type-Options"] = headers["X-Content-Type-Options"] ?? "nosniff"
+        headers["Permissions-Policy"] = headers["Permissions-Policy"] ?? "camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), display-capture=()"
+        headers["Cache-Control"] = headers["Cache-Control"] ?? "no-store"
+        let reasons = [200: "OK", 206: "Partial Content", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed", 416: "Range Not Satisfiable", 431: "Request Header Fields Too Large", 503: "Service Unavailable"]
         var response = Data("HTTP/1.1 \(status) \(reasons[status] ?? "Error")\r\n".utf8)
         for (key, value) in headers { response.append(Data("\(key): \(value)\r\n".utf8)) }
         response.append(Data("\r\n".utf8))

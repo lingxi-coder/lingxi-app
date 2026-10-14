@@ -7,8 +7,12 @@ import com.lingxi.code.market.MarketVersion
 import com.lingxi.code.market.OperationPhase
 import com.lingxi.code.market.UpdateStatus
 
+/** Where an app on the 应用 page comes from. */
+enum class AppSource { MARKET, CHAT }
+
 /** One installed app as the 应用 page and the drawer show it. */
 data class MyApp(
+    /** The market's app id, or `chat:<id>` for an app made in chat (see [chatAppKey]). */
     val appId: String,
     val name: String,
     val category: String,
@@ -16,34 +20,49 @@ data class MyApp(
     val updateAvailable: Boolean,
     /** Only a download, install or uninstall that is still running. */
     val activeOperation: MarketOperation?,
+    val source: AppSource = AppSource.MARKET,
 )
 
 private val ActivePhases = setOf(OperationPhase.DOWNLOADING, OperationPhase.COMMITTING, OperationPhase.UNINSTALLING)
 
 /**
- * The installed apps, most recently opened first, then by name. An app the
- * pages know nothing about yet is shown by its id until its details load.
- * PURE, so the order is unit-testable on the plain JVM.
+ * The installed market apps and the apps made in chat, most recently opened
+ * first, then by name. A market app the pages know nothing about yet is shown
+ * by its id until its details load. PURE, so the order is unit-testable on the
+ * plain JVM.
  */
 internal fun myApps(
     installed: List<InstalledApp>,
     info: Map<String, InstalledAppInfo>,
     updates: List<MarketUpdate>,
     operations: Map<String, MarketOperation>,
+    chatApps: List<ChatApp> = emptyList(),
 ): List<MyApp> {
     val updatable = updates.filter { it.status == UpdateStatus.UPDATE_AVAILABLE }.mapTo(HashSet()) { it.appId }
-    return installed
-        .map { record ->
-            val known = info[record.appId]
-            MyApp(
-                appId = record.appId,
-                name = known?.name?.takeIf(String::isNotBlank) ?: record.appId,
-                category = known?.category.orEmpty(),
-                lastOpenedAtMillis = known?.lastOpenedAtMillis,
-                updateAvailable = record.appId in updatable,
-                activeOperation = operations[record.appId]?.takeIf { it.phase in ActivePhases },
-            )
-        }
+    val market = installed.map { record ->
+        val known = info[record.appId]
+        MyApp(
+            appId = record.appId,
+            name = known?.name?.takeIf(String::isNotBlank) ?: record.appId,
+            category = known?.category.orEmpty(),
+            lastOpenedAtMillis = known?.lastOpenedAtMillis,
+            updateAvailable = record.appId in updatable,
+            activeOperation = operations[record.appId]?.takeIf { it.phase in ActivePhases },
+        )
+    }
+    val chat = chatApps.map { app ->
+        val key = chatAppKey(app.id)
+        MyApp(
+            appId = key,
+            name = app.name,
+            category = "",
+            lastOpenedAtMillis = info[key]?.lastOpenedAtMillis,
+            updateAvailable = false,
+            activeOperation = null,
+            source = AppSource.CHAT,
+        )
+    }
+    return (market + chat)
         .sortedWith(
             compareByDescending<MyApp> { it.lastOpenedAtMillis ?: Long.MIN_VALUE }
                 .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }

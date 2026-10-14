@@ -48,6 +48,9 @@ final class DesktopSettingsRepository {
     private(set) var documents: [String: String] = [:]
     private(set) var skillCatalog: SkillAdminCatalog?
     private(set) var skillDocument: SkillAdminDocument?
+    /// How many catalogs each domain has received, so a reader can wait for
+    /// the next one even when it is unchanged.
+    private(set) var catalogArrivals: [String: Int] = [:]
     var errorMessage: String?
     private(set) var statusMessage: String?
     @ObservationIgnored private var submitter: ((ClientCommand) async throws -> Void)?
@@ -193,7 +196,8 @@ final class DesktopSettingsRepository {
 
     func admin(domain: String, action: String, target: String? = nil,
                skillTarget: SkillAdminIdentity? = nil, scope: String? = nil,
-               revision: String? = nil, payload: String? = nil, mutation: Bool = false) async {
+               revision: String? = nil, payload: String? = nil, mutation: Bool = false,
+               timeout: Duration = .seconds(20)) async {
         guard connected else { return }
         guard !saving else { errorMessage = "Wait for the current engine operation to finish."; return }
         if scope == "managed" && mutation { errorMessage = "Managed configuration is read-only."; return }
@@ -208,7 +212,7 @@ final class DesktopSettingsRepository {
         nextOperation += 1
         let operation = nextOperation
         if !["get_catalog", "get_snapshot", "get_document"].contains(action) { operations.insert(operation) } else { readRequests.insert(domain) }
-        if mutation { saving = true; startConfirmationTimeout(); statusMessage = "Waiting for engine confirmation…" }
+        if mutation { saving = true; startConfirmationTimeout(timeout); statusMessage = "Waiting for engine confirmation…" }
         errorMessage = nil
         let command: ClientCommand
         switch domain {
@@ -323,7 +327,10 @@ final class DesktopSettingsRepository {
             readRequests.remove("skill")
             catalogs["skill"] = json
             skillCatalog = SkillAdminCatalog.parse(json)
-        case let .pluginCatalog(json): readRequests.remove("plugin"); catalogs["plugin"] = json
+        case let .pluginCatalog(json):
+            readRequests.remove("plugin")
+            catalogs["plugin"] = json
+            catalogArrivals["plugin", default: 0] += 1
         case let .mcpConfigurationSnapshot(json): readRequests.remove("mcp"); catalogs["mcp"] = json
         case let .skillDocument(json):
             readRequests.remove("skill")
@@ -356,11 +363,11 @@ final class DesktopSettingsRepository {
         }
     }
 
-    private func startConfirmationTimeout() {
+    private func startConfirmationTimeout(_ timeout: Duration = .seconds(20)) {
         confirmationTimeout?.cancel()
         let generation = sourceGeneration
         confirmationTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(20))
+            try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self, self.sourceGeneration == generation, self.saving else { return }
             self.fail("The engine has not confirmed this operation. Refresh before retrying; the change may already have been written.")
         }

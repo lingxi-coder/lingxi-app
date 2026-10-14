@@ -93,6 +93,8 @@ pub fn build_mobile_engine(
             memory_provider: Some(orchestrator::prompt::real_provider()),
             // The native WebView host renders inline widgets.
             inline_visualization: true,
+            // The Apps page and the card under the tool call open local apps.
+            local_apps: true,
             ..MobileConfig::default()
         };
         let (workspace_host_path, stable_workspace_id) = match impls.mobile_linux.as_ref() {

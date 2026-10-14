@@ -80,6 +80,10 @@ internal fun ToolCallView(
         AnsweredQuestionsView(call.questionAnswers, !expanded, onToggleExpanded, modifier)
         return
     }
+    if (call.localApp != null && call.status == AgentToolStatus.Completed) {
+        LocalAppCard(call.localApp, modifier)
+        return
+    }
     if (call.planMarkdown != null) {
         PlanDocumentCard(call.planMarkdown, call.status == AgentToolStatus.Running)
         return

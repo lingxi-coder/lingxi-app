@@ -312,6 +312,8 @@ data class ToolCallUi(
     val fallbackSummary: String? = null,
     val planMarkdown: String? = null,
     val questionAnswers: List<AnsweredQuestion>? = null,
+    /** The app a `LocalApp` publish stored; the row is drawn as its card. */
+    val localApp: PublishedLocalApp? = null,
 )
 
 /** One ordered piece of a settled transcript message. */

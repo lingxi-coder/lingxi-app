@@ -9,12 +9,15 @@ enum LocalAppMarketConfig {
 }
 
 /// The process's one Local App Market (its README asks for one long-lived
-/// instance per root) and what the pages remember about installed apps.
+/// instance per root), the apps made in chat, and what the pages remember
+/// about both.
 @MainActor
 enum LocalApps {
     /// nil only when the market cannot be created at all (no Application
     /// Support directory); the 应用 page then says the market is unavailable.
     static let market: LocalAppMarket? = try? LocalAppMarket(baseURL: LocalAppMarketConfig.apiRoot)
+    /// The engine's library; every engine handle attaches its host here.
+    static let chat = ChatApps()
     static let info = InstalledAppInfoStore()
     private static var initialized = false
 
@@ -40,13 +43,14 @@ extension AppOperation {
 }
 
 extension LocalAppMarket {
-    /// The installed apps as the pages show them, with what [info] remembers.
-    func myApps(info: [String: InstalledAppInfo]) -> [MyApp] {
+    /// The installed apps and [chatApps] as the pages show them, with what [info] remembers.
+    func myApps(info: [String: InstalledAppInfo], chatApps: [ChatApp]) -> [MyApp] {
         AppsModel.myApps(
             installedIDs: installed.filter { !$0.removing }.map(\.appId),
             info: info,
             updatable: Set(updates.filter { $0.status == .update_available }.map(\.appId)),
-            operations: operations.compactMapValues(AppOperation.init)
+            operations: operations.compactMapValues(AppOperation.init),
+            chatApps: chatApps
         )
     }
 

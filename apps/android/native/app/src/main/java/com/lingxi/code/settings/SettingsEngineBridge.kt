@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -23,6 +24,8 @@ class SettingsEngineBridge {
         val generation: Long = 0,
         val snapshot: ClientEvent.SettingsSnapshot? = null,
         val catalogs: Map<String, String> = emptyMap(),
+        /** How many times each domain's catalog arrived, so a reload is seen even when it is unchanged. */
+        val catalogUpdates: Map<String, Long> = emptyMap(),
         val notice: String? = null,
         val pending: ULong? = null,
         val models: List<ModelDetailsDto> = emptyList(),
@@ -106,7 +109,11 @@ class SettingsEngineBridge {
         }
     }
     private fun catalog(domain: String, json: String) {
-        mutable.value = mutable.value.copy(catalogs = mutable.value.catalogs + (domain to json))
+        val current = mutable.value
+        mutable.value = current.copy(
+            catalogs = current.catalogs + (domain to json),
+            catalogUpdates = current.catalogUpdates + (domain to (current.catalogUpdates[domain] ?: 0) + 1),
+        )
     }
     suspend fun refresh() = dispatch(ClientCommand.RefreshListings(listOf(ListingKindDto.SETTINGS, ListingKindDto.MODELS)))
     suspend fun update(layer: String, patch: JSONObject) {
@@ -194,8 +201,9 @@ class SettingsEngineBridge {
         mutable.value = mutable.value.copy(notice = "Waiting for secure credential storage…")
         dispatch(ClientCommand.DeleteProviderCredential(++serial,providerId))
     }
+    /** Sends one admin command; returns the operation id of a mutating one (null for `get_*`). */
     suspend fun admin(domain: String, action: String, target: String? = null, scope: String? = null,
-                      revision: String? = null, payload: String? = null) {
+                      revision: String? = null, payload: String? = null): ULong? {
         val requestSource = source ?: error("Connect an engine to manage these settings")
         val requestGeneration = generation
         val id = if (action.startsWith("get_")) null else ++serial
@@ -216,6 +224,21 @@ class SettingsEngineBridge {
             else -> error("Unknown configuration domain")
         }
         dispatch(command, requestSource, requestGeneration)
+        return id
+    }
+
+    /**
+     * Waits until operation [id] is no longer pending and returns its final
+     * event (SUCCEEDED or FAILED). An engine error that cleared it instead fails
+     * with the engine's message.
+     */
+    suspend fun awaitOperation(id: ULong, timeoutMillis: Long = 120_000): ClientEvent.ConfigurationOperation {
+        val requestGeneration = generation
+        val settled = withTimeoutOrNull(timeoutMillis) {
+            state.first { it.generation != requestGeneration || it.pending != id }
+        } ?: error("The engine did not finish the operation in time")
+        check(settled.generation == requestGeneration) { "Engine source changed; reload settings" }
+        return settled.operation?.takeIf { it.operationId == id } ?: error(settled.notice ?: "The engine rejected the operation")
     }
     private suspend fun dispatch(command: ClientCommand, requestSource: ConversationSource? = source, requestGeneration: Long = generation) {
         check(requestGeneration == generation && requestSource === source) { "Engine source changed; reload settings" }

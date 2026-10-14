@@ -45,10 +45,13 @@ enum ConversationRenderLayout {
     static func transcriptItems(_ items: [ConversationRenderItem]) -> [ConversationRenderItem] {
         items.compactMap { item in
             guard case let .run(run) = item else { return item }
-            let questions = run.tools.filter { $0.status == .completed && $0.questionAnswers != nil }
+            let questions = run.tools.filter {
+                $0.status == .completed && ($0.questionAnswers != nil || $0.localApp != nil)
+            }
             guard !questions.isEmpty else { return nil }
-            // Completed answers are conversation content. Reuse their stable
-            // activity identities without exposing the rest of the run ledger.
+            // Completed answers and published apps are conversation content.
+            // Reuse their stable activity identities without exposing the rest
+            // of the run ledger.
             let ids = Set(questions.map(\.id))
             var summary = run
             summary.status = .completed
@@ -905,6 +908,8 @@ struct ConversationToolTrace: Identifiable, Equatable {
     /// originating tool instead of letting it drift to the tail.
     var spawnedAgentID: String? = nil
     var questionAnswers: [ConversationAnsweredQuestion]? = nil
+    /// The app a `LocalApp` publish stored; the row is drawn as its card.
+    var localApp: PublishedLocalApp? = nil
 }
 
 enum ConversationShellStatus: Equatable {
@@ -1324,5 +1329,29 @@ struct ConversationAnsweredQuestion: Equatable {
             rows.append(Self(question: question, answer: answer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? answer : nil))
         }
         return rows
+    }
+}
+
+/// The app a `LocalApp` publish stored, decoded once at live/history result
+/// boundaries. Only a publish has a card: `list` and `read` stay ordinary tool
+/// rows. The result is the tool's small structured output
+/// (`{action, id, revision, name, warnings}`), never the app.
+struct PublishedLocalApp: Equatable {
+    let id: String
+    let name: String
+    let revision: Int
+
+    static func parse(tool: String, json: String) -> Self? {
+        guard tool == "LocalApp",
+              let data = json.data(using: .utf8),
+              let output = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (output["action"] as? String ?? "publish") == "publish",
+              let id = output["id"] as? String,
+              id.range(of: "^[a-z0-9]{1,32}$", options: .regularExpression) != nil,
+              let revision = output["revision"] as? Int, revision >= 1,
+              let name = output["name"] as? String,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return Self(id: id, name: name, revision: revision)
     }
 }

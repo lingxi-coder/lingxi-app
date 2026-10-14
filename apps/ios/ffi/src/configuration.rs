@@ -301,6 +301,8 @@ pub(super) fn ios_mobile_config_from_launch_config(
         memory_provider: Some(orchestrator::prompt::real_provider()),
         // The native WebView host renders inline widgets.
         inline_visualization: true,
+        // The Apps page and the card under the tool call open local apps.
+        local_apps: true,
         ..MobileConfig::default()
     };
     if !config.api_base.is_empty() {

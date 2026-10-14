@@ -142,16 +142,32 @@ internal fun uninstallApp(localApps: LocalApps, appId: String) {
     }
 }
 
+/** Deletes an app made in chat (key `chat:<id>`) with its data, then forgets it once it is gone. */
+internal fun deleteChatApp(localApps: LocalApps, key: String) {
+    val id = chatAppIdOf(key) ?: return
+    val job = localApps.chat.delete(id)
+    localApps.scope.launch {
+        job.join()
+        if (localApps.chat.state.value.none { it.id == id }) localApps.info.forget(key)
+    }
+}
+
+/** Confirms removing an app; an app made in chat is deleted rather than uninstalled. */
 @Composable
-internal fun UninstallDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun UninstallDialog(name: String, onConfirm: () -> Unit, onDismiss: () -> Unit, chat: Boolean = false) {
     val t = LingXiTheme.palette
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.apps_uninstall_title_fmt, name)) },
+        title = {
+            Text(stringResource(if (chat) R.string.apps_delete_title_fmt else R.string.apps_uninstall_title_fmt, name))
+        },
         text = { Text(stringResource(R.string.apps_uninstall_body)) },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text(stringResource(R.string.apps_action_uninstall), color = t.danger)
+                Text(
+                    stringResource(if (chat) R.string.common_delete else R.string.apps_action_uninstall),
+                    color = t.danger,
+                )
             }
         },
         dismissButton = {
@@ -294,8 +310,9 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
 enum class AppsTab { Mine, Market }
 
 /**
- * 应用: the installed apps (我的) and the Local App Market (市场). Opening an app
- * runs it full screen; long-press a tile for its details, update and uninstall.
+ * 应用: the installed apps and the apps made in chat (我的), and the Local App
+ * Market (市场). Opening an app runs it full screen; long-press a tile for its
+ * details, update and uninstall, or to delete an app made in chat.
  */
 @Composable
 fun AppsPage(
@@ -309,14 +326,17 @@ fun AppsPage(
     val store = localApps.market.store
     val market by store.state.collectAsState()
     val info by localApps.info.state.collectAsState()
-    val apps = remember(market.installed, info, market.updates, market.operations) {
-        myApps(market.installed, info, market.updates, market.operations)
+    val chatApps by localApps.chat.state.collectAsState()
+    val apps = remember(market.installed, info, market.updates, market.operations, chatApps) {
+        myApps(market.installed, info, market.updates, market.operations, chatApps)
     }
     var tab by rememberSaveable { mutableStateOf(AppsTab.Mine) }
     var query by rememberSaveable { mutableStateOf("") }
     var searched by remember { mutableStateOf(false) }
     var uninstalling by remember { mutableStateOf<MyApp?>(null) }
 
+    // Apps made in chat since the list was last read.
+    LaunchedEffect(Unit) { localApps.chat.refresh() }
     // Ask about updates once there is something installed to ask about.
     LaunchedEffect(market.installed.isNotEmpty()) {
         if (market.installed.isNotEmpty()) store.checkUpdates()
@@ -377,11 +397,13 @@ fun AppsPage(
     }
 
     uninstalling?.let { app ->
+        val chat = app.source == AppSource.CHAT
         UninstallDialog(
             name = app.name,
+            chat = chat,
             onConfirm = {
                 uninstalling = null
-                uninstallApp(localApps, app.appId)
+                if (chat) deleteChatApp(localApps, app.appId) else uninstallApp(localApps, app.appId)
             },
             onDismiss = { uninstalling = null },
         )
@@ -573,13 +595,16 @@ private fun AppTile(
             )
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.apps_details)) },
-                onClick = {
-                    menuOpen = false
-                    onShowDetails()
-                },
-            )
+            // An app made in chat has no market page; it can only be deleted.
+            if (app.source == AppSource.MARKET) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.apps_details)) },
+                    onClick = {
+                        menuOpen = false
+                        onShowDetails()
+                    },
+                )
+            }
             if (app.updateAvailable && !busy) {
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.apps_action_update)) },
@@ -591,7 +616,14 @@ private fun AppTile(
             }
             if (!busy) {
                 DropdownMenuItem(
-                    text = { Text(stringResource(R.string.apps_action_uninstall), color = t.danger) },
+                    text = {
+                        Text(
+                            stringResource(
+                                if (app.source == AppSource.CHAT) R.string.common_delete else R.string.apps_action_uninstall,
+                            ),
+                            color = t.danger,
+                        )
+                    },
                     onClick = {
                         menuOpen = false
                         onUninstall()

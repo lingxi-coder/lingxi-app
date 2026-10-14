@@ -258,3 +258,21 @@ final class AskUserQuestionSummaryTests: XCTestCase {
         XCTAssertNil(ConversationAnsweredQuestion.parse(tool: "AskUserQuestion", json: "not json"))
     }
 }
+
+final class LocalAppCardParseTests: XCTestCase {
+    func testAPublishResultIsTheCard() {
+        XCTAssertEqual(
+            PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"publish","id":"a1b2c3d4e5f","revision":2,"name":"喝水记录","warnings":[]}"#),
+            PublishedLocalApp(id: "a1b2c3d4e5f", name: "喝水记录", revision: 2)
+        )
+    }
+    func testListReadOtherToolsAndMalformedResultsHaveNoCard() {
+        XCTAssertNil(PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"list","apps":[]}"#))
+        XCTAssertNil(PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"read","id":"a1","name":"T","revision":1,"bytes":9}"#))
+        XCTAssertNil(PublishedLocalApp.parse(tool: "Visualization", json: #"{"action":"publish","id":"a1","revision":1,"name":"T"}"#))
+        XCTAssertNil(PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"publish","id":"../x","revision":1,"name":"T"}"#))
+        XCTAssertNil(PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"publish","id":"a1","revision":0,"name":"T"}"#))
+        XCTAssertNil(PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"publish","id":"a1","revision":1,"name":" "}"#))
+        XCTAssertNil(PublishedLocalApp.parse(tool: "LocalApp", json: #"Published "T" as local app a1"#))
+    }
+}

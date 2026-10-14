@@ -35,11 +35,8 @@ export const SETTINGS_NAV: NavPage[] = [
   // 与它挂在哪个导航分组下无关。
   { id: 'custom-providers', label: '自定义 Provider 与路由', group: '模型与服务', icon: 'plug', needsEngine: true, layered: true, searchKeys: ['providers', 'routing', 'baseUrl', 'apiKeyEnv', 'models', 'aliases', 'fallback', 'retry'], implemented: true },
 
-  // 组↔layered 的例外 2/3：不在 编码 组，但是 layered。`settings.fusion`
-  // 是活在四层设置文件里的普通设置键。放在 模型与服务 组是因为这一页配的就是
-  // 模型本身——Fusion 的三个角色各要一个模型，而且必须显式配置：引擎没有自动
-  // 选择回落，缺一个角色就在发出任何请求之前拒绝整次运行。
-  { id: 'fusion', label: 'Fusion 多模型合议', group: '模型与服务', icon: 'sparkle', needsEngine: true, layered: true, searchKeys: ['fusion', '合议', 'panelModels', 'analystModel', 'panel', 'analyst', '多模型'], implemented: true },
+  // Fusion lists strategies from all three settings scopes and owns its scope filter.
+  { id: 'fusion', label: 'Fusion 多模型合议', group: '模型与服务', icon: 'sparkle', needsEngine: true, layered: false, searchKeys: ['fusion', '合议', '策略', 'scope', 'panelModels', 'analystModel', 'panel', 'analyst', '多模型'], implemented: true },
 
   { id: 'permissions', label: '权限', group: '编码', icon: 'shield', needsEngine: true, layered: true, searchKeys: ['permissions', '权限', 'allow', 'deny', 'ask', 'additionalDirectories', 'bypassPermissions'], implemented: true },
   { id: 'tools-agent', label: '工具与 Agent 行为', group: '编码', icon: 'sliders', needsEngine: true, layered: true, searchKeys: ['promptSuggestionEnabled', 'enabledTools', 'outputStyle', 'modelOverrides', 'alwaysThinkingEnabled', 'showThinkingSummaries', 'visionDelegationEnabled', 'disableAllHooks', 'skipWebFetchPreflight'], implemented: true },

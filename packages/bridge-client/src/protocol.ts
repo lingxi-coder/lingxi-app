@@ -710,6 +710,7 @@ export type ClientCommand =
   | { type: 'mcp_admin'; command: McpAdminCommandDto }
   | { type: 'plugin_admin'; command: PluginAdminCommandDto }
   | { type: 'hook_admin'; command: HookAdminCommandDto }
+  | { type: 'fusion_admin'; command: FusionAdminCommandDto }
   // ── AudioService (engine -> device operations and capability publication) ──
   | { type: 'audio_response'; identity: AudioOperationIdDto; result: AudioOperationResultDto }
   | { type: 'start_realtime_audio'; request_json: string }
@@ -1251,7 +1252,7 @@ export type ConfigurationOperationStatusDto = 'started' | 'progress' | 'succeede
 
 export type ConfigurationEffectDto = 'applied' | 'restart_required' | 'not_applicable';
 
-export type ConfigurationDomainDto = 'skill' | 'mcp' | 'plugin' | 'hook';
+export type ConfigurationDomainDto = 'skill' | 'mcp' | 'plugin' | 'hook' | 'fusion';
 
 export interface ConfigurationOperationDto {
   operation_id: number;
@@ -1275,6 +1276,53 @@ export type SkillAdminCommandDto = ConfigurationAdminCommandDto;
 export type McpAdminCommandDto = ConfigurationAdminCommandDto;
 export type PluginAdminCommandDto = ConfigurationAdminCommandDto;
 export type HookAdminCommandDto = ConfigurationAdminCommandDto;
+export type FusionAdminCommandDto = ConfigurationAdminCommandDto;
+
+export interface FusionStrategyRefDto {
+  scope: WritableScopeDto;
+  id: string;
+}
+
+/** Runtime configuration uses the engine's camelCase setting names. */
+export interface FusionStrategyDto {
+  id: string;
+  name: string;
+  config: Record<string, unknown>;
+}
+
+export interface FusionGlobalsDto {
+  enabled?: boolean;
+  proactive?: boolean;
+  slash_cross_provider_default?: boolean;
+  allow_cross_provider_for_agent?: boolean;
+  allowed_profiles?: string[];
+}
+
+export interface FusionScopeCatalogDto {
+  scope: WritableScopeDto;
+  /** Whether this scope is admitted by the current runtime settings sources. */
+  admitted: boolean;
+  path: string;
+  revision: string;
+  strategies: FusionStrategyDto[];
+  default_strategy_id: string | null;
+  globals: FusionGlobalsDto;
+  diagnostic: string | null;
+}
+
+export interface FusionCatalogDto {
+  scopes: FusionScopeCatalogDto[];
+  effective_globals: FusionGlobalsDto;
+  default_strategy: FusionStrategyRefDto | null;
+  diagnostics: string[];
+}
+
+export interface FusionStrategySelectionDto {
+  reference: FusionStrategyRefDto;
+  name: string;
+  config: Record<string, unknown>;
+  revision: string;
+}
 
 /** One discovered skill entry (listings.rs `SkillDto`). */
 export interface SkillDto {
@@ -1703,6 +1751,8 @@ export type ClientEvent =
       message?: string;
       details_json?: string;
     }
+  | { type: 'fusion_catalog'; catalog_json: string }
+  | { type: 'fusion_strategy_resolved'; operation_id: number; selection_json?: string; error?: string }
   | { type: 'skill_catalog'; catalog_json: string }
   | { type: 'skill_document'; document_json: string }
   | { type: 'mcp_configuration_snapshot'; snapshot_json: string }

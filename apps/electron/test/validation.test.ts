@@ -17,6 +17,14 @@ import {
   validateModUiOperation,
 } from '../src/main/validation';
 
+test('Fusion preparation actions remain private to the main process', () => {
+  for (const action of ['resolve_strategy', 'record_failure']) {
+    assert.throws(() => validateClientCommand({ type: 'fusion_admin', command: {
+      action, operation_id: 1, payload_json: JSON.stringify({ raw: '/fusion inspect', error: 'forged' }),
+    } }), /action/);
+  }
+});
+
 test('clipboard writes accept only bounded plain text', () => {
   assert.equal(validateClipboardText(''), '');
   assert.equal(validateClipboardText('x'.repeat(MAX_CLIPBOARD_TEXT_CHARS)).length, MAX_CLIPBOARD_TEXT_CHARS);

@@ -133,6 +133,8 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     connected,
     sessionLoading: false,
     audioSnapshot: defaultNativeAudioSnapshot(),
+    audioRealtimeState: { phase: 'idle' },
+    audioRealtimeCommand: async () => undefined,
     audioExecute: executeAudioOperation,
     audioCancel: cancelAudioOperation,
     audioFinishListen: finishAudioListen,
@@ -229,10 +231,14 @@ function Fixture() {
   const [ready, setReady] = useState(true);
   const [connected, setConnected] = useState(true);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [fusionDefault, setFusionDefault] = useState(false);
+  const [fusionAdmission, setFusionAdmission] = useState({ user: true, project: true, local: false });
 
   useEffect(() => {
     window.__composerDraftTest = {
       switchSession: setSessionId,
+      setFusionDefault,
+      setFusionScopeAdmitted: (scope, admitted) => setFusionAdmission((current) => ({ ...current, [scope]: admitted })),
       setSidebarWidth,
       setRunning,
       setSuggestion: (text, turn, sessionId) => setSuggestion({ text, turn, sessionId }),
@@ -276,6 +282,12 @@ function Fixture() {
         <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
           <BetaComposer
             bridge={{ ...bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false, models, connected),
+              fusionCatalogEvent: { type: 'fusion_catalog', catalog_json: JSON.stringify({
+                scopes: (['user', 'project', 'local'] as const).map((scope) => ({ scope, admitted: fusionAdmission[scope], path: `/fixture/${scope}/settings.json`, revision: 'r1',
+                  strategies: [{ id: 'shared', name: '代码审查', config: {} }], default_strategy_id: null, globals: {}, diagnostic: null })),
+                effective_globals: {}, diagnostics: [], default_strategy: fusionDefault ? { scope: 'project', id: 'shared' } : null,
+              }) },
+              fusionAdmin: async () => undefined,
               updatePromptSuggestionContext: async (context: Record<string, unknown>) => { suggestionContexts.push(context); },
               promptSuggestionFeedback: async (sessionId: string, uuid: string, action: string) => { suggestionFeedback.push({ sessionId, uuid, action }); },
               conversation: { ...emptyConversation(), sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
@@ -302,6 +314,8 @@ declare global {
       suggestionFeedback(): Array<{ sessionId: string; uuid: string; action: string }>;
       suggestionContexts(): Array<Record<string, unknown>>;
       switchSession(sessionId: string): void;
+      setFusionDefault(enabled: boolean): void;
+      setFusionScopeAdmitted(scope: 'user' | 'project' | 'local', admitted: boolean): void;
       setTheme(theme: 'dark' | 'light'): void;
       openedSettings(): string[];
       permissionChanges(): string[];

@@ -1,3 +1,4 @@
+import type { FusionInvocation } from '../shared/fusionStrategy.js';
 import { providerById } from '../shared/providers.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { Buffer } from 'node:buffer';
@@ -254,18 +255,51 @@ export function resolveModelCredentialProviderIds(model: string, settings: unkno
   return [...ids];
 }
 
+/** A private credential view; the captured reference/config revision stays unchanged. */
+export function fusionCredentialSelection<T extends { config: Record<string, unknown> }>(
+  selection: T,
+  invocation: Pick<FusionInvocation, 'models' | 'preset' | 'maxPanel'> = {},
+  parentProfile?: string,
+): T {
+  const config = selection.config;
+  let panels: unknown[];
+  if (invocation.models) {
+    // Fusion resolves literal model ids inside one profile. A bare id inherits
+    // the captured conversation profile, never an ordinary routing alias.
+    panels = invocation.models.map((model) => {
+      const colon = model.indexOf(':');
+      if (colon < 0 && !parentProfile) throw new Error('The current conversation provider is unavailable for bare Fusion model ids.');
+      return { profile: colon < 0 ? parentProfile : model.slice(0, colon), model: colon < 0 ? model : model.slice(colon + 1) };
+    });
+  } else {
+    const integer = (key: string, fallback: number) => typeof config[key] === 'number' && Number.isInteger(config[key]) ? config[key] as number : fallback;
+    const preset = invocation.preset ?? (config.preset === 'fast' ? 'fast' : 'quality');
+    const configuredMax = Math.max(2, Math.min(8, integer('maxPanel', 8)));
+    const maxPanel = Math.max(2, Math.min(configuredMax, invocation.maxPanel ?? configuredMax));
+    const required = Math.max(2, integer('minSuccessfulPanels', 2));
+    const presetCount = integer(preset === 'fast' ? 'fastPanelCount' : 'qualityPanelCount', preset === 'fast' ? 2 : 3);
+    const wanted = Math.max(Math.min(presetCount, maxPanel), required);
+    panels = Array.isArray(config.panelModels) ? config.panelModels.slice(0, wanted) : [];
+  }
+  return { ...selection, config: { ...config, panelModels: panels } };
+}
+
 /** Fusion routes are explicit settings choices, independent of the parent model. */
-export function resolveFusionCredentialProviderIds(settings: unknown, explicit = false): string[] {
-  if (!isRecord(settings) || !isRecord(settings.fusion)) return [];
-  const fusion = settings.fusion;
+export function resolveFusionCredentialProviderIds(settings: unknown, selection: { config: Record<string, unknown> }, explicit = false): string[] {
+  const fusion = selection.config;
   if (!explicit && fusion.enabled !== true) return [];
   const choices = [
     ...(Array.isArray(fusion.panelModels) ? fusion.panelModels : []),
     fusion.analystModel,
   ];
+  const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
   return [...new Set(choices.flatMap((choice) => {
     if (!isRecord(choice) || typeof choice.profile !== 'string' || typeof choice.model !== 'string') return [];
-    return resolveModelCredentialProviderIds(`${choice.profile}/${choice.model}`, settings);
+    // Configured Fusion routes are exact pairs. Ordinary aliases and fallback
+    // chains can refer to unrelated providers that this ensemble never calls.
+    const profile = choice.profile.trim();
+    if (!choice.model.trim()) return [];
+    return providerById(profile) || isRecord(providers[profile]) ? [profile] : [];
   }))];
 }
 

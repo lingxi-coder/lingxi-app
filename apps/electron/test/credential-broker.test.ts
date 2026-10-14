@@ -9,6 +9,7 @@ import {
   resolveProviderCredential,
   resolveProviderIdForModel,
   resolveModelCredentialProviderIds,
+  fusionCredentialSelection,
   resolveFusionCredentialProviderIds,
   resolveProviderTestCredential,
   resolveSessionLaunchCredentials,
@@ -301,17 +302,18 @@ test('custom aliases resolve only the selected profile and its model fallback ch
   assert.deepEqual(resolveModelCredentialProviderIds('fast', { providers: { ...settings.providers, duplicate: { models: [{ id: 'second', aliases: ['fast'] }] } } }), []);
 });
 
-test('Fusion credential routes require opt-in for normal prompts and include custom aliases', () => {
+test('Fusion credential routes require opt-in and use exact profiles without ordinary fallbacks', () => {
   const settings = {
     providers: { custom: { models: [{ id: 'real-model', aliases: ['fast'] }] }, backup: { models: ['backup-model'] } },
     routing: { fallback: { 'real-model': ['backup/backup-model'] } },
-    fusion: { enabled: false, panelModels: [{ profile: 'custom', model: 'fast' }], analystModel: { profile: 'kimi', model: 'kimi-k3' }, synthesizerModel: { profile: 'custom', model: 'fast' } },
+    fusion: { strategies: [{ id: 'unselected', name: 'Unselected', config: { panelModels: [{ profile: 'openai-chatgpt', model: 'gpt' }] } }] },
   };
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings), []);
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings, true), ['custom', 'backup', 'kimi']);
-  settings.fusion.enabled = true;
-  assert.deepEqual(resolveFusionCredentialProviderIds(settings), ['custom', 'backup', 'kimi']);
-  assert.deepEqual(resolveFusionCredentialProviderIds({ fusion: { enabled: true, panelModels: [null, 'broken', { profile: 42 }] } }), []);
+  const selection = { config: { enabled: false, panelModels: [{ profile: 'custom', model: 'real-model' }], analystModel: { profile: 'kimi', model: 'kimi-k3' } } };
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection), []);
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection, true), ['custom', 'kimi']);
+  selection.config.enabled = true;
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection), ['custom', 'kimi']);
+  assert.deepEqual(resolveFusionCredentialProviderIds({}, { config: { enabled: true, panelModels: [null, 'broken', { profile: 42 }] } }), []);
 });
 
 
@@ -412,4 +414,44 @@ test('credential helper accepts a response exactly at its raw byte limit with a 
     }),
   });
   assert.deepEqual(await broker!.health(), { protocolVersion: 1, buildVersion: 'tëst' });
+});
+
+
+test('Fusion credential views apply preset counts and max-panel without mutating the snapshot revision', () => {
+  const selection = { reference: { scope: 'user', id: 'review' }, revision: 'original-revision', config: {
+    enabled: true, panelModels: [
+      { profile: 'deepseek', model: 'a' }, { profile: 'kimi', model: 'b' },
+      { profile: 'openai-chatgpt', model: 'c' }, { profile: 'openai', model: 'd' },
+    ], analystModel: { profile: 'deepseek', model: 'judge' }, qualityPanelCount: 4,
+  } };
+  const fast = fusionCredentialSelection(selection, { preset: 'fast' });
+  assert.deepEqual(resolveFusionCredentialProviderIds({}, fast, true), ['deepseek', 'kimi']);
+  assert.equal(fast.revision, 'original-revision');
+  assert.equal(selection.config.panelModels.length, 4);
+  assert.notEqual(fast.config, selection.config);
+  const capped = fusionCredentialSelection(selection, { maxPanel: 2 });
+  assert.deepEqual(resolveFusionCredentialProviderIds({}, capped, true), ['deepseek', 'kimi']);
+  const required = fusionCredentialSelection({ config: { ...selection.config, minSuccessfulPanels: 3 } }, { preset: 'fast' });
+  assert.equal(required.config.panelModels.length, 3);
+  assert.deepEqual(resolveFusionCredentialProviderIds({}, fusionCredentialSelection({ config: { ...selection.config, preset: 'fast' } }), true), ['deepseek', 'kimi']);
+});
+
+test('Fusion explicit models replace the roster and bare ids inherit the captured parent profile', () => {
+  const settings = { providers: { primary: { models: [{ id: 'actual', aliases: ['fast'] }] }, alternate: { models: ['other'] } }, routing: { aliases: { boss: 'alternate/other' } } };
+  const snapshot = { config: { enabled: true, panelModels: [{ profile: 'openai-chatgpt', model: 'not-selected' }], analystModel: { profile: 'deepseek', model: 'judge' } } };
+  const inherited = fusionCredentialSelection(snapshot, { models: ['fast', 'boss'] }, 'primary');
+  assert.deepEqual(inherited.config.panelModels, [{ profile: 'primary', model: 'fast' }, { profile: 'primary', model: 'boss' }]);
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, inherited, true), ['primary', 'deepseek']);
+  assert.throws(() => fusionCredentialSelection(snapshot, { models: ['fast', 'boss'] }), /conversation provider is unavailable/);
+  const explicit = fusionCredentialSelection(snapshot, { models: ['openai-chatgpt:chosen', 'kimi:kimi-k3'], preset: 'fast', maxPanel: 2 });
+  assert.deepEqual(resolveFusionCredentialProviderIds({}, explicit, true), ['openai-chatgpt', 'kimi', 'deepseek']);
+  assert.deepEqual(snapshot.config.panelModels, [{ profile: 'openai-chatgpt', model: 'not-selected' }]);
+});
+
+test('Fusion configured pairs trim whitespace and cannot be shadowed by another profile model id', () => {
+  const settings = { providers: { unrelated: { models: ['deepseek/a'] } }, routing: { fallback: { a: ['openai-chatgpt/unused'] } } };
+  const selection = { config: { panelModels: [{ profile: ' deepseek ', model: ' a ' }], analystModel: { profile: ' kimi ', model: ' judge ' } } };
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, selection, true), ['deepseek', 'kimi']);
+  assert.deepEqual(resolveFusionCredentialProviderIds({ providers: { claude: { models: ['custom'] } } },
+    { config: { panelModels: [{ profile: 'claude', model: 'custom' }] } }, true), ['claude']);
 });

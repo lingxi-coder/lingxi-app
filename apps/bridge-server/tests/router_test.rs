@@ -1789,6 +1789,35 @@ async fn slash_command_routes_to_registry() {
 }
 
 #[tokio::test]
+async fn fusion_preparation_failure_routes_without_dispatching_a_slash_command() {
+    struct NeverDispatch;
+    #[async_trait]
+    impl SlashCommandDispatcher for NeverDispatch {
+        async fn dispatch(&self, _: &str) -> SlashDispatchResult {
+            panic!("recording a failed invocation must never start Fusion")
+        }
+    }
+    let router = EngineCommandRouter::new(
+        Arc::new(MockOrchestratorHandle::new()), Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }), Some(Arc::new(NeverDispatch)), None,
+    );
+    let sink = CapturingSink::arc();
+    router.route(ClientCommand::FusionAdmin {
+        command: client::protocol::commands::FusionAdminCommandDto {
+            action: "record_failure".into(),
+            payload_json: Some(serde_json::json!({"raw":"/fusion inspect", "error":"Selected strategy unavailable"}).to_string()),
+            operation_id: None,
+            target: None,
+            scope: None,
+            revision: None,
+        },
+    }, sink.clone()).await;
+    assert!(sink.events().await.iter().any(|event| matches!(event,
+        ClientEvent::SlashCommandResult { display, is_error: true, .. } if display.contains("Selected strategy unavailable")
+    )));
+}
+
+#[tokio::test]
 async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
     use command_api::dispatcher::RegistrySlashDispatcher;
     use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
@@ -3286,6 +3315,7 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
         serde_json::Value::from(false),
     );
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project.clone(),
@@ -3426,6 +3456,7 @@ async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
     .unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3477,6 +3508,7 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
     std::fs::create_dir_all(&home).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3526,6 +3558,7 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
     std::fs::create_dir_all(&home).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3610,6 +3643,7 @@ async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3662,6 +3696,7 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
     std::fs::create_dir_all(&home).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3716,6 +3751,7 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
     std::fs::write(home.join("settings.json"), "{ not json").unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3768,6 +3804,7 @@ async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3819,6 +3856,7 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,
@@ -3883,6 +3921,7 @@ async fn update_workspace_directories_writes_the_named_layer_and_preserves_other
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project,

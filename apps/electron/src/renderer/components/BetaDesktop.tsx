@@ -8,6 +8,9 @@ import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
 import { ContextWindow } from './ContextWindow';
+import { FusionStrategyPicker } from './FusionStrategyPicker';
+import { chooseFusionStrategy, fusionInvocation } from '../../shared/fusionStrategy';
+import { parseFusionCatalog } from './settings/pages/FusionCatalog';
 import {
   useCallback,
   useEffect,
@@ -23,6 +26,7 @@ import {
 } from 'react';
 import type {
   ImageRefDto,
+  FusionStrategyRefDto,
   ModelDetailsDto,
   ReasoningSelectionDto,
   SessionRowDto,
@@ -1656,6 +1660,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [modelQuery, setModelQuery] = useState('');
   const [submenuBounds, setSubmenuBounds] = useState<ModelPickerSubmenuBounds | null>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [fusionChoice, setFusionChoice] = useState<{ sessionId: string | null; reference: FusionStrategyRefDto | null } | null>(null);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
   const [fileResults, setFileResults] = useState<string[]>([]);
@@ -1702,6 +1707,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const composerDraftRevision = useRef(0);
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
+  const selectedFusion = fusionChoice?.sessionId === activeSessionId ? fusionChoice.reference : null;
+  const fusionDraft = /^\s*\/fusion(?:\s|$)/i.test(text) && !/^\s*\/fusion\s+(?:setup|clean)\s*$/i.test(text);
+  const typedFusion = useMemo(() => {
+    try { return fusionInvocation(text)?.strategy; } catch { return undefined; }
+  }, [text]);
   const audio = nativeAudioApi();
   const voicePrefs = bridge.bootstrap?.settings.voice ?? audioConfigurationDefaults();
   const inputAudioGate = audioFeatureGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot(), 'listen');
@@ -2598,7 +2608,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
       return;
     }
-    const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
+    let slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
       setImageNotice('当前任务完成后才能运行 / 命令。');
@@ -2611,6 +2621,21 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     if (isSlashCommand && imageAttachments.length) {
       setImageNotice('图片附件不能和 / 命令一起发送，请先输入普通问题。');
       return;
+    }
+    if (isSlashCommand) {
+      try {
+        const invocation = fusionInvocation(slashCommand);
+        if (invocation && !invocation.strategy) {
+          if (selectedFusion) slashCommand = chooseFusionStrategy(slashCommand, selectedFusion);
+          else if (!parseFusionCatalog(bridge.fusionCatalogEvent?.catalog_json).default_strategy) {
+            setImageNotice('请选择一个 Fusion 策略，或在设置中指定默认策略。');
+            return;
+          }
+        }
+      } catch (cause) {
+        setImageNotice(cause instanceof Error ? cause.message : '无法读取 Fusion 策略。');
+        return;
+      }
     }
     if (voiceState === 'listening') stopVoice();
     if (isSlashCommand) {
@@ -3166,6 +3191,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <VisualizationContextBadge chip={visualizationChip} onDismiss={() => setVisualizationChip(null)} />
           </div>
         )}
+        {fusionDraft && <FusionStrategyPicker catalogJson={bridge.fusionCatalogEvent?.catalog_json}
+          value={typedFusion ?? selectedFusion} explicit={Boolean(typedFusion)} disabled={!ready || bridge.running}
+          onChange={(reference) => setFusionChoice({ sessionId: activeSessionId, reference })}
+          onSettings={() => onOpenSettingsPage('fusion')} />}
         <div className="composer-input-view">
           <div
             ref={input}

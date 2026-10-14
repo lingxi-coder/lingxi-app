@@ -7,6 +7,7 @@ import type {
   CronJobDto,
   CronRequestDto,
   CronRunDto,
+  FusionAdminCommandDto,
   HookAdminCommandDto,
   ImageRefDto,
   McpAdminCommandDto,
@@ -73,6 +74,7 @@ import type { RuntimeState, SharedDesktopCache } from './bridgeRuntimeState.js';
 import type {
   ConfigurationOperationEvent,
   DesktopTurnToken,
+  FusionCatalogEvent,
   McpConfigurationSnapshotEvent,
   McpServersEvent,
   PluginCatalogEvent,
@@ -220,6 +222,7 @@ export function useBridge(): UseBridge {
   const [skillCatalogEvent, setSkillCatalogEvent] = useState<SkillCatalogEvent | null>(null);
   const [skillDocumentEvent, setSkillDocumentEvent] = useState<SkillDocumentEvent | null>(null);
   const [mcpConfigurationSnapshotEvent, setMcpConfigurationSnapshotEvent] = useState<McpConfigurationSnapshotEvent | null>(null);
+  const [fusionCatalogEvent, setFusionCatalogEvent] = useState<FusionCatalogEvent | null>(null);
   const [pluginCatalogEvent, setPluginCatalogEvent] = useState<PluginCatalogEvent | null>(null);
   const [configurationOperations, setConfigurationOperations] = useState<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>({});
   const pendingConfigurationOperations = useRef(new Map<string, PendingConfigurationOperation>());
@@ -324,6 +327,7 @@ export function useBridge(): UseBridge {
     setSkillCatalogEvent(null);
     setSkillDocumentEvent(null);
     setMcpConfigurationSnapshotEvent(null);
+    setFusionCatalogEvent(null);
     setPluginCatalogEvent(null);
     setConfigurationOperations({});
   }, [activeSessionId]);
@@ -843,6 +847,7 @@ export function useBridge(): UseBridge {
         if (event.type === 'skill_catalog') setSkillCatalogEvent(event);
         if (event.type === 'skill_document') setSkillDocumentEvent(event);
         if (event.type === 'mcp_configuration_snapshot') setMcpConfigurationSnapshotEvent(event);
+        if (event.type === 'fusion_catalog') setFusionCatalogEvent(event);
         if (event.type === 'plugin_catalog') setPluginCatalogEvent(event);
         if (event.type === 'configuration_operation') {
           setConfigurationOperations((previous) => ({ ...previous, [event.domain]: event }));
@@ -1033,6 +1038,7 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       host.command(activeSessionId, { type: 'skill_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'mcp_admin', command: { action: 'get_snapshot' } }),
+      host.command(activeSessionId, { type: 'fusion_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'plugin_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'hook_admin', command: { action: 'get_document' } }),
       host.command(activeSessionId, { type: 'list_sessions', limit: 100 }),
@@ -1822,6 +1828,7 @@ export function useBridge(): UseBridge {
       command({ type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       command({ type: 'skill_admin', command: { action: 'get_catalog' } }),
       command({ type: 'mcp_admin', command: { action: 'get_snapshot' } }),
+      command({ type: 'fusion_admin', command: { action: 'get_catalog' } }),
       command({ type: 'plugin_admin', command: { action: 'get_catalog' } }),
       command({ type: 'hook_admin', command: { action: 'get_document' } }),
       refreshDiagnostics(),
@@ -2135,6 +2142,7 @@ export function useBridge(): UseBridge {
     envelope:
       | { type: 'skill_admin'; command: SkillAdminCommandDto }
       | { type: 'mcp_admin'; command: McpAdminCommandDto }
+      | { type: 'fusion_admin'; command: FusionAdminCommandDto }
       | { type: 'plugin_admin'; command: PluginAdminCommandDto }
       | { type: 'hook_admin'; command: HookAdminCommandDto },
   ): Promise<ConfigurationOperationEvent | void> => {
@@ -2165,6 +2173,10 @@ export function useBridge(): UseBridge {
   );
   const mcpAdmin = useCallback(
     (adminCommand: McpAdminCommandDto) => runConfigurationAdmin('mcp', { type: 'mcp_admin', command: adminCommand }),
+    [runConfigurationAdmin],
+  );
+  const fusionAdmin = useCallback(
+    (adminCommand: FusionAdminCommandDto) => runConfigurationAdmin('fusion', { type: 'fusion_admin', command: adminCommand }),
     [runConfigurationAdmin],
   );
   const pluginAdmin = useCallback(
@@ -2202,6 +2214,7 @@ export function useBridge(): UseBridge {
     skillCatalogEvent,
     skillDocumentEvent,
     mcpConfigurationSnapshotEvent,
+    fusionCatalogEvent,
     pluginCatalogEvent,
     configurationOperations,
     activeSession,
@@ -2288,6 +2301,7 @@ export function useBridge(): UseBridge {
     removeMcpServer,
     skillAdmin,
     mcpAdmin,
+    fusionAdmin,
     pluginAdmin,
     hookAdmin,
     restartBridge,

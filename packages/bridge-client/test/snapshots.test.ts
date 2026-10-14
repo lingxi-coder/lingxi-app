@@ -910,10 +910,23 @@ function validateCommand(name: string, v: unknown): void {
       validateMcpScope(o['scope']);
       assert.ok(isString(o['name']));
       break;
+    case 'update_prompt_suggestion_context':
+      assert.ok(isString(o['session_id']));
+      assert.ok(['focused', 'blurred', 'unknown'].includes(o['focus'] as string));
+      for (const key of ['input_empty', 'pending_permission', 'elicitation_active']) assert.ok(isBool(o[key]));
+      break;
+    case 'prompt_suggestion_feedback':
+      assert.ok(isString(o['session_id']) && isString(o['uuid']));
+      assert.ok(['shown', 'accepted', 'dismissed'].includes(o['action'] as string));
+      break;
+    case 'record_prompt_suggestion_submission':
+      assert.ok(isString(o['text']));
+      break;
     case 'skill_admin':
     case 'mcp_admin':
     case 'plugin_admin':
     case 'hook_admin':
+    case 'fusion_admin':
       validateConfigurationAdminCommand(o['command']);
       break;
     case 'get_audio_session_context':
@@ -1465,13 +1478,19 @@ function validateEvent(name: string, v: unknown): void {
       if ('error' in o) assert.ok(isString(o['error']));
       break;
     case 'configuration_operation':
-      assert.ok(['skill', 'mcp', 'plugin', 'hook'].includes(o['domain'] as string));
+      assert.ok(['skill', 'mcp', 'plugin', 'hook', 'fusion'].includes(o['domain'] as string));
       assert.ok(isNumber(o['operation_id']));
       assert.ok(['started', 'progress', 'succeeded', 'failed'].includes(o['status'] as string));
       assert.ok(['applied', 'restart_required', 'not_applicable'].includes(o['effect'] as string));
       if ('message' in o) assert.ok(isString(o['message']));
       if ('details_json' in o) assert.ok(isString(o['details_json']));
       break;
+    case 'fusion_strategy_resolved':
+      assert.ok(isNumber(o['operation_id']));
+      if ('selection_json' in o) assert.ok(isString(o['selection_json']));
+      if ('error' in o) assert.ok(isString(o['error']));
+      break;
+    case 'fusion_catalog':
     case 'skill_catalog':
       assert.ok(isString(o['catalog_json']));
       break;

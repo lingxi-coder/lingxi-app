@@ -108,7 +108,12 @@ def _localizations_for(locales: dict[str, dict], scope: str | None, key: str) ->
             value = section.get(key) if isinstance(section, dict) else None
         else:
             value = source.get(key)
-        if value:
+        if isinstance(value, dict) and "plural" in value:
+            result[locale] = {"variations": {"plural": {
+                quantity: {"stringUnit": {"state": "translated", "value": text}}
+                for quantity, text in value["plural"].items()
+            }}}
+        elif value:
             result[locale] = {"stringUnit": {"state": "translated", "value": value}}
     return result
 
@@ -189,6 +194,10 @@ def write_android(locales: dict[str, dict], out_dir: Path | str) -> None:
         values = {}
         for key in keys:
             value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, dict):
+                # Android plurals are a <plurals> resource, which this generator
+                # does not write; keep plural keys iOS-only (a key with a space).
+                raise ValueError(f"error: {locale}.json: {key} is a plural; plurals are iOS-only")
             if value:
                 values[key] = value
         if not values:

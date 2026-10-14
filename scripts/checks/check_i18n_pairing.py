@@ -113,6 +113,18 @@ ANDROID_LOCALE_DIR = {
     "ko": "values-ko",
 }
 ANDROID_COMPANION_STRINGS_BASENAME = "strings_conversation_extra.xml"
+
+# 手工维护的 <plurals> 资源。generate.py 不生成 Android 复数，所以一个 iOS 复数
+# key（`"chat_asked_questions %lld"`）在 Android 侧由同 stem 的 <plurals> 配对，
+# 而不是 `_fmt` 兄弟。
+ANDROID_PLURALS_FILES = (
+    "apps/android/native/app/src/main/res/values/ask_question.xml",
+)
+ANDROID_PLURALS_NAME = re.compile(r'<plurals\s+name="([a-zA-Z_][a-zA-Z0-9_]*)"')
+
+# 构建插件生成、不在任何 catalog 里的 R.string（google-services 从
+# google-services.json 生成 default_web_client_id）。
+ANDROID_PLUGIN_GENERATED_STRINGS = {"default_web_client_id"}
 ANDROID_RES_ROOT = "apps/android/native/app/src/main/res"
 
 # 只匹配字面量 key（无 `\(...)` 插值）。插值调用会被 Swift 编译成复合 key
@@ -207,6 +219,15 @@ def _android_companion_locale_gaps(repo_root):
     return gaps
 
 
+def _android_plurals_names(repo_root):
+    names = set()
+    for rel in ANDROID_PLURALS_FILES:
+        path = Path(repo_root) / rel
+        if path.is_file():
+            names.update(ANDROID_PLURALS_NAME.findall(path.read_text(encoding="utf-8", errors="replace")))
+    return names
+
+
 def load(directory):
     directory = Path(directory)
     out = {}
@@ -233,7 +254,8 @@ def measure(locales, repo_root):
     def stem(k):
         return k.split(" ")[0].split("%")[0].rstrip("_ ")
 
-    unpaired = [k for k in illegal if stem(k) + ANDROID_PAIR_SUFFIX not in legal]
+    plurals = _android_plurals_names(repo_root)
+    unpaired = [k for k in illegal if stem(k) + ANDROID_PAIR_SUFFIX not in legal and stem(k) not in plurals]
 
     ios_refs = _ios_source_refs(repo_root)
     if len(ios_refs) < MIN_IOS_SOURCE_REFS:
@@ -246,7 +268,7 @@ def measure(locales, repo_root):
         fail("found only %d distinct key(s) referenced by Android R.string.* under %s — refusing to "
              "trust an enumeration this much smaller than the known count, the scan is probably broken"
              % (len(android_refs), Path(repo_root) / ANDROID_SOURCE_ROOT))
-    android_known = legal | _android_companion_names(repo_root)
+    android_known = legal | _android_companion_names(repo_root) | ANDROID_PLUGIN_GENERATED_STRINGS
     ios_orphans = sorted(k for k in ios_refs if k not in key_set)
     android_orphans = sorted(k for k in android_refs if k not in android_known)
     companion_gaps = _android_companion_locale_gaps(repo_root)

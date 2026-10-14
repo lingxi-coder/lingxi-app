@@ -92,6 +92,15 @@ Android writer escapes it correctly into `strings.xml`'s `\n` form; a
 translation carrying a multi-line source string should preserve the line
 break in the same position.
 
+### Plurals (iOS only)
+
+A value may be an object `{"plural": {"one": "…", "other": "…"}}` instead of a
+string; it becomes the key's plural variations in `Localizable.xcstrings`, so
+use it only on an iOS key (one with a space, like `"chat_asked_questions %lld"`)
+and only in the locales that need it — the others keep a plain string. Android
+plurals are not generated: they live in the hand-written
+`values*/ask_question.xml` `<plurals>` resources.
+
 ## Adding a language
 
 1. Add the canonical locale code to `LOCALES` in `generate.py` (currently

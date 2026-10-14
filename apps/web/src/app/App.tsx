@@ -14,12 +14,13 @@ import { PublicLayout } from '../layouts/PublicLayout';
 import { detectInitialRegion, Locale, Region } from '../utils/locale';
 import { usePersistentState } from './usePersistentState';
 import { useRouter } from './router';
+import { useTheme } from './useTheme';
 
 export function App() {
   const route = useRouter();
   const [locale, setLocale] = usePersistentState<Locale>('lingxi.web.locale', 'zh');
   const [region, setRegion] = usePersistentState<Region>('lingxi.web.region', detectInitialRegion);
-  const [theme, setTheme] = usePersistentState<'light' | 'dark'>('lingxi.web.theme', 'light');
+  const [theme, setTheme] = useTheme();
 
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
@@ -97,7 +98,7 @@ export function App() {
         : <HomePage locale={locale} region={region} />;
 
   return (
-    <PublicLayout {...common} activeRoute={route}>
+    <PublicLayout {...common} activeRoute={route} theme={theme} onThemeToggle={() => setTheme((current) => current === 'light' ? 'dark' : 'light')}>
       {page}
     </PublicLayout>
   );

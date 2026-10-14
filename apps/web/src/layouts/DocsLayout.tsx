@@ -110,7 +110,7 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
         </nav>
         <div className="developer-controls">
           <a href="https://github.com/lingxi-coder" target="_blank" rel="noreferrer" className="developer-github">GitHub ↗</a>
-          <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+          <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
           <button type="button" onClick={() => onLocaleChange(locale === 'zh' ? 'en' : 'zh')} aria-label={t('Switch to Chinese', '切换为英文')} className="developer-language">{locale === 'zh' ? 'EN' : '中文'}</button>
         </div>
       </header>

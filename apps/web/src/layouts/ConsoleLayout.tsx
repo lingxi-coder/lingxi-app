@@ -1,3 +1,4 @@
+import { Brand } from '../components/Brand';
 import { PropsWithChildren } from 'react';
 import { AppRoute } from '../app/router';
 import { IconChart, IconDocs, IconKey, IconWallet } from '../components/Icons';
@@ -38,7 +39,7 @@ export function ConsoleLayout({
     <div className="console-shell">
       <aside className="console-sidebar">
         <RouteLink href="/" className="wordmark">
-          LingXi
+          <Brand compact />
         </RouteLink>
         <nav className="console-nav" aria-label="Console navigation">
           {consoleNav.map((item) => {
@@ -85,7 +86,7 @@ export function ConsoleLayout({
               region={region}
               onRegionChange={onRegionChange}
             />
-            <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+            <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
           </div>
         </header>
         <main className="console-content">{children}</main>

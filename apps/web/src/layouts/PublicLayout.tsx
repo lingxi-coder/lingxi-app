@@ -1,5 +1,6 @@
 import { PropsWithChildren, useEffect, useRef } from 'react';
 import { AppRoute } from '../app/router';
+import { ThemeToggle } from '../components/ThemeToggle';
 import { Brand } from '../components/Brand';
 import { Locale, Region, pickLocaleText } from '../utils/locale';
 import { LanguageToggle } from '../components/LanguageToggle';
@@ -8,6 +9,8 @@ import { IconArrowRight, IconGlobe } from '../components/Icons';
 
 interface PublicLayoutProps extends PropsWithChildren {
   activeRoute: AppRoute;
+  theme: 'light' | 'dark';
+  onThemeToggle: () => void;
   locale: Locale;
   region: Region;
   onLocaleChange: (locale: Locale) => void;
@@ -47,6 +50,8 @@ function LandingMenu({ children, locale }: PropsWithChildren<{ locale: Locale }>
 
 export function PublicLayout({
   activeRoute,
+  theme,
+  onThemeToggle,
   children,
   locale,
   region,
@@ -71,6 +76,7 @@ export function PublicLayout({
             <button type="button" className="landing-language" onClick={() => onLocaleChange(locale === 'en' ? 'zh' : 'en')} aria-label={t('Switch to Chinese', '切换为英语')}>
               <IconGlobe width={16} height={16} /><span>{locale === 'en' ? '中文' : 'EN'}</span>
             </button>
+            <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
             <LandingMenu locale={locale}>{navigation}</LandingMenu>
           </div>
         </header>
@@ -104,7 +110,7 @@ export function PublicLayout({
         </div>
         <div className="topbar">
           <RouteLink href="/" className="wordmark">
-            LingXi
+            <Brand compact />
           </RouteLink>
           <nav className="topnav" aria-label="Main navigation">
             <RouteLink href="/">
@@ -127,6 +133,7 @@ export function PublicLayout({
               region={region}
               onRegionChange={onRegionChange}
             />
+            <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
             <RouteLink href="/login" className="primary-link">
               {pickLocaleText(locale, labels.login)}
               <IconArrowRight width={16} height={16} />
@@ -137,7 +144,7 @@ export function PublicLayout({
       <main>{children}</main>
       <footer className="public-footer">
         <div>
-          <div className="wordmark small">LingXi</div>
+          <div className="wordmark small"><Brand compact /></div>
           <p>
             {pickLocaleText(locale, {
               en: 'Cross-device AI development assistance for individual builders.',

@@ -2,6 +2,10 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      try { document.documentElement.dataset.theme = JSON.parse(localStorage.getItem("lingxi.web.theme")) === "dark" ? "dark" : "light"; }
+      catch { document.documentElement.dataset.theme = "light"; }
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>灵犀 LingXi — 让想法，成为现实。</title>

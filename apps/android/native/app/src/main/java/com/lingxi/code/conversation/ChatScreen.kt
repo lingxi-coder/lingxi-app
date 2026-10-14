@@ -344,7 +344,7 @@ fun ChatScreen(
                 onToggleToolCall = onToggleToolCall,
             )
             flowModePanel?.invoke()
-            if (renderItems.any { it is ChatRenderItem.Empty }) {
+            if (isNewChat) {
                 NewChatBar(
                     mode = sessionMode,
                     workspaceName = workspaceName,

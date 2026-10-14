@@ -41,6 +41,9 @@ enum AppRoute: Hashable {
     case sessionDetails(sessionID: String)
     case projects
     case project(id: String)
+    /// 应用: the installed apps and the market; one app's page.
+    case apps
+    case marketApp(id: String)
 }
 
 extension AppRoute: Identifiable {
@@ -58,6 +61,10 @@ extension AppRoute: Identifiable {
             return "session-details:\(sessionID)"
         case .projects:
             return "projects"
+        case .apps:
+            return "apps"
+        case .marketApp(let id):
+            return "market-app:\(id)"
         case .project(let id):
             return "project:\(id)"
         }
@@ -68,6 +75,8 @@ extension AppRoute: Identifiable {
 @MainActor
 final class AppNavigationModel {
     var path: [AppRoute] = []
+    /// The installed app running full screen, if any.
+    var runningAppID: String?
     /// The sidebar's recents filter chip. A list filter only — it never decides
     /// which mode the live conversation is in.
     var drawerFilter: RecentsFilter = .all
@@ -183,14 +192,32 @@ final class AppNavigationModel {
         pushPage(.project(id: projectID))
     }
 
+    func openApps() {
+        pushPage(.apps)
+    }
+
+    func openMarketApp(_ appID: String) {
+        pushPage(.marketApp(id: appID))
+    }
+
+    /// Runs an installed app full screen over everything else.
+    func runApp(_ appID: String) {
+        closeSidebar()
+        settingsOpen = false
+        runningAppID = appID
+    }
+
     /// Replace a page of the same family at the top instead of stacking
-    /// duplicates (a second notification for the same task, re-opening the
-    /// projects list from a project page).
+    /// duplicates (a second notification for the same task), and go back to
+    /// the projects list when it is already under the top (re-opening it from
+    /// a project page).
     private func pushPage(_ route: AppRoute) {
         closeSidebar()
         settingsOpen = false
         if let last = path.last, last.isSamePage(as: route) {
             path[path.count - 1] = route
+        } else if route == .projects, let index = path.lastIndex(of: .projects) {
+            path.removeSubrange((index + 1)...)
         } else {
             path.append(route)
         }
@@ -210,7 +237,8 @@ private extension AppRoute {
         switch (self, other) {
         case (.cron, .cron), (.cron, .cronRun), (.cronRun, .cron), (.cronRun, .cronRun),
              (.cronNew, .cronNew), (.cronNew, .cron), (.cron, .cronNew),
-             (.projects, .projects), (.project, .project):
+             (.projects, .projects), (.project, .project),
+             (.apps, .apps), (.marketApp, .marketApp):
             true
         default:
             false

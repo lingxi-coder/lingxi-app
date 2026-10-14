@@ -13,8 +13,10 @@ enum SettingsGroup: String, CaseIterable, Hashable, Sendable, Identifiable {
 
     var id: String { rawValue }
 
-    var title: String { String(localized: String.LocalizationValue("settings_group_\(rawValue)")) }
-    var summary: String { String(localized: String.LocalizationValue("settings_group_\(rawValue)_summary")) }
+    // `stringLiteral:` matters: an interpolated literal would look up the
+    // key "settings_group_%@" and show that raw key on screen.
+    var title: String { String(localized: String.LocalizationValue(stringLiteral: "settings_group_\(rawValue)")) }
+    var summary: String { String(localized: String.LocalizationValue(stringLiteral: "settings_group_\(rawValue)_summary")) }
 
     var icon: LXIconName {
         switch self {

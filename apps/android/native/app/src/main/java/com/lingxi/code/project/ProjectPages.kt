@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -38,6 +38,7 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.PageTopBar
 import com.lingxi.code.components.UiTags
+import com.lingxi.code.components.blockTouchesBehind
 import com.lingxi.code.components.modeColor
 import com.lingxi.code.components.tint
 import com.lingxi.code.drawer.RecentsFilter
@@ -83,11 +84,17 @@ internal fun projectSessionsFor(project: Project, filter: RecentsFilter): List<P
         .filter { filter.accepts(it.mode) }
         .sortedByDescending(ProjectSession::updatedAtEpochMillis)
 
-/** The project list page: every project, pinned first, with a ＋ to create or import one. */
+/**
+ * The project list page: every project, pinned first, with a ＋ to create or import one.
+ *
+ * [pinnedWorkspaces] is the pin time per workspace key (`project.<id>`). It is a
+ * value, not a lookup function: the sort is remembered against it, and a function
+ * capturing the same state holder keeps its identity when a pin changes.
+ */
 @Composable
 fun ProjectsPage(
     projects: List<Project>,
-    pinnedAtEpochMillis: (String) -> Long?,
+    pinnedWorkspaces: Map<String, Long>,
     statusMessage: String?,
     onBack: () -> Unit,
     onOpenProject: (String) -> Unit,
@@ -96,12 +103,15 @@ fun ProjectsPage(
     modifier: Modifier = Modifier,
 ) {
     val t = LingXiTheme.palette
-    val sorted = remember(projects, pinnedAtEpochMillis) { sortProjectsForList(projects, pinnedAtEpochMillis) }
+    val sorted = remember(projects, pinnedWorkspaces) {
+        sortProjectsForList(projects) { key -> pinnedWorkspaces[key] }
+    }
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(t.windowBg)
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .blockTouchesBehind()
+            .windowInsetsPadding(WindowInsets.systemBars)
             .testTag(UiTags.PROJECTS_PAGE),
     ) {
         PageTopBar(
@@ -111,7 +121,7 @@ fun ProjectsPage(
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .testTag(UiTags.PROJECTS_CREATE)
                         .clickable(onClick = onCreateProject),
@@ -150,7 +160,7 @@ fun ProjectsPage(
             } else {
                 SettingsSection {
                     sorted.forEachIndexed { index, project ->
-                        val pinned = pinnedAtEpochMillis(projectWorkspaceKey(project.id)) != null
+                        val pinned = projectWorkspaceKey(project.id) in pinnedWorkspaces
                         SettingsRow(
                             label = project.name,
                             sub = project.desc.takeIf(String::isNotBlank),
@@ -164,7 +174,7 @@ fun ProjectsPage(
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .size(30.dp)
+                                        .size(40.dp)
                                         .clip(CircleShape)
                                         .clickable { onTogglePinned(project.id) },
                                 ) {
@@ -215,7 +225,8 @@ fun ProjectPage(
         modifier = modifier
             .fillMaxSize()
             .background(t.windowBg)
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .blockTouchesBehind()
+            .windowInsetsPadding(WindowInsets.systemBars)
             .testTag(UiTags.PROJECT_PAGE),
     ) {
         PageTopBar(title = project.name, onBack = onBack)

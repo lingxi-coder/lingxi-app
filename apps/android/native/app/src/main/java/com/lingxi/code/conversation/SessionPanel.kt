@@ -106,17 +106,22 @@ internal fun SessionPanel(
                     onTap = onContinueInOtherMode,
                     modifier = Modifier.testTag(UiTags.SESSION_PANEL_MODE),
                 )
+                // A Chat session has no file permissions to ask about (same as iOS).
+                val showsPermission = model.mode == SessionMode.Code
                 SettingsRow(
                     label = stringResource(R.string.session_details_model),
                     value = model.modelName,
                     chevron = false,
+                    isLast = !showsPermission,
                 )
-                SettingsRow(
-                    label = stringResource(R.string.settings_parity_permissions),
-                    value = model.permissionLabel,
-                    isLast = true,
-                    onTap = onOpenPermissionSettings,
-                )
+                if (showsPermission) {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_parity_permissions),
+                        value = model.permissionLabel,
+                        isLast = true,
+                        onTap = onOpenPermissionSettings,
+                    )
+                }
             }
             SettingsSection {
                 SettingsRow(

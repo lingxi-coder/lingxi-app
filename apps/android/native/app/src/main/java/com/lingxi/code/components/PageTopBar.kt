@@ -1,7 +1,6 @@
 package com.lingxi.code.components
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -26,10 +26,14 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.theme.LingXiTheme
 
+/** The smallest comfortable thumb target; Material's own minimum is 48dp. */
+private val TouchTarget = 44.dp
+
 /**
  * The top bar of a full-screen page pushed over the conversation (projects,
  * a project): back chevron on the left, centered title, optional trailing
- * action. Same look as the settings top bar.
+ * action. Same look as the settings top bar, with thumb-sized targets at both
+ * ends.
  */
 @Composable
 fun PageTopBar(
@@ -51,17 +55,15 @@ fun PageTopBar(
                     strokeWidth = 0.5.dp.toPx(),
                 )
             }
-            .padding(horizontal = 8.dp)
-            .padding(top = 6.dp, bottom = 12.dp),
+            .padding(horizontal = 4.dp)
+            .padding(top = 2.dp, bottom = 6.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        Box(
+            contentAlignment = Alignment.Center,
             modifier = Modifier
-                .widthIn(max = 120.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onBack)
-                .padding(horizontal = 4.dp, vertical = 6.dp),
+                .size(TouchTarget)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(onClick = onBack),
         ) {
             LXIcon(
                 name = LXIconName.ChevronR,
@@ -83,8 +85,17 @@ fun PageTopBar(
                 textAlign = TextAlign.Center,
             )
         }
-        Box(Modifier.widthIn(min = 34.dp), contentAlignment = Alignment.Center) {
-            trailing?.invoke() ?: Box(Modifier.size(34.dp))
+        // Always as wide as the back target, so the title stays centered.
+        Box(Modifier.widthIn(min = TouchTarget), contentAlignment = Alignment.Center) {
+            trailing?.invoke() ?: Box(Modifier.size(TouchTarget))
         }
     }
 }
+
+/**
+ * A page drawn over the conversation owns every touch inside its bounds.
+ * Without a pointer-input node an unhandled tap falls through to whatever is
+ * underneath — the chat's title (which opens the session panel) or its composer.
+ * A Material `Surface` does the same, which is why settings never needed this.
+ */
+fun Modifier.blockTouchesBehind(): Modifier = pointerInput(Unit) {}

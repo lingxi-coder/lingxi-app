@@ -602,6 +602,7 @@ struct RootView: View {
         let launchLifecycle = bootstrapLifecycle
             .task { await cronRepository.handleLaunch() }
         return launchLifecycle
+            .task { await LocalApps.initializeOnce() }
             .task {
                 await consumePendingAppActions()
                 syncConversationBackgroundSurfaces()
@@ -610,6 +611,26 @@ struct RootView: View {
 
     private func withPresentations(_ content: some View) -> some View {
         content
+            .fullScreenCover(
+                item: Binding(
+                    get: { navigation.runningAppID.map(RunningApp.init) },
+                    set: { navigation.runningAppID = $0?.id }
+                )
+            ) { running in
+                if let market = LocalApps.market {
+                    AppRuntimeView(
+                        market: market,
+                        info: LocalApps.info,
+                        appId: running.id,
+                        onClose: { navigation.runningAppID = nil },
+                        onShowDetails: { appID in
+                            navigation.runningAppID = nil
+                            navigation.openMarketApp(appID)
+                        }
+                    )
+                    .environment(\.theme, theme)
+                }
+            }
             .fullScreenCover(
                 isPresented: Binding(
                     get: { navigation.settingsOpen },
@@ -705,7 +726,11 @@ struct RootView: View {
             closeSidebar: { navigation.closeSidebar() },
             onOpenSession: openRecentSession,
             onToggleSessionPinned: toggleSessionPinned,
-            onContinueInMode: requestContinueInMode
+            onContinueInMode: requestContinueInMode,
+            appMarket: LocalApps.market,
+            appInfo: LocalApps.info,
+            openApps: { navigation.openApps() },
+            openApp: { navigation.runApp($0) }
         )
         .id(sourceGeneration)
     }
@@ -730,6 +755,11 @@ struct RootView: View {
                 onMakeScheduled: scheduleCurrentSession,
                 onOpenTerminal: openCurrentWorkspaceTerminal,
                 onArchive: archiveCurrentSession,
+                // A scheduled run's workspace never indexes its sessions, so a
+                // chat started there would be missing from the drawer.
+                onNewChat: activeScope == .scheduled
+                    ? { startNewChat(in: .global, mode: activeMode) }
+                    : nil,
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
                     sessionDetailsSheetOpen = true
@@ -934,6 +964,22 @@ struct RootView: View {
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
             .toolbar(.hidden, for: .navigationBar)
+        case .apps:
+            AppsPage(
+                market: LocalApps.market,
+                info: LocalApps.info,
+                onOpenApp: { navigation.runApp($0) },
+                onShowDetails: { navigation.openMarketApp($0) }
+            )
+        case .marketApp(let appID):
+            if let market = LocalApps.market {
+                MarketAppPage(
+                    market: market,
+                    info: LocalApps.info,
+                    appId: appID,
+                    onOpenApp: { navigation.runApp($0) }
+                )
+            }
         case .projects:
             ProjectsPage(
                 projectStore: projectStore,
@@ -951,7 +997,7 @@ struct RootView: View {
                 activeSession: activeSession,
                 onTogglePinned: { toggleWorkspacePinned(ConversationScope.project(projectID).workspaceKey) },
                 onNewSession: { mode in
-                    switchScope(to: .project(projectID), mode: mode, startNew: true)
+                    switchScope(to: .project(projectID), mode: mode ?? activeMode, startNew: true)
                 },
                 onOpenSession: { mode, sessionID in
                     switchScope(to: .project(projectID), mode: mode, resumeSessionID: sessionID)
@@ -1496,6 +1542,7 @@ struct RootView: View {
     }
 
     private func toggleSessionPinned(_ sessionID: String) {
+        guard !sessionID.isEmpty else { return }
         sessionPinnedAt = scopedPreferences.setSessionPinned(
             sessionPinnedAt[sessionID] == nil,
             sessionID: sessionID
@@ -2242,4 +2289,9 @@ private struct ConversationProjectBridge: View {
             try? await projectStore.syncEngineSessions(projectId: projectID, rows: summaries)
         }
     }
+}
+
+/// The app running full screen, as the item of its cover.
+private struct RunningApp: Identifiable {
+    let id: String
 }

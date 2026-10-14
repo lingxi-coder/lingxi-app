@@ -56,4 +56,17 @@ final class ConversationNavigationTests: XCTestCase {
         XCTAssertEqual(navigation.path.last, .sessionDetails(sessionID: "session-details-1"))
         XCTAssertEqual(navigation.path.last?.id, "session-details:session-details-1")
     }
+
+    func testReopeningProjectsFromAProjectPageGoesBackToTheList() {
+        let navigation = AppNavigationModel()
+
+        navigation.openProjects()
+        navigation.openProject("project-a")
+        navigation.openProjects()
+        XCTAssertEqual(navigation.path, [.projects])
+
+        navigation.openProject("project-a")
+        navigation.openProject("project-b")
+        XCTAssertEqual(navigation.path, [.projects, .project(id: "project-b")])
+    }
 }

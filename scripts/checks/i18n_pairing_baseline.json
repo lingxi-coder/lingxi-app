@@ -1,5 +1,5 @@
 {
-  "totalKeys": 1851,
+  "totalKeys": 1892,
   "androidIllegal": 105,
   "androidIllegalUnpaired": 93,
   "iosSourceOrphans": 0,
@@ -14,7 +14,7 @@
   },
   "identicalToBase": {
     "zh-Hans": 0,
-    "zh-Hant": 213,
+    "zh-Hant": 221,
     "en": 18,
     "ja": 37,
     "ko": 13

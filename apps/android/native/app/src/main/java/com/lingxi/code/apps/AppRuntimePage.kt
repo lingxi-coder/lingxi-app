@@ -65,8 +65,9 @@ import kotlinx.coroutines.launch
 private val ExternalSchemes = setOf("https", "http", "mailto", "tel")
 
 /**
- * An installed app running full screen. The market's runtime owns the WebView
- * (the app's own origin and storage profile, no native bridge); this page only
+ * An installed app running full screen. The market's runtime, or for an app
+ * made in chat ([appId] `chat:<id>`) the chat runtime, owns the WebView (the
+ * app's own origin and storage profile, no native bridge); this page only
  * attaches it, pauses it with the activity and closes it on the way out. The
  * only chrome is the capsule in the top-right corner, as in a mini program.
  */
@@ -81,6 +82,8 @@ fun AppRuntimePage(
     val t = LingXiTheme.palette
     val context = LocalContext.current
     val runtime = localApps.market.runtime
+    val chatRuntime = localApps.chat.runtime
+    val chatId = remember(appId) { chatAppIdOf(appId) }
     var webView by remember(appId) { mutableStateOf<WebView?>(null) }
     var openError by remember(appId) { mutableStateOf<String?>(null) }
     var externalUrl by remember(appId) { mutableStateOf<String?>(null) }
@@ -88,8 +91,13 @@ fun AppRuntimePage(
 
     LaunchedEffect(appId) {
         try {
-            webView = runtime.open(appId) { url ->
+            val onExternalNavigation = { url: String ->
                 if (Uri.parse(url).scheme?.lowercase() in ExternalSchemes) externalUrl = url
+            }
+            webView = if (chatId != null) {
+                chatRuntime.open(chatId, onExternalNavigation)
+            } else {
+                runtime.open(appId, onExternalNavigation)
             }
             localApps.info.markOpened(appId, System.currentTimeMillis())
         } catch (e: CancellationException) {
@@ -104,14 +112,20 @@ fun AppRuntimePage(
     // the old one: the market scope runs on Main.immediate, so this close has
     // finished before anything else composes.
     DisposableEffect(appId) {
-        onDispose { localApps.scope.launch { runtime.close(appId) } }
+        onDispose {
+            localApps.scope.launch { if (chatId != null) chatRuntime.close(chatId) else runtime.close(appId) }
+        }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, appId) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> localApps.scope.launch { runtime.suspend(appId) }
-                Lifecycle.Event.ON_RESUME -> localApps.scope.launch { runtime.resume(appId) }
+                Lifecycle.Event.ON_PAUSE -> localApps.scope.launch {
+                    if (chatId != null) chatRuntime.suspend(chatId) else runtime.suspend(appId)
+                }
+                Lifecycle.Event.ON_RESUME -> localApps.scope.launch {
+                    if (chatId != null) chatRuntime.resume(chatId) else runtime.resume(appId)
+                }
                 else -> Unit
             }
         }
@@ -182,7 +196,8 @@ fun AppRuntimePage(
                 .align(Alignment.TopEnd)
                 .padding(top = 8.dp, end = 10.dp),
         ) {
-            Capsule(onMore = { menuOpen = true }, onClose = onClose)
+            // An app made in chat has no market details to show.
+            Capsule(onMore = if (chatId == null) ({ menuOpen = true }) else null, onClose = onClose)
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.apps_details)) },
@@ -221,9 +236,9 @@ fun AppRuntimePage(
     }
 }
 
-/** The mini-program capsule: more (⋯) and close (✕). */
+/** The mini-program capsule: more (⋯, only with [onMore]) and close (✕). */
 @Composable
-private fun Capsule(onMore: () -> Unit, onClose: () -> Unit) {
+private fun Capsule(onMore: (() -> Unit)?, onClose: () -> Unit) {
     val t = LingXiTheme.palette
     val shape = RoundedCornerShape(50)
     val moreLabel = stringResource(R.string.composer_more)
@@ -235,19 +250,21 @@ private fun Capsule(onMore: () -> Unit, onClose: () -> Unit) {
             .background(t.surface.copy(alpha = 0.92f))
             .border(0.5.dp, t.border, shape),
     ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterHorizontally),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .width(46.dp)
-                .height(34.dp)
-                .semantics { contentDescription = moreLabel }
-                .testTag(UiTags.APP_RUNTIME_MORE)
-                .clickable(onClick = onMore),
-        ) {
-            repeat(3) { Box(Modifier.size(4.dp).clip(CircleShape).background(t.text)) }
+        if (onMore != null) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .width(46.dp)
+                    .height(34.dp)
+                    .semantics { contentDescription = moreLabel }
+                    .testTag(UiTags.APP_RUNTIME_MORE)
+                    .clickable(onClick = onMore),
+            ) {
+                repeat(3) { Box(Modifier.size(4.dp).clip(CircleShape).background(t.text)) }
+            }
+            Box(Modifier.width(0.5.dp).height(16.dp).background(t.border))
         }
-        Box(Modifier.width(0.5.dp).height(16.dp).background(t.border))
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier

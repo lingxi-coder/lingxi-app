@@ -1706,6 +1706,7 @@ final class EngineConversationSource: ConversationSource {
                 handle = builtHandle
                 refreshAudioSessionContext()
                 VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
+                LocalApps.chat.attach(builtHandle.localAppHost())
                 self.listener = listener
                 self.permissionSink = permissionSink
                 handleBuildTask = nil
@@ -3230,6 +3231,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
                     trace.display = derivedDisplay
                     trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
+                    trace.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                     trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
                         resultJson,
@@ -4808,6 +4810,7 @@ final class EngineConversationSource: ConversationSource {
                         merged.status = status
                         merged.display = lowered
                         merged.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
+                        merged.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
                         merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         merged.outputSummary = fallback
                         pendingRun?.tools[index] = merged
@@ -4822,7 +4825,8 @@ final class EngineConversationSource: ConversationSource {
                             header: nil,
                             display: lowered,
                             spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson),
-                            questionAnswers: isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
+                            questionAnswers: isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson),
+                            localApp: isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
                         )
                         pendingRun?.tools.append(trace)
                     }

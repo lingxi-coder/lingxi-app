@@ -8,6 +8,7 @@ import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
+import com.lingxi.code.bindings.runtime.LocalAppHost
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
@@ -342,6 +343,10 @@ class EngineConversationSource private constructor(
 
     override val visualizationHost: VisualizationHost? by lazy {
         runCatching { handle.visualizationHost(VISUALIZATION_ORIGIN) }.getOrNull()
+    }
+
+    override val localAppHost: LocalAppHost? by lazy {
+        runCatching { handle.localAppHost() }.getOrNull()
     }
 
     override fun submit(

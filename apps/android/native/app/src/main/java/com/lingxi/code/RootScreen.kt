@@ -89,7 +89,9 @@ import com.lingxi.code.apps.AppRuntimePage
 import com.lingxi.code.apps.AppsPage
 import com.lingxi.code.apps.LocalApps
 import com.lingxi.code.apps.MarketAppPage
+import com.lingxi.code.apps.chatAppKey
 import com.lingxi.code.apps.myApps
+import com.lingxi.code.conversation.LocalAppCardLinks
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.CatalogModelDetails
@@ -1500,6 +1502,11 @@ fun RootScreen(
     var marketAppId by rememberSaveable { mutableStateOf<String?>(null) }
     var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
     val localApps = remember(appContext) { LocalApps.get(appContext) }
+    // Every engine of this process serves the one library the `LocalApp` tool
+    // publishes to; the pages and the chat cards read it through this host.
+    val localAppHost = conversationSource.localAppHost
+    LaunchedEffect(localApps, localAppHost) { localApps.chat.attach(localAppHost) }
+    val chatApps by localApps.chat.state.collectAsState()
     // The drawer needs only what is installed and what is known about it, so a
     // download's progress never recomposes this screen; the pages collect the
     // whole market state themselves.
@@ -1507,8 +1514,19 @@ fun RootScreen(
         localApps.market.store.state.map { it.installed }.distinctUntilChanged()
     }.collectAsState(initial = localApps.market.store.state.value.installed)
     val installedAppInfo by localApps.info.state.collectAsState()
-    val drawerApps = remember(installedApps, installedAppInfo) {
-        myApps(installedApps, installedAppInfo, updates = emptyList(), operations = emptyMap())
+    val drawerApps = remember(installedApps, installedAppInfo, chatApps) {
+        myApps(installedApps, installedAppInfo, updates = emptyList(), operations = emptyMap(), chatApps = chatApps)
+    }
+    val localAppCardLinks = remember(localApps, chatApps) {
+        LocalAppCardLinks(
+            open = { id ->
+                runtimeAppId = chatAppKey(id)
+                // The drawer lists it among the recent apps from now on.
+                localApps.chat.refresh()
+            },
+            exists = { id -> localApps.chat.exists(id) },
+            generation = chatApps,
+        )
     }
     // Leaves the projects pages, e.g. once a project was created or imported from
     // them and the conversation has moved into it.
@@ -1963,6 +1981,7 @@ fun RootScreen(
                     onCancelQuestion = chatViewModel::cancelQuestion,
                     onResumeWorkflow = chatViewModel::resumeWorkflow,
                     visualizationHost = visualizationHost,
+                    localAppCardLinks = localAppCardLinks,
                     onVisualizationFollowup = chatViewModel::offerVisualizationFollowup,
                     onAcceptVisualizationFollowup = chatViewModel::acceptVisualizationFollowup,
                     onRemoveVisualizationChip = chatViewModel::clearVisualizationChip,

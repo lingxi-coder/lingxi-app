@@ -101,6 +101,9 @@ interface ConversationSource {
     /** Serves the dedicated visualization WebView; null without an engine. */
     val visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? get() = null
 
+    /** The app library the `LocalApp` tool publishes to; null without an engine. */
+    val localAppHost: com.lingxi.code.bindings.runtime.LocalAppHost? get() = null
+
     /**
      * Cancel the in-flight turn (the composer's Stop affordance). Fires the
      * engine's `Cancel` command so the streaming turn terminates promptly; the

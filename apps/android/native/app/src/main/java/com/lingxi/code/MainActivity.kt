@@ -278,6 +278,12 @@ class MainActivity : ComponentActivity() {
                     terminalOpen = false
                 }
             }
+            // 引擎就绪后登记 LingXi 的插件市场（只加市场、不装插件，所以不用重连），
+            // 让设置 → 插件里能装它的插件；用户删掉这个市场后不再加回。
+            val lingxiMarketplace = remember { com.lingxi.code.plugins.LingxiMarketplaceSeeder(applicationContext) }
+            LaunchedEffect(activeConversationSource) {
+                activeConversationSource?.let { lingxiMarketplace.ensure(it) }
+            }
 
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
                 Box(Modifier.fillMaxSize()) {

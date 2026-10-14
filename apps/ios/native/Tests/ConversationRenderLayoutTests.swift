@@ -18,6 +18,19 @@ final class ConversationRenderLayoutTests: XCTestCase {
         XCTAssertTrue(ConversationRenderLayout.timelineGroups(items).first?.isToolGroup == true)
     }
 
+    func testPublishedAppCardsRemainInTranscript() throws {
+        var completed = run(id: "app-run", status: .completed)
+        var publish = tool(id: "publish", name: "LocalApp")
+        publish.status = .completed
+        publish.localApp = PublishedLocalApp(id: "a1", name: "Timer", revision: 1)
+        completed.tools = [tool(id: "read", name: "Read"), publish]
+        completed.activities = [.tool(id: "read"), .tool(id: "publish")]
+        let items = ConversationRenderLayout.transcriptItems([.run(completed)])
+        guard case let .run(summary) = try XCTUnwrap(items.first) else { return XCTFail("missing app summary") }
+        XCTAssertEqual(summary.tools, [publish])
+        XCTAssertEqual(summary.activities, [.tool(id: "publish")])
+    }
+
     func testRunCardsNeverEnterDurableTranscript() {
         let completed = run(id: "completed", status: .completed)
         let running = run(id: "running", status: .running)

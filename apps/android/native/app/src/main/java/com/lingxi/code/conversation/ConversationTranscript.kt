@@ -239,6 +239,7 @@ private class MessageBuild(
                     ref.build.blocks[ref.blockIndex] = MessageContent.Tool(
                         existing.call.copy(display = display, status = status,
                             questionAnswers = if (!block.isError) parseQuestionAnswers(block.tool, block.resultJson) else null,
+                            localApp = if (!block.isError) parseLocalAppResult(block.tool, block.resultJson) else null,
                             planMarkdown = existing.call.planMarkdown ?: toolPlanMarkdown(block.tool, block.resultJson)),
                     )
                 } else {
@@ -252,6 +253,7 @@ private class MessageBuild(
                                 tool = block.tool,
                                 planMarkdown = toolPlanMarkdown(block.tool, block.resultJson),
                                 questionAnswers = if (!block.isError) parseQuestionAnswers(block.tool, block.resultJson) else null,
+                                localApp = if (!block.isError) parseLocalAppResult(block.tool, block.resultJson) else null,
                                 display = display,
                                 status = status,
                             ),

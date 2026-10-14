@@ -174,6 +174,8 @@ fun ChatScreen(
     onTogglePlan: () -> Unit = {},
     /** Serves inline visualization widgets; null renders them unavailable. */
     visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? = null,
+    /** Opens the apps `LocalApp` published; null draws their cards without an Open button. */
+    localAppCardLinks: LocalAppCardLinks? = null,
     /** A widget drafted a follow-up question for the composer. */
     onVisualizationFollowup: (VisualizationFollowup) -> Unit = {},
     /** The composer took the offered follow-up; its chip rides the next send. */
@@ -293,7 +295,10 @@ fun ChatScreen(
                         onFollowup = { currentOnVisualizationFollowup(it) },
                     )
                 }
-                CompositionLocalProvider(LocalVisualizationContext provides visualizationContext) {
+                CompositionLocalProvider(
+                    LocalVisualizationContext provides visualizationContext,
+                    LocalAppCardHost provides localAppCardLinks,
+                ) {
                     MessageList(
                         state = state,
                         items = renderItems,

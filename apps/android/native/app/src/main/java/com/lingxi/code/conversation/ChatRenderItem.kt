@@ -127,7 +127,8 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
                     val live = authoritativeTools[call.id]
                     MessageContent.Tool(when {
                         live != null -> call.copy(status = live.status, header = live.header ?: call.header,
-                            display = live.display ?: call.display, questionAnswers = live.questionAnswers ?: call.questionAnswers)
+                            display = live.display ?: call.display, questionAnswers = live.questionAnswers ?: call.questionAnswers,
+                            localApp = live.localApp ?: call.localApp)
                         call.status == AgentToolStatus.Running -> call.copy(status = AgentToolStatus.Unknown)
                         else -> call
                     })

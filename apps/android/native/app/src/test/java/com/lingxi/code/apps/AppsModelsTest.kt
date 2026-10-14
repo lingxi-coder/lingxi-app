@@ -37,6 +37,37 @@ class AppsModelsTest {
     }
 
     @Test
+    fun appsMadeInChatJoinTheListUnderTheirOwnKeys() {
+        val info = mapOf(
+            "a" to InstalledAppInfo("a", "Market app", lastOpenedAtMillis = 10),
+            "chat:a1" to InstalledAppInfo("chat:a1", "chat:a1", lastOpenedAtMillis = 20),
+        )
+        val apps = myApps(
+            installed = listOf(installed("a")),
+            info = info,
+            updates = emptyList(),
+            operations = emptyMap(),
+            chatApps = listOf(
+                ChatApp("a1", "Water", "", revision = 3, updatedAtMillis = 5),
+                ChatApp("b2", "Abacus", "", revision = 1, updatedAtMillis = 6),
+            ),
+        )
+        assertEquals(listOf("chat:a1", "a", "chat:b2"), apps.map(MyApp::appId))
+        // The library's name wins over what the pages recorded when it was opened.
+        assertEquals("Water", apps.first().name)
+        assertEquals(listOf(AppSource.CHAT, AppSource.MARKET, AppSource.CHAT), apps.map(MyApp::source))
+        assertEquals(false, apps.first().updateAvailable)
+    }
+
+    @Test
+    fun chatAppKeysRoundTripAndNeverMatchMarketIds() {
+        assertEquals("chat:a1", chatAppKey("a1"))
+        assertEquals("a1", chatAppIdOf(chatAppKey("a1")))
+        assertNull(chatAppIdOf("a1"))
+        assertNull(chatAppIdOf("chat:"))
+    }
+
+    @Test
     fun myAppsMarksUpdatesAndOnlyRunningOperations() {
         val apps = myApps(
             installed = listOf(installed("a"), installed("b"), installed("c")),

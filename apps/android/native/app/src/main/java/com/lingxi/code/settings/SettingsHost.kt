@@ -248,9 +248,25 @@ fun SettingsHost(
                     }
                 }
                 page(SettingsRoutes.ENGINE_MCP) { McpConfigurationPage(engineBridge) }
-                (layeredPageKeys.keys.filter { it != SettingsRoutes.PROJECTS } + SettingsRoutes.DIAGNOSTICS).forEach { engineRoute ->
+                (layeredPageKeys.keys.filter { it != SettingsRoutes.PROJECTS && it != SettingsRoutes.PLUGINS } + SettingsRoutes.DIAGNOSTICS).forEach { engineRoute ->
                     page(engineRoute) { EngineSettingsPage(engineRoute, engineBridge, reconnectSafely) }
                 }
+                page(SettingsRoutes.PLUGINS) {
+                    PluginsPage(
+                        bridge = engineBridge,
+                        onDetail = { id -> navController.navigate(SettingsRoutes.pluginDetail(id)) },
+                        onAdvanced = { navController.navigate(SettingsRoutes.PLUGINS_ADVANCED) },
+                    )
+                }
+                page(SettingsRoutes.PLUGIN_DETAIL) {
+                    PluginDetailPage(
+                        bridge = engineBridge,
+                        pluginId = it.arguments?.getString("id").orEmpty(),
+                        onReconnect = reconnectSafely,
+                        onPop = { navController.popBackStack() },
+                    )
+                }
+                page(SettingsRoutes.PLUGINS_ADVANCED) { EngineSettingsPage(SettingsRoutes.PLUGINS, engineBridge, reconnectSafely) }
 
                 // Device settings
                 page(SettingsRoutes.APPEARANCE) {
@@ -447,6 +463,8 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.TYPESCRIPT_LSP -> stringResource(SettingsTitles.TYPESCRIPT_LSP)
         SettingsRoutes.OPEN_SOURCE -> stringResource(SettingsTitles.OPEN_SOURCE)
         SettingsRoutes.SKILLS -> stringResource(SettingsTitles.SKILLS)
+        SettingsRoutes.PLUGIN_DETAIL -> stringResource(R.string.plugins_detail_title)
+        SettingsRoutes.PLUGINS_ADVANCED -> stringResource(R.string.plugins_advanced)
         SettingsRoutes.MCP_LIST -> stringResource(SettingsTitles.MCP)
         SettingsRoutes.LINUX_RUNTIME -> stringResource(SettingsTitles.LINUX_RUNTIME)
         SettingsRoutes.COMPUTER_USE -> stringResource(SettingsTitles.COMPUTER_USE)

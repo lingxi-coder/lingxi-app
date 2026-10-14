@@ -355,7 +355,7 @@ private struct PluginConfigurationEditor: View {
     }
 }
 
-private struct PluginSensitiveFields: View {
+struct PluginSensitiveFields: View {
     let pluginID: String
     let schemaJSON: String?
     let readOnly: Bool

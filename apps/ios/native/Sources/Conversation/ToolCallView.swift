@@ -34,6 +34,8 @@ struct ToolCallView: View {
         if let rows = trace.questionAnswers, trace.status == .completed {
             AnsweredQuestionsView(rows: rows, isExpanded: !isExpanded, onToggle: onToggle)
                 .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
+        } else if let app = trace.localApp, trace.status == .completed {
+            LocalAppCard(app: app)
         } else if let document = trace.planDocument {
             PlanDocumentCard(document: document)
         } else {

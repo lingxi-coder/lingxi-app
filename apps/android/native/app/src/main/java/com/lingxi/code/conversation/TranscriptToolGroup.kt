@@ -72,7 +72,8 @@ internal fun toolIconName(verb: ToolVerbUi?) = when (verb) {
 
 @Composable
 internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String>, onToggle: (String) -> Unit) {
-    if (group.calls.any { it.questionAnswers != null }) {
+    // Answered questions and published apps are cards, never folded into a group.
+    if (group.calls.any { it.questionAnswers != null || it.localApp != null }) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             group.calls.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
         }

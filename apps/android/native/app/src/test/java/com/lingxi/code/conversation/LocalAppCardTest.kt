@@ -1,0 +1,40 @@
+package com.lingxi.code.conversation
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+class LocalAppCardTest {
+    @Test
+    fun aPublishResultIsTheCard() {
+        assertEquals(
+            PublishedLocalApp("a1b2c3d4e5f", "喝水记录", 2),
+            parseLocalAppResult(
+                "LocalApp",
+                """{"action":"publish","id":"a1b2c3d4e5f","revision":2,"name":"喝水记录","warnings":[]}""",
+            ),
+        )
+    }
+
+    @Test
+    fun listReadOtherToolsAndMalformedResultsHaveNoCard() {
+        assertNull(parseLocalAppResult("LocalApp", """{"action":"list","apps":[]}"""))
+        assertNull(parseLocalAppResult("LocalApp", """{"action":"read","id":"a1","name":"T","revision":1,"bytes":9}"""))
+        assertNull(parseLocalAppResult("Visualization", """{"action":"publish","id":"a1","revision":1,"name":"T"}"""))
+        assertNull(parseLocalAppResult("LocalApp", """{"action":"publish","id":"../x","revision":1,"name":"T"}"""))
+        assertNull(parseLocalAppResult("LocalApp", """{"action":"publish","id":"a1","revision":0,"name":"T"}"""))
+        assertNull(parseLocalAppResult("LocalApp", """{"action":"publish","id":"a1","revision":1,"name":" "}"""))
+        assertNull(parseLocalAppResult("LocalApp", "Published \"T\" as local app a1"))
+    }
+
+    @Test
+    fun theCardSurvivesRunToTranscriptProjection() {
+        val app = PublishedLocalApp("a1", "Timer", 1)
+        assertEquals(
+            app,
+            AgentToolRunState(id = "t", tool = "LocalApp", status = AgentToolStatus.Completed, localApp = app)
+                .toToolCall()
+                .localApp,
+        )
+    }
+}

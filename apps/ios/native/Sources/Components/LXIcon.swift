@@ -10,7 +10,7 @@ enum LXIconName: String {
     case menu, edit, pencil, search, sparkle, sparkles, book, bookOpen, listFiles, workflow, cog, wrench, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
     case chevronR, play, pause, x, skill, plug, dream, link, copy, share, listChecks
-    case warning, stop, squareStop, arrowRight, audioWave, terminal, globe
+    case warning, stop, squareStop, arrowRight, audioWave, terminal, globe, appBuilder
 }
 
 struct LXIcon: View {
@@ -123,6 +123,19 @@ extension LXIcon {
                 PathSpec { roundedRect(3,4,18,16,2) },
                 PathSpec { line([(7,9),(10,12),(7,15)]) },
                 PathSpec { line([(13,16),(18,16)]) },
+            ]
+        case .appBuilder:
+            // An app window with a sparkle in it: the Local App Builder plugin,
+            // mirroring Android LXIconName.AppBuilder.
+            return [
+                PathSpec { roundedRect(3,4,18,16,3) },
+                PathSpec { line([(3,8.5),(21,8.5)]) },
+                PathSpec {
+                    var p = line([(12,10.6),(12.9,13.35),(15.65,14.25),(12.9,15.15),
+                                  (12,17.9),(11.1,15.15),(8.35,14.25),(11.1,13.35)])
+                    p.closeSubpath()
+                    return p
+                },
             ]
         case .globe:
             return [

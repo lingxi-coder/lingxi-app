@@ -17,6 +17,35 @@ final class AppsModelTests: XCTestCase {
         XCTAssertEqual(apps.last?.name, "d")
     }
 
+    func testAppsMadeInChatJoinTheListUnderTheirOwnKeys() {
+        let info: [String: InstalledAppInfo] = [
+            "a": InstalledAppInfo(appId: "a", name: "Market app", lastOpenedAt: t0),
+            "chat:a1": InstalledAppInfo(appId: "chat:a1", name: "chat:a1", lastOpenedAt: t0.addingTimeInterval(10)),
+        ]
+        let apps = AppsModel.myApps(
+            installedIDs: ["a"],
+            info: info,
+            updatable: [],
+            operations: [:],
+            chatApps: [
+                ChatApp(id: "a1", name: "Water", summary: "", revision: 3, updatedAt: t0),
+                ChatApp(id: "b2", name: "Abacus", summary: "", revision: 1, updatedAt: t0),
+            ]
+        )
+        XCTAssertEqual(apps.map(\.appId), ["chat:a1", "a", "chat:b2"])
+        // The library's name wins over what the pages recorded when it was opened.
+        XCTAssertEqual(apps.first?.name, "Water")
+        XCTAssertEqual(apps.map(\.source), [.chat, .market, .chat])
+        XCTAssertEqual(apps.first?.updateAvailable, false)
+    }
+
+    func testChatAppKeysRoundTripAndNeverMatchMarketIDs() {
+        XCTAssertEqual(AppsModel.chatAppKey("a1"), "chat:a1")
+        XCTAssertEqual(AppsModel.chatAppID(of: AppsModel.chatAppKey("a1")), "a1")
+        XCTAssertNil(AppsModel.chatAppID(of: "a1"))
+        XCTAssertNil(AppsModel.chatAppID(of: "chat:"))
+    }
+
     func testMyAppsMarksUpdatesAndOnlyRunningOperations() {
         let apps = AppsModel.myApps(
             installedIDs: ["a", "b", "c"],

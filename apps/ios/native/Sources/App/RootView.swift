@@ -594,6 +594,14 @@ struct RootView: View {
                         )
                     }
                     await providerRepository.refreshCredentialStatus()
+                    #if canImport(harness_runtimeFFI)
+                        // 只登记灵犀的插件市场，不安装任何插件；用户在设置 → 插件里自己装。
+                        // 记过一次就不再加回来，用户删掉的市场保持删掉。
+                        guard generation == sourceGeneration else { return }
+                        await LingxiMarketplaceSeeder.shared.ensure(events: clientEventCenter) { command in
+                            try await current.submitEngineCommand(command)
+                        }
+                    #endif
                 } catch {
                     guard generation == sourceGeneration else { return }
                     current.warmUp()
@@ -620,6 +628,7 @@ struct RootView: View {
                 if let market = LocalApps.market {
                     AppRuntimeView(
                         market: market,
+                        chat: LocalApps.chat,
                         info: LocalApps.info,
                         appId: running.id,
                         onClose: { navigation.runningAppID = nil },
@@ -728,6 +737,7 @@ struct RootView: View {
             onToggleSessionPinned: toggleSessionPinned,
             onContinueInMode: requestContinueInMode,
             appMarket: LocalApps.market,
+            chatApps: LocalApps.chat,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
             openApp: { navigation.runApp($0) }
@@ -772,6 +782,10 @@ struct RootView: View {
                     )
                 }
             )
+            .environment(\.openLocalApp, { id in
+                navigation.runApp(AppsModel.chatAppKey(id))
+                Task { await LocalApps.chat.refresh() }
+            })
             .id(sourceGeneration)
             ConversationProjectBridge(
                 model: source.model,
@@ -967,6 +981,7 @@ struct RootView: View {
         case .apps:
             AppsPage(
                 market: LocalApps.market,
+                chat: LocalApps.chat,
                 info: LocalApps.info,
                 onOpenApp: { navigation.runApp($0) },
                 onShowDetails: { navigation.openMarketApp($0) }

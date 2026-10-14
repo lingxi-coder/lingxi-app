@@ -36,6 +36,8 @@ struct Drawer: View {
     /// Read on each render rather than observed, so a download's progress
     /// never redraws the sidebar; installs and opens change [appInfo] anyway.
     let appMarket: LocalAppMarket?
+    /// The apps made in chat; observed, since the library changes rarely.
+    let chatApps: ChatApps?
     let openApps: () -> Void
     let openApp: (String) -> Void
 
@@ -66,6 +68,7 @@ struct Drawer: View {
         onToggleSessionPinned: @escaping (String) -> Void = { _ in },
         onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in },
         appMarket: LocalAppMarket? = nil,
+        chatApps: ChatApps? = nil,
         appInfo: InstalledAppInfoStore,
         openApps: @escaping () -> Void = {},
         openApp: @escaping (String) -> Void = { _ in }
@@ -90,6 +93,7 @@ struct Drawer: View {
         self.onToggleSessionPinned = onToggleSessionPinned
         self.onContinueInMode = onContinueInMode
         self.appMarket = appMarket
+        self.chatApps = chatApps
         self.appInfo = appInfo
         self.openApps = openApps
         self.openApp = openApp
@@ -167,7 +171,7 @@ struct Drawer: View {
     }
 
     private var installedApps: [MyApp] {
-        appMarket?.myApps(info: appInfo.apps) ?? []
+        appMarket?.myApps(info: appInfo.apps, chatApps: chatApps?.apps ?? []) ?? []
     }
 
     private var matchingCrons: [CronScopedTask] {

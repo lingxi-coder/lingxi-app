@@ -405,6 +405,8 @@ fun ChatScreen(
                 showDiscardRecovery = state.durableRecoveryBlocked,
                 enabled = !state.durableRecoveryBlocked &&
                     (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
+                // Loading preserves the live editor's selection and IME composition.
+                inputEnabled = !state.durableRecoveryBlocked,
                 modelSetupRequired = modelSetupRequired,
                 onOpenModelSettings = onOpenModelSettings,
                 modelProviderStatuses = modelProviderStatuses,

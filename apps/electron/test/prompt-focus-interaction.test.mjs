@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const composerDraftDriver = join(fixtureRoot, 'composer-draft-electron.mjs');
 
-test('real Electron restores an independent unsent composer draft for each session', async () => {
+async function checkComposerDraft(loadingCaret = false) {
   const vite = await createServer({
     root: fixtureRoot,
     configFile: false,
@@ -32,7 +32,7 @@ test('real Electron restores an independent unsent composer draft for each sessi
     await vite.listen();
     const address = vite.httpServer?.address();
     assert.ok(address && typeof address === 'object' && address.port, 'Vite fixture server did not bind a port');
-    const fixtureUrl = `http://127.0.0.1:${address.port}/composer-draft-fixture.html`;
+    const fixtureUrl = `http://127.0.0.1:${address.port}/composer-draft-fixture.html${loadingCaret ? '?loading-caret' : ''}`;
     child = spawn(process.execPath, [electronBinary, composerDraftDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
@@ -50,7 +50,7 @@ test('real Electron restores an independent unsent composer draft for each sessi
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron composer draft fixture timed out\n${childError.join('')}`));
-      }, 20_000);
+      }, loadingCaret ? 45_000 : 20_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
@@ -63,6 +63,11 @@ test('real Electron restores an independent unsent composer draft for each sessi
         catch (error) { rejectResult(new Error(`Invalid Electron composer draft output: ${output}`, { cause: error })); }
       });
     });
+
+    if (loadingCaret) {
+      assert.deepEqual(result, { loadingSelection: true });
+      return;
+    }
 
     if (process.env.LINGXI_TEST_PRELOAD) {
       assert.deepEqual(result, { nativeFileAttachments: true });
@@ -114,4 +119,7 @@ test('real Electron restores an independent unsent composer draft for each sessi
     await vite.close();
     rmSync(temporaryUserData, { recursive: true, force: true });
   }
-});
+}
+
+test('real Electron restores an independent unsent composer draft for each session', () => checkComposerDraft());
+test('real Electron preserves the caret and directional selection when session loading completes', () => checkComposerDraft(true));

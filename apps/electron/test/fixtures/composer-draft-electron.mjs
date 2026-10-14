@@ -45,7 +45,7 @@ async function main() {
     show: false,
     width: 900,
     height: 700,
-    webPreferences: { sandbox: true, ...(process.env.LINGXI_TEST_PRELOAD ? { preload: process.env.LINGXI_TEST_PRELOAD } : {}) },
+    webPreferences: { sandbox: true, ...(new URL(url).searchParams.has('loading-caret') ? { backgroundThrottling: false } : {}), ...(process.env.LINGXI_TEST_PRELOAD ? { preload: process.env.LINGXI_TEST_PRELOAD } : {}) },
   });
 
   try {
@@ -66,6 +66,72 @@ async function main() {
       };
     })()`);
     assert.deepEqual(emptyState, { placeholderPosition: 'absolute', sendVisibility: 'hidden', disabled: true, tabIndex: -1, offset: 0 });
+
+    if (new URL(url).searchParams.has('loading-caret')) {
+      // Loading adopts the current draft without replacing its editing nodes.
+      // Exercise actual browser typing and both caret and directional selections.
+      const loadedSession = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      for (const [temporarySession, anchor, focus, rich] of [
+        [null, 11, 11, false],
+        ['pending-new:caret', 5, 5, false],
+        ['pending-new:selection', 2, 8, false],
+        ['pending-new:rich-selection', 8, 2, true],
+        [loadedSession, 5, 5, false],
+      ]) {
+        await webContents.executeJavaScript(`(() => {
+          window.__composerDraftTest.switchSession(${JSON.stringify(temporarySession)});
+          window.__composerDraftTest.setSessionLoading(true);
+        })()`);
+        await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === '' && document.querySelector('[aria-label="Attach files"]').disabled`);
+        await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]').focus()`);
+        await webContents.insertText('draft typed');
+        const before = await webContents.executeJavaScript(`(() => {
+          const prompt = document.querySelector('[aria-label="Prompt"]');
+          if (${rich}) {
+            prompt.innerHTML = '<span data-file-mention="src/app.ts" contenteditable="false">app.ts</span><div>draft typed</div><div>second line</div>';
+            prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+          }
+          const textNode = ${rich} ? prompt.querySelector('div').firstChild : prompt.firstChild;
+          window.getSelection().setBaseAndExtent(textNode, ${anchor}, textNode, ${focus});
+          window.__loadingDraftNode = textNode;
+          return { html: prompt.innerHTML, text: prompt.textContent };
+        })()`);
+        await webContents.executeJavaScript(`(() => {
+          window.__composerDraftTest.switchSession(${JSON.stringify(loadedSession)});
+          window.__composerDraftTest.setSessionLoading(false);
+        })()`);
+        await waitFor(webContents, `document.querySelector('[aria-label="Send prompt"]')?.disabled === false`);
+        const after = await webContents.executeJavaScript(`(() => {
+          const prompt = document.querySelector('[aria-label="Prompt"]');
+          const selection = window.getSelection();
+          return { html: prompt.innerHTML, text: prompt.textContent,
+            focused: document.activeElement === prompt,
+            sameNode: prompt.contains(window.__loadingDraftNode) && selection.anchorNode === window.__loadingDraftNode && selection.focusNode === window.__loadingDraftNode,
+            anchor: selection.anchorOffset, focus: selection.focusOffset };
+        })()`);
+        assert.deepEqual(after, { ...before, focused: true, sameNode: true, anchor, focus }, `selection survives loading ${temporarySession ?? 'startup'}`);
+        if (anchor === focus) {
+          await webContents.insertText('!');
+          assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]').textContent`),
+            before.text.slice(0, focus) + '!' + before.text.slice(focus), 'typing continues at the original caret');
+        }
+        await setPrompt(webContents, '');
+      }
+
+      // A real session switch still restores independent drafts.
+      const otherSession = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      await webContents.insertText('draft for loaded session');
+      await switchSession(webContents, otherSession);
+      await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]').textContent === ''`);
+      await setPrompt(webContents, 'draft for other session');
+      await switchSession(webContents, loadedSession);
+      await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]').textContent === 'draft for loaded session'`);
+      await switchSession(webContents, otherSession);
+      await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]').textContent === 'draft for other session'`);
+      process.stdout.write(JSON.stringify({ loadingSelection: true }) + '\n');
+      return;
+    }
+
     const flowBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').getBoundingClientRect().toJSON()`);
     assert.equal(await webContents.executeJavaScript(`getComputedStyle(document.querySelector('.composer-submit-actions')).display`), 'none');
     await webContents.insertText('Hello');

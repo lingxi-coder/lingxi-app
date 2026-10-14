@@ -6,6 +6,8 @@ export const appRoutes = [
   '/download',
   '/pricing',
   '/login',
+  '/privacy',
+  '/data-deletion',
   '/console',
   '/console/usage',
   '/console/api-keys',

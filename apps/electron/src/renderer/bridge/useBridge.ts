@@ -7,6 +7,7 @@ import type {
   CronJobDto,
   CronRequestDto,
   CronRunDto,
+  FusionAdminCommandDto,
   HookAdminCommandDto,
   ImageRefDto,
   McpAdminCommandDto,
@@ -19,6 +20,7 @@ import type {
   WritableScopeDto,
 } from '@lingxi/bridge-client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { watchCredentialRecovery } from './credentialRecovery.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import { hostMicrophonePermissionReader } from '../../shared/microphoneAccess.js';
 import type {
@@ -72,6 +74,7 @@ import type { RuntimeState, SharedDesktopCache } from './bridgeRuntimeState.js';
 import type {
   ConfigurationOperationEvent,
   DesktopTurnToken,
+  FusionCatalogEvent,
   McpConfigurationSnapshotEvent,
   McpServersEvent,
   PluginCatalogEvent,
@@ -219,6 +222,7 @@ export function useBridge(): UseBridge {
   const [skillCatalogEvent, setSkillCatalogEvent] = useState<SkillCatalogEvent | null>(null);
   const [skillDocumentEvent, setSkillDocumentEvent] = useState<SkillDocumentEvent | null>(null);
   const [mcpConfigurationSnapshotEvent, setMcpConfigurationSnapshotEvent] = useState<McpConfigurationSnapshotEvent | null>(null);
+  const [fusionCatalogEvent, setFusionCatalogEvent] = useState<FusionCatalogEvent | null>(null);
   const [pluginCatalogEvent, setPluginCatalogEvent] = useState<PluginCatalogEvent | null>(null);
   const [configurationOperations, setConfigurationOperations] = useState<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>({});
   const pendingConfigurationOperations = useRef(new Map<string, PendingConfigurationOperation>());
@@ -323,6 +327,7 @@ export function useBridge(): UseBridge {
     setSkillCatalogEvent(null);
     setSkillDocumentEvent(null);
     setMcpConfigurationSnapshotEvent(null);
+    setFusionCatalogEvent(null);
     setPluginCatalogEvent(null);
     setConfigurationOperations({});
   }, [activeSessionId]);
@@ -842,6 +847,7 @@ export function useBridge(): UseBridge {
         if (event.type === 'skill_catalog') setSkillCatalogEvent(event);
         if (event.type === 'skill_document') setSkillDocumentEvent(event);
         if (event.type === 'mcp_configuration_snapshot') setMcpConfigurationSnapshotEvent(event);
+        if (event.type === 'fusion_catalog') setFusionCatalogEvent(event);
         if (event.type === 'plugin_catalog') setPluginCatalogEvent(event);
         if (event.type === 'configuration_operation') {
           setConfigurationOperations((previous) => ({ ...previous, [event.domain]: event }));
@@ -1030,6 +1036,7 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       host.command(activeSessionId, { type: 'skill_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'mcp_admin', command: { action: 'get_snapshot' } }),
+      host.command(activeSessionId, { type: 'fusion_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'plugin_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'hook_admin', command: { action: 'get_document' } }),
     ]).catch((cause) => setError(messageFrom(cause)));
@@ -1245,11 +1252,12 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host, submittedSessionFor, updateRuntime]);
 
-  const beginLocalCommand = useCallback((raw: string) => {
+  const beginLocalCommand = useCallback(async (raw: string) => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
+    await host?.command(sessionId, { type: 'record_prompt_suggestion_submission', text: raw }).catch(() => undefined);
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginLocalSlashCommand(state.conversation, raw) }));
-  }, [updateRuntime]);
+  }, [host, updateRuntime]);
 
   const dismissCommandResult = useCallback(() => {
     const sessionId = activeSessionIdRef.current;
@@ -1817,6 +1825,7 @@ export function useBridge(): UseBridge {
       command({ type: 'refresh_listings', which: [{ type: 'mcp' }, { type: 'skills' }] }),
       command({ type: 'skill_admin', command: { action: 'get_catalog' } }),
       command({ type: 'mcp_admin', command: { action: 'get_snapshot' } }),
+      command({ type: 'fusion_admin', command: { action: 'get_catalog' } }),
       command({ type: 'plugin_admin', command: { action: 'get_catalog' } }),
       command({ type: 'hook_admin', command: { action: 'get_document' } }),
       refreshDiagnostics(),
@@ -1895,6 +1904,22 @@ export function useBridge(): UseBridge {
       capture(cause);
     }
   }, [capture, host, updateRuntime]);
+  const credentialStorageUnavailable = bootstrap?.providerCredentials?.some((entry) => Boolean(entry.storageError)) ?? false;
+  useEffect(() => {
+    if (!host || !credentialStorageUnavailable) return;
+    let disposed = false;
+    const stop = watchCredentialRecovery({
+      windowTarget: window,
+      documentTarget: document,
+      isVisible: () => document.visibilityState === 'visible',
+      refresh: async () => {
+        const snapshot = await host.bootstrap();
+        if (!disposed) applyBootstrap(snapshot);
+      },
+    });
+    return () => { disposed = true; stop(); };
+  }, [applyBootstrap, credentialStorageUnavailable, host]);
+
   const clearSession = useCallback(async (name?: string) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
@@ -2017,6 +2042,14 @@ export function useBridge(): UseBridge {
       }
     }, [host],
   );
+  const updatePromptSuggestionContext = useCallback(
+    (context: Parameters<UseBridge['updatePromptSuggestionContext']>[0]) =>
+      command({ type: 'update_prompt_suggestion_context', ...context }), [command],
+  );
+  const promptSuggestionFeedback = useCallback(
+    (sessionId: string, uuid: string, action: 'shown' | 'accepted' | 'dismissed') =>
+      command({ type: 'prompt_suggestion_feedback', session_id: sessionId, uuid, action }), [command],
+  );
   const updateEngineSettings = useCallback(
     async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
       await command({ type: 'update_settings', destination, patch_json: JSON.stringify(patch) });
@@ -2106,6 +2139,7 @@ export function useBridge(): UseBridge {
     envelope:
       | { type: 'skill_admin'; command: SkillAdminCommandDto }
       | { type: 'mcp_admin'; command: McpAdminCommandDto }
+      | { type: 'fusion_admin'; command: FusionAdminCommandDto }
       | { type: 'plugin_admin'; command: PluginAdminCommandDto }
       | { type: 'hook_admin'; command: HookAdminCommandDto },
   ): Promise<ConfigurationOperationEvent | void> => {
@@ -2138,6 +2172,10 @@ export function useBridge(): UseBridge {
     (adminCommand: McpAdminCommandDto) => runConfigurationAdmin('mcp', { type: 'mcp_admin', command: adminCommand }),
     [runConfigurationAdmin],
   );
+  const fusionAdmin = useCallback(
+    (adminCommand: FusionAdminCommandDto) => runConfigurationAdmin('fusion', { type: 'fusion_admin', command: adminCommand }),
+    [runConfigurationAdmin],
+  );
   const pluginAdmin = useCallback(
     (adminCommand: PluginAdminCommandDto) => runConfigurationAdmin('plugin', { type: 'plugin_admin', command: adminCommand }),
     [runConfigurationAdmin],
@@ -2160,6 +2198,7 @@ export function useBridge(): UseBridge {
     scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     manageCron,
     uiSurfaceClientId: stableUiSurfaceClientId,
+    updatePromptSuggestionContext, promptSuggestionFeedback,
     hosted,
     loading,
     bootstrap: presentedBootstrap,
@@ -2172,6 +2211,7 @@ export function useBridge(): UseBridge {
     skillCatalogEvent,
     skillDocumentEvent,
     mcpConfigurationSnapshotEvent,
+    fusionCatalogEvent,
     pluginCatalogEvent,
     configurationOperations,
     activeSession,
@@ -2258,6 +2298,7 @@ export function useBridge(): UseBridge {
     removeMcpServer,
     skillAdmin,
     mcpAdmin,
+    fusionAdmin,
     pluginAdmin,
     hookAdmin,
     restartBridge,

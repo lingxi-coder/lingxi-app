@@ -2516,8 +2516,7 @@ impl ChatWidget {
     }
 
     /// Wire the composition root's shared `/fusion setup` settings snapshot,
-    /// preloaded from `~/.lingxi/settings.json` at startup and updated in place
-    /// by the async save effect.
+    /// preloaded from user/project/local registries and refreshed after saves.
     pub fn set_fusion_settings(
         &mut self,
         slot: std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>,
@@ -3986,7 +3985,16 @@ impl ChatWidget {
         if args.eq_ignore_ascii_case("setup") {
             return self.open_fusion_setup();
         }
-        if !args.is_empty() && !self.fusion_models_are_configured() {
+        let explicit_strategy = args
+            .split_whitespace()
+            .any(|token| token == "--strategy" || token.starts_with("--strategy="));
+        let maintenance = args.eq_ignore_ascii_case("clean")
+            || args.split_whitespace().next() == Some("--retry-publication");
+        if !args.is_empty()
+            && !explicit_strategy
+            && !maintenance
+            && !self.fusion_models_are_configured()
+        {
             self.show_system_text(
                 "Fusion has no models configured yet — opening /fusion setup. \
                  Your prompt was not sent; run it again once setup is saved.",
@@ -4008,7 +4016,7 @@ impl ChatWidget {
     fn fusion_models_are_configured(&self) -> bool {
         self.fusion_settings.as_ref().is_none_or(|slot| {
             slot.lock()
-                .map(|snapshot| snapshot.roles.is_configured())
+                .map(|snapshot| snapshot.roles.is_configured() || !snapshot.entries.is_empty())
                 .unwrap_or(true)
         })
     }
@@ -4032,6 +4040,8 @@ impl ChatWidget {
         self.bottom_pane
             .show_fusion_setup(crate::fusion::setup::FusionSetupSnapshot {
                 candidates: crate::fusion::setup::candidates_from_rows(&rows),
+                entries: settings.entries,
+                scopes: settings.scopes,
                 roles: settings.roles,
                 enabled: settings.enabled,
                 max_panel: if settings.max_panel == 0 {
@@ -5164,7 +5174,7 @@ impl ChatWidget {
         self.run_core_command(
             "effort",
             args,
-            &command_api::builtins::effort::EffortHandler::new(handle),
+            &crate::effort_command::EffortHandler::new(handle),
         )
     }
 
@@ -6276,7 +6286,11 @@ fn registry_slash_rows(
             hidden: false,
             replaces_builtin: false,
             argument_hint: c.argument_hint.clone(),
-            argument_names: c.argument_names.clone(),
+            argument_names: if matches!(c.kind, SlashCommandKind::Builtin { .. }) {
+                Vec::new()
+            } else {
+                c.argument_names.clone()
+            },
         })
         .collect()
 }
@@ -9531,6 +9545,7 @@ mod tests {
                 roles,
                 enabled: false,
                 max_panel: 8,
+                ..Default::default()
             },
         ))
     }
@@ -9572,6 +9587,39 @@ mod tests {
         assert!(setup_view_is_open(&widget));
         let shown = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
         assert!(shown.contains("not sent"), "{shown}");
+    }
+
+    #[test]
+    fn explicit_fusion_strategy_dispatches_even_without_a_default() {
+        let mut widget = widget();
+        widget.set_fusion_settings(fusion_settings(false));
+        let Some(ChatOutcome::DispatchSlash(input, _)) =
+            widget.handle_slash("/fusion --fast --strategy project:review review locking")
+        else {
+            panic!("explicit strategy must reach the runtime resolver");
+        };
+        assert_eq!(
+            input,
+            "/fusion --fast --strategy project:review review locking"
+        );
+        assert!(!setup_view_is_open(&widget));
+    }
+
+    #[test]
+    fn fusion_cleanup_and_publication_retry_do_not_require_a_strategy() {
+        for input in [
+            "/fusion clean",
+            "/fusion CLEAN",
+            "/fusion --retry-publication fu_0123456789abcdef0123456789abcdef",
+        ] {
+            let mut widget = widget();
+            widget.set_fusion_settings(fusion_settings(false));
+            let Some(ChatOutcome::DispatchSlash(dispatched, _)) = widget.handle_slash(input) else {
+                panic!("maintenance must reach the runtime without opening setup: {input}");
+            };
+            assert_eq!(dispatched, input);
+            assert!(!setup_view_is_open(&widget));
+        }
     }
 
     #[test]

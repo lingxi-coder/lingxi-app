@@ -6,7 +6,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { parseJsonObjectInput } from '../jsonInput';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader, useExtensionHubNavigation } from './ExtensionHub';
 import {
   adminRecordCommand,
   asRecord,
@@ -174,7 +174,7 @@ function JsonPropertyEditor({
   );
 }
 
-export function McpServers({ bridge, onNavigate, onClose }: PageContentProps) {
+export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { mcpAdmin?: unknown }).mcpAdmin === 'function';
   const snapshot = useMemo(() => parseSnapshot(bridge), [bridge.mcpConfigurationSnapshotEvent?.snapshot_json, bridge.mcpServersEvent?.servers]);
@@ -237,6 +237,7 @@ export function McpServers({ bridge, onNavigate, onClose }: PageContentProps) {
     }
     onNavigate(pageId, pluginId);
   };
+  useExtensionHubNavigation(onRegisterNavigationRequest, requestHubNavigation);
   const discardAndNavigate = () => {
     if (!pendingHubPage) return;
     setPendingSelection(null);
@@ -389,8 +390,8 @@ export function McpServers({ bridge, onNavigate, onClose }: PageContentProps) {
   };
 
   return (
-    <ExtensionHubLayout bridge={bridge} active="mcp" onNavigate={requestHubNavigation} onClose={onClose}>
-        <ExtensionHubHeader title="Tools" description="Connect MCP servers to bring your tools into LingXi" search={search} onSearch={setSearch} actions={<>
+    <ExtensionHubLayout>
+        <ExtensionHubHeader title="MCP 服务器" description="Connect MCP servers to bring your tools into LingXi" search={search} onSearch={setSearch} actions={<>
           <button type="button" aria-label="Refresh MCP servers" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to refresh tools.'))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
           <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">Add <ExtensionGlyph name="plus" size={14} /></button>
         </>} />

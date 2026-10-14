@@ -449,8 +449,11 @@ impl EngineCommandRouter {
                         }
                     };
                     let Some(writer) = store.transcript_writer.as_ref() else {
-                        sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal,
-                            message: "main transcript identity owner is unavailable".into() }).await;
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: "main transcript identity owner is unavailable".into(),
+                        })
+                        .await;
                         return;
                     };
                     let snapshot = async {
@@ -461,11 +464,19 @@ impl EngineCommandRouter {
                     let (rows, next) = match snapshot {
                         Ok(value) => value,
                         Err(message) => {
-                            sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message }).await;
+                            sink.emit(ClientEvent::Error {
+                                kind: ErrorKindDto::Internal,
+                                message,
+                            })
+                            .await;
                             return;
                         }
                     };
-                    (rows, harness_runtime::desktop::session_agents::transcript_revision(&raw), next)
+                    (
+                        rows,
+                        harness_runtime::desktop::session_agents::transcript_revision(&raw),
+                        next,
+                    )
                 }
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
@@ -548,13 +559,16 @@ impl EngineCommandRouter {
                     return;
                 }
             };
-            let rows = match harness_runtime::session_agent_transcript::parse_session_agent_message_rows(&raw) {
-                Ok(rows) => rows,
-                Err(message) => {
-                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: format!("load session agent transcript failed: transcript is corrupt ({message})") }).await;
-                    return;
-                }
-            };
+            let rows =
+                match harness_runtime::session_agent_transcript::parse_session_agent_message_rows(
+                    &raw,
+                ) {
+                    Ok(rows) => rows,
+                    Err(message) => {
+                        sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: format!("load session agent transcript failed: transcript is corrupt ({message})") }).await;
+                        return;
+                    }
+                };
             let next = match harness_runtime::session_agent_transcript::read_session_agent_next_message_index(
                 store.fs.as_ref(), transcript_path.as_deref().expect("validated transcript path"),
             ).await {
@@ -564,7 +578,11 @@ impl EngineCommandRouter {
                     return;
                 }
             };
-            (rows, harness_runtime::desktop::session_agents::transcript_revision(&raw), next)
+            (
+                rows,
+                harness_runtime::desktop::session_agents::transcript_revision(&raw),
+                next,
+            )
         };
         if self.handle.current_session_id().await != requested_session_id {
             return;

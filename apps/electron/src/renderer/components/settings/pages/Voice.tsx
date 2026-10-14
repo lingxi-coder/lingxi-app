@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AudioOperationDto } from '@lingxi/bridge-client';
 
 import {
@@ -167,13 +167,6 @@ function modelProgress(model: NativeAudioModelSnapshot): string | null {
   return `${Math.min(100, Math.round((model.state.receivedBytes / model.state.totalBytes) * 100))}%`;
 }
 
-function routeDescription(route: AudioRouteResolution): string {
-  if (route.effective?.source === 'provider') return `云端 · ${route.effective.profileId} · ${route.effective.modelId}`;
-  if (route.effective?.source === 'system') return `系统${route.effective.voiceId ? ` · ${route.effective.voiceId}` : ''}`;
-  if (route.effective?.source === 'offline') return `离线 · ${route.effective.modelId ?? '语言默认模型'}`;
-  return `不可用 · ${route.reason}`;
-}
-
 export function voiceSelectionOptionValue(voice: AudioVoiceSelection | null, fallbackModelId?: string | null): string {
   if (!voice) return 'automatic';
   if (voice.source === 'provider') return `provider:${voice.profileId ?? ''}:${voice.modelId ?? ''}:${voice.id}`;
@@ -320,27 +313,32 @@ export function Voice({ bridge }: PageContentProps) {
       updateDraft((current) => ({ ...current, [kind]: { ...current[kind], voice: id && resolvedProfile ? { source: 'provider', id, profileId: resolvedProfile, modelId: effectiveModel ?? null } : null } }));
     }} style={inputStyle(t)}><option value="">服务商默认音色</option>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label ?? voice.id}</option>)}{voiceId && !voices.some((voice) => voice.id === voiceId) && <option value={voiceId}>{voiceId}（需要检查）</option>}</select>;
     return <>
-      <Row title="服务商绑定" desc={cloud.binding === 'follow_session' ? `跟随当前会话 · ${resolvedProfile ?? '尚未选择会话 profile'}` : '仅此操作使用指定的 profile。'} align="center">
-        <select aria-label={`${kind} 服务商绑定`} value={cloud.binding} onChange={(event) => changeCloud({ binding: event.target.value })} style={inputStyle(t)}><option value="follow_session">跟随当前会话</option><option value="explicit_profile">指定 profile</option></select>
+      <Row title="账号选择" desc={cloud.binding === 'follow_session' ? `跟随当前会话 · ${resolvedProfile ?? '尚未选择账号'}` : '仅此语音功能使用指定账号。'} align="center">
+        <select aria-label={`${kind} 账号选择`} value={cloud.binding} onChange={(event) => changeCloud({ binding: event.target.value })} style={inputStyle(t)}><option value="follow_session">跟随当前会话</option><option value="explicit_profile">指定账号</option></select>
       </Row>
-      {cloud.binding === 'explicit_profile' && <Row title="服务商 profile" align="center"><input aria-label={`${kind} profile`} value={cloud.profileId ?? ''} placeholder="已配置的 profile ID" onChange={(event) => changeCloud({ profileId: event.target.value.trim() || null })} style={inputStyle(t)} /></Row>}
-      <Row title="音频模型" desc={`独立于聊天模型 · ${capabilityReadiness ?? '等待宿主能力检查'}`} align="center">
+      {cloud.binding === 'explicit_profile' && <Row title="语音账号" align="center">
+        <select aria-label={`${kind} profile`} value={cloud.profileId ?? ''} onChange={(event) => changeCloud({ profileId: event.target.value || null, modelId: null })} style={inputStyle(t)}>
+          <option value="">选择账号</option>
+          {[...new Set([...(bridge.bootstrap?.providerCredentials?.filter((entry) => entry.configured).map((entry) => entry.providerId) ?? []), ...(snapshot.providerCatalog?.map((entry) => entry.profileId) ?? []), ...(cloud.profileId ? [cloud.profileId] : [])])].map((id) => <option key={id} value={id}>{({ openai: 'OpenAI', 'openai-chatgpt': 'Codex Auth', deepseek: 'DeepSeek', kimi: 'Kimi', openrouter: 'OpenRouter', zai: 'Z.ai' } as Record<string, string>)[id] ?? id}</option>)}
+        </select>
+      </Row>}
+      <Row title="音频模型" desc={capabilityReadiness === 'ready' ? undefined : '请检查账号和模型是否支持此语音功能。'} align="center">
         <select aria-label={`${kind} 音频模型`} value={cloud.modelId ?? ''} onChange={(event) => changeCloud({ modelId: event.target.value || null })} style={inputStyle(t)}>
           <option value="">{capability?.modelIds?.includes(null) ? '原生服务（无模型选择）' : '服务商默认'}{capability?.defaultModelId ? ` · ${capability.defaultModelId}` : ''}</option>
           {selectableModels.map((id) => <option key={id} value={id}>{models?.find((model) => model.id === id)?.label ?? id}</option>)}
           {cloud.modelId && !capability?.modelIds?.includes(cloud.modelId) && <option value={cloud.modelId}>{cloud.modelId}（需要检查）</option>}
         </select>
       </Row>
-      {kind === 'conversation' && <Row title="实时会话音色" desc="此音色只用于指定的实时 profile 与音频模型。" align="center">{voiceSelect}</Row>}
-      {kind === 'speech' && <Row title="云端音色" desc="音色绑定到当前 profile 和音频模型。" align="center"><div style={{ display: 'flex', gap: 10 }}>{voiceSelect}<button type="button" onClick={previewVoice} style={ghostButtonStyle(t)}>试听所选偏好</button></div></Row>}
+      {kind === 'conversation' && <Row title="实时会话音色" desc="选择实时会话使用的音色。" align="center">{voiceSelect}</Row>}
+      {kind === 'speech' && <Row title="云端音色" desc="" align="center"><div style={{ display: 'flex', gap: 10 }}>{voiceSelect}<button type="button" onClick={previewVoice} style={ghostButtonStyle(t)}>试听所选偏好</button></div></Row>}
     </>;
   };
 
   const recognitionModelValue = displayDraft.recognition.offlineModelId ?? 'language-default';
   const speechModelValue = displayDraft.speech.offlineModelId ?? 'language-default';
   const speechVoiceValue = voiceSelectionOptionValue(displayDraft.speech.voice, displayDraft.speech.offlineModelId);
-  const systemVoices = model.voiceOptions.filter((voice) => voice.source === 'system');
-  const offlineVoices = model.voiceOptions.filter((voice) => voice.source === 'sherpa' && (!displayDraft.speech.offlineModelId || voice.familyId === displayDraft.speech.offlineModelId));
+  const systemVoices = model.voiceOptions.filter((voice) => displayDraft.speech.source !== 'offline' && voice.source === 'system');
+  const offlineVoices = model.voiceOptions.filter((voice) => displayDraft.speech.source !== 'system' && voice.source === 'sherpa' && (!displayDraft.speech.offlineModelId || voice.familyId === displayDraft.speech.offlineModelId));
   const availableVoiceValues = new Set([
     ...systemVoices.map((voice) => `system:${systemVoiceOptionId(voice)}`),
     ...offlineVoices.map((voice) => voice.id),
@@ -349,29 +347,35 @@ export function Voice({ bridge }: PageContentProps) {
     ? speechVoiceValue
     : null;
 
+  const languageOptions = [...new Set(['auto', 'zh-CN', 'en-US', 'zh-TW', 'ja-JP', ...snapshot.voices.map((voice) => voice.languageTag), displayDraft.language])].filter(Boolean);
+  const languageName = (value: string) => { try { return new Intl.DisplayNames(['zh'], { type: 'language' }).of(value) ?? value; } catch { return value; } };
+  const sourceDescription = (route: AudioRouteResolution, operation: string) => {
+    if (route.status !== 'ready') return '此来源暂不可用，请选择其他来源或安装模型。';
+    if (route.effective?.source === 'system') return `使用系统${operation}。`;
+    if (route.effective?.source === 'offline') return `使用${model.models.find((entry) => entry.modelId === route.effective?.modelId)?.displayName ?? '离线模型'}。`;
+    return `使用云端${operation}，需要联网。`;
+  };
+
   return (
     <>
-      <Card title="语音会话">
-        <Row title="会话模式" desc={displayDraft.conversation.mode === 'realtime' ? snapshot.realtimeReadiness?.reason ?? '当前宿主尚未提供通过 Agent 工具与权限链路的实时会话。' : '识别输入后交给当前 Agent，按输出设置朗读回复。'} align="center">
-          <select aria-label="语音会话模式" value={displayDraft.conversation.mode} onChange={(event) => updateDraft((current) => ({ ...current, conversation: { ...current.conversation, mode: event.target.value } }))} style={inputStyle(t)}>
-            <option value="agent">Agent 会话</option>
-            <option value="realtime">原生实时会话{snapshot.realtimeReadiness?.ready ? '' : '（需要配置或宿主支持）'}</option>
+      <Card title="语音输入">
+        <Row title="语言" desc="跟随系统不会自动识别说话语言；说中文请选择中文。" align="center">
+          <select aria-label="语音语言" value={displayDraft.language} onChange={(event) => updateDraft((current) => ({ ...current, language: event.target.value }))} style={inputStyle(t)}>
+            {languageOptions.map((value) => <option key={value} value={value}>{value === 'auto' ? '跟随系统' : languageName(value)}</option>)}
           </select>
         </Row>
-        {displayDraft.conversation.mode === 'realtime' && <><Row title="交互方式" desc="轮流说话：聆听结束后播放回复；此设备尚未验证回声消除。" align="center"><select aria-label="实时交互方式" value={displayDraft.conversation.interaction} onChange={(event) => updateDraft((current) => ({ ...current, conversation: { ...current.conversation, interaction: event.target.value } }))} style={inputStyle(t)}><option value="turn_based">轮流说话</option>{displayDraft.conversation.interaction !== 'turn_based' && <option value={displayDraft.conversation.interaction}>插话模式（当前不可用）</option>}</select></Row>{cloudFields('conversation', displayDraft.conversation.cloud)}</>}
-      </Card>
-      <Card title="语音输入">
-        <Row title="识别来源" desc={`请求：${displayDraft.recognition.source} · 预览：${routeDescription(model.recognitionRoute)} · 实际：${model.actualRecognition}`} align="center">
+
+        <Row title="识别来源" desc={sourceDescription(model.recognitionRoute, "识别")} align="center">
           <select aria-label="识别来源" value={displayDraft.recognition.source} onChange={(event) => updateDraft((current) => ({ ...current, recognition: { ...current.recognition, source: event.target.value } }))} style={inputStyle(t)}>
             {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             {!SOURCE_OPTIONS.some((option) => option.value === displayDraft.recognition.source) && <option value={displayDraft.recognition.source}>未知来源（不可用）</option>}
           </select>
         </Row>
         {displayDraft.recognition.source === 'offline' && (
-        <Row title="离线识别模型" desc="自动使用共享目录中第一个已安装且语言匹配的模型；指定模型不会回退。" align="center">
+        <Row title="离线识别模型" desc="Zipformer、Moonshine 用于识别。MeloTTS、Kitten 请在下方朗读设置中选择。" align="center">
           <select aria-label="离线识别模型" value={recognitionModelValue} onChange={(event) => updateDraft((current) => ({ ...current, recognition: { ...current.recognition, offlineModelId: event.target.value === 'language-default' ? null : event.target.value } }))} style={inputStyle(t)}>
             <option value="language-default">按语言自动选择</option>
-            {model.models.filter((entry) => entry.kind === 'stt').map((entry) => <option key={entry.modelId} value={entry.modelId}>{entry.displayName}</option>)}
+            {model.models.filter((entry) => entry.kind === 'stt').map((entry) => <option key={entry.modelId} value={entry.modelId}>{entry.displayName} · {entry.state.type === 'ready' ? '已安装' : entry.state.type === 'not-installed' ? '未安装' : '安装中或需重试'}</option>)}
             {displayDraft.recognition.offlineModelId && !model.models.some((entry) => entry.modelId === displayDraft.recognition.offlineModelId) && <option value={displayDraft.recognition.offlineModelId}>未知模型（不可用）</option>}
           </select>
         </Row>
@@ -379,24 +383,24 @@ export function Voice({ bridge }: PageContentProps) {
         {displayDraft.recognition.source === 'provider' && cloudFields('recognition', displayDraft.recognition.cloud)}
       </Card>
       <Card title="语音输出">
-        <Row title="朗读来源" desc={`请求：${displayDraft.speech.source} · 预览：${routeDescription(model.speechRoute)} · 实际：${model.actualSpeech}`} align="center">
+        <Row title="朗读来源" desc={sourceDescription(model.speechRoute, "朗读")} align="center">
           <select aria-label="朗读来源" value={displayDraft.speech.source} onChange={(event) => updateDraft((current) => ({ ...current, speech: { ...current.speech, source: event.target.value, ...(event.target.value === 'automatic' ? { voice: null } : {}) } }))} style={inputStyle(t)}>
             {SOURCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             {!SOURCE_OPTIONS.some((option) => option.value === displayDraft.speech.source) && <option value={displayDraft.speech.source}>未知来源（不可用）</option>}
           </select>
         </Row>
         {displayDraft.speech.source === 'offline' && (
-        <Row title="离线朗读模型" desc="只影响朗读；选择系统来源时不会使用离线模型。" align="center">
+        <Row title="离线朗读模型" desc="MeloTTS 支持中英文朗读，Kitten 支持英文朗读。" align="center">
           <select aria-label="离线朗读模型" value={speechModelValue} onChange={(event) => updateDraft((current) => ({ ...current, speech: { ...current.speech, offlineModelId: event.target.value === 'language-default' ? null : event.target.value } }))} style={inputStyle(t)}>
             <option value="language-default">按语言自动选择</option>
-            {model.models.filter((entry) => entry.kind === 'tts').map((entry) => <option key={entry.modelId} value={entry.modelId}>{entry.displayName}</option>)}
+            {model.models.filter((entry) => entry.kind === 'tts').map((entry) => <option key={entry.modelId} value={entry.modelId}>{entry.displayName} · {entry.state.type === 'ready' ? '已安装' : entry.state.type === 'not-installed' ? '未安装' : '安装中或需重试'}</option>)}
             {displayDraft.speech.offlineModelId && !model.models.some((entry) => entry.modelId === displayDraft.speech.offlineModelId) && <option value={displayDraft.speech.offlineModelId}>未知模型（不可用）</option>}
           </select>
         </Row>
         )}
         {displayDraft.speech.source === 'provider' && cloudFields('speech', displayDraft.speech.cloud)}
         {displayDraft.speech.source !== 'provider' && (
-        <Row title="朗读音色" desc={displayDraft.speech.voice ? `请求：${displayDraft.speech.voice.source} · ${displayDraft.speech.voice.id} · 实际：${model.speechRoute.effective?.voiceId ?? '不可用'}` : `请求：自动 · 实际：${model.speechRoute.effective?.voiceId ?? '不可用'}`} align="center">
+        <Row title="音色" align="center">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <select aria-label="朗读音色" value={speechVoiceValue} onChange={(event) => updateDraft((current) => {
               const voice = voiceSelectionFromValue(event.target.value, model.voiceOptions);
@@ -408,13 +412,10 @@ export function Voice({ bridge }: PageContentProps) {
               {systemVoices.map((voice) => <option key={voice.id} value={`system:${voice.id.replace(/^system:/, '')}`}>{voice.label}</option>)}
               {offlineVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}（离线）</option>)}
             </select>
-            <button type="button" onClick={previewVoice} style={ghostButtonStyle(t)}>试听所选偏好</button>
+            <button type="button" onClick={previewVoice} style={ghostButtonStyle(t)} aria-label="试听所选偏好">试听</button>
           </div>
         </Row>
         )}
-        <Row title="语言" desc={`auto 将在每次操作开始时跟随系统语言；当前：${resolveAudioLanguage(displayDraft.language, snapshot.localeTag ?? 'en-US')}`} align="center">
-          <input aria-label="语音语言" value={displayDraft.language === AUDIO_LANGUAGE_AUTO ? '' : displayDraft.language} onChange={(event) => updateDraft((current) => ({ ...current, language: event.target.value.trim() || AUDIO_LANGUAGE_AUTO }))} placeholder="auto" style={inputStyle(t)} />
-        </Row>
         {displayDraft.speech.source === 'provider' ? (
           <Row title="语速" desc={displayDraft.rate === 1 ? '云端朗读目前仅支持 1.0× 语速。' : `云端朗读目前仅支持 1.0×；保留的 ${displayDraft.rate.toFixed(2)}× 偏好暂不可用。`} align="center">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -426,23 +427,57 @@ export function Voice({ bridge }: PageContentProps) {
           <Row title="语速" desc="0.5× – 2.0×" align="center"><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><input type="range" min={0.5} max={2} step={0.05} value={displayDraft.rate} onChange={(event) => updateDraft((current) => ({ ...current, rate: Number(event.target.value) }))} aria-label="朗读语速" /><span style={{ fontSize: 12.5, color: t.text3, minWidth: 40 }}>{displayDraft.rate.toFixed(2)}×</span></div></Row>
         )}
         <Row title="自动朗读回复" desc="只朗读普通输入发送后的最终回复；心流模式使用自己的流式播报。" align="center"><label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: t.text2 }}><input type="checkbox" checked={displayDraft.autoPlayReplies} onChange={(event) => updateDraft((current) => ({ ...current, autoPlayReplies: event.target.checked }))} aria-label="自动朗读回复" />{displayDraft.autoPlayReplies ? '已开启' : '已关闭'}</label></Row>
-        <Row title="保存语音偏好" desc={dirty ? '修改尚未保存。' : '设置保存在此设备，不会写入项目或模型配置。'} align="center"><button type="button" disabled={!dirty || saving} onClick={() => void save()} style={ghostButtonStyle(t, !dirty || saving)}>{saving ? '正在保存…' : '保存'}</button></Row>
-        {(audioConfigurationError || saveError || operationError || model.notices.length > 0) && <div role="status" aria-live="polite" data-testid="voice-notices" style={{ padding: '12px 18px', display: 'flex', flexDirection: 'column', gap: 8 }}>{audioConfigurationError && <div style={{ color: t.danger, fontSize: 12.5 }}>{audioConfigurationError}</div>}{saveError && <div style={{ color: t.danger, fontSize: 12.5 }}>{saveError}</div>}{operationError && <div style={{ color: t.danger, fontSize: 12.5 }}>{operationError}</div>}{model.notices.map((notice) => <div key={notice} style={{ color: t.text2, fontSize: 12.5 }}>· {notice}</div>)}</div>}
       </Card>
 
-      <Card title="离线模型">
+      {(audioConfigurationError || saveError || operationError || model.notices.length > 0) && <div role="status" aria-live="polite" style={{ padding: '0 0 16px', color: t.danger, fontSize: 12.5, lineHeight: 1.5 }}>
+        {audioConfigurationError || saveError || (operationError?.includes('429') ? '云端语音额度暂不可用，可切换账号或使用系统、离线语音。' : operationError ? '语音操作失败，请检查语言、来源和模型。' : '所选语音来源暂不可用，请调整来源或安装对应模型。')}
+      </div>}
+      <Card>        <Row title="保存设置" desc={dirty ? '修改尚未保存。' : '仅保存在此设备。'} align="center"><button type="button" disabled={!dirty || saving} onClick={() => void save()} style={ghostButtonStyle(t, !dirty || saving)}>{saving ? '正在保存…' : '保存'}</button></Row>
+      </Card>
+      <VoiceSettingsDisclosure title="离线模型" detail={`${model.models.filter((entry) => entry.state.type === 'ready').length} 个已安装`} initiallyOpen={displayDraft.recognition.source === 'offline' || displayDraft.speech.source === 'offline' || model.models.some((entry) => ['downloading', 'failed'].includes(entry.state.type))}>
+      <Card>
+        <div style={{ padding: "12px 18px", color: t.text3, fontSize: 12 }}>识别模型用于输入，朗读模型用于输出。下载完成后在对应列表中选择。</div>
         {model.models.map((entry) => {
           const busy = ['queued', 'downloading', 'verifying', 'extracting'].includes(entry.state.type);
           const action = entry.state.type === 'ready' ? '删除' : busy ? '取消' : entry.state.type === 'failed' ? '重试' : '下载';
-          return <Row key={entry.modelId} title={entry.displayName} desc={`${entry.kind === 'stt' ? '语音识别' : '语音合成'} · ${formatBytes(entry.approxSizeBytes)}${entry.state.type === 'failed' ? ` · ${entry.state.message}` : ''}`} align="center"><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><span style={{ fontSize: 12, color: entry.state.type === 'failed' ? t.danger : t.text3 }}>{MODEL_STATE_LABELS[entry.state.type]}{modelProgress(entry) ? ` ${modelProgress(entry)}` : ''}</span><button type="button" onClick={() => changeModel(entry)} style={ghostButtonStyle(t, false, entry.state.type === 'ready')}>{action}</button></div></Row>;
+          return <Row key={entry.modelId} title={entry.displayName} desc={`${entry.kind === 'stt' ? '识别' : '朗读'} · ${formatBytes(entry.approxSizeBytes)}${entry.state.type === 'failed' ? ` · ${entry.state.message}` : ''}`} align="center"><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><span style={{ fontSize: 12, color: entry.state.type === 'failed' ? t.danger : t.text3 }}>{MODEL_STATE_LABELS[entry.state.type]}{modelProgress(entry) ? ` ${modelProgress(entry)}` : ''}</span><button type="button" onClick={() => changeModel(entry)} style={ghostButtonStyle(t, false, entry.state.type === 'ready')}>{action}</button></div></Row>;
         })}
       </Card>
 
-      <Card title="权限与状态">
+      </VoiceSettingsDisclosure>
+      <VoiceSettingsDisclosure title="高级设置与权限" initiallyOpen={snapshot.permissions.microphone !== 'granted'}>
+      <Card title="语音会话">
+        <Row title="会话模式" desc={displayDraft.conversation.mode === 'realtime' ? snapshot.realtimeReadiness?.reason ?? '当前宿主尚未提供通过 Agent 工具与权限链路的实时会话。' : '识别输入后交给当前 Agent，按输出设置朗读回复。'} align="center">
+          <select aria-label="语音会话模式" value={displayDraft.conversation.mode} onChange={(event) => updateDraft((current) => ({ ...current, conversation: { ...current.conversation, mode: event.target.value } }))} style={inputStyle(t)}>
+            <option value="agent">Agent 会话</option>
+            <option value="realtime">原生实时会话{snapshot.realtimeReadiness?.ready ? '' : '（需要配置或宿主支持）'}</option>
+          </select>
+        </Row>
+        {displayDraft.conversation.mode === 'realtime' && <><Row title="交互方式" desc="轮流说话：聆听结束后播放回复；此设备尚未验证回声消除。" align="center"><select aria-label="实时交互方式" value={displayDraft.conversation.interaction} onChange={(event) => updateDraft((current) => ({ ...current, conversation: { ...current.conversation, interaction: event.target.value } }))} style={inputStyle(t)}><option value="turn_based">轮流说话</option>{displayDraft.conversation.interaction !== 'turn_based' && <option value={displayDraft.conversation.interaction}>插话模式（当前不可用）</option>}</select></Row>{cloudFields('conversation', displayDraft.conversation.cloud)}</>}
+      </Card>
+      <Card title="权限">
         <Row title="麦克风" desc={`当前状态：${permissionLabel(model.microphonePermission)}`} align="center">{model.microphonePermission === 'denied' ? <button type="button" onClick={() => void bridge.openSystemSettings('microphone')} style={ghostButtonStyle(t)}>打开系统设置</button> : model.microphonePermission === 'prompt' ? <button type="button" onClick={requestPermissions} style={ghostButtonStyle(t)}>请求授权</button> : <span style={{ color: t.text3, fontSize: 12.5 }}>{permissionLabel(model.microphonePermission)}</span>}</Row>
         <Row title="系统语音识别" desc={`当前状态：${permissionLabel(model.speechPermission)}`} align="center">{model.speechPermission === 'denied' || model.speechPermission === 'restricted' ? <button type="button" onClick={() => void bridge.openSystemSettings('speech_recognition')} style={ghostButtonStyle(t)}>打开系统设置</button> : model.speechPermission === 'not_determined' ? <button type="button" onClick={requestPermissions} style={ghostButtonStyle(t)}>请求授权</button> : <span style={{ color: t.text3, fontSize: 12.5 }}>{permissionLabel(model.speechPermission)}</span>}</Row>
-        <Row title="原生服务" desc={snapshot.helper.message ?? '识别、合成与播放均由本机 Helper 处理。'} align="center"><span style={{ color: t.text3, fontSize: 12.5 }}>{snapshot.helper.state}</span></Row>
+        <Row title="原生服务" desc={snapshot.helper.message ?? '语音在本机处理。'} align="center"><span style={{ color: t.text3, fontSize: 12.5 }}>{snapshot.helper.state === "running" ? "可用" : "需要检查"}</span></Row>
       </Card>
+        <Card title="实际使用">
+          <Row title="识别" desc={model.actualRecognition}>{null}</Row>
+          <Row title="朗读" desc={model.actualSpeech}>{null}</Row>
+          <Row title="自定义语言" desc="填写语言地区代码，例如 zh-CN。" align="center"><input aria-label="自定义语音语言" value={displayDraft.language} onChange={(event) => updateDraft((current) => ({ ...current, language: event.target.value.trim() || AUDIO_LANGUAGE_AUTO }))} style={inputStyle(t)} /></Row>
+        </Card>
+      </VoiceSettingsDisclosure>
     </>
   );
+}
+
+function VoiceSettingsDisclosure({ title, detail, initiallyOpen, children }: { title: string; detail?: string; initiallyOpen?: boolean; children: ReactNode }) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(Boolean(initiallyOpen));
+  useEffect(() => { if (initiallyOpen) setExpanded(true); }, [initiallyOpen]);
+  return <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)} style={{ marginBottom: 20 }}>
+    <summary style={{ cursor: 'pointer', padding: '12px 0', color: t.text2, fontSize: 13, fontWeight: 600 }}>
+      {title}{detail && <span style={{ marginLeft: 10, color: t.text3, fontWeight: 400 }}>{detail}</span>}
+    </summary>
+    {children}
+  </details>;
 }

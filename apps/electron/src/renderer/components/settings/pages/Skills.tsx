@@ -7,7 +7,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { boolFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
 import { MarkdownContent } from '../../MarkdownContent';
 import {
   asBoolean,
@@ -130,7 +130,7 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
   return editingLayer === 'project' ? 'project' : 'user';
 }
 
-export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, scopeControls }: PageContentProps) {
+export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest }: PageContentProps) {
   const t = useT();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
   const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills]);
@@ -290,6 +290,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     }
     onNavigate(pageId, pluginId);
   };
+  useExtensionHubNavigation(onRegisterNavigationRequest, requestHubNavigation);
   const discardAndNavigate = () => {
     if (!pendingHubPage) return;
     discardDrafts();
@@ -562,7 +563,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const previewMarkdown = selectedDocument?.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim() ?? '';
 
   return (
-    <ExtensionHubLayout bridge={bridge} active="skills" onNavigate={requestHubNavigation} onClose={onClose} scopeControls={scopeControls}>
+    <ExtensionHubLayout>
       <ExtensionHubHeader title="Skills" description="Extend LingXi with task-specific skills" search={search} onSearch={setSearch} actions={<>
         <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? 'Reloading skills' : 'Reload skills'}><ExtensionGlyph name="refresh" size={16} /></button>
         <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label="Skill settings" aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
@@ -621,10 +622,13 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             {selection.kind === 'skill' && !editingDocument ? <>
               {selectedDocument?.parseError && <div role="alert" style={noteStyle(t, 'danger')}>{selectedDocument.parseError}</div>}
               <div className="extension-skill-preview">{loadingDocument ? <div role="status">Loading SKILL.md…</div> : selectedDocument ? <MarkdownContent text={previewMarkdown || 'This skill has no instructions yet.'} /> : <div className="extension-hub-empty">The skill document is not available.</div>}</div>
+              {selectedDocument && !selectedDocument.writable && <div id="skill-uninstall-readonly-reason" style={noteStyle(t, 'warn')}>
+                {selectedDocument.readonlyReason || '此 Skill 为只读，无法卸载。'}
+              </div>}
             </> : detail}
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
-            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} title={selectedDocument?.readonlyReason} onClick={handleTrashSkill}>Uninstall</button>
+            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={selectedDocument && !selectedDocument.writable ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>Uninstall</button>
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);

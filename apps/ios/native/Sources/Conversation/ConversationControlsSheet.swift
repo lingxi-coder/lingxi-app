@@ -133,7 +133,7 @@ struct ConversationEffortControl: View {
     private var discreteOptions: [ConversationReasoningOption] {
         var seen = Set<String>()
         return options.filter {
-            !$0.isBudget && !$0.id.isEmpty && !$0.id.hasPrefix("budget:")
+            !$0.isBudget && !$0.id.isEmpty && !["automatic", "disabled"].contains($0.id) && !$0.id.hasPrefix("budget:")
                 && seen.insert($0.id).inserted
         }
     }

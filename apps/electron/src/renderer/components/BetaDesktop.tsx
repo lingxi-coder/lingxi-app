@@ -1,4 +1,7 @@
-import { audioFeatureGate, audioConversationGate } from '../audio/audioFeatureGate';
+import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
+import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
+import { AudioSetupGuide } from './AudioSetupGuide';
+import { ComposerSlashArgumentHint } from './ComposerSlashArgumentHint';
 import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
@@ -7,6 +10,9 @@ import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
 import { ContextWindow } from './ContextWindow';
+import { FusionStrategyPicker } from './FusionStrategyPicker';
+import { chooseFusionStrategy, fusionInvocation } from '../../shared/fusionStrategy';
+import { parseFusionCatalog } from './settings/pages/FusionCatalog';
 import {
   useCallback,
   useEffect,
@@ -22,6 +28,7 @@ import {
 } from 'react';
 import type {
   ImageRefDto,
+  FusionStrategyRefDto,
   ModelDetailsDto,
   ReasoningSelectionDto,
   SessionRowDto,
@@ -51,6 +58,7 @@ import {
   slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
+import { slashArgumentHint } from '../bridge/slashArgumentHint';
 import {
   filterModelGroups,
   filterVisibleModelReferences,
@@ -231,12 +239,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
       pinnedSection,
     },
   });
+  const needsInput = sessionNeedsInput(status);
   const highlighted = active || opening;
   const attention = opening
     ? { label: 'Opening session', color: t.accent }
     : status?.connection.status === 'error' || status?.error
     ? { label: 'Session error', color: t.danger }
-    : status?.pendingInteractions
+    : needsInput
       ? { label: 'Waiting for input', color: t.warn }
       : (status?.turnActive || status?.backgroundAgentsRunning)
         ? { label: 'Running', color: t.ok }
@@ -329,7 +338,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
         title={pinnedSection ? `${title}\n${projectPath}` : title}
-        aria-label={`${title}, ${sessionMetadata}`}
+        aria-label={`${title}, ${sessionMetadata}${needsInput ? ", Needs input" : ""}`}
         data-session-project-path={projectPath}
         style={{
           width: '100%', minHeight: 34, display: 'flex', alignItems: 'center', gap: pinnedSection ? 5 : 10,
@@ -343,12 +352,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         {pinnedSection && <Icon name="chat" size={15} stroke={1.7} />}
         <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
+          {needsInput && <NeedsInputBadge />}
           {opening
             ? <SidebarSessionProgress label="Opening session" />
             // A session ERROR shows as a ringed mark at this row's trailing edge
             // instead (below), so it is not repeated inline here.
             : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" />
-            : attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+            : !needsInput && attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
         <span className="sidebar-session-metadata" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
           {sessionMetadata}
@@ -390,12 +400,16 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat, children, topbar }: {
   bridge: UseBridge;
+  activityView?: boolean;
+  onToggleActivityView?(): void;
   onOpenSettings(): void;
   scheduled?: boolean;
   onOpenScheduled?(): void;
   onOpenChat?(): void;
+  children?: ReactNode;
+  topbar?: ReactNode;
 }) {
   const t = useT();
   const asideRef = useRef<HTMLElement>(null);
@@ -731,9 +745,18 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
   return (
     <>
-    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} style={{ '--rail-material': t.appBg, '--sidebar-material': t.sidebarBg, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
+    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} data-workspace={children ? 'true' : undefined} style={{ '--rail-material': t.sidebarBg, '--sidebar-material': t.sidebarPanelBg, '--desktop-surface': t.stageBg, '--desktop-sidebar-width': `${sidebarWidth}px`, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
+      <div className="drag-region desktop-window-toolbar">
+        <div className="desktop-sidebar-brand">
+          <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
+          <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
+          <button type="button" className="sidebar-header-icon" aria-label={activityView ? "Turn off activity view" : "Turn on activity view"} title={`${activityView ? "Turn off" : "Turn on"} activity view (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><Icon name="bell" size={18} stroke={1.65} /></button>
+          <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
+        </div>
+        {topbar}
+      </div>
+      <div className="desktop-body">
       <nav className="desktop-nav-rail no-drag" aria-label="Main navigation">
-        <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
         <button type="button" className="desktop-rail-button" data-active={!scheduled || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label="Scheduled tasks" title="Scheduled tasks" onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
@@ -742,23 +765,18 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         <button type="button" className="desktop-rail-button" aria-label="Review changes" title="Review changes" onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={settingsLabel()} title={settingsLabel()} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
       </nav>
+    <div className="desktop-surface">
     <aside
       id="desktop-session-sidebar"
       className="desktop-sidebar"
       ref={asideRef}
       aria-hidden={sidebarCollapsed || undefined}
       data-resizing={resizingSidebar || undefined}
-      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderWidth: '0 0.5px', borderStyle: 'solid', borderColor: t.border, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
+      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
-      <div className="drag-region desktop-sidebar-brand" style={{ height: 56, flexShrink: 0, padding: '5px 12px 4px 64px', borderBottom: `0.5px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1 }}>LingXi</strong>
-        <button type="button" className="sidebar-header-icon" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }} style={{ color: t.text3 }}><Icon name="bell" size={18} stroke={1.65} /></button>
-        <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
-      </div>
-
       {searchOpen && <div className="sidebar-search"><Icon name="search" size={15} stroke={1.7} /><input ref={searchInputRef} type="search" aria-label="Search chats and projects" placeholder="Search chats and projects" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label="Close search" onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
-      <div style={{ padding: '2px 12px 14px' }}>
+      <div style={{ padding: '16px 12px 14px' }}>
         <button
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
@@ -1128,6 +1146,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         style={{ color: t.accent }}
       />
     </aside>
+    {children}
+    </div>
+    </div>
     </div>
     {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
     {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession} error={renameError} onClose={() => { if (!renamingSession) setRenameTarget(null); }} onConfirm={(title) => void confirmRename(title)} />}
@@ -1322,7 +1343,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 16px 0 22px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
+    <header className="drag-region desktop-topbar" style={{ height: 'var(--desktop-toolbar-height, 44px)', position: 'relative', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px', '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
       <div className="desktop-topbar-project">
         <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.65} /></span>
         <div style={{ minWidth: 0 }}>
@@ -1646,12 +1667,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 }) {
   const t = useT();
   const [text, setText] = useState('');
+  const shownSuggestionUuids = useRef(new Set<string>());
+  const [rejectedSuggestionUuid, setRejectedSuggestionUuid] = useState<string | null>(null);
+  const [suggestionWindowFocused, setSuggestionWindowFocused] = useState(() => document.hasFocus());
   const [promptComposing, setPromptComposing] = useState(false);
+  const [promptCursorOffset, setPromptCursorOffset] = useState(0);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
   const [modelQuery, setModelQuery] = useState('');
   const [submenuBounds, setSubmenuBounds] = useState<ModelPickerSubmenuBounds | null>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [fusionChoice, setFusionChoice] = useState<{ sessionId: string | null; reference: FusionStrategyRefDto | null } | null>(null);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
   const [fileResults, setFileResults] = useState<string[]>([]);
@@ -1664,6 +1690,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [imageNotice, setImageNotice] = useState<string | null>(null);
   const [imageDragActive, setImageDragActive] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
+  const [audioGuidance, setAudioGuidance] = useState<AudioSetupGuidance | null>(null);
   const [flowMode, setFlowMode] = useState(false);
   const [flowState, setFlowState] = useState<VoiceFlowState>(DEFAULT_VOICE_FLOW_STATE);
   const [slashResultIndex, setSlashResultIndex] = useState(0);
@@ -1697,12 +1724,18 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const composerDraftRevision = useRef(0);
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
+  const selectedFusion = fusionChoice?.sessionId === activeSessionId ? fusionChoice.reference : null;
+  const fusionDraft = /^\s*\/fusion(?:\s|$)/i.test(text) && !/^\s*\/fusion\s+(?:setup|clean)\s*$/i.test(text);
+  const typedFusion = useMemo(() => {
+    try { return fusionInvocation(text)?.strategy; } catch { return undefined; }
+  }, [text]);
   const audio = nativeAudioApi();
   const voicePrefs = bridge.bootstrap?.settings.voice ?? audioConfigurationDefaults();
   const inputAudioGate = audioFeatureGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot(), 'listen');
   const conversationAudioGate = audioConversationGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot());
   const voicePrefsRef = useRef({ configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 });
   voicePrefsRef.current = { configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 };
+  useEffect(() => { setAudioGuidance(null); }, [bridge.bootstrap?.settings.voiceRevision, activeSessionId]);
   const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
   const dictationOwner = useRef<NativeAudioOwner | null>(null);
   const autoplayOwner = useRef<NativeAudioOwner | null>(null);
@@ -1762,7 +1795,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const modelListPlacement = modelPickerSubmenuPlacement(390, submenuBounds);
   const optionListPlacement = modelPickerSubmenuPlacement(300, submenuBounds);
   const reasoningControls = bridge.desktop.conversationControls?.reasoning;
-  const reasoningOptions = reasoningControls?.spec.options ?? [];
+  const reasoningOptions = (reasoningControls?.spec.options ?? []).filter(
+    ({ selection }) => selection.type !== 'automatic' && selection.type !== 'disabled',
+  );
   const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
   const providerCredentials = bridge.bootstrap?.providerCredentials;
 
@@ -1771,8 +1806,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     knownModel: (model) => bridge.desktop.models.includes(model),
     setPermissionMode: (mode) => bridge.setPermissionMode(mode),
     setReasoningLevel: (id) => bridge.setReasoningSelection({ type: 'level', id }),
-    setReasoningAutomatic: () => bridge.setReasoningSelection({ type: 'automatic' }),
-    setReasoningDisabled: () => bridge.setReasoningSelection({ type: 'disabled' }),
     setFastMode: (enabled) => bridge.setFastMode(enabled),
     fastMode: () => bridge.desktop.fastMode,
     setTheme: (theme) => onSetTheme(theme),
@@ -1804,7 +1837,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     emit: (output, isError) => bridge.emitCommandOutput(output, isError === true),
   }), [bridge, onOpenSettings, onOpenSettingsPage, onSetTheme]);
 
-  const slashMenuOpen = slashQuery !== null && ready;
+  const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
+  const argumentHint = useMemo(() => !promptComposing && !hasMentionTokens && !filePicker
+    ? slashArgumentHint(text, promptCursorOffset, bridge.desktop.slashCommands)
+    : undefined, [text, promptCursorOffset, bridge.desktop.slashCommands, promptComposing, hasMentionTokens, filePicker]);
+  const slashMenuOpen = slashQuery !== null && ready && !argumentHint;
 
   const fileMenuOpen = Boolean(filePicker && ready);
 
@@ -2073,6 +2110,20 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     return snapshot;
   };
 
+  useEffect(() => {
+    const updateCursor = () => {
+      const editor = input.current;
+      const selection = window.getSelection();
+      if (!editor || !selection?.focusNode || !editor.contains(selection.focusNode)) return;
+      const prefix = document.createRange();
+      prefix.selectNodeContents(editor);
+      prefix.setEnd(selection.focusNode, selection.focusOffset);
+      setPromptCursorOffset(richPromptText(prefix.cloneContents()).length);
+    };
+    document.addEventListener('selectionchange', updateCursor);
+    return () => document.removeEventListener('selectionchange', updateCursor);
+  }, []);
+
   useLayoutEffect(() => {
     imageDraftGeneration.current += 1;
     const editor = input.current;
@@ -2105,7 +2156,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
     draftSessionId.current = activeSessionId;
     const draft = activeSessionId ? draftsBySession.current.get(activeSessionId) : undefined;
-    editor.innerHTML = draft?.html ?? '';
+    // Adopting the live draft must preserve its nodes and browser selection.
+    if (!carryDraft) editor.innerHTML = draft?.html ?? '';
     setText(draft?.text ?? '');
     setSelectedFiles(draft ? [...draft.files] : []);
     const images = draft ? [...draft.images] : [];
@@ -2115,7 +2167,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setFilePicker(null);
     setPreviewPath(null);
     mentionDismissed.current = false;
-    savedEditorSelection.current = null;
+    if (!carryDraft) savedEditorSelection.current = null;
     setSlashQuery(null);
     activeMentionRange.current = null;
     activeSlashRange.current = null;
@@ -2245,10 +2297,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const reportNativeAudioFailure = useCallback((result: AudioOperationResultDto): boolean => {
     if (result.type !== 'failed') return false;
-    if (result.error.kind === 'permission_denied') setVoiceState('denied');
-    else if (result.error.kind === 'unavailable' || result.error.kind === 'unsupported') setVoiceState('unsupported');
-    else setVoiceState('idle');
-    if (result.error.kind !== 'cancelled') setImageNotice(`语音操作失败：${result.error.message}`);
+    setVoiceState(voiceStateAfterAudioFailure(result.error.kind));
+    setAudioGuidance(audioSetupGuidance(result.error.kind, result.error.message));
     return true;
   }, []);
 
@@ -2273,9 +2323,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [audio, bridge.audioCancel]);
 
   const startStandardListening = async () => {
-    if (!inputAudioGate.ready && inputAudioGate.reason) setImageNotice(inputAudioGate.reason);
+    if (!inputAudioGate.ready && inputAudioGate.reason) {
+      setAudioGuidance(audioSetupGuidance('unavailable', inputAudioGate.reason));
+      return;
+    }
     if (!audio || typeof bridge.audioExecute !== 'function') {
       setVoiceState('unsupported');
+      setAudioGuidance(audioSetupGuidance('unsupported'));
       return;
     }
     const editor = input.current;
@@ -2285,6 +2339,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     const generation = ++dictationGeneration.current;
     standardListeningRef.current = true;
     setVoiceState('listening');
+    setAudioGuidance(null);
     setImageNotice(null);
     let preserveFailureState = false;
     try {
@@ -2302,7 +2357,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         if (transcript) insertVoiceTextAtSelection(transcript);
       }
     } catch (cause) {
-      if (generation === dictationGeneration.current) setImageNotice(cause instanceof Error ? cause.message : '本机语音识别失败。');
+      if (generation === dictationGeneration.current) setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
     } finally {
       if (generation === dictationGeneration.current) {
         standardListeningRef.current = false;
@@ -2318,7 +2373,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     try {
       await bridge.audioFinishListen();
     } catch (cause) {
-      setImageNotice(cause instanceof Error ? cause.message : '停止语音识别失败。');
+      setAudioGuidance(audioSetupGuidance('unavailable', cause instanceof Error ? cause.message : ''));
     }
   };
 
@@ -2361,7 +2416,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
         clearTimeout: (handle) => window.clearTimeout(handle as number),
       },
-      onStateChange: (state) => setFlowState(state),
+      onStateChange: (state) => {
+        setFlowState(state);
+        if (state.phase === 'failed' || state.phase === 'configurationRequired') {
+          setAudioGuidance(audioSetupGuidance('unavailable', state.detail));
+        }
+      },
     });
     flowControllerRef.current = controller;
     setFlowState(controller.getState());
@@ -2384,6 +2444,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     void controller.stop();
   }, [flowMode, voicePrefs.conversation.mode, bridge.audioRealtimeCommand]);
+
+  useEffect(() => {
+    const state = bridge.audioRealtimeState;
+    if (flowMode && voicePrefs.conversation.mode === 'realtime'
+      && (state.phase === 'failed' || state.phase === 'configurationRequired')) {
+      setAudioGuidance(audioSetupGuidance('unavailable', state.detail));
+    }
+  }, [flowMode, voicePrefs.conversation.mode, bridge.audioRealtimeState.phase, bridge.audioRealtimeState.detail]);
 
   useEffect(() => {
     if (!audio) {
@@ -2437,7 +2505,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     if (voiceState === 'denied') {
-      void bridge.openSystemSettings('microphone');
+      setAudioGuidance(audioSetupGuidance('permission_denied'));
       return;
     }
     if (standardListeningRef.current) {
@@ -2452,6 +2520,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       void stopFlowMode();
       return;
     }
+    if (!conversationAudioGate.ready) {
+      setAudioGuidance(audioSetupGuidance('unavailable', conversationAudioGate.reason));
+      return;
+    }
+    setAudioGuidance(null);
     setFlowMode(true);
   };
 
@@ -2571,7 +2644,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
       return;
     }
-    const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
+    let slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
       setImageNotice('当前任务完成后才能运行 / 命令。');
@@ -2585,12 +2658,27 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       setImageNotice('图片附件不能和 / 命令一起发送，请先输入普通问题。');
       return;
     }
+    if (isSlashCommand) {
+      try {
+        const invocation = fusionInvocation(slashCommand);
+        if (invocation && !invocation.strategy) {
+          if (selectedFusion) slashCommand = chooseFusionStrategy(slashCommand, selectedFusion);
+          else if (!parseFusionCatalog(bridge.fusionCatalogEvent?.catalog_json).default_strategy) {
+            setImageNotice('请选择一个 Fusion 策略，或在设置中指定默认策略。');
+            return;
+          }
+        }
+      } catch (cause) {
+        setImageNotice(cause instanceof Error ? cause.message : '无法读取 Fusion 策略。');
+        return;
+      }
+    }
     if (voiceState === 'listening') stopVoice();
     if (isSlashCommand) {
       clearComposer();
       const resolved = resolveDesktopCommand(slashCommand, ALL_DESKTOP_COMMANDS);
       if (resolved && !desktopCommandIsShadowed(slashCommand, bridge.desktop.slashCommands)) {
-        bridge.beginLocalCommand(slashCommand);
+        await bridge.beginLocalCommand(slashCommand);
         void Promise.resolve(resolved.command.run(resolved.args, commandContext)).catch(() => undefined);
         return;
       }
@@ -2688,7 +2776,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     const insertion = activeSlashRange.current?.cloneRange() ?? editorSelection(editor);
     insertion.deleteContents();
-    const command = document.createTextNode(slashCommandText(name));
+    const command = document.createTextNode(`${slashCommandText(name)} `);
     insertion.insertNode(command);
     const caret = document.createRange();
     caret.setStart(command, command.length);
@@ -2889,6 +2977,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   };
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (promptSuggestion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.key === 'Tab' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        acceptPromptSuggestion();
+        return;
+      }
+    }
     // Enter on a focused reference follows the link instead of submitting the draft.
     const reference = event.target instanceof Element
       ? event.target.closest<HTMLElement>('[data-context-mention], [data-file-mention]') : null;
@@ -2977,8 +3072,69 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
+  const promptSuggestion = bridge.conversation.promptSuggestion?.uuid !== rejectedSuggestionUuid && ready && !bridge.running && !promptComposing && !text.length
+    && !bridge.isCancelling && !bridge.pendingPermission && !bridge.pendingAskUserQuestion
+    && !selectedFiles.length && !imageAttachments.length && !visualizationChip
+    && !filePicker && slashQuery === null
+    ? bridge.conversation.promptSuggestion?.suggestion : undefined;
+  useEffect(() => {
+    const update = () => setSuggestionWindowFocused(document.visibilityState === 'visible' && document.hasFocus());
+    window.addEventListener('focus', update);
+    window.addEventListener('blur', update);
+    document.addEventListener('visibilitychange', update);
+    update();
+    return () => {
+      window.removeEventListener('focus', update);
+      window.removeEventListener('blur', update);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, []);
+  useEffect(() => {
+    const sessionId = bridge.conversation.sessionKey;
+    if (!ready || !sessionId) return;
+    void bridge.updatePromptSuggestionContext({ session_id: sessionId,
+      focus: suggestionWindowFocused ? 'focused' : 'blurred',
+      input_empty: !text.length && !promptComposing && !selectedFiles.length && !imageAttachments.length && !visualizationChip,
+      pending_permission: Boolean(bridge.pendingPermission || bridge.pendingAskUserQuestion), elicitation_active: false,
+    }).catch(() => undefined);
+  }, [ready, bridge.conversation.sessionKey, bridge.updatePromptSuggestionContext, suggestionWindowFocused,
+    text, promptComposing, selectedFiles.length, imageAttachments.length, visualizationChip,
+    bridge.pendingPermission, bridge.pendingAskUserQuestion]);
+  useEffect(() => {
+    const sessionId = bridge.conversation.sessionKey;
+    if (!ready || !sessionId) return;
+    return () => {
+      void bridge.updatePromptSuggestionContext({ session_id: sessionId, focus: 'blurred',
+        input_empty: false, pending_permission: false, elicitation_active: false }).catch(() => undefined);
+    };
+  }, [ready, bridge.conversation.sessionKey, bridge.updatePromptSuggestionContext]);
+  useEffect(() => {
+    const suggestion = bridge.conversation.promptSuggestion;
+    if (!suggestion || shownSuggestionUuids.current.has(suggestion.uuid) || rejectedSuggestionUuid === suggestion.uuid) return;
+    if (!promptSuggestion) {
+      setRejectedSuggestionUuid(suggestion.uuid);
+      void bridge.promptSuggestionFeedback(suggestion.session_id, suggestion.uuid, 'dismissed').catch(() => undefined);
+      return;
+    }
+    shownSuggestionUuids.current.add(suggestion.uuid);
+    void bridge.promptSuggestionFeedback(suggestion.session_id, suggestion.uuid, 'shown').catch(() => undefined);
+  }, [promptSuggestion, bridge.conversation.promptSuggestion, bridge.promptSuggestionFeedback, rejectedSuggestionUuid]);
+  const acceptPromptSuggestion = () => {
+    const editor = input.current;
+    if (!editor || !promptSuggestion || richPromptSnapshot(editor).text.length) return;
+    const suggestion = bridge.conversation.promptSuggestion;
+    if (suggestion) void bridge.promptSuggestionFeedback(suggestion.session_id, suggestion.uuid, 'accepted').catch(() => undefined);
+    editor.textContent = promptSuggestion;
+    syncPromptState();
+    editor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
   const draftCommand = parseSlashCommandPrefix(text);
-  const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
   const decorateCommand = Boolean(draftCommand && !promptComposing && !hasMentionTokens);
   const promptTextStyle: CSSProperties = {
     display: 'block', width: '100%', minHeight: 56, maxHeight: 'min(144px, 24vh)', overflowY: 'auto',
@@ -3017,6 +3173,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   );
   return (
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
+      {audioGuidance && <AudioSetupGuide guidance={audioGuidance}
+        onOpenSettings={() => onOpenSettingsPage('voice')} onDismiss={() => setAudioGuidance(null)} />}
       {flowMode && (
         <VoiceFlowPanel
           state={voicePrefs.conversation.mode === 'realtime' ? bridge.audioRealtimeState : flowState}
@@ -3068,6 +3226,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             <VisualizationContextBadge chip={visualizationChip} onDismiss={() => setVisualizationChip(null)} />
           </div>
         )}
+        {fusionDraft && <FusionStrategyPicker catalogJson={bridge.fusionCatalogEvent?.catalog_json}
+          value={typedFusion ?? selectedFusion} explicit={Boolean(typedFusion)} disabled={!ready || bridge.running}
+          onChange={(reference) => setFusionChoice({ sessionId: activeSessionId, reference })}
+          onSettings={() => onOpenSettingsPage('fusion')} />}
         <div className="composer-input-view">
           <div
             ref={input}
@@ -3076,7 +3238,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             contentEditable
             suppressContentEditableWarning
             spellCheck
-            data-placeholder={promptPlaceholder}
+            data-placeholder={promptSuggestion ? '' : promptPlaceholder}
             data-empty={!hasPrompt ? 'true' : 'false'}
             data-command-decorated={decorateCommand || undefined}
             onInput={() => { mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
@@ -3100,7 +3262,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 setPreviewPath(token.dataset.fileMention);
               }
             }}
-            onCompositionStart={() => setPromptComposing(true)}
+            onCompositionStart={() => { setPromptComposing(true); }}
             onCompositionEnd={() => { setPromptComposing(false); syncPromptState(); updateActiveCompletions(); }}
             onScroll={(event) => {
               if (!commandMirror.current) return;
@@ -3112,7 +3274,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             aria-disabled={false}
             aria-autocomplete="list"
             aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'mention-results' : undefined}
-            aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : undefined}
+            aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : argumentHint ? 'composer-slash-argument-hint' : undefined}
             aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
             aria-activedescendant={slashMenuOpen && slashCommands[slashResultIndex]
               ? `slash-command-result-${slashResultIndex}`
@@ -3121,6 +3283,16 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 : undefined}
             style={{ ...promptTextStyle, color: decorateCommand ? 'transparent' : t.text, caretColor: t.text, cursor: 'text' }}
           />
+          {bridge.conversation.promptSuggestionNotice && (
+            <div className="composer-prompt-suggestion-notice" role="status" style={{ color: t.text4 }}>{bridge.conversation.promptSuggestionNotice}</div>
+          )}
+          {promptSuggestion && (
+            <button type="button" className="composer-prompt-suggestion" onClick={acceptPromptSuggestion}
+              onMouseDown={(event) => event.preventDefault()} style={{ color: t.text4 }}
+              aria-label={`Use suggestion: ${promptSuggestion}`} title="Tab or → to accept">
+              <span>{promptSuggestion}</span><kbd aria-hidden="true">Tab</kbd>
+            </button>
+          )}
           {draftCommand && (
             <span className="composer-command-marker"><CommandIcon command={draftCommand.name} size={28} /></span>
           )}
@@ -3132,6 +3304,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               <span className="composer-command-prefix">{draftCommand.prefix}</span>{draftCommand.rest}
             </div>
           )}
+          {argumentHint && <ComposerSlashArgumentHint editor={input} text={text} hint={argumentHint} color={t.text4} />}
         </div>
         {previewPath && <FileMentionPreview key={`${activeSessionId}:${previewPath}`} path={previewPath} bridge={bridge} onClose={() => { setPreviewPath(null); focusPrompt(); }} />}
         {slashMenuOpen && (
@@ -3479,10 +3652,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </>
             )}
           </div>
-          {inputAudioGate.visible && (
+          {(inputAudioGate.visible || (voicePrefs.recognition.source === 'provider' && bridge.audioSnapshot?.capabilities?.supported_operations.includes('record'))) && (
           <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
           )}
-          {conversationAudioGate.visible && !canStop && !hasPrompt && <button
+          {(conversationAudioGate.visible || bridge.audioSnapshot?.capabilities?.supported_operations.includes('record')) && !canStop && !hasPrompt && <button
             type="button"
             disabled={!ready}
             className="composer-icon-action"
@@ -3513,10 +3686,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           </div>
         </div>
         )}
-        {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
-          {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}
-          {voiceState === 'denied' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.danger, fontSize: 10.5 }}>Microphone permission denied</span>}
-        </div>}
       </div>
     </div>
   );

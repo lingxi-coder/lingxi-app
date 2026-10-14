@@ -14,6 +14,7 @@ struct ChatView: View {
     /// Chat keeps the desktop-neutral palette scoped to this surface. Child
     /// views receive the same resolved value through the environment below.
     private var t: Palette { DesignTokens.chatPalette(dark: app.isDark) }
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let session: SessionRef
@@ -59,7 +60,7 @@ struct ChatView: View {
     let voiceInteraction: VoiceInteractionController
     var onOpenVoiceSettings: () -> Void = {}
     private let cameraCapture = CameraCapture()
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
     // chat view so the user is told up front when the network is unavailable —
@@ -88,7 +89,19 @@ struct ChatView: View {
         self.convo = source.model
     }
 
-    var body: some View {
+    private func reportSuggestionContext(focus: String? = nil) {
+        var pendingPermission = !convo.pendingQuestions.isEmpty
+        #if canImport(harness_runtimeFFI)
+        pendingPermission = pendingPermission || !convo.pendingPermissions.isEmpty
+        #endif
+        source.updatePromptSuggestionContext(sessionId: convo.activeSessionId,
+            focus: focus ?? (scenePhase == .active ? "focused" : "blurred"),
+            inputEmpty: draft.isEmpty && attachment == nil && convo.visualizationChip == nil,
+            pendingPermission: pendingPermission)
+    }
+
+    @ViewBuilder
+    private var conversationContent: some View {
         let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
         ZStack {
             t.windowBg.ignoresSafeArea()
@@ -104,7 +117,9 @@ struct ChatView: View {
                 }
                 messageList(showsSelectedAgent: false)
                 runtimeFooter
-                if voiceInteraction.isPresented {
+                if let guidance = AudioSetupGuidance.forPhase(voiceInteraction.phase, message: voiceInteraction.statusDetail) {
+                    AudioSetupBanner(guidance: guidance, onConfigure: onOpenVoiceSettings, onDismiss: voiceInteraction.close)
+                } else if voiceInteraction.isPresented {
                     InlineVoicePanel(
                         controller: voiceInteraction,
                         onConfigure: onOpenVoiceSettings
@@ -118,6 +133,7 @@ struct ChatView: View {
                          availableModels: convo.availableModels,
                          availableModelDetails: convo.availableModelDetails,
                          activeModelId: convo.activeModelId,
+                         contextUsage: convo.sessionTransitionPending ? nil : convo.contextUsage,
                          providerConfigured: convo.providerConfigured,
                          onSelectModel: { reference in
                              source.setModel(reference)
@@ -150,6 +166,14 @@ struct ChatView: View {
                          recentModels: recentModels,
                          draft: $draft,
                          onSend: send,
+                         promptSuggestion: convo.promptSuggestion,
+                         promptSuggestionNotice: convo.promptSuggestionNotice,
+                         suggestionTurnKey: "\(convo.activeSessionId):\(convo.promptSuggestionUuid ?? "")",
+                         onSuggestionFeedback: { action in
+                             if let uuid = convo.promptSuggestionUuid {
+                                 source.promptSuggestionFeedback(sessionId: convo.activeSessionId, uuid: uuid, action: action)
+                             }
+                         },
                          slashCommands: convo.slashCommands,
                          slashCommandsLoaded: convo.slashCommandsLoaded,
                          slashCommandPending: convo.slashCommandPending,
@@ -177,6 +201,20 @@ struct ChatView: View {
             }
 
         }
+        #if canImport(harness_runtimeFFI)
+        .onChange(of: convo.pendingPermissions) { _, _ in reportSuggestionContext() }
+        #endif
+        .onChange(of: draft) { _, _ in reportSuggestionContext() }
+        .onChange(of: scenePhase) { _, _ in reportSuggestionContext() }
+        .onChange(of: convo.activeSessionId) { _, _ in reportSuggestionContext() }
+        .onChange(of: attachment) { _, _ in reportSuggestionContext() }
+        .onChange(of: convo.visualizationChip?.id) { _, _ in reportSuggestionContext() }
+        .onChange(of: convo.pendingQuestions.map(\.requestId)) { _, _ in reportSuggestionContext() }
+    }
+
+    var body: some View {
+        let visibleAvailableModels = providerRepository.visibleModelReferences(convo.availableModels)
+        conversationContent
         .environment(\.theme, t)
         .tint(t.accent)
         .buttonStyle(.plain)
@@ -186,6 +224,7 @@ struct ChatView: View {
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
+            reportSuggestionContext()
             source.listSessionAgents()
             recentModels = modelRecents.resolved(against: visibleAvailableModels)
         }
@@ -224,6 +263,7 @@ struct ChatView: View {
             recentModels = modelRecents.resolved(against: models)
         }
         .onDisappear {
+            reportSuggestionContext(focus: "blurred")
             voiceInteraction.handleContextChange()
         }
         .onReceive(convo.turnSpeechUpdates) { update in
@@ -372,13 +412,12 @@ struct ChatView: View {
             }
             .accessibilityIdentifier("conversation.new-chat")
         } label: {
-            Image(systemName: "list.bullet.rectangle")
+            Image(systemName: "ellipsis.circle")
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(t.accent)
-                .frame(width: 38, height: 36)
-                .contentShape(.rect)
         }
+        .menuStyle(.automatic)
+        .buttonStyle(.automatic)
+        .tint(t.accent)
         .accessibilityLabel("Open conversation summary")
         .accessibilityIdentifier("conversation.summary-menu")
     }

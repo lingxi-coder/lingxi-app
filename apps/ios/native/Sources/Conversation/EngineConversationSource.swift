@@ -433,6 +433,7 @@ final class EngineConversationSource: ConversationSource {
         replayProjectionState = nil
         hasConfirmedSessionState = false
         model.clearAgentState()
+        model.contextUsage = nil
         if isNew {
             model.messages = []
             model.items = []
@@ -1264,6 +1265,16 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func dismissError() { model.error = nil }
+
+    func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {
+        Task { try? await submitCommand(.updatePromptSuggestionContext(
+            sessionId: sessionId, focus: focus, inputEmpty: inputEmpty,
+            pendingPermission: pendingPermission, elicitationActive: false)) }
+    }
+
+    func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {
+        Task { try? await submitCommand(.promptSuggestionFeedback(sessionId: sessionId, uuid: uuid, action: action)) }
+    }
 
     func submitEngineCommand(_ command: ClientCommand) async throws {
         try await submitCommand(command)
@@ -2814,6 +2825,9 @@ final class EngineConversationSource: ConversationSource {
         switch event {
         case .turnStarted:
             guard acceptTurnEvent(event) else { return }
+            model.promptSuggestion = nil
+            model.promptSuggestionUuid = nil
+            model.suggestionTurn &+= 1
             assistantRowsByIdentity = [:]
             assistantReasoningByIdentity = [:]
             currentResponseReasoningIDs = []
@@ -3240,14 +3254,14 @@ final class EngineConversationSource: ConversationSource {
 
         case let .usageUpdate(_, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
             guard acceptTurnEvent(event) else { return }
-            updateActiveRun {
-                $0.usage = ConversationUsageSnapshot(
-                    inputTokens: inputTokens,
-                    outputTokens: outputTokens,
-                    cacheReadTokens: cacheReadTokens,
-                    cacheCreationTokens: cacheCreationTokens
-                )
-            }
+            let usage = ConversationUsageSnapshot(
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                cacheReadTokens: cacheReadTokens,
+                cacheCreationTokens: cacheCreationTokens
+            )
+            model.contextUsage = usage
+            updateActiveRun { $0.usage = usage }
 
         case let .apiRetry(message, attempt, maxRetries, delayMs):
             guard acceptTurnEvent(event) else { return }
@@ -3319,6 +3333,16 @@ final class EngineConversationSource: ConversationSource {
         case let .messageIdentity(messageId):
             guard acceptTurnEvent(event) else { return }
             pendingAssistantIdentity = messageId
+
+        case let .promptSuggestionState(enabled, notice):
+            model.promptSuggestionEnabled = enabled
+            model.promptSuggestionNotice = notice
+
+        case let .promptSuggestion(suggestion, uuid, sessionId):
+            guard model.activeSessionId == sessionId,
+                  !model.streaming, !model.sessionTransitionPending, model.pendingQuestions.isEmpty else { return }
+            model.promptSuggestion = suggestion
+            model.promptSuggestionUuid = uuid
 
         case let .messageRetracted(messageId):
             guard acceptTurnEvent(event) else { return }
@@ -3818,6 +3842,8 @@ final class EngineConversationSource: ConversationSource {
             )
 
         case let .sessionStarted(sessionId, mode):
+            model.promptSuggestion = nil
+            model.promptSuggestionUuid = nil
             guard SessionMode(dto: mode) == sessionMode else { return }
             // A fresh session began on the connection (1:1 with a successful
             // `NewSession`). Adopt it as active. Reset the transcript ONLY
@@ -3857,6 +3883,8 @@ final class EngineConversationSource: ConversationSource {
             refreshSessionAgentsAfterTransition()
 
         case let .sessionResumed(sessionId, mode, messages):
+            model.promptSuggestion = nil
+            model.promptSuggestionUuid = nil
             guard SessionMode(dto: mode) == sessionMode else { return }
             // A prior session was resumed (1:1 with a successful
             // `ResumeSession`). Adopt it as active AND surface the restored
@@ -3910,6 +3938,8 @@ final class EngineConversationSource: ConversationSource {
             reattachDurableTurnIfNeeded(sessionID: sessionId)
 
         case .sessionEnded:
+            model.promptSuggestion = nil
+            model.promptSuggestionUuid = nil
             // The current session ended (e.g. cleared). Drop the active id;
             // the next `SessionStarted`/`SessionResumed` re-establishes one.
             model.activeSessionId = ""
@@ -4007,6 +4037,7 @@ final class EngineConversationSource: ConversationSource {
                 description: command.description,
                 aliases: command.aliases,
                 argumentHint: command.argumentHint,
+                argumentNames: command.argumentNames,
                 menuDescription: command.menuDescription,
                 source: command.source,
                 hidden: command.hidden

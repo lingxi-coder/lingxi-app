@@ -222,7 +222,7 @@ fun CronScreen(
                         change(automation.change("model", model).withReasoning(com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic))
                     }
                     val reasoningOptions = modelState?.details?.get(automation.model)?.reasoningOptions.orEmpty().filter { it.persistable }
-                    val choices = listOf("{\"type\":\"automatic\"}" to "Automatic") + reasoningOptions.map { reasoningJson(it.selection).toString() to it.label }
+                    val choices = reasoningOptions.map { reasoningJson(it.selection).toString() to it.label }
                     CronChoice("Reasoning", automation.reasoningJson, choices.distinctBy { it.first }, fallbackLabel = automation.reasoningLabel) { change(automation.change("reasoning", org.json.JSONObject(it))) }
                     CronChoice("Notifications", automation.notificationPolicy, listOf("all" to "All runs", "failed" to "Failures only", "none" to "Off"), divider = false) { change(automation.change("notificationPolicy", it)) }
                     }

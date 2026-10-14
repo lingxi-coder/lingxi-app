@@ -5,6 +5,7 @@ import CryptoKit
 import Foundation
 @preconcurrency import Speech
 import SherpaOnnx
+import SherpaOnnxC
 
 private let maxLineBytes = 16 * 1024 * 1024
 private let maxInlineAudioBase64Bytes = maxLineBytes - (64 * 1024)
@@ -1240,6 +1241,16 @@ final class SherpaRuntime {
 
     static func modelDirectory(for entry: GeneratedOfflineModelEntry, root: URL) -> URL? {
         let base = root.appending(path: entry.id, directoryHint: .isDirectory)
+        return directoryContainingModel(entry, base: base)
+    }
+
+    // Release archives use upstream directory names, not our installed model IDs.
+    // Keep this lookup separate so runtime discovery remains scoped to entry.id.
+    static func extractedModelDirectory(for entry: GeneratedOfflineModelEntry, root: URL) -> URL? {
+        directoryContainingModel(entry, base: root)
+    }
+
+    private static func directoryContainingModel(_ entry: GeneratedOfflineModelEntry, base: URL) -> URL? {
         let fm = FileManager.default
         let candidates = [base] + ((try? fm.contentsOfDirectory(
             at: base,
@@ -1253,6 +1264,23 @@ final class SherpaRuntime {
                 return fm.fileExists(atPath: candidate.appending(path: $0).path, isDirectory: &isDirectory) && isDirectory.boolValue
             }
         }
+    }
+
+    static func meloModelConfiguration(directory: URL) -> SherpaOnnxOfflineTtsVitsModelConfig {
+        sherpaOnnxOfflineTtsVitsModelConfig(
+            model: directory.appending(path: "model.onnx").path,
+            lexicon: directory.appending(path: "lexicon.txt").path,
+            tokens: directory.appending(path: "tokens.txt").path,
+            dictDir: directory.appending(path: "dict").path
+        )
+    }
+
+    static func makeOfflineTts(_ config: inout SherpaOnnxOfflineTtsConfig) throws -> SherpaOnnxOfflineTtsWrapper {
+        let tts = withUnsafePointer(to: &config) { SherpaOnnxOfflineTtsWrapper(config: $0) }
+        guard tts.tts != nil else {
+            throw HelperError.synthesisFailed("the offline speech model could not be initialized; check its installed files")
+        }
+        return tts
     }
 
     static func transcribe(samples: [Float], sampleRate: Int, languageIdentifier: String, modelID: String? = nil, root: URL) throws -> HelperTranscript {
@@ -1347,7 +1375,7 @@ final class SherpaRuntime {
                 maxNumSentences: 2,
                 silenceScale: 0.2
             )
-            let tts = withUnsafePointer(to: &config) { SherpaOnnxOfflineTtsWrapper(config: $0) }
+            let tts = try makeOfflineTts(&config)
             let collector = PCM16SampleCollector(maximumBytes: maximumPayloadBytes, cancellation: cancellation)
             let context = Unmanaged.passUnretained(collector).toOpaque()
             let generated = tts.generateWithConfig(
@@ -1366,12 +1394,7 @@ final class SherpaRuntime {
         case .ttsVits:
             var config = sherpaOnnxOfflineTtsConfig(
                 model: sherpaOnnxOfflineTtsModelConfig(
-                    vits: sherpaOnnxOfflineTtsVitsModelConfig(
-                        model: directory.appending(path: "model.int8.onnx").path,
-                        lexicon: directory.appending(path: "lexicon.txt").path,
-                        tokens: directory.appending(path: "tokens.txt").path,
-                        dataDir: directory.appending(path: "dict").path
-                    )
+                    vits: meloModelConfiguration(directory: directory)
                 ),
                 ruleFsts: [
                     directory.appending(path: "phone.fst").path,
@@ -1381,7 +1404,7 @@ final class SherpaRuntime {
                 maxNumSentences: 2,
                 silenceScale: 0.2
             )
-            let tts = withUnsafePointer(to: &config) { SherpaOnnxOfflineTtsWrapper(config: $0) }
+            let tts = try makeOfflineTts(&config)
             let collector = PCM16SampleCollector(maximumBytes: maximumPayloadBytes, cancellation: cancellation)
             let context = Unmanaged.passUnretained(collector).toOpaque()
             let generated = tts.generateWithConfig(
@@ -2073,7 +2096,7 @@ actor ModelStore {
             }
             _ = try shell("/usr/bin/tar", ["-xf", archive.path, "-C", staging.path])
             try Self.ensureNoSymlinks(in: staging)
-            guard let extracted = SherpaRuntime.modelDirectory(for: model, root: staging) else {
+            guard let extracted = SherpaRuntime.extractedModelDirectory(for: model, root: staging) else {
                 throw HelperError.download("the downloaded archive did not contain the expected model files")
             }
             try checkInstallActive(modelID, token: token)
@@ -2421,9 +2444,11 @@ actor HelperStateStore {
 
     func snapshot(
         message: String?,
-        revision: UInt64? = nil
+        revision: UInt64? = nil,
+        configurationOverride: AudioConfigurationV4? = nil
     ) async -> HelperSnapshot {
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
+        let configuration = configurationOverride ?? audioConfiguration
         return HelperSnapshot(
             helper: .init(state: "running", message: message ?? helperMessage),
             permissions: .init(
@@ -2433,12 +2458,12 @@ actor HelperStateStore {
             owner: owner,
             activity: activity,
             localeTag: currentLocaleTag(),
-            recognizerAvailable: recognizerAvailability(for: activeLanguage),
+            recognizerAvailable: recognizerAvailability(for: resolvedLanguage(nil, configuration: configuration)),
             recognition: recognitionSnapshot,
             playback: playbackSnapshot,
             voices: availableVoices(root: storageRoot),
             models: await models.snapshots(),
-            capabilities: await audioCapabilities(speechStatus: speechStatus),
+            capabilities: await audioCapabilities(speechStatus: speechStatus, configuration: configuration),
             configurationRevision: revision ?? audioConfigurationRevision,
             currentOperation: activeRequestIdentity.flatMap { identity in
                 activeRequestOwner.map { HelperAudioCurrentOperation(identity: identity, owner: $0) }
@@ -2452,9 +2477,8 @@ actor HelperStateStore {
         )
     }
 
-    private func audioCapabilities(speechStatus: SFSpeechRecognizerAuthorizationStatus) async -> HelperAudioCapabilities {
+    private func audioCapabilities(speechStatus: SFSpeechRecognizerAuthorizationStatus, configuration: AudioConfigurationV4) async -> HelperAudioCapabilities {
         let microphone = Self.microphonePermissionState()
-        let configuration = audioConfiguration
         let language = resolvedLanguage(nil, configuration: configuration)
         let recognitionRoute = await resolveRecognitionRoute(
             configuration: configuration,
@@ -2967,7 +2991,8 @@ actor HelperStateStore {
     private func dispatchCommand(_ input: [String: Any], commandType: String) async throws -> HelperResponse {
         switch commandType {
         case "get_snapshot":
-            return HelperResponse(type: "snapshot", snapshot: await snapshot(message: nil), transcript: nil, recording: nil, models: nil, model: nil, error: nil)
+            let configuration = input["configuration"].map { AudioConfigurationNormalizer.normalize($0) }
+            return HelperResponse(type: "snapshot", snapshot: await snapshot(message: nil, configurationOverride: configuration), transcript: nil, recording: nil, models: nil, model: nil, error: nil)
         case "request_authorization":
             let permissions = input["permissions"] as? [String] ?? []
             try await requestPermissions(permissions)

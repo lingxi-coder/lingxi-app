@@ -1,7 +1,7 @@
 import { questionAnswers } from './AskUserQuestionSummary';
 import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
-import { toolDisplayHeader, toolHasBody } from '../model/runItem';
+import { toolDisplayHeader } from '../model/runItem';
 import { Disclosure } from './Disclosure';
 import { ToolCall, toolIconName } from './ToolCall';
 import { ToolActivityIcon } from './ToolActivityIcon';
@@ -30,14 +30,9 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
   }
   const singleTool = group.tools.length === 1 ? group.tools[0] : undefined;
   if (singleTool) {
-    const singleView = toolDisplayHeader(singleTool);
-    // A lone summary-only call has nothing more to reveal. Let the tool row
-    // carry its headline and status without a duplicate group disclosure.
-    if (!toolHasBody(singleTool) || /permission/i.test(`${singleTool.tool} ${singleView.label} ${singleView.title}`)) {
-      return <div className="transcript-tool-group">
-        <ToolCall item={singleTool} modUiSessionId={modUiSessionId} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
-      </div>;
-    }
+    return <div className="transcript-tool-group">
+      <ToolCall item={singleTool} modUiSessionId={modUiSessionId} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
+    </div>;
   }
   const failed = group.tools.filter((tool) => tool.status === 'error').length;
   const lastTool = group.tools.at(-1);
@@ -51,7 +46,7 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
       label={`${summary}${failureSummary} · ${group.tools.length} tools`}
-      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: lastTool.status === 'error' ? t.danger : t.text3 } as CSSProperties}
+      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: t.text3 } as CSSProperties}
       summary={<>
         <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ToolActivityIcon name={toolIconName(lastTool.view.verb, lastTool.tool, lastTool.view.icon)} /></span>
         <span title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>

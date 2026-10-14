@@ -1,6 +1,6 @@
 import type { DocPage } from './types';
 
-const source = 'https://github.com/lingxi-coder/llm-client/blob/1a60e73ad12e663be768232a91cbd3ea693aca6e';
+const source = 'https://github.com/lingxi-coder/llm-client';
 
 export const llmPages: DocPage[] = [
   {
@@ -12,21 +12,33 @@ export const llmPages: DocPage[] = [
       zh: '独立的 Rust 模型客户端，统一供应商协议、类型化请求、流式响应、图像、嵌入向量与模型目录。',
     },
     packageName: 'lingxi-llm-client',
-    sourceUrl: `${source}/README.en.md`,
+    sourceUrl: source,
+    sources: [{ repo: 'lingxi-app', path: 'Cargo.toml' }, { repo: 'llm-client', path: 'Cargo.toml' }, { repo: 'llm-client', path: 'src/lib.rs' }, { repo: 'llm-client', path: 'src/client/builder.rs' }, { repo: 'llm-client', path: 'src/client/live.rs' }, { repo: 'llm-client', path: 'src/protocol/llm.rs' }, { repo: 'llm-client', path: 'src/presets.rs' }],
     sections: [
       {
         id: 'install',
-        title: { en: 'Install from Git', zh: '从 Git 安装' },
+        title: { en: 'Use the documented working tree', zh: '使用本文工作树' },
         paragraphs: [{
-          en: 'The package is lingxi-llm-client 0.3.0 and the Rust import is lingxi_llm_client. Use Rust 1.94 or later. This reference pins the source revision used to document the API; keep the application and runtime on the same revision.',
-          zh: 'Cargo 包名是 lingxi-llm-client，当前版本为 0.3.0，Rust 导入名为 lingxi_llm_client。需要 Rust 1.94 或更新版本。这里固定了本文所依据的源码版本；应用与运行时应使用相同版本。',
+          en: 'The package is lingxi-llm-client 0.3.0 and the Rust import is lingxi_llm_client. Use Rust 1.94 or later. This handbook documents the current workspace, including uncommitted APIs. Place a separate consumer directory beside llm-client and use its local path. The source baseline records SDK HEAD, dirty files and the product’s actual pinned revision independently; a version number alone does not establish API availability.',
+          zh: 'Cargo 包名是 lingxi-llm-client，当前版本为 0.3.0，Rust 导入名为 lingxi_llm_client。需要 Rust 1.94 或更新版本。本手册描述当前工作区，包含未提交 API。在 llm-client 旁新建独立消费者目录，使用本地 path。源码基线分别记录 SDK HEAD、修改文件与产品实际固定版本；版本号本身不能证明 API 可用。',
         }],
         code: [{
-          label: 'Cargo.toml · dependency excerpt / 依赖片段',
-          language: 'toml',
-          code: `[dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client", rev = "1a60e73ad12e663be768232a91cbd3ea693aca6e" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }`,
+          label: { en: 'Cargo.toml · complete isolated consumer', zh: 'Cargo.toml · 完整隔离消费者' },
+          language: 'toml', verification: 'manual', exampleId: 'llm-working-tree-manifest',
+          code: `[package]
+name = "handbook-llm-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+lingxi-llm-client = { path = "../llm-client", features = ["realtime-websocket"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+async-trait = "0.1"
+futures = "0.3"`,
         }],
         note: {
           en: 'The default feature set is empty. Enable responses-websocket or realtime-websocket for the corresponding built-in WebSocket transport, and tokenizer-* features for offline tokenizers.',
@@ -37,18 +49,19 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }`,
         id: 'first-request',
         title: { en: 'Send your first request', zh: '发送第一个请求' },
         paragraphs: [{
-          en: 'Build a client from the built-in profiles, choose a region, and supply a valid credential for each request. The openai profile and gpt-4.1-mini model are catalog entries; your provider account still needs access to the model.',
-          zh: '从内置连接配置创建客户端，选择区域，并在每次请求中提供有效凭据。openai 连接与 gpt-4.1-mini 模型来自内置目录；供应商账户仍需具有该模型的访问权限。',
+          en: 'Select the OpenAI profile from the built-in catalog, choose a region, and supply a valid credential for each request. Other profiles can require host-provided authenticators before build; registering the full catalog is not a ready-to-use configuration. The openai profile and gpt-4.1-mini model are catalog entries; your provider account still needs access to the model.',
+          zh: '从内置目录选择 OpenAI 连接，指定区域，并在每次请求中提供有效凭据。其他连接可能要求 build 前注册宿主认证器；登记完整目录不代表配置已可直接运行。openai 连接与 gpt-4.1-mini 模型来自内置目录；供应商账户仍需具有该模型的访问权限。',
         }],
         code: [{
-          label: 'src/main.rs · complete example / 完整示例',
+          label: { en: 'src/main.rs · complete example', zh: 'src/main.rs · 完整示例' }, verification: 'compile', exampleId: 'llm-first-request',
           language: 'rust',
           code: `use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage, Region, Secret};
 use lingxi_llm_client::{builtin_providers, LlmClientBuilder, RequestOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let profiles = builtin_providers()?;
+    let profiles = builtin_providers()?.into_iter()
+        .filter(|profile| profile.profile_name == "openai").collect::<Vec<_>>();
     let client = LlmClientBuilder::new(&profiles)?
         .with_region(Region::International)
         .build()?;
@@ -64,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }`,
         }],
         note: {
-          en: 'The example reads OPENAI_API_KEY itself. The client does not discover, refresh, or persist secrets. Use the credential for the exact selected profile and account.',
-          zh: '示例自行读取 OPENAI_API_KEY。客户端不会自动查找、刷新或持久化密钥。凭据必须属于实际选择的连接与账户。',
+          en: 'The example reads OPENAI_API_KEY itself. The client does not discover, refresh, or persist secrets; OPENAI_API_KEY is read only by this example. The model name is a configured request ID, not a guarantee of live entitlement. Use the credential for the exact selected profile and account.',
+          zh: '示例自行读取 OPENAI_API_KEY。客户端不会自动查找、刷新或持久化密钥；仅此示例读取 OPENAI_API_KEY。模型名是已配置请求 ID，不保证真实账户权限。凭据必须属于实际选择的连接与账户。',
         },
       },
       {
@@ -89,6 +102,115 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
           { en: 'Keep one long-lived client. Model, reasoning controls, service tier, credentials, and timeouts are request-scoped.', zh: '复用长期存活的客户端。模型、推理控制、服务等级、凭据与超时均属于请求级设置。' },
         ],
       },
+      {
+        "id": "composition",
+        "title": {
+          "en": "Composition and public services",
+          "zh": "组合与公共服务"
+        },
+        "paragraphs": [
+          {
+            "en": "The client is one standalone Rust crate, not the Agent engine. A shared client publishes immutable configuration revisions; chat, images, embeddings, audio, decisions and provider-native resources capture the appropriate revision for each operation. Builder registrations determine the actual codecs, authenticators, transport, directories, attachment resolver and account sources available to a profile.",
+            "zh": "客户端是一个独立 Rust crate，不是 Agent 引擎。共享客户端发布不可变配置修订；Chat、图像、嵌入、音频、决策与供应商原生资源在每次操作捕获对应修订。Builder 注册决定连接实际可用的 codec、认证器、传输、目录、附件 resolver 与账户来源。"
+          }
+        ],
+        "bullets": [
+          {
+            "en": "LlmClientBuilder::with_transport injects a host HTTP implementation without constructing a network client. register_codec/register_authenticator replace the matching registry entry; custom transports must expose raw provider responses and avoid hidden retry/redirect policy.",
+            "zh": "LlmClientBuilder::with_transport 注入宿主 HTTP 实现，不创建网络客户端。register_codec/register_authenticator 替换对应注册项；自定义传输应暴露原始供应商响应，避免隐藏重试/重定向策略。"
+          },
+          {
+            "en": "BuildError::MissingRegion, MissingCodec and MissingAuthenticator reject incomplete composition before the first model request. The built-in builder supplies ApiKey, Bearer and ChatGptPlan authenticators; full catalog profiles such as CopilotBearer require the matching host registration. Select only the intended profiles for a small standalone client.",
+            "zh": "BuildError::MissingRegion、MissingCodec 与 MissingAuthenticator 会在首个模型请求前拒绝不完整组合。内置 builder 提供 ApiKey、Bearer 与 ChatGptPlan 认证器；完整目录中的 CopilotBearer 等连接要求对应宿主注册。独立小型客户端只选择实际需要的连接。"
+          },
+          {
+            "en": "Use client.snapshot() when preflight, execution and cost must share a fixed revision. A later ClientConfigManager publication changes future live calls, not previously captured snapshots.",
+            "zh": "预检、执行与成本需共享固定修订时，使用 client.snapshot()。之后 ClientConfigManager 发布配置改变后续实时调用，不改变已捕获快照。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Exact-profile cloud audio",
+              "zh": "精确连接云端音频"
+            },
+            "href": "/docs/llm-audio"
+          },
+          {
+            "label": {
+              "en": "Output contracts and decisions",
+              "zh": "输出约定与决策"
+            },
+            "href": "/docs/llm-controls"
+          },
+          {
+            "label": {
+              "en": "Native resources and hosted tools",
+              "zh": "原生资源与托管工具"
+            },
+            "href": "/docs/llm-native-services"
+          }
+        ]
+      },
+      {
+        "id": "mock-transport",
+        "title": {
+          "en": "Test request contracts without a provider",
+          "zh": "不连接供应商的请求约定测试"
+        },
+        "paragraphs": [
+          {
+            "en": "This complete test uses the same public builder and Chat facade as an application, but an injected Transport supplies a deterministic Responses envelope. It asserts the model and input reached the wire and exactly one send occurred. It establishes local protocol behavior only; it sends no real provider request.",
+            "zh": "此完整测试使用应用相同的公共 builder 与 Chat 入口，由注入 Transport 提供确定的 Responses 响应体。测试断言模型与输入到达协议层且只发送一次，只证明本地协议行为，不向真实供应商发送请求。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Executable mock Transport test",
+              "zh": "可执行 mock Transport 测试"
+            },
+            "language": "rust",
+            "verification": "mock",
+            "exampleId": "llm-transport-mock",
+            "code": "#[cfg(test)]\nmod tests {\n    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};\n    use async_trait::async_trait;\n    use lingxi_llm_client::{builtin_providers, HttpRequest, HttpResponse, LlmClientBuilder, RequestOptions, StreamResponse, Transport};\n    use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage, LlmError, Region, Secret};\n\n    struct MockTransport { sends: AtomicUsize }\n    #[async_trait]\n    impl Transport for MockTransport {\n        async fn send(&self, request: HttpRequest) -> Result<StreamResponse, LlmError> {\n            self.sends.fetch_add(1, Ordering::SeqCst);\n            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();\n            assert_eq!(body[\"model\"], \"gpt-4.1-mini\");\n            assert!(body.get(\"input\").is_some());\n            Ok(HttpResponse {\n                status: 200, headers: vec![],\n                body: serde_json::to_vec(&serde_json::json!({\n                    \"id\":\"resp_mock\", \"object\":\"response\", \"status\":\"completed\",\n                    \"model\":\"gpt-4.1-mini\", \"output\":[{\n                        \"id\":\"msg_mock\", \"type\":\"message\", \"status\":\"completed\", \"role\":\"assistant\",\n                        \"content\":[{\"type\":\"output_text\", \"text\":\"Mock answer\", \"annotations\":[]}]\n                    }], \"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}\n                })).unwrap().into(),\n            }.into())\n        }\n    }\n\n    #[tokio::test]\n    async fn public_client_dispatches_once() {\n        let http = Arc::new(MockTransport { sends: AtomicUsize::new(0) });\n        let profiles = builtin_providers().unwrap().into_iter()\n            .filter(|profile| profile.profile_name == \"openai\").collect::<Vec<_>>();\n        let client = LlmClientBuilder::with_transport(http.clone(), &profiles)\n            .with_region(Region::International).build().unwrap();\n        let mut request = ChatRequest::new(\"gpt-4.1-mini\");\n        request.messages.push(ConversationMessage::user_text(\"Hello\"));\n        let options = RequestOptions { credential: Some(Secret::new(\"mock-key\".into())), ..Default::default() };\n        let response = client.chat().complete_in(\"openai\", &request, &options).await.unwrap();\n        assert_eq!(response.message.text(), \"Mock answer\");\n        assert_eq!(http.sends.load(Ordering::SeqCst), 1);\n    }\n}"
+          }
+        ]
+      },
+      {
+        "id": "pinned-install",
+        "title": {
+          "en": "Install a fixed revision separately",
+          "zh": "独立安装固定修订"
+        },
+        "paragraphs": [
+          {
+            "en": "The complete SHA below is an independent fixed-revision installation example. Validate it as a separate consumer; the generated source baseline shows the actual product dependency and current llm-client workspace HEAD independently. The working-tree examples above are not evidence that every new API is available at this revision.",
+            "zh": "以下完整 SHA 是独立的固定修订安装示例，应作为独立消费者验证；生成的源码基线分别展示产品实际依赖与当前 llm-client 工作树 HEAD。上方工作树示例不能证明所有新 API 在该修订可用。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Cargo.toml · separate pinned consumer",
+              "zh": "Cargo.toml · 独立固定版本消费者"
+            },
+            "language": "toml",
+            "verification": "manual",
+            "exampleId": "llm-pinned-manifest",
+            "code": "[package]\nname = \"handbook-llm-pinned\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nlingxi-llm-client = { git = \"https://github.com/lingxi-coder/llm-client.git\", rev = \"87db6e234e32cbc251a128d6b370cdda36c4d0c0\" }\ntokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\"] }"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "System source baseline and dependency revisions",
+              "zh": "系统源码基线与依赖修订"
+            },
+            "href": "/docs/system-overview"
+          }
+        ]
+      },
     ],
   },
   {
@@ -97,7 +219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     title: { en: 'Requests & execution', zh: '请求与执行' },
     description: { en: 'Compose typed model input and control each physical attempt with draft, prepare, dispatch, and collect.', zh: '构建类型化模型输入，通过草稿、准备、发送与收集阶段控制每一次实际调用。' },
     packageName: 'lingxi-llm-client',
-    sourceUrl: `${source}/src/client/prepared.rs`,
+    sourceUrl: source,
+    sources: [{ repo: 'llm-client', path: 'src/client/options.rs' }, { repo: 'llm-client', path: 'src/client/prepared.rs' }, { repo: 'llm-client', path: 'src/client/executor.rs' }, { repo: 'llm-client', path: 'src/client/requests.rs' }, { repo: 'llm-client', path: 'src/protocol/llm.rs' }, { repo: 'llm-client', path: 'src/codecs/mod.rs' }, { repo: 'llm-client', path: 'src/transport.rs' }, { repo: 'llm-client', path: 'tests/execution_contracts.rs' }],
     sections: [
       {
         id: 'chat-request',
@@ -116,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         code: [{
           label: 'Typed input · excerpt / 类型化输入片段',
-          language: 'rust',
+          language: 'rust', verification: 'excerpt',
           code: `use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage};
 
 let mut request = ChatRequest::new("gpt-4.1-mini");
@@ -149,7 +272,7 @@ request.max_tokens = Some(1024);`,
         ],
         code: [{
           label: 'Host execution · excerpt with existing client/request/options / 宿主执行片段',
-          language: 'rust',
+          language: 'rust', verification: 'excerpt',
           code: `use lingxi_llm_client::codecs::RequestMode;
 
 let snapshot = client.snapshot();
@@ -179,6 +302,77 @@ let response = answer?;`,
           { name: 'LlmClient::count_tokens_exact_in', signature: 'pub async fn count_tokens_exact_in(&self, profile: &str, request: &ChatRequest, options: &RequestOptions) -> Result<Option<u64>, LlmError>', description: { en: 'Use Anthropic exact input counting. Unsupported protocols return None; counting errors stay errors and no answer is generated.', zh: '使用 Anthropic 精确输入计数。不支持的协议返回 None；计数错误仍为错误，且不会生成回答。' } },
         ],
       },
+      {
+        "id": "wire-pipeline",
+        diagram: {
+          src: '/docs-assets/llm-request-flow.svg',
+          alt: { en: 'Model request from snapshot and route admission through attachments, codec, authentication and transport to decoded events and host tools', zh: '模型请求由快照与路由准入经过附件、codec、认证和传输，形成解码事件并交给宿主工具' },
+          caption: { en: 'The SDK owns provider communication. Harness owns tool execution, permissions, history and attempt accounting.', zh: 'SDK 负责供应商通信；Harness 负责工具执行、权限、历史与逐次结算。' },
+        },
+        "title": {
+          "en": "From typed input to transport",
+          "zh": "类型化输入到传输"
+        },
+        "steps": [
+          {
+            "en": "Capture configuration, resolve model/profile/region/protocol and check explicit controls, continuation, hosted-tool and file constraints.",
+            "zh": "捕获配置，解析模型、连接、区域与协议，检查显式控制、续接、托管工具与文件约束。"
+          },
+          {
+            "en": "Resolve host attachments, choose inline/provider-file binding and capture request-local file provenance. A generation preflight can perform attachment I/O and uploads.",
+            "zh": "解析宿主附件，选择内联/供应商文件绑定并捕获请求级文件来源。生成预检可能执行附件 I/O 与上传。"
+          },
+          {
+            "en": "WireCodec encodes the selected protocol using CodecContext/EncodeRequest. Apply the host finalizer and authenticate the final bytes once.",
+            "zh": "WireCodec 使用 CodecContext/EncodeRequest 编码所选协议，应用宿主 finalizer 并对最终字节认证一次。"
+          },
+          {
+            "en": "Transport returns status/headers and a raw body stream. For completion collect then decode; for streaming use the codec decoder and accounting observations per chunk.",
+            "zh": "Transport 返回状态、响应头与原始响应体流。非流式先收集再解码；流式按传输块使用 codec decoder 与结算观测。"
+          },
+          {
+            "en": "Return canonical content, usage, inference facts and scoped continuation. The host executes local tools, owns transcript persistence, chooses another round and performs cleanup.",
+            "zh": "返回标准内容、用量、推理事实与作用域续接。宿主执行本地工具、持久化转录、选择下一轮并清理资源。"
+          }
+        ],
+        "note": {
+          "en": "A request admission failure can occur before transport; a response parsing failure can occur after the provider has accepted and charged a call. Do not use successful JSON decoding as the boundary for recording a physical attempt.",
+          "zh": "请求准入失败可能发生于传输前；响应解析失败可能发生于供应商已接受并收费后。不能以 JSON 解码成功作为记录实际尝试的边界。"
+        }
+      },
+      {
+        "id": "input-replay",
+        "title": {
+          "en": "Tools, native content and continuation",
+          "zh": "工具、原生内容与续接"
+        },
+        "paragraphs": [
+          {
+            "en": "ConversationMessage carries canonical ContentBlock values and protocol-tagged native_options. Text, thinking, signatures, tool IDs and exact tool argument JSON have distinct replay roles. ProviderContent belongs to its original protocol and is rejected on incompatible replay; raw ProviderEvent observations are not transcript content.",
+            "zh": "ConversationMessage 携带标准 ContentBlock 与协议标记 native_options。文本、思考、签名、工具 ID 与精确工具参数 JSON 具有不同重放职责。ProviderContent 属于原协议，不兼容重放会拒绝；原始 ProviderEvent 观测不是转录内容。"
+          },
+          {
+            "en": "A completed response produces a reusable ContinuationRef only with stable account_scope. The next request carries that reference and only new input. It must use the original executed profile, endpoint, model and account; raw response_id alone is not a portable continuation.",
+            "zh": "仅在 account_scope 稳定时，完成响应产生可复用 ContinuationRef。下一次请求携带该引用与新输入，必须使用原实际执行连接、端点、模型与账户；单独 raw response_id 不是可移植续接。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Attempt accounting and retry policy",
+              "zh": "逐次结算与重试策略"
+            },
+            "href": "/docs/llm-execution-accounting"
+          },
+          {
+            "label": {
+              "en": "Attachments and provider files",
+              "zh": "附件与供应商文件"
+            },
+            "href": "/docs/llm-files"
+          }
+        ]
+      },
     ],
   },
   {
@@ -187,7 +381,8 @@ let response = answer?;`,
     title: { en: 'Streaming & cancellation', zh: '流式响应与取消' },
     description: { en: 'Read normalized events or per-chunk observations while preserving tools, native content, usage, and terminal errors.', zh: '读取标准化事件或逐传输块观测，保留工具、原生内容、用量与终止错误。' },
     packageName: 'lingxi-llm-client',
-    sourceUrl: `${source}/src/client/stream.rs`,
+    sourceUrl: source,
+    sources: [{ repo: 'llm-client', path: 'src/client/stream.rs' }, { repo: 'llm-client', path: 'src/client/session.rs' }, { repo: 'llm-client', path: 'src/protocol/llm.rs' }, { repo: 'llm-client', path: 'src/stream_assembly.rs' }, { repo: 'llm-client', path: 'src/framing/sse.rs' }, { repo: 'llm-client', path: 'src/framing/eventstream.rs' }, { repo: 'llm-client', path: 'tests/model_stream.rs' }, { repo: 'llm-client', path: 'tests/structured_output.rs' }],
     sections: [
       {
         id: 'events',
@@ -197,7 +392,7 @@ let response = answer?;`,
           zh: 'ModelStream 自带异步 next()，无需导入 StreamExt。打开流或读取流时均可能失败。应一直读取到 None，包括 End 事件之后，再将报告视为最终结果。',
         }],
         code: [{
-          label: 'Streaming function · reusable excerpt, call from an async host / 可复用函数片段',
+          label: { en: 'Complete streaming function', zh: '完整流式函数' }, verification: 'compile', exampleId: 'llm-stream-text',
           language: 'rust',
           code: `use lingxi_llm_client::protocol::{ChatRequest, StreamEvent};
 use lingxi_llm_client::{LlmClient, RequestOptions};
@@ -241,7 +436,7 @@ async fn stream_text(
         ],
         code: [{
           label: 'Chunk observation · excerpt with an existing stream / 传输块观测片段',
-          language: 'rust',
+          language: 'rust', verification: 'excerpt',
           code: `while let Some(batch) = stream.next_batch().await {
     // Persist these facts in the host before interpreting events.
     let usage = batch.usage;
@@ -281,6 +476,99 @@ async fn stream_text(
           zh: 'PreparedCall 的 WebSocket 执行需要实现 connect_websocket 的 Transport。发送失败不会重发当前调用。宿主负责重连、取消以及是否准备下一次调用。',
         },
       },
+      {
+        "id": "lossless-assembly",
+        "title": {
+          "en": "Preserve canonical and native stream data",
+          "zh": "保留标准与原生流数据"
+        },
+        "paragraphs": [
+          {
+            "en": "Use StreamAccumulator or ModelStream::collect_response when a host needs a complete assistant message. Assembly preserves sparse block indices, completed block order, thought signatures, native replay content and exact tool input JSON. The partial assembly on failure exposes unfinished blocks and incomplete tools; it must not be treated as a successful terminal tool request.",
+            "zh": "宿主需要完整助手消息时，使用 StreamAccumulator 或 ModelStream::collect_response。组装保留稀疏块索引、完成顺序、思考签名、原生重放内容与精确工具输入 JSON。失败时部分组装暴露未完成块与不完整工具，不能当作成功终止工具请求。"
+          }
+        ],
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Event family",
+                "zh": "事件族"
+              },
+              {
+                "en": "Consumer handling",
+                "zh": "消费者处理"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "TextDelta / TextDeltaJsUtf16",
+                  "zh": "TextDelta / TextDeltaJsUtf16"
+                },
+                {
+                  "en": "Display and assemble by block; retain exact UTF-16 units where present",
+                  "zh": "按块显示并组装；存在精确 UTF-16 单元时保留"
+                }
+              ],
+              [
+                {
+                  "en": "ReasoningDelta / ThoughtSignature / RedactedThinking",
+                  "zh": "ReasoningDelta / ThoughtSignature / RedactedThinking"
+                },
+                {
+                  "en": "Reasoning display and replay signatures/opaque data have separate roles",
+                  "zh": "思考显示与重放签名/不透明数据职责不同"
+                }
+              ],
+              [
+                {
+                  "en": "ToolCallDelta / BlockEnd",
+                  "zh": "ToolCallDelta / BlockEnd"
+                },
+                {
+                  "en": "Accumulate exact arguments and provider IDs; execute only a validated completed call",
+                  "zh": "累积精确参数与供应商 ID；仅执行已校验完成的调用"
+                }
+              ],
+              [
+                {
+                  "en": "ProviderContent / Native / NativeDelta",
+                  "zh": "ProviderContent / Native / NativeDelta"
+                },
+                {
+                  "en": "Preserve typed/native payload and protocol ownership",
+                  "zh": "保留类型化/原生载荷与协议归属"
+                }
+              ],
+              [
+                {
+                  "en": "ProviderEvent / NativeControl",
+                  "zh": "ProviderEvent / NativeControl"
+                },
+                {
+                  "en": "Observation/control only; not replayable message content or local tool calls",
+                  "zh": "仅观测/控制；不是可重放消息或本地工具调用"
+                }
+              ],
+              [
+                {
+                  "en": "Inference / WebSearch / FileSearch / End",
+                  "zh": "Inference / WebSearch / FileSearch / End"
+                },
+                {
+                  "en": "Retain facts, attribution and stop reason; continue until EOF",
+                  "zh": "保留事实、归因与停止原因；继续读取直到 EOF"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "A final End event and complete UsageReport are different facts. Provider streams can omit usage or fail after content; use usage_is_complete() and final inference when estimating cost. model_stream and structured_output tests validate local projection, not live streaming latency.",
+          "zh": "最终 End 事件与完整 UsageReport 是不同事实。供应商流可能遗漏用量或在内容之后失败；估算成本需检查 usage_is_complete() 与最终推理事实。model_stream 与 structured_output 测试验证本地投影，不证明真实流延迟。"
+        }
+      },
     ],
   },
   {
@@ -289,7 +577,8 @@ async fn stream_text(
     title: { en: 'Image API', zh: '图像 API' },
     description: { en: 'Generate, edit, and query native image tasks through a service independent of Chat.', zh: '通过独立于 Chat 的服务生成、编辑图像并查询原生图像任务。' },
     packageName: 'lingxi-llm-client',
-    sourceUrl: `${source}/docs/images.en.md`,
+    sourceUrl: source,
+    sources: [{ repo: 'llm-client', path: 'src/images/mod.rs' }, { repo: 'llm-client', path: 'src/images/wire.rs' }, { repo: 'llm-client', path: 'src/protocol/image.rs' }, { repo: 'llm-client', path: 'src/providers/dispatch.rs' }, { repo: 'llm-client', path: 'tests/images.rs' }],
     sections: [
       {
         id: 'generate',
@@ -299,7 +588,7 @@ async fn stream_text(
           zh: 'client.images() 与 Chat 共享配置和传输，但具有独立的请求、模型目录、凭据选项、能力与路由。chat().models() 不包含图像输出模型。',
         }],
         code: [{
-          label: 'Image function · excerpt, call from an async host / 图像函数片段',
+          label: { en: 'Image function · call from an async host', zh: '图像函数 · 从异步宿主调用' }, verification: 'compile', exampleId: 'llm-image-generation',
           language: 'rust',
           code: `use lingxi_llm_client::{builtin_providers, LlmClientBuilder};
 use lingxi_llm_client::protocol::{
@@ -307,7 +596,9 @@ use lingxi_llm_client::protocol::{
 };
 
 async fn generate(api_key: String) -> Result<(), Box<dyn std::error::Error>> {
-    let client = LlmClientBuilder::new(&builtin_providers()?)?
+    let profiles = builtin_providers()?.into_iter()
+        .filter(|profile| profile.profile_name == "openai").collect::<Vec<_>>();
+    let client = LlmClientBuilder::new(&profiles)?
         .with_region(Region::International).build()?;
     let request = ImageGenerationRequest {
         model: "gpt-image-1.5".into(),
@@ -362,6 +653,33 @@ async fn generate(api_key: String) -> Result<(), Box<dyn std::error::Error>> {
           zh: '图像调用不会自动重试、切换连接、轮询或持久化任务。超时后供应商仍可能继续生成。图像用量独立于 Chat token 成本估算；目标账户能力需要验证。',
         },
       },
+      {
+        "id": "image-lifecycle",
+        "title": {
+          "en": "Image dispatch, persistence and failure",
+          "zh": "图像发送、持久化与失败"
+        },
+        "paragraphs": [
+          {
+            "en": "capabilities_in validates an exact profile/model before resolving image attachments or dispatching. Generate/edit return ImageResponse, while submit/get_task expose only a supported provider-native task route. Image task references retain the original connection, endpoint, model and account; the host persists them and chooses polling/cancellation when the provider supports it.",
+            "zh": "capabilities_in 在解析图像附件或发送前校验精确连接/模型。Generate/edit 返回 ImageResponse；submit/get_task 仅用于受支持原生任务路由。图像任务引用保留原连接、端点、模型与账户；宿主持久化并按供应商支持选择轮询/取消。"
+          },
+          {
+            "en": "Retain native URLs/Base64 and output metadata before application processing. A provider timeout may leave generation running; a lost response must not silently become another image request. ImageError dispatch distinguishes not-sent, rejected, accepted and unknown outcomes for host recovery. Do not bill image generation through Chat token price assumptions.",
+            "zh": "应用处理前保留原生 URL/Base64 与输出元数据。供应商超时后生成可能仍在运行；响应丢失不能静默转为另一次图像请求。ImageError dispatch 区分未发送、拒绝、已接受与未知结果，供宿主恢复。不能假设图像生成适用 Chat token 价格。"
+          }
+        ],
+        "bullets": [
+          {
+            "en": "Application AttachmentRef inputs require an authorized resolver; provider image URL inputs remain provider-managed. Preserve existing transparency/mask semantics in the host rather than fabricating an unsupported option.",
+            "zh": "应用 AttachmentRef 输入要求已授权 resolver；供应商图像 URL 输入仍由供应商管理。宿主应保留已有透明度/遮罩语义，不能编造不支持的选项。"
+          },
+          {
+            "en": "images tests establish capability admission, encoding and typed task behavior with simulated responses. Live account model access, output quality, temporary URL expiration and target-device display require separate acceptance.",
+            "zh": "images 测试使用模拟响应证明能力准入、编码与类型化任务行为。真实账户模型权限、输出质量、临时 URL 过期与目标设备显示需单独验收。"
+          }
+        ]
+      },
     ],
   },
   {
@@ -370,7 +688,8 @@ async fn generate(api_key: String) -> Result<(), Box<dyn std::error::Error>> {
     title: { en: 'Providers, catalogs & pricing', zh: '供应商、目录与计价' },
     description: { en: 'Bind profiles, filter by region, manage catalogs, access native resources, and estimate cost from observed facts.', zh: '绑定连接、按区域过滤、管理目录、访问原生资源，并依据观测事实估算成本。' },
     packageName: 'lingxi-llm-client',
-    sourceUrl: `${source}/docs/api.en.md`,
+    sourceUrl: source,
+    sources: [{ repo: 'llm-client', path: 'src/client/store.rs' }, { repo: 'llm-client', path: 'src/client/resolve.rs' }, { repo: 'llm-client', path: 'src/configuration/model.rs' }, { repo: 'llm-client', path: 'src/configuration/sync.rs' }, { repo: 'llm-client', path: 'src/protocol/provider.rs' }, { repo: 'llm-client', path: 'src/client/frozen_pricing.rs' }, { repo: 'llm-client', path: 'src/token_count/request.rs' }, { repo: 'llm-client', path: 'data/capability-matrix-protocols.json' }, { repo: 'llm-client', path: 'data/capability-audit.json' }, { repo: 'llm-client', path: 'data/providers/openai.toml' }, { repo: 'llm-client', path: 'data/providers/anthropic.toml' }, { repo: 'llm-client', path: 'data/providers/qwen.toml' }, { repo: 'llm-client', path: 'tests/regions.rs' }],
     sections: [
       {
         id: 'profiles',
@@ -394,11 +713,12 @@ async fn generate(api_key: String) -> Result<(), Box<dyn std::error::Error>> {
         title: { en: 'Manage persistent configuration', zh: '管理持久化配置' },
         code: [{
           label: 'Managed client · async-host excerpt / 托管客户端片段',
-          language: 'rust',
+          language: 'rust', verification: 'excerpt',
           code: `use lingxi_llm_client::{builtin_providers, LlmClientBuilder};
 use lingxi_llm_client::protocol::Region;
 
-let profiles = builtin_providers()?;
+let profiles = builtin_providers()?.into_iter()
+        .filter(|profile| profile.profile_name == "openai").collect::<Vec<_>>();
 let (client, config) = LlmClientBuilder::new(&profiles)?
     .with_region(Region::International)
     .build_managed()?;
@@ -422,8 +742,8 @@ let profile = snapshot.profile("openai");`,
           en: 'Use client.provider::<T>(profile) to bind an exact connection to its provider client. Public clients include OpenAiClient, AnthropicClient, GoogleClient, DeepSeekClient, KimiClient, QwenClient, MiniMaxClient, ZhipuClient, XaiClient, OpenRouterClient, and GithubCopilotClient.',
           zh: '使用 client.provider::<T>(profile) 将精确连接绑定到供应商客户端。公开客户端包括 OpenAiClient、AnthropicClient、GoogleClient、DeepSeekClient、KimiClient、QwenClient、MiniMaxClient、ZhipuClient、XaiClient、OpenRouterClient 与 GithubCopilotClient。',
         }, {
-          en: 'Native resources keep their own types and support boundaries: files, retrieval, batches, background jobs, remote tools, speech, and realtime sessions vary by provider. Use the pinned source API guide for each provider resource. Realtime audio device capture and playback remain in the host.',
-          zh: '原生资源保留独立类型与支持边界：文件、检索、批处理、后台任务、远程工具、语音和实时会话因供应商而异。各供应商资源的细节见固定版本源码 API 指南。实时音频设备采集与播放仍由宿主负责。',
+          en: 'Native resources keep their own types and support boundaries: files, retrieval, batches, background jobs, remote tools, speech, and realtime sessions vary by provider. Use the generated current Rustdoc for complete resource types and signatures, and the provider resources chapter for scope and lifecycle constraints. Realtime audio device capture and playback remain in the host.',
+          zh: '原生资源保留独立类型与支持边界：文件、检索、批处理、后台任务、远程工具、语音和实时会话因供应商而异。完整资源类型与签名见生成的当前 Rustdoc，作用域与生命周期限制见供应商资源章节。实时音频设备采集与播放仍由宿主负责。',
         }],
         apis: [
           { name: 'LlmClient::provider', signature: 'pub fn provider<T: ProviderClient>(&self, profile_name: &str) -> Result<T, ProviderBindingError>', description: { en: 'Reject a mismatched provider/profile binding rather than inferring another route.', zh: '拒绝不匹配的供应商与连接绑定，不会推测其他路由。' } },
@@ -431,7 +751,7 @@ let profile = snapshot.profile("openai");`,
         ],
         code: [{
           label: 'Provider binding · excerpt with an existing client / 供应商绑定片段',
-          language: 'rust',
+          language: 'rust', verification: 'excerpt',
           code: `use lingxi_llm_client::providers::OpenAiClient;
 
 let openai = client.provider::<OpenAiClient>("openai")?;
@@ -455,6 +775,134 @@ let background = openai.background();`,
           { name: 'LlmClient::estimate_local_tokens_in', signature: 'pub fn estimate_local_tokens_in(&self, profile: &str, request: &ChatRequest) -> Result<LocalTokenEstimate, LocalTokenCountError>', description: { en: 'Estimate visible input offline using enabled mapped tokenizers; omissions are explicit and are not provider billing usage.', zh: '使用已启用且已映射的分词器离线估算可见输入；明确报告遗漏项，不代表供应商结费用量。' } },
         ],
         note: { en: 'Reasoning effort changes token consumption, not the declared unit rate. Catalogs and cost estimates do not establish live provider availability, a final invoice, or a host accounting ledger.', zh: '推理 effort 改变 token 消耗，不改变声明的单位费率。目录与成本估算不代表真实供应商可用性、最终账单或宿主结算账本。' },
+      },
+      {
+        "id": "authentication-hosting",
+        "title": {
+          "en": "Authentication and hosting boundaries",
+          "zh": "认证与云托管边界"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Route/auth class",
+                "zh": "路由/认证类型"
+              },
+              {
+                "en": "Host responsibility",
+                "zh": "宿主职责"
+              },
+              {
+                "en": "SDK responsibility",
+                "zh": "SDK 职责"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "API key / bearer",
+                  "zh": "API key / bearer"
+                },
+                {
+                  "en": "Select account and refresh/store valid secret",
+                  "zh": "选择账户并刷新/存储有效凭据"
+                },
+                {
+                  "en": "Encode configured headers once for the selected route",
+                  "zh": "按所选路由一次性编码配置请求头"
+                }
+              ],
+              [
+                {
+                  "en": "Restricted ChatGPT / Copilot routes",
+                  "zh": "受限 ChatGPT / Copilot 路由"
+                },
+                {
+                  "en": "Provide entitled account token and grant state",
+                  "zh": "提供有授权的账户 token 与 grant 状态"
+                },
+                {
+                  "en": "Enforce allowed route/resource policy; no generic API-key equivalence",
+                  "zh": "执行允许的路由/资源策略；不等同通用 API key"
+                }
+              ],
+              [
+                {
+                  "en": "Bedrock AWS SigV4",
+                  "zh": "Bedrock AWS SigV4"
+                },
+                {
+                  "en": "Provide credential and exact signing configuration",
+                  "zh": "提供凭据与精确签名配置"
+                },
+                {
+                  "en": "Encode hosted protocol and authenticate final bytes",
+                  "zh": "编码托管协议并认证最终字节"
+                }
+              ],
+              [
+                {
+                  "en": "Vertex / Azure / Foundry",
+                  "zh": "Vertex / Azure / Foundry"
+                },
+                {
+                  "en": "Provide project/location or deployment/resource and appropriate credential",
+                  "zh": "提供 project/location 或 deployment/resource 与适当凭据"
+                },
+                {
+                  "en": "Use the declared wrapper; native services opt in separately",
+                  "zh": "使用已声明包装协议；原生服务需单独启用"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "A provider-compatible gateway does not become the official provider just because it shares a protocol. Exact endpoint and provider identity checks gate native resources, decisions, hosted tools and account APIs. Builder codec support and model metadata establish local capabilities; account authorization and regional endpoint access remain independent.",
+            "zh": "供应商兼容网关不会因共享协议而成为官方供应商。精确端点与供应商身份检查限定原生资源、决策、托管工具与账户 API。Builder codec 支持与模型元数据证明本地能力；账户授权与区域端点访问仍独立。"
+          }
+        ]
+      },
+      {
+        "id": "catalog-provenance",
+        "title": {
+          "en": "Catalog provenance and verification",
+          "zh": "目录来源与验证"
+        },
+        "paragraphs": [
+          {
+            "en": "The checked-in provider TOML and capability matrices describe current implemented/admitted contracts, with provider/model/protocol-specific supported, unsupported or unknown facts. Directory sync can add observed models but does not invent their prices or native capabilities. A model removed from the static catalog can retain observed identity without retaining withdrawn static pricing.",
+            "zh": "仓库中的供应商 TOML 与能力矩阵描述当前实现/准入约定，按供应商、模型、协议记录 supported、unsupported 或 unknown。目录同步可添加观测模型，不编造价格或原生能力。模型从静态目录移除后可保留观测身份，但不保留撤回的静态价格。"
+          }
+        ],
+        "bullets": [
+          {
+            "en": "Record selected profile, wire model, source baseline and account region with validation results. Compile/mock tests prove public API/wire behavior; a live request separately proves that one account accepted one operation at that time.",
+            "zh": "验证结果记录所选连接、协议模型、源码基线与账户区域。编译/模拟测试证明公共 API/协议行为；真实请求单独证明某一账户在当时接受了某一操作。"
+          },
+          {
+            "en": "A full baseline mismatch between local SDK HEAD and the product’s dependency revision is visible in the handbook source data. Keep local path consumer verification separate from Git-pinned installation verification; do not edit production manifests or locks to make the examples compile.",
+            "zh": "本地 SDK HEAD 与产品依赖修订不同会显示于手册源码数据。工作树 path 消费者与 Git 固定安装分别验证，不能为示例编译而改生产清单或锁文件。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Current protocol feature matrix source",
+              "zh": "当前协议能力矩阵源码"
+            },
+            "href": "https://github.com/lingxi-coder/llm-client"
+          },
+          {
+            "label": {
+              "en": "Per-attempt usage and account query distinctions",
+              "zh": "逐次用量与账户查询的区别"
+            },
+            "href": "/docs/llm-execution-accounting"
+          }
+        ]
       },
     ],
   },

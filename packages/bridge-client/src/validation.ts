@@ -14,6 +14,7 @@ import type {
   AudioOwnerDto,
   AudioReadinessStateDto,
   ClientEvent,
+  FusionCatalogDto,
   MessageDto,
   SessionAgentMessageRowDto,
   NativeUiClientAddressDto,
@@ -992,10 +993,71 @@ function sessionMode(value: unknown, name: string): 'chat' | 'code' {
   return mode;
 }
 
+/** Catalogs retain editable excluded scopes, while execution requires admission. */
+export function validateFusionCatalog(value: unknown): FusionCatalogDto {
+  const catalog = object(value, 'Fusion catalog');
+  const validateScope = (value: unknown) => {
+    if (value !== 'user' && value !== 'project' && value !== 'local') throw new Error('invalid Fusion scope');
+  };
+  const validateGlobals = (value: unknown) => {
+    const globals = object(value, 'Fusion globals');
+    for (const key of ['enabled', 'proactive', 'slash_cross_provider_default', 'allow_cross_provider_for_agent']) {
+      if (globals[key] !== undefined) boolean(globals[key], `Fusion ${key}`);
+    }
+    if (globals['allowed_profiles'] !== undefined) stringArray(globals['allowed_profiles'], 'Fusion allowed profiles');
+  };
+  if (!Array.isArray(catalog['scopes'])) throw new Error('invalid Fusion scopes');
+  for (const value of catalog['scopes']) {
+    const scope = object(value, 'Fusion scope');
+    validateScope(scope['scope']);
+    boolean(scope['admitted'], 'Fusion scope admission');
+    string(scope['path'], 'Fusion scope path');
+    string(scope['revision'], 'Fusion scope revision');
+    if (!Array.isArray(scope['strategies'])) throw new Error('invalid Fusion strategies');
+    for (const value of scope['strategies']) {
+      const strategy = object(value, 'Fusion strategy');
+      string(strategy['id'], 'Fusion strategy id');
+      string(strategy['name'], 'Fusion strategy name');
+      object(strategy['config'], 'Fusion strategy config');
+    }
+    if (scope['default_strategy_id'] !== null) string(scope['default_strategy_id'], 'Fusion default strategy id');
+    if (scope['diagnostic'] !== null) string(scope['diagnostic'], 'Fusion scope diagnostic');
+    validateGlobals(scope['globals']);
+  }
+  validateGlobals(catalog['effective_globals']);
+  if (catalog['default_strategy'] !== null) {
+    const reference = object(catalog['default_strategy'], 'Fusion default strategy');
+    validateScope(reference['scope']);
+    string(reference['id'], 'Fusion default strategy id');
+  }
+  stringArray(catalog['diagnostics'], 'Fusion diagnostics');
+  return catalog as unknown as FusionCatalogDto;
+}
+
 export function validateClientEvent(value: unknown): ClientEvent {
   const input = object(value, 'client event');
   const type = string(input['type'], 'client event type');
   switch (type) {
+    case 'fusion_catalog': {
+      exactKeys(input, ['type', 'catalog_json'], 'Fusion catalog event');
+      const catalog_json = string(input['catalog_json'], 'Fusion catalog JSON');
+      validateFusionCatalog(JSON.parse(catalog_json));
+      return { type, catalog_json };
+    }
+    case 'fusion_strategy_resolved': {
+      exactKeys(input, ['type', 'operation_id', 'selection_json', 'error'], 'Fusion selection event');
+      const selection_json = optionalString(input['selection_json'], 'Fusion selection JSON');
+      const error = optionalString(input['error'], 'Fusion selection error');
+      if ((selection_json === undefined) === (error === undefined)) {
+        throw new Error('Fusion selection must carry exactly one result or error');
+      }
+      return {
+        type,
+        operation_id: integer(input['operation_id'], 'Fusion operation id'),
+        ...(selection_json === undefined ? {} : { selection_json }),
+        ...(error === undefined ? {} : { error }),
+      };
+    }
     case 'ui_control_result':
       exactKeys(input, ['type', 'request_id', 'response_json', 'metadata_json', 'error'], 'client event');
       if (input['response_json'] === undefined && input['error'] === undefined) {

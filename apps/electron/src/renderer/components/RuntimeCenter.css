@@ -17,7 +17,7 @@
 .runtime-summary-section + .runtime-summary-section { border-top: .5px solid var(--runtime-border); }
 .runtime-summary-section h2 { margin: 0 0 10px; padding: 0 8px; color: var(--runtime-muted); font-size: 14px; font-weight: 400; }
 .runtime-inspector { width: 390px; min-width: 390px; flex-shrink: 0; min-height: 0; display: flex; flex-direction: column; }
-.runtime-inspector-header { height: 56px; min-height: 56px; display: flex; align-items: center; gap: 8px; padding: 0 12px; }
+.runtime-inspector-header { height: var(--desktop-toolbar-height, 44px); min-height: var(--desktop-toolbar-height, 44px); display: flex; align-items: center; gap: 8px; padding: 0 12px; }
 .runtime-inspector-tabs { min-width: 0; flex: 1; display: flex; align-items: center; gap: 5px; overflow-x: auto; scrollbar-width: thin; }
 .runtime-inspector-landing { display: grid; align-content: center; flex: 1; padding: 32px; gap: 12px; }
 .runtime-section-detail { min-height: 0; padding: 20px 16px; overflow-wrap: anywhere; }

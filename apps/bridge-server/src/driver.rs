@@ -127,7 +127,8 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
             batch
                 .into_iter()
                 .filter_map(|command| {
-                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput { queue_delivery: None,
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
+                        queue_delivery: None,
                         text: command.text()?.to_owned(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
@@ -917,6 +918,10 @@ impl TurnDriver for OrchestratorTurnDriver {
         )
     }
 
+    async fn record_prompt_suggestion_submission(&self, text: &str) {
+        let _ = self.orchestrator.record_prompt_suggestion_submission(text).await;
+    }
+
     async fn ui_attach(&self, client_id: &str, surface: UiSurfaceDto) -> bool {
         let surface = match surface {
             UiSurfaceDto::Desktop => orchestrator::config::ModRenderSurface::Desktop,
@@ -1462,9 +1467,9 @@ mod tests {
         );
         let calls = streaming.captured_calls().await;
         let content = first_user_content(&calls[0].messages);
-        assert!(content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")));
+        assert!(content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")
+        ));
         assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
 

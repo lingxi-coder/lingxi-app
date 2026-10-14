@@ -218,8 +218,10 @@ fun RootScreen(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
+    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
+    onOpenVoiceSettings: () -> Unit = { onOpenSettings() },
     onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     modelSetupRequired: Boolean = false,
@@ -559,6 +561,14 @@ fun RootScreen(
     // releasing the held finger flips it off. The overlay renders above the
     // drawer + conversation.
     var voiceActive by remember { mutableStateOf(false) }
+    var audioGuidance by remember { mutableStateOf<com.lingxi.code.voice.AudioSetupGuidance?>(null) }
+    val captureState by com.lingxi.code.voice.VoiceCaptureStore.state.collectAsState()
+    LaunchedEffect(captureState.phase, captureState.errorMessage) {
+        if (captureState.phase == com.lingxi.code.voice.VoiceCapturePhase.Failed) {
+            audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(message = captureState.errorMessage ?: captureState.statusText)
+            voiceActive = false
+        }
+    }
 
     // FlowMode (心流) voice-orb overlay visibility — a TAP on the composer mic
     // flips it on (the long-press STT path still drives `voiceActive`). The
@@ -570,11 +580,19 @@ fun RootScreen(
 
     // Flow uses this actual Agent conversation; its audio controller pins each admitted route.
     val flowVoiceController = rememberFlowVoiceController()
+    val flowVoiceState by flowVoiceController.state.collectAsState()
+    LaunchedEffect(flowVoiceState.error) {
+        flowVoiceState.error?.let { error ->
+            audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(error.kind.name, error.message)
+            flowActive = false
+        }
+    }
     val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
     LaunchedEffect(chatViewModel, state.session.id, activeSessionMode, sourceScope) {
         flowVoiceController.pause()
         voiceSpeechPlayer.stop()
+        audioGuidance = null
     }
     LaunchedEffect(flowVoiceController, state.model.id, state.model.providerId) {
         flowVoiceController.updateSessionBinding(state.model.id, state.model.providerId)
@@ -606,6 +624,9 @@ fun RootScreen(
     val resolvedSettingsStore: SettingsStore =
         settingsStore ?: viewModel(factory = SettingsStore.factory(context))
     val settingsState by resolvedSettingsStore.state.collectAsState()
+    LaunchedEffect(settingsState.voice, settingsState.llmProviders) {
+        audioGuidance = null
+    }
     // The notifier holds ARMED TIMERS (upstream's 60s idle delay, 6s permission
     // delay), so a preference change has to be pushed at it rather than polled.
     // Keyed on the value, not just the ViewModel, so every edit lands.
@@ -630,7 +651,15 @@ fun RootScreen(
             if (!currentAutoPlayReplies.value || currentFlowActive.value) return@collect
             val text = completion.finalAssistantText.trim()
             if (text.isEmpty()) return@collect
-            runCatching { voiceSpeechPlayer.speak(text) }
+            runCatching {
+                voiceSpeechPlayer.speak(text, onError = { error ->
+                    audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(error.kind.name, error.message)
+                })
+            }.onFailure { error ->
+                if (error !is kotlinx.coroutines.CancellationException) {
+                    audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(message = error.message.orEmpty())
+                }
+            }
         }
     }
     LaunchedEffect(chatViewModel, resolvedSettingsStore) {
@@ -741,8 +770,13 @@ fun RootScreen(
         onPartialTranscript = { partial ->
             draft = appendVoiceTranscript(voiceDraftBase, partial)
         },
+        onError = { kind, message ->
+            audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.fromError(kind, message)
+            voiceActive = false
+        },
     )
     val onVoiceHoldStart: () -> Unit = {
+        audioGuidance = null
         voiceDraftBase = draft
         startVoiceCapture()
     }
@@ -1696,6 +1730,11 @@ fun RootScreen(
                     .imePadding(),
             ) {
                 ChatScreen(
+                    onSuggestionContext = chatViewModel::updatePromptSuggestionContext,
+                    onSuggestionFeedback = chatViewModel::promptSuggestionFeedback,
+                    pendingPermission = pendingPermission != null,
+                    effectivePermissionMode = settingsState.effectivePermissionMode,
+                    onOpenPermissionSettings = onOpenPermissionSettings,
                     state = state,
                     onSend = {
                         text ->
@@ -1730,9 +1769,9 @@ fun RootScreen(
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     // Ordinary mic and Flow Mode are separate controls.
                     onMicClick = {
-                        if (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE) {
-                            chatViewModel.reportHostError(settingsState.voiceCapability.recognitionReason ?: "Audio input needs configuration. Open audio settings.")
-                            onOpenSettings()
+                        if (!voiceActive && (!settingsState.voiceCapability.recognitionSupported ||
+                            settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE)) {
+                            audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.Configuration
                             return@ChatScreen
                         }
                         if (!voiceActive) voiceSpeechPlayer.stop()
@@ -1740,9 +1779,9 @@ fun RootScreen(
                         if (voiceActive) onVoiceHoldStart() else onVoiceHoldRelease()
                     },
                     onMicHoldStart = {
-                        if (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE) {
-                            chatViewModel.reportHostError(settingsState.voiceCapability.recognitionReason ?: "Audio input needs configuration. Open audio settings.")
-                            onOpenSettings()
+                        if (!settingsState.voiceCapability.recognitionSupported ||
+                            settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE) {
+                            audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.Configuration
                             return@ChatScreen
                         }
                         voiceSpeechPlayer.stop()
@@ -1755,20 +1794,24 @@ fun RootScreen(
                     },
                     onFlowModeClick = {
                         val realtime = settingsState.voice.conversation.mode == "realtime"
-                        if ((realtime && settingsState.voiceCapability.providerRealtime?.readiness != "ready") ||
+                        if (!flowActive && ((realtime && settingsState.voiceCapability.providerRealtime?.readiness != "ready") ||
                             (!realtime && (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE ||
-                            settingsState.voiceCapability.speechReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE))) {
-                            chatViewModel.reportHostError(settingsState.voiceCapability.recognitionReason ?: settingsState.voiceCapability.speechReason ?: "Voice conversation needs configuration.")
-                            onOpenSettings()
+                            settingsState.voiceCapability.speechReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE ||
+                            !settingsState.voiceCapability.recognitionSupported || !settingsState.voiceCapability.speechSupported)))) {
+                            audioGuidance = com.lingxi.code.voice.AudioSetupGuidance.Configuration
                             return@ChatScreen
                         }
+                        audioGuidance = null
                         flowActive = !flowActive
                         if (flowActive) voiceSpeechPlayer.stop()
                     },
                     flowModeActive = flowActive,
-                    voiceInputSupported = settingsState.voiceCapability.recognitionSupported,
-                    voiceConversationSupported = if (settingsState.voice.conversation.mode == "realtime") settingsState.voiceCapability.realtimeConversationSupported
-                        else settingsState.voiceCapability.recognitionSupported && settingsState.voiceCapability.speechSupported,
+                    // Unavailable actions stay reachable to explain how to configure them.
+                    voiceInputSupported = true,
+                    voiceConversationSupported = true,
+                    audioGuidance = audioGuidance,
+                    onOpenVoiceSettings = onOpenVoiceSettings,
+                    onDismissAudioGuidance = { audioGuidance = null },
                     flowModePanel = {
                         FlowModeOverlay(
                             visible = flowActive,

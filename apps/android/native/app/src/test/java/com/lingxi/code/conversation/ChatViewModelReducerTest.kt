@@ -369,7 +369,7 @@ class ChatViewModelReducerTest {
         vm.send("/compact")
         runCurrent()
 
-        assertTrue(source.commands.single() is ClientCommand.ForceCompact)
+        assertEquals(1, source.commands.count { it is ClientCommand.ForceCompact })
         assertEquals("/compact", vm.state.value.messages.single().text)
         assertEquals(CompactionProgressStatus.Running, vm.state.value.compaction?.status)
         assertNull(vm.state.value.compaction?.startedAtMillis)

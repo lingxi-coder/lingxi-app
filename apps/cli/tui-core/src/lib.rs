@@ -28,6 +28,7 @@ pub mod orchestrator_bridge;
 pub mod permission_bridge;
 pub mod recent_models;
 pub use client::presentation::render;
+pub use client::slash_command_argument_count;
 pub mod retry_ux;
 pub mod status_line_command;
 pub mod telemetry;

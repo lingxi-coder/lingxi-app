@@ -277,7 +277,10 @@ data class CatalogModelDetails(
                     )
                 },
                 capabilities = buildCapabilities(dto),
-                reasoningOptions = dto.reasoning.options.mapNotNull { option ->
+                reasoningOptions = dto.reasoning.options.filter { option ->
+                    option.selection !is com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic &&
+                        option.selection !is com.lingxi.code.bindings.client.ReasoningSelectionDto.Disabled
+                }.mapNotNull { option ->
                     selectionLabel(option.selection)?.let { label ->
                         CatalogReasoningOption(label = label, persistable = option.persistable, selection = option.selection)
                     }

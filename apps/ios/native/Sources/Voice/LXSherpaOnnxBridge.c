@@ -247,7 +247,7 @@ int32_t LXSherpaTtsCopyPCM16(
         config.model.kitten.data_dir = data_dir;
         config.model.kitten.length_scale = 1.0f;
     } else {
-        LXPath(model, sizeof(model), model_directory, "model.int8.onnx");
+        LXPath(model, sizeof(model), model_directory, "model.onnx");
         LXPath(lexicon, sizeof(lexicon), model_directory, "lexicon.txt");
         LXPath(dict_dir, sizeof(dict_dir), model_directory, "dict");
         config.model.vits.model = model;

@@ -110,7 +110,10 @@ pub struct SessionStoreContext {
 
 impl SessionStoreContext {
     /// Retain the prepared session's authoritative writer for identity snapshots.
-    pub fn with_transcript_writer(mut self, writer: Option<Arc<session::jsonl::JsonlWriter>>) -> Self {
+    pub fn with_transcript_writer(
+        mut self,
+        writer: Option<Arc<session::jsonl::JsonlWriter>>,
+    ) -> Self {
         self.transcript_writer = writer;
         self
     }
@@ -783,7 +786,8 @@ impl CommandRouter for EngineCommandRouter {
                 let request = Ok(serde_json::json!({
                     "subtype": "ui_client_module",
                     "plugin": plugin,
-                }).into());
+                })
+                .into());
                 self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
                     .await;
             }
@@ -1380,6 +1384,21 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Settings ─────────────────────────────────────────────────────
+            ClientCommand::UpdatePromptSuggestionContext {
+                session_id, focus, input_empty, pending_permission, elicitation_active,
+            } => {
+                let _ = self.handle.update_prompt_suggestion_context(
+                    lingxi_core::host::orchestrator::PromptSuggestionContext {
+                        session_id, focus, input_empty, pending_permission, elicitation_active,
+                    },
+                ).await;
+            }
+            ClientCommand::RecordPromptSuggestionSubmission { text } => {
+                let _ = self.handle.record_prompt_suggestion_submission(&text).await;
+            }
+            ClientCommand::PromptSuggestionFeedback { session_id, uuid, action } => {
+                let _ = self.handle.prompt_suggestion_feedback(&session_id, &uuid, &action).await;
+            }
             ClientCommand::UpdateSettings {
                 destination,
                 patch_json,
@@ -1428,6 +1447,9 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::McpAdmin { command } => {
                 self.apply_mcp_admin(command, &*sink).await;
+            }
+            ClientCommand::FusionAdmin { command } => {
+                self.apply_fusion_admin(command, &*sink).await;
             }
             ClientCommand::PluginAdmin { command } => {
                 self.apply_plugin_admin(command, &*sink).await;

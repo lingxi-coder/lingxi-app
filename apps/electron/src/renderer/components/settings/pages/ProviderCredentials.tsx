@@ -14,6 +14,7 @@ import {
   waitForModelSelection,
 } from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
+import { ProviderProtocol } from './ProviderProtocol';
 
 /**
  * Which provider is pre-selected on mount. Pure so it's testable without
@@ -85,7 +86,7 @@ export function shouldRequestCredentialPreview(
 }
 
 /** Built-in Provider credentials use their declared official API endpoints. */
-export function ProviderCredentials({ bridge, initialProviderId, pendingModelReference: requestedModelReference, onClose }: PageContentProps) {
+export function ProviderCredentials({ bridge, initialProviderId, pendingModelReference: requestedModelReference, onClose, snapshot: engineSnapshot, editingLayer, onJumpToLayer, onLayerLockChange }: PageContentProps) {
   const t = useT();
   const snapshot = bridge.bootstrap;
   const [key, setKey] = useState('');
@@ -435,6 +436,8 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
             <span style={{ color: t.text, fontSize: 13, fontWeight: 600 }}>{selectedProvider.label}</span>
           </div>
 
+          <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} snapshot={engineSnapshot}
+            editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} onLayerLockChange={onLayerLockChange} />
           <Card title={selectedProvider.label}>
         {pendingModelReference && (
           <Row title="待应用的模型" desc={`${isCodexAuth ? '登录 ChatGPT 账号' : `保存 ${selectedProvider.label} API Key`}以使用 ${modelReference(pendingModelReference).label}。`} align="center">

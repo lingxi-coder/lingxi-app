@@ -21,7 +21,7 @@ enum VoiceRecognitionMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .automatic: String(localized: "voice_mode_automatic_title")
-        case .system: "System"
+        case .system: String(localized: "audio_source_system")
         case .onDevice: String(localized: "voice_mode_on_device_title")
         case .cloud: String(localized: "audio_cloud_source")
         }
@@ -58,7 +58,7 @@ enum VoiceSpeechMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .automatic: String(localized: "voice_mode_automatic_title")
-        case .system: "System"
+        case .system: String(localized: "audio_source_system")
         case .offline: String(localized: "voice_mode_on_device_title")
         case .cloud: String(localized: "audio_cloud_source")
         }
@@ -194,6 +194,21 @@ final class VoiceCapabilityModel {
     private(set) var recognizerAvailable = false
     private(set) var onDeviceAvailable = false
     private(set) var voices: [SystemVoiceOption] = []
+
+    var speechVoiceOptions: [SystemVoiceOption] {
+        let selectedModelID = configurationStore.configuration.speech.offlineModelId
+        return voices.filter { voice in
+            if voice.id == "auto" { return true }
+            switch voice.source {
+            case .system:
+                return speechMode != .offline
+            case .sherpa(let modelID, _):
+                return speechMode != .system && (speechMode != .offline
+                    || selectedModelID == nil
+                    || selectedModelID == modelID)
+            }
+        }
+    }
     private(set) var modelStates: [String: VoiceModelState] = [:]
     private(set) var isPreviewing = false
     private(set) var errorMessage: String?
@@ -316,6 +331,34 @@ final class VoiceCapabilityModel {
     }
 
     var cloudVoiceID: String { configurationStore.configuration.speech.voice?.source == .provider ? configurationStore.configuration.speech.voice?.id ?? "" : "" }
+
+    func offlineModels(for kind: GeneratedVoiceModelKind) -> [VoiceOfflineModelStatus] {
+        GeneratedVoiceModelCatalog.all.filter { $0.kind == kind }.map {
+            VoiceOfflineModelStatus(model: $0, state: modelStates[$0.id] ?? .notInstalled)
+        }
+    }
+
+    func setOfflineModel(_ modelID: String?, for kind: GeneratedVoiceModelKind) {
+        if let modelID, GeneratedVoiceModelCatalog.byID(modelID)?.kind != kind {
+            errorMessage = String(localized: "audio_offline_models_hint")
+            return
+        }
+        var configuration = configurationStore.configuration
+        if kind == .stt {
+            configuration.recognition.source = .offline
+            configuration.recognition.offlineModelId = modelID
+        } else {
+            configuration.speech.source = .offline
+            configuration.speech.offlineModelId = modelID
+            configuration.speech.voice = nil
+        }
+        do {
+            _ = try configurationStore.save(configuration, expectedRevision: configurationStore.revision)
+            load(configuration)
+            errorMessage = nil
+            refreshCapabilities()
+        } catch { errorMessage = error.localizedDescription }
+    }
 
     var cloudPreviewSupported: Bool { cloudService.capabilities[.speech]?.route.supported == true }
 

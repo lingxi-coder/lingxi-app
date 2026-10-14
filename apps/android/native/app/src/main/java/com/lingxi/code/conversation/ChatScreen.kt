@@ -27,7 +27,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.LightMode
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton as MaterialIconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetValue
@@ -35,6 +44,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -76,7 +89,7 @@ import kotlinx.coroutines.delay
 /**
  * The conversation surface — the Android analog of the iOS `ChatView`.
  *
- * Composes the top bar (menu / title / theme-toggle / new-chat), a scrolling
+ * Composes the top bar (drawer / title / overflow menu), a scrolling
  * message list (with the live execution trace and the new-chat empty state),
  * and the [Composer]. The conversation itself is owned by [state]; user
  * intents are hoisted to the caller's [ChatViewModel] via the callbacks.
@@ -107,9 +120,15 @@ fun ChatScreen(
     flowModeActive: Boolean = false,
     voiceInputSupported: Boolean = true,
     voiceConversationSupported: Boolean = true,
+    audioGuidance: com.lingxi.code.voice.AudioSetupGuidance? = null,
+    onOpenVoiceSettings: () -> Unit = {},
+    onDismissAudioGuidance: () -> Unit = {},
     flowModePanel: (@Composable () -> Unit)? = null,
     draft: String = "",
     onDraftChange: (String) -> Unit = {},
+    onSuggestionContext: (String, String, Boolean, Boolean) -> Unit = { _, _, _, _ -> },
+    onSuggestionFeedback: (String, String, String) -> Unit = { _, _, _ -> },
+    pendingPermission: Boolean = false,
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
@@ -125,6 +144,8 @@ fun ChatScreen(
     modelSetupRequired: Boolean = false,
     /** Opens settings directly at the LLM Provider page. */
     onOpenModelSettings: () -> Unit = {},
+    effectivePermissionMode: String = "auto",
+    onOpenPermissionSettings: () -> Unit = {},
     /** Settings/credential state displayed alongside each provider section. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
     /** Opens the matching provider editor, or the provider list for null. */
@@ -159,6 +180,29 @@ fun ChatScreen(
     onAcceptVisualizationFollowup: (VisualizationFollowup) -> Unit = {},
     onRemoveVisualizationChip: () -> Unit = {},
 ) {
+    val suggestionLifecycle = LocalLifecycleOwner.current.lifecycle
+    val suggestionInputEmpty = draft.isEmpty() && attachment == null && state.visualizationChip == null
+    val currentSuggestionContext by rememberUpdatedState(onSuggestionContext)
+    val currentSuggestionInputEmpty by rememberUpdatedState(suggestionInputEmpty)
+    val currentSuggestionPermission by rememberUpdatedState(pendingPermission || state.pendingQuestions.isNotEmpty())
+    DisposableEffect(suggestionLifecycle, state.session.id) {
+        val sessionId = state.session.id
+        val observer = LifecycleEventObserver { _, _ ->
+            currentSuggestionContext(sessionId,
+                if (suggestionLifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) "focused" else "blurred",
+                currentSuggestionInputEmpty, currentSuggestionPermission)
+        }
+        suggestionLifecycle.addObserver(observer)
+        onDispose {
+            suggestionLifecycle.removeObserver(observer)
+            currentSuggestionContext(sessionId, "blurred", currentSuggestionInputEmpty, currentSuggestionPermission)
+        }
+    }
+    LaunchedEffect(state.session.id, suggestionInputEmpty, pendingPermission, state.pendingQuestions.isNotEmpty()) {
+        onSuggestionContext(state.session.id,
+            if (suggestionLifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) "focused" else "blurred",
+            suggestionInputEmpty, pendingPermission || state.pendingQuestions.isNotEmpty())
+    }
     val t = LingXiTheme.palette
     val currentDraft by rememberUpdatedState(draft)
     val currentOnDraftChange by rememberUpdatedState(onDraftChange)
@@ -299,11 +343,24 @@ fun ChatScreen(
                 onToggleToolCall = onToggleToolCall,
             )
             flowModePanel?.invoke()
+            audioGuidance?.let { guidance ->
+                AudioSetupBanner(guidance, onOpenVoiceSettings, onDismissAudioGuidance)
+            }
             Composer(
                 text = draft,
+                slashCommands = state.slashCommands,
+                promptSuggestion = state.promptSuggestion,
+                promptSuggestionNotice = state.promptSuggestionNotice,
+                suggestionTurnKey = "${state.session.id}:${state.promptSuggestionUuid}",
+                onSuggestionFeedback = { action -> state.promptSuggestionUuid?.let { uuid ->
+                    onSuggestionFeedback(state.session.id, uuid, action)
+                } },
                 onTextChange = onDraftChange,
                 model = state.model,
                 availableModels = state.availableModels,
+                contextUsage = state.contextUsage.takeUnless { state.sessionTransitioning },
+                effectivePermissionMode = effectivePermissionMode,
+                onOpenPermissionSettings = onOpenPermissionSettings,
                 onModelChange = onSelectModel,
                 onSend = {
                     if (modelSetupRequired) {
@@ -334,6 +391,9 @@ fun ChatScreen(
                 showDiscardRecovery = state.durableRecoveryBlocked,
                 enabled = !state.durableRecoveryBlocked &&
                     (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
+                // Loading must not interrupt editing or replace the retained
+                // TextFieldValue's selection and IME composition.
+                inputEnabled = !state.durableRecoveryBlocked,
                 modelSetupRequired = modelSetupRequired,
                 onOpenModelSettings = onOpenModelSettings,
                 modelProviderStatuses = modelProviderStatuses,
@@ -443,24 +503,41 @@ private fun TopBar(
             overflow = TextOverflow.Ellipsis,
         )
         Spacer(Modifier.weight(1f))
-        IconButton(
-            name = if (isDark) LXIconName.Sun else LXIconName.Moon,
-            color = t.text2,
-            size = 18.dp,
-            onClick = onToggleTheme,
-            contentDescription = if (isDark) {
-                stringResource(R.string.chat_toggle_theme_light)
-            } else {
-                stringResource(R.string.chat_toggle_theme_dark)
-            },
-        )
-        IconButton(
-            name = LXIconName.Edit,
-            color = t.accent,
-            size = 18.dp,
-            onClick = onNewChat,
-            contentDescription = stringResource(R.string.chat_new_chat),
-        )
+        Box {
+            var menuExpanded by remember { mutableStateOf(false) }
+            MaterialIconButton(onClick = { menuExpanded = !menuExpanded }) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = stringResource(R.string.composer_more),
+                    tint = t.text,
+                )
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = {
+                        Text(stringResource(if (isDark) R.string.chat_toggle_theme_light else R.string.chat_toggle_theme_dark))
+                    },
+                    leadingIcon = {
+                        Icon(if (isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode, contentDescription = null)
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onToggleTheme()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.chat_new_chat)) },
+                    leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                    onClick = {
+                        menuExpanded = false
+                        onNewChat()
+                    },
+                )
+            }
+        }
     }
 }
 

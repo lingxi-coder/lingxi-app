@@ -3,7 +3,7 @@ export function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <span
       className={`product-brand${compact ? ' product-brand-compact' : ''}`}
-      style={{ display: 'inline-flex', alignItems: 'center', gap: `var(--brand-gap, ${compact ? 9 : 18}px)`, color: 'var(--brand-color, #4267ed)' }}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: `var(--brand-gap, ${compact ? 9 : 18}px)`, color: 'var(--brand-color, var(--accent))' }}
     >
       <svg
         className="product-brand-mark"

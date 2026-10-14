@@ -1,5 +1,6 @@
 import { PropsWithChildren, useEffect, useRef } from 'react';
 import { AppRoute } from '../app/router';
+import { ThemeToggle } from '../components/ThemeToggle';
 import { Brand } from '../components/Brand';
 import { Locale, Region, pickLocaleText } from '../utils/locale';
 import { LanguageToggle } from '../components/LanguageToggle';
@@ -8,6 +9,8 @@ import { IconArrowRight, IconGlobe } from '../components/Icons';
 
 interface PublicLayoutProps extends PropsWithChildren {
   activeRoute: AppRoute;
+  theme: 'light' | 'dark';
+  onThemeToggle: () => void;
   locale: Locale;
   region: Region;
   onLocaleChange: (locale: Locale) => void;
@@ -47,6 +50,8 @@ function LandingMenu({ children, locale }: PropsWithChildren<{ locale: Locale }>
 
 export function PublicLayout({
   activeRoute,
+  theme,
+  onThemeToggle,
   children,
   locale,
   region,
@@ -71,13 +76,16 @@ export function PublicLayout({
             <button type="button" className="landing-language" onClick={() => onLocaleChange(locale === 'en' ? 'zh' : 'en')} aria-label={t('Switch to Chinese', '切换为英语')}>
               <IconGlobe width={16} height={16} /><span>{locale === 'en' ? '中文' : 'EN'}</span>
             </button>
+            <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
             <LandingMenu locale={locale}>{navigation}</LandingMenu>
           </div>
         </header>
         <main id="landing-main">{children}</main>
         <footer className="landing-footer">
-          <div><Brand compact /><p>{t('Tools for ideas worth building.', '为每一个值得实现的想法。')}</p></div>
+          <div><Brand compact /><p>{t('Your personal AI agent.', '你的个人辅助 Agent。')}</p></div>
           <div className="landing-footer-links">
+            <RouteLink href="/privacy">{t('Privacy', '隐私政策')}</RouteLink>
+            <RouteLink href="/data-deletion">{t('Data deletion', '数据删除')}</RouteLink>
             <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
             <RouteLink href="/docs">{t('Documentation', '开发者文档')}</RouteLink>
             <a href="https://github.com/lingxi-coder/lingxi-app" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
@@ -92,17 +100,17 @@ export function PublicLayout({
       <div className="ambient-grid" aria-hidden="true" />
       <header className="public-header">
         <div className="announcement-bar">
-          <span className="eyebrow">New</span>
+          <span className="eyebrow">LingXi</span>
           <span>
             {pickLocaleText(locale, {
-              en: 'Product concept: one task moving clearly across desktop, phone, and CLI.',
-              zh: '产品概念：让同一个任务在桌面、手机与 CLI 间清晰接续。',
+              en: 'Your personal AI agent, here to help with everyday tasks.',
+              zh: '心有灵犀，助你成事。你的个人辅助 Agent。',
             })}
           </span>
         </div>
         <div className="topbar">
           <RouteLink href="/" className="wordmark">
-            LingXi
+            <Brand compact />
           </RouteLink>
           <nav className="topnav" aria-label="Main navigation">
             <RouteLink href="/">
@@ -125,6 +133,7 @@ export function PublicLayout({
               region={region}
               onRegionChange={onRegionChange}
             />
+            <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
             <RouteLink href="/login" className="primary-link">
               {pickLocaleText(locale, labels.login)}
               <IconArrowRight width={16} height={16} />
@@ -135,15 +144,17 @@ export function PublicLayout({
       <main>{children}</main>
       <footer className="public-footer">
         <div>
-          <div className="wordmark small">LingXi</div>
+          <div className="wordmark small"><Brand compact /></div>
           <p>
             {pickLocaleText(locale, {
-              en: 'Cross-device AI development assistance for individual builders.',
-              zh: '面向个人开发者的跨设备 AI 开发助手。',
+              en: 'Your personal AI agent, here to help with everyday life.',
+              zh: '你的个人辅助 Agent，与你一起把日常的事情做好。',
             })}
           </p>
         </div>
         <div className="footer-links">
+          <RouteLink href="/privacy">{locale === 'zh' ? '隐私政策' : 'Privacy'}</RouteLink>
+          <RouteLink href="/data-deletion">{locale === 'zh' ? '数据删除' : 'Data deletion'}</RouteLink>
           <RouteLink href="/download">Download</RouteLink>
           <RouteLink href="/pricing">Pricing</RouteLink>
           <RouteLink href="/docs">Docs</RouteLink>

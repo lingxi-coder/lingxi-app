@@ -221,6 +221,12 @@ pub struct Runtime {
 /// so every `emit_text` / `emit_tool_call` / `emit_end_turn` lands on
 /// `bridge_rx` as a [`tui_core::orchestrator_bridge::TurnEvent`].
 pub struct TuiBuild {
+    /// Reload the exact Fusion sources admitted by this CLI session.
+    pub fusion_layers: Arc<
+        dyn Fn() -> Result<Vec<lingxi_core::host::fusion_strategy::FusionSettingsLayer>, String>
+            + Send
+            + Sync,
+    >,
     /// Standard runtime bundle.
     pub runtime: Runtime,
     /// The resolved boot permission mode (claude-code `initialPermissionModeFromCLI`)
@@ -1633,6 +1639,11 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         Some(gate.clone() as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
     let flag_settings = cfg.flag_settings.clone();
+    let fusion_cfg = cfg.clone();
+    let fusion_layers = Arc::new(move || {
+        harness_runtime::desktop::fusion_settings_layers_for_config(&fusion_cfg)
+            .map_err(|error| error.to_string())
+    });
     let mut runtime = build_cli_runtime_from_config(cfg, bridge, argv).await?;
     bind_tui_permission_gate(&gate, &runtime);
     #[cfg(test)]
@@ -1660,6 +1671,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         .map(permission::permission_mode_from_cli_string)
         .unwrap_or(permission_mode);
     Ok(TuiBuild {
+        fusion_layers,
         runtime,
         initial_permission_mode: permission_mode,
         bypass_available: !argv.restricted_enabled()

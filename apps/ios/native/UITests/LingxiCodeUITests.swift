@@ -115,7 +115,7 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
     func testComposerTracksKeyboardAndKeepsVoiceModesSeparate() {
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.buttons["composer.voice"].exists)
         XCTAssertTrue(app.buttons["composer.flow"].exists)
@@ -282,7 +282,7 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
     func testKeyboardPreservesComposerLayout() {
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         let ids = ["composer.model", "composer.controls", "composer.voice", "composer.flow"]
         let inputFrame = input.frame
         let frames = ids.map { app.buttons[$0].frame }
@@ -308,7 +308,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchArguments += ["-theme", "light"]
         app.launch()
 
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
         input.tap()
         input.typeText("composer action icon")
@@ -340,7 +340,7 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
     func testSlashCommandSuggestionsFilterSelectAndSubmit() {
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
 
         input.tap()
@@ -359,16 +359,26 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertFalse(help.exists, app.debugDescription)
         review.tap()
 
-        XCTAssertEqual(input.value as? String, "/review")
+        XCTAssertEqual(input.value as? String, "/review ")
         XCTAssertFalse(review.exists, app.debugDescription)
 
-        input.typeText(" [instructions]")
-        XCTAssertTrue(app.staticTexts["[instructions]"].exists, app.debugDescription)
+        let hint = app.staticTexts["composer.slash-argument-hint"]
+        XCTAssertTrue(hint.waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertEqual(hint.value as? String, "[instructions]")
+        XCTAssertEqual(hint.frame.minY, input.frame.minY, accuracy: 4)
+        let hintScreenshot = XCTAttachment(screenshot: app.screenshot())
+        hintScreenshot.name = "iOS-slash-command-inline-argument-hint"
+        hintScreenshot.lifetime = .keepAlways
+        add(hintScreenshot)
+
+        input.typeText("staged")
+        XCTAssertFalse(hint.exists, app.debugDescription)
+        XCTAssertEqual(input.value as? String, "/review staged")
         let send = app.buttons["composer.send"]
         XCTAssertTrue(send.isHittable, app.debugDescription)
         send.tap()
         XCTAssertTrue(
-            app.staticTexts["/review [instructions]"].waitForExistence(timeout: 5),
+            app.staticTexts["/review staged"].waitForExistence(timeout: 5),
             app.debugDescription
         )
     }
@@ -379,7 +389,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.launch()
 
         let messageList = app.scrollViews["conversation.message-list"]
-        let composerInput = app.textFields["composer.input"]
+        let composerInput = app.textViews["composer.input"]
         let flowButton = app.buttons["composer.flow"]
         XCTAssertTrue(flowButton.waitForExistence(timeout: 8), app.debugDescription)
         flowButton.tap()
@@ -585,12 +595,12 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(sheet.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Child agent completed the requested check."].waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.agent-read-only"].exists, app.debugDescription)
-        XCTAssertFalse(sheet.textFields["composer.input"].exists, app.debugDescription)
+        XCTAssertFalse(sheet.textViews["composer.input"].exists, app.debugDescription)
         app.buttons["conversation.agent-detail.close"].tap()
         XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
 
         XCTAssertTrue(app.staticTexts["Hello! I'm ready to help with your software engineering tasks."].waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 
     /// The drawer has THREE tabs — `DrawerSection` is `chat`/`code`/`cron` —
@@ -819,7 +829,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
 
-        let input = app.textFields["composer.input"]
+        let input = app.textViews["composer.input"]
         XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
         input.tap()
         input.typeText("summary draft")

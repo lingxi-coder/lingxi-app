@@ -14,7 +14,8 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'topbar-summary-electron.mjs');
 
-test('real Electron workspace keeps summary pinned with independent details and restored context access', async () => {
+for (const controlsOnly of [false, true]) {
+test(controlsOnly ? 'real Electron inspector header controls respond to mouse input' : 'real Electron workspace keeps summary pinned with independent details and restored context access', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-topbar-summary-electron-'));
   const vite = await createServer({
@@ -38,7 +39,7 @@ test('real Electron workspace keeps summary pinned with independent details and 
     const fixtureUrl = `http://127.0.0.1:${address.port}/topbar-summary-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl, ...(controlsOnly ? ['--inspector-controls-only'] : [])], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -69,10 +70,14 @@ test('real Electron workspace keeps summary pinned with independent details and 
       });
     });
 
+    if (controlsOnly) {
+      assert.deepEqual(result.controls, ['summary', 'expand', 'restore', 'hide']);
+      return;
+    }
     assert.equal(result.checks.length, 9);
     assert.deepEqual(result.overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
     assert.equal(result.overview.width, 300);
-    assert.deepEqual(result.heights, { chat: 56, detail: 56, panel: 390 });
+    assert.deepEqual(result.heights, { chat: 44, detail: 44, panel: 390 });
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
@@ -81,3 +86,4 @@ test('real Electron workspace keeps summary pinned with independent details and 
     rmSync(temporaryUserData, { recursive: true, force: true });
   }
 });
+}

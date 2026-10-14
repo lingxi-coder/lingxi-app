@@ -685,6 +685,9 @@ export type ClientCommand =
   | { type: 'request_exit' }
   // ── Settings (persisted) ─────────────────────────────────────────────────────
   | { type: 'update_settings'; destination: WritableScopeDto; patch_json: string }
+  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
+  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: 'shown' | 'accepted' | 'dismissed' }
+  | { type: 'record_prompt_suggestion_submission'; text: string }
   // ── Permissions (persisted) ──────────────────────────────────────────────────
   | {
       type: 'update_permission_rules';
@@ -707,6 +710,7 @@ export type ClientCommand =
   | { type: 'mcp_admin'; command: McpAdminCommandDto }
   | { type: 'plugin_admin'; command: PluginAdminCommandDto }
   | { type: 'hook_admin'; command: HookAdminCommandDto }
+  | { type: 'fusion_admin'; command: FusionAdminCommandDto }
   // ── AudioService (engine -> device operations and capability publication) ──
   | { type: 'audio_response'; identity: AudioOperationIdDto; result: AudioOperationResultDto }
   | { type: 'start_realtime_audio'; request_json: string }
@@ -1248,7 +1252,7 @@ export type ConfigurationOperationStatusDto = 'started' | 'progress' | 'succeede
 
 export type ConfigurationEffectDto = 'applied' | 'restart_required' | 'not_applicable';
 
-export type ConfigurationDomainDto = 'skill' | 'mcp' | 'plugin' | 'hook';
+export type ConfigurationDomainDto = 'skill' | 'mcp' | 'plugin' | 'hook' | 'fusion';
 
 export interface ConfigurationOperationDto {
   operation_id: number;
@@ -1272,6 +1276,53 @@ export type SkillAdminCommandDto = ConfigurationAdminCommandDto;
 export type McpAdminCommandDto = ConfigurationAdminCommandDto;
 export type PluginAdminCommandDto = ConfigurationAdminCommandDto;
 export type HookAdminCommandDto = ConfigurationAdminCommandDto;
+export type FusionAdminCommandDto = ConfigurationAdminCommandDto;
+
+export interface FusionStrategyRefDto {
+  scope: WritableScopeDto;
+  id: string;
+}
+
+/** Runtime configuration uses the engine's camelCase setting names. */
+export interface FusionStrategyDto {
+  id: string;
+  name: string;
+  config: Record<string, unknown>;
+}
+
+export interface FusionGlobalsDto {
+  enabled?: boolean;
+  proactive?: boolean;
+  slash_cross_provider_default?: boolean;
+  allow_cross_provider_for_agent?: boolean;
+  allowed_profiles?: string[];
+}
+
+export interface FusionScopeCatalogDto {
+  scope: WritableScopeDto;
+  /** Whether this scope is admitted by the current runtime settings sources. */
+  admitted: boolean;
+  path: string;
+  revision: string;
+  strategies: FusionStrategyDto[];
+  default_strategy_id: string | null;
+  globals: FusionGlobalsDto;
+  diagnostic: string | null;
+}
+
+export interface FusionCatalogDto {
+  scopes: FusionScopeCatalogDto[];
+  effective_globals: FusionGlobalsDto;
+  default_strategy: FusionStrategyRefDto | null;
+  diagnostics: string[];
+}
+
+export interface FusionStrategySelectionDto {
+  reference: FusionStrategyRefDto;
+  name: string;
+  config: Record<string, unknown>;
+  revision: string;
+}
 
 /** One discovered skill entry (listings.rs `SkillDto`). */
 export interface SkillDto {
@@ -1313,6 +1364,7 @@ export interface SlashCommandDto {
   source: string;
   aliases?: string[];
   argument_hint?: string;
+  argument_names?: string[];
   menu_description?: string;
   hidden?: boolean;
 }
@@ -1593,6 +1645,8 @@ export type ClientEvent =
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
   | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }
+  | { type: 'prompt_suggestion'; suggestion: string; uuid: string; session_id: string }
+  | { type: 'prompt_suggestion_state'; enabled: boolean; notice: string | null }
   /**
    * Authoritative durable state for one mobile turn. Emitted on attach,
    * resume, recovery gating, and every terminal transition
@@ -1698,6 +1752,8 @@ export type ClientEvent =
       message?: string;
       details_json?: string;
     }
+  | { type: 'fusion_catalog'; catalog_json: string }
+  | { type: 'fusion_strategy_resolved'; operation_id: number; selection_json?: string; error?: string }
   | { type: 'skill_catalog'; catalog_json: string }
   | { type: 'skill_document'; document_json: string }
   | { type: 'mcp_configuration_snapshot'; snapshot_json: string }

@@ -1,0 +1,14 @@
+[package]
+name = "handbook-llm-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+lingxi-llm-client = { path = "../llm-client", features = ["realtime-websocket"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+async-trait = "0.1"
+futures = "0.3"

@@ -1,5 +1,6 @@
-@import './components/AskUserQuestion.css';
 @import "./components/settings/pages/ConfigurationPage.css";
+@import './components/settings/SettingsScreen.css';
+@import './components/AskUserQuestion.css';
 @import './components/TurnFileSummary.css';
 @import './components/CommandIdentity.css';
 @import './components/SlashCommandMenu.css';
@@ -42,35 +43,57 @@ body {
 .desktop-shell {
   isolation: isolate;
 }
-.desktop-window-drag-strip {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  right: 0;
-  left: 116px;
-  height: 38px;
-}
 .desktop-main {
   overflow: hidden;
-  border-radius: 0;
-  box-shadow: -1px 0 0 var(--nav-panel-border);
 }
 .desktop-navigation {
+  --desktop-toolbar-height: 44px;
+  --desktop-shell-gap: 8px;
+  --desktop-rail-width: 52px;
   z-index: 2;
   position: relative;
   height: 100%;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
   background: var(--rail-material);
 }
+.desktop-navigation[data-workspace='true'] { flex: 1; }
+.desktop-window-toolbar { display: flex; flex: 0 0 var(--desktop-toolbar-height); min-width: 0; }
+.desktop-body { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.desktop-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 calc(var(--desktop-rail-width) + var(--desktop-shell-gap) + var(--desktop-sidebar-width));
+  min-width: 0;
+  padding: 0 12px 0 116px;
+  transition: flex-basis 170ms cubic-bezier(.2, 0, 0, 1);
+}
+.desktop-navigation:has(.desktop-sidebar[data-resizing='true']) .desktop-sidebar-brand { transition: none; }
+.desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand { flex-basis: 164px; }
+.desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand > :not(.desktop-rail-toggle) { display: none; }
+.desktop-surface {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin: var(--desktop-shell-gap);
+  overflow: hidden;
+  border-radius: 16px;
+  isolation: isolate;
+  background: var(--desktop-surface);
+  box-shadow: 0 0 0 .5px var(--nav-panel-border);
+}
 .desktop-nav-rail {
-  width: 52px;
-  padding: 46px 6px 12px;
+  width: var(--desktop-rail-width);
+  padding: var(--desktop-shell-gap) 6px 12px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  flex: 0 0 52px;
+  flex: 0 0 var(--desktop-rail-width);
 }
 .desktop-rail-button {
   width: 40px;
@@ -92,12 +115,10 @@ body {
   color: var(--text);
 }
 .desktop-rail-toggle {
-  position: absolute;
-  z-index: 3;
-  top: 12px;
-  left: 78px;
   width: 32px;
   height: 32px;
+  flex: 0 0 32px;
+  border-radius: 8px;
 }
 .desktop-rail-button[data-active='true'] {
   color: var(--desktop-accent);
@@ -173,9 +194,17 @@ body {
   box-shadow: 0 1px 3px rgb(0 0 0 / 4%), inset 0 0 0 1px var(--nav-panel-border);
 }
 .desktop-sidebar-list { scrollbar-gutter: stable; }
-.desktop-workspace { background: var(--rail-material); }
+.desktop-workspace { background: transparent; }
+.desktop-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 @media (prefers-reduced-motion: reduce) {
-  .desktop-sidebar, .desktop-rail-button { transition: none; }
+  .desktop-sidebar, .desktop-sidebar-brand, .desktop-rail-button { transition: none; }
 }
 .desktop-sidebar-brand { font-family: var(--font-sans-default); user-select: none; }
 .desktop-sidebar-brand button { -webkit-app-region: no-drag; }
@@ -2647,3 +2676,52 @@ textarea, input { font-family: inherit; }
 .command-result-card[data-command-name="goal"] .command-result-name { display: none; }
 .command-result-card[data-command-name="goal"] .command-result-pre { background: transparent; border: 0; padding: 0; font-family: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command-result-card[data-command-name="goal"] .command-result-body { background: transparent; box-shadow: none; border-radius: 0; padding: 0 0 4px 30px; }
+
+.composer-prompt-suggestion {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+}
+.composer-prompt-suggestion span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-prompt-suggestion kbd { flex: none; font-size: 10px; opacity: .7; }
+.composer-prompt-suggestion:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
+
+.composer-prompt-suggestion-notice {
+  font-size: 11px;
+  padding: 4px 12px 0;
+}
+
+.composer-slash-argument-hint {
+  position: absolute;
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Tool arguments yield space to the action label and status. */
+.tool-row-title > [dir='ltr'] { flex-shrink: 0; }
+.tool-row-argument { display: inline-block; flex: 0 1 auto; }
+.tool-row-response { min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .75rem; color: var(--tool-label-color); opacity: .8; }
+.tool-row-status { flex-shrink: 0; padding: .15rem .45rem; border-radius: .4rem; font-size: .7rem; font-weight: 550; color: var(--permission-danger); background: color-mix(in oklab, var(--permission-danger) 8%, transparent); }
+.tool-result-error { font-family: inherit; font-size: .8rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; border-left: 2px solid var(--permission-danger) !important; }
+.tool-disclosure-trigger[aria-expanded='false'] .transcript-disclosure-chevron { opacity: .45; }
+.tool-disclosure-trigger[aria-expanded='false']:hover .transcript-disclosure-chevron,
+.tool-disclosure-trigger[aria-expanded='false']:focus-visible .transcript-disclosure-chevron { opacity: 1; }
+.tool-disclosure-trigger:active { transition-duration: 0ms; scale: 1; background: color-mix(in oklab, currentColor 12%, transparent) !important; }
+@media (prefers-contrast: more) {
+  .tool-row-status { background: transparent; outline: 1px solid currentColor; }
+}

@@ -324,7 +324,7 @@ struct DesktopToolsAgentPage: View {
     @State private var outputStyle = ""
     @State private var overrideFrom = ""
     @State private var overrideTo = ""
-    private let flags = ["disableArtifact", "disableAgentView", "disableAllHooks", "skipWebFetchPreflight", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled"]
+    private let flags = ["promptSuggestionEnabled", "disableArtifact", "disableAgentView", "disableAllHooks", "skipWebFetchPreflight", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled"]
     private var overrides: [String: String] { repository.ownValue(key: "modelOverrides", layer: layer) as? [String: String] ?? [:] }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -332,7 +332,7 @@ struct DesktopToolsAgentPage: View {
             SettingsLayerPicker(selection: $layer)
             ForEach(flags, id: \.self) { key in
                 VStack(alignment: .leading) {
-                    Toggle(key, isOn: Binding(get: { repository.ownValue(key: key, layer: layer) as? Bool ?? false },
+                    Toggle(key, isOn: Binding(get: { repository.ownValue(key: key, layer: layer) as? Bool ?? (key == "promptSuggestionEnabled") },
                                               set: { value in save(key, value) }))
                         .disabled(!repository.canEdit(key: key, layer: layer))
                     Text(repository.provenanceLabel(for: key)).font(.caption).foregroundStyle(.secondary)

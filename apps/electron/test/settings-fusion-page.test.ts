@@ -30,10 +30,10 @@ function model(id: string, overrides: Partial<ModelDetailsDto> = {}): ModelDetai
   } as ModelDetailsDto;
 }
 
-test('the Fusion page is declared, layered, and actually registered', () => {
+test('the Fusion page owns its three-scope filter and is registered', () => {
   const page = SETTINGS_NAV.find((entry) => entry.id === 'fusion');
   assert.ok(page, 'the nav must declare the Fusion page');
-  assert.equal(page.layered, true, 'settings.fusion lives in the four settings layers');
+  assert.equal(page.layered, false, 'Fusion presents all scopes and must not show a second outer scope switcher');
   assert.equal(page.needsEngine, true, 'the model pickers read the live provider catalog');
   assert.ok(PAGE_CONTENT.fusion, 'a declared page with no component renders a placeholder');
 });
@@ -141,4 +141,48 @@ test('Fusion only offers configured providers including custom profiles and buil
   ]).map((row) => row.choice.profile), ['deepseek', 'custom', 'builtin']);
   assert.deepEqual(configuredCandidates(rows), []);
   assert.deepEqual(configuredCandidates(rows, []), []);
+});
+
+
+import { copiedFusionStrategy, fusionNameError, fusionNeedsLegacyReplacement, fusionStrategyKey, parseFusionCatalog, type FusionCatalogScope } from '../src/renderer/components/settings/pages/FusionCatalog';
+
+function catalogScope(scope: FusionCatalogScope['scope'], name = 'Review'): FusionCatalogScope {
+  return { scope, admitted: true, path: '/fixture/settings.json', revision: 'r1', strategies: [{ id: 'stable-id', name, config: { panelModels: [{ profile: 'test', model: 'model' }] } }], default_strategy_id: null, globals: {}, diagnostic: null };
+}
+
+test('invalid named strategies are repaired without requesting replacement of the scope', () => {
+  const scope = catalogScope('user');
+  scope.diagnostic = 'fusion.maxPanel must be 2..=8';
+  scope.strategies[0]!.config.maxPanel = 9;
+  assert.equal(fusionNeedsLegacyReplacement(scope), false);
+  assert.equal(fusionNeedsLegacyReplacement({ ...scope, strategies: [] }), true);
+  assert.equal(fusionNeedsLegacyReplacement(undefined), false);
+});
+test('strategy identities include scope, and duplicate names are rejected only inside the selected scope', () => {
+  const user = catalogScope('user');
+  const project = catalogScope('project', 'Project review');
+  assert.notEqual(fusionStrategyKey('user', 'stable-id'), fusionStrategyKey('project', 'stable-id'));
+  assert.equal(fusionNameError('  Review ', user, 'new-id'), '该作用域中已有同名策略，请使用其他名称。');
+  assert.equal(fusionNameError('Review', project, 'new-id'), null);
+  assert.equal(fusionNameError('Review', user, 'stable-id'), null);
+  assert.equal(fusionNameError(' ', user, 'new-id'), '请输入策略名称。');
+});
+test('copy gets a distinct identity and cannot mutate the source strategy', () => {
+  const original = catalogScope('user').strategies[0]!;
+  const copy = copiedFusionStrategy(original, 'new-id');
+  assert.equal(copy.id, 'new-id');
+  assert.equal(copy.name, 'Review 副本');
+  assert.notEqual(copy.config, original.config);
+  (copy.config.panelModels as {model:string}[])[0]!.model = 'changed';
+  assert.equal((original.config.panelModels as {model:string}[])[0]!.model, 'model');
+});
+test('catalog keeps per-scope strategies and diagnostics without reading legacy singleton settings', () => {
+  const user = catalogScope('user'); const project = catalogScope('project');
+  const parsed = parseFusionCatalog(JSON.stringify({ scopes: [user, project], effective_globals: { enabled: true }, default_strategy: { scope: 'project', id: 'stable-id' }, diagnostics: ['legacy local configuration'] }));
+  assert.equal(parsed.scopes.length, 2);
+  assert.equal(parsed.scopes[0]!.strategies[0]!.name, parsed.scopes[1]!.strategies[0]!.name);
+  assert.deepEqual(parsed.default_strategy, { scope: 'project', id: 'stable-id' });
+  assert.deepEqual(parsed.diagnostics, ['legacy local configuration']);
+  assert.equal(parseFusionCatalog('{not json').diagnostics.length, 1);
+  assert.deepEqual(parseFusionCatalog(undefined).scopes, []);
 });

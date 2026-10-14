@@ -45,6 +45,8 @@ struct LingxiAccountSection: View {
             }
             if account.busy { ProgressView("正在处理…") }
             if let message = account.message { Text(message).accessibilityIdentifier("account.message").font(.footnote).accessibilityAddTraits(.updatesFrequently) }
+            Link(String(localized: "privacy_policy_link"), destination: URL(string: "https://lingxios.net/privacy")!)
+                .font(.footnote)
             Divider()
         }
         .textFieldStyle(.roundedBorder)

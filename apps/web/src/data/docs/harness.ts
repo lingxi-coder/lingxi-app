@@ -1,9 +1,8 @@
-import type { DocPage, DocText } from './types';
+import type { DocPage, DocSection, DocText } from './types';
 
 const t = (en: string, zh: string): DocText => ({ en, zh });
-const revision = 'cabc6b954f06c70310bc53579fc0420e9b9dda0c';
-const source = (path: string) =>
-  `https://github.com/lingxi-coder/harness-runtime/blob/${revision}/${path}`;
+const source = (_path: string) => 'https://github.com/lingxi-coder/harness-runtime';
+const sources = (...paths: string[]) => paths.map((path) => ({ repo: 'harness-runtime' as const, path }));
 
 export const harnessPages: DocPage[] = [
   {
@@ -16,6 +15,7 @@ export const harnessPages: DocPage[] = [
     ),
     packageName: 'harness-runtime',
     sourceUrl: source('crates/runtime/src/lib.rs'),
+    sources: sources('crates/runtime/src/lib.rs', 'crates/runtime/src/api.rs', 'crates/runtime/Cargo.toml', 'Cargo.toml', 'rust-toolchain.toml'),
     sections: [
       {
         id: 'overview',
@@ -31,34 +31,64 @@ export const harnessPages: DocPage[] = [
           ),
         ],
         note: t(
-          'These pages document the main integration surface at the linked source revision. The repository source is the full reference for lower-level types and platform-specific configuration.',
-          '这些页面介绍链接源码版本中的主要集成接口。底层类型和平台专用配置以仓库源码作为完整参考。',
+          'These pages describe the current workspace. The source baseline records HEAD, dirty files and the product dependency revision separately. A local API is not automatically present in the pinned product build; use Rustdoc for compiler-resolved types and features.',
+          '这些页面描述当前工作区。源码基线分别记录 HEAD、未提交文件和产品依赖版本。本地接口并不自动包含在产品固定版本中；编译器解析后的类型和 feature 请查阅 Rustdoc。',
         ),
       },
       {
         id: 'installation',
-        title: t('Install from an immutable revision', '固定版本安装'),
+        title: t('Use one source identity', '使用唯一源码身份'),
         paragraphs: [
           t(
-            'Pin a full 40-character Git revision in the host workspace. The example below uses the source revision linked by these docs. Pin any additional packages from this repository to the same canonical Git URL and revision so that shared Rust types retain one Cargo package identity.',
-            '在宿主工作空间中固定完整的 40 位 Git 提交。以下示例使用本页源码链接对应的版本。同一仓库的其他直接依赖也应使用相同的规范 Git URL 和提交，确保共享 Rust 类型保持同一 Cargo 包身份。',
+            'For the current working-tree examples, create sdk-consumer beside harness-runtime, llm-client and mobile-linux-runtime. Use the complete local manifest below. Direct Harness crates and explicit consumer patches select the three SDK working trees; inspect cargo metadata to verify those source identities before compiling the copied examples.',
+            '验证当前工作树示例时，在 harness-runtime、llm-client 与 mobile-linux-runtime 旁创建 sdk-consumer，并使用下方完整本地清单。直接 Harness crate 与显式消费者 patch 选择三个 SDK 工作树；编译复制的示例前应通过 cargo metadata 验证这些源码身份。',
           ),
         ],
         code: [
           {
-            label: 'Cargo.toml · desktop',
+            label: t('Cargo.toml · working-tree consumer', 'Cargo.toml · 工作树消费者'),
             language: 'toml',
-            code: `[dependencies]\nharness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "${revision}", default-features = false, features = ["desktop"] }`,
+            verification: 'manual',
+            exampleId: 'harness-working-tree-manifest',
+            code: `[package]
+name = "handbook-harness-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+harness-runtime = { path = "../harness-runtime/crates/runtime", default-features = false, features = ["desktop"] }
+client = { path = "../harness-runtime/crates/client", features = ["adapter"] }
+tool-api = { path = "../harness-runtime/crates/tool-api" }
+permission = { path = "../harness-runtime/crates/permission" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[patch."https://github.com/lingxi-coder/llm-client.git"]
+lingxi-llm-client = { path = "../llm-client" }
+
+[patch."https://github.com/lingxi-coder/mobile-linux-runtime.git"]
+mobile-linux-api = { path = "../mobile-linux-runtime/crates/mobile-linux-api" }
+mobile-linux-core = { path = "../mobile-linux-runtime/crates/mobile-linux-core" }
+mobile-linux-android = { path = "../mobile-linux-runtime/crates/mobile-linux-android" }
+mobile-linux-ios = { path = "../mobile-linux-runtime/crates/mobile-linux-ios" }
+platform-pty = { path = "../mobile-linux-runtime/crates/platform-pty" }
+
+[patch.crates-io]
+git2 = { path = "../harness-runtime/third_party/git2-rs/git2" }`,
           },
           {
             label: 'Source checkout',
             language: 'bash',
+            verification: 'manual',
             code: 'git clone --recurse-submodules https://github.com/lingxi-coder/harness-runtime.git\ncd harness-runtime\ngit submodule update --init --recursive\ncargo check --locked -p harness-runtime',
           },
         ],
         note: t(
-          'The repository pins Rust 1.94.0. Its root Cargo patch redirects llm-client to deps/llm-client for repository development; this patch does not propagate to downstream workspaces.',
-          '仓库固定 Rust 1.94.0。根 Cargo patch 在仓库开发时将 llm-client 指向 deps/llm-client；该 patch 不会传播到下游工作空间。',
+          'The repository pins Rust 1.94.0 and has no root path patch selecting the sibling llm-client. These overrides belong explicitly to the isolated consumer. For a released integration, use one reviewed full Git revision for all direct Harness packages, remove working-tree SDK overrides, and review the lockfile. Never mix Git and local versions of shared Rust types.',
+          '仓库固定 Rust 1.94.0，根目录没有指向相邻 llm-client 的 path patch。这些覆盖显式属于隔离消费者。发布集成时，所有直接 Harness 包使用同一经审查完整 Git 提交，移除 SDK 工作树覆盖并审查锁文件。共享 Rust 类型不能混用 Git 与本地来源。',
         ),
       },
       {
@@ -83,6 +113,8 @@ export const harnessPages: DocPage[] = [
           {
             label: 'Rust · host-supplied services',
             language: 'rust',
+            verification: 'compile',
+            exampleId: 'harness-assemble',
             code: 'use std::sync::Arc;\nuse harness_runtime::{\n    Harness, HarnessBuilder, LifecycleService, SessionService,\n};\n\nfn assemble(\n    session: Arc<dyn SessionService>,\n    lifecycle: Arc<dyn LifecycleService>,\n) -> Harness {\n    HarnessBuilder::new(session, lifecycle).build()\n}',
           },
         ],
@@ -116,6 +148,7 @@ export const harnessPages: DocPage[] = [
     ),
     packageName: 'harness-runtime',
     sourceUrl: source('crates/runtime/src/api.rs'),
+    sources: sources('crates/runtime/src/api.rs', 'crates/runtime/src/desktop/sdk.rs', 'crates/core/src/host/orchestrator.rs', 'crates/client/src/adapter/output_stream.rs'),
     sections: [
       {
         id: 'run',
@@ -130,6 +163,8 @@ export const harnessPages: DocPage[] = [
           {
             label: 'Rust · shared session interface',
             language: 'rust',
+            verification: 'compile',
+            exampleId: 'harness-run-turn',
             code: 'use harness_runtime::{\n    CancellationToken, HandleError, Harness, RunInput, TurnOutcome,\n};\n\nasync fn run_turn(\n    harness: &Harness,\n    prompt: String,\n    cancel: CancellationToken,\n) -> Result<TurnOutcome, HandleError> {\n    harness.session().run(\n        RunInput { prompt, images: Vec::new() },\n        cancel,\n    ).await\n}',
           },
         ],
@@ -184,7 +219,7 @@ export const harnessPages: DocPage[] = [
         apis: [
           {
             name: 'OutputStream::emit_text',
-            signature: 'async fn emit_text(&self, text: &str)',
+            signature: 'async fn emit_text(&self, text: &str, utf16_code_units: Option<&[u16]>)',
             description: t('Deliver assistant text to the host’s output destination.', '将助手文本交给宿主输出目标。'),
           },
         ],
@@ -226,6 +261,7 @@ export const harnessPages: DocPage[] = [
     ),
     packageName: 'harness-runtime',
     sourceUrl: source('crates/runtime/src/desktop/sdk.rs'),
+    sources: sources('crates/runtime/src/api.rs', 'crates/runtime/src/desktop/sdk.rs', 'crates/runtime/src/desktop/session_state.rs', 'crates/runtime/src/mobile/host.rs', 'crates/runtime/src/mobile/host/assembly.rs', 'crates/runtime/src/headless/mod.rs', 'crates/runtime/src/headless/config.rs', 'crates/runtime/src/headless/host.rs', 'crates/runtime/src/headless/io.rs', 'crates/runtime/src/headless/session.rs', 'crates/permission/src/gate.rs', 'crates/session/src/storage.rs', 'crates/session/src/resumer.rs'),
     sections: [
       {
         id: 'host-services',
@@ -276,7 +312,64 @@ export const harnessPages: DocPage[] = [
             'mobile::build_mobile takes MobileConfig, an Arc<dyn Platform>, a ClientEventListener, and a PermissionRequestSink. It returns MobileRuntime; device capabilities and platform services are supplied through Platform.',
             'mobile::build_mobile 接收 MobileConfig、Arc<dyn Platform>、ClientEventListener 和 PermissionRequestSink，返回 MobileRuntime。设备能力与平台服务通过 Platform 注入。',
           ),
+          t(
+            'The desktop wrapper below requires the companion permission crate from the same Harness source identity. The complete consumer manifest includes that dependency. Headless uses the same desktop feature and accepts explicit host services, byte I/O and signals; it does not install signal handlers, take over global stdio or call process::exit.',
+            '下方桌面包装器需要来自同一 Harness 源码身份的配套 permission crate；完整消费者清单已包含它。Headless 使用同一 desktop feature，接收显式宿主服务、字节 I/O 与信号，不安装信号处理器、接管全局 stdio 或调用 process::exit。',
+          ),
         ],
+        code: [
+          {
+            label: t('Rust · desktop assembly with a host permission gate', 'Rust · 带宿主权限门的桌面组装'),
+            language: 'rust', verification: 'compile', exampleId: 'harness-desktop-build',
+            code: `use std::sync::Arc;
+use harness_runtime::{
+    desktop::{self, BuildError, DesktopConfig},
+    Harness, OutputStream,
+};
+use permission::gate::PermissionGate;
+
+async fn desktop_harness(
+    config: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+    permissions: Arc<dyn PermissionGate>,
+) -> Result<Harness, BuildError> {
+    desktop::build_harness(config, output, permissions).await
+}`,
+          },
+          {
+            label: t('Rust · headless run with host-owned byte streams', 'Rust · 使用宿主字节流的 Headless 执行'),
+            language: 'rust', verification: 'compile', exampleId: 'harness-headless-run',
+            code: `use std::sync::Arc;
+use harness_runtime::{
+    desktop::DesktopConfig,
+    headless::{self, HeadlessConfig, HeadlessExit, HeadlessHostServices,
+        HeadlessIo, HeadlessOptions, HeadlessSignals, SessionStart},
+};
+
+async fn headless_prompt(
+    desktop: DesktopConfig,
+    services: Arc<dyn HeadlessHostServices>,
+    io: HeadlessIo,
+    signals: HeadlessSignals,
+    prompt: String,
+) -> HeadlessExit {
+    headless::run(
+        HeadlessConfig {
+            desktop,
+            options: HeadlessOptions { prompt: Some(prompt), ..Default::default() },
+            session_start: SessionStart::New,
+        },
+        services,
+        io,
+        signals,
+    ).await
+}`,
+          },
+        ],
+        note: t(
+          'HeadlessIo::new takes injected AsyncRead and stdout/stderr AsyncWrite implementations. Text input reads to EOF; use an empty input reader for a prompt-only call, or explicitly mark a terminal input. Keep the sender returned by HeadlessSignals::channel to forward host interrupts/shutdown. Inspect HeadlessExit.execution, shutdown and delivery independently; compilation does not execute a model turn.',
+          'HeadlessIo::new 接收注入的 AsyncRead 和 stdout／stderr AsyncWrite 实现。文本输入读取至 EOF；仅提示词调用使用空输入 reader，终端输入则显式标记。保留 HeadlessSignals::channel 返回的 sender，转发宿主中断／关闭。分别检查 HeadlessExit.execution、shutdown 与 delivery；编译示例不会执行模型轮次。',
+        ),
         apis: [
           {
             name: 'desktop::build_harness',
@@ -303,6 +396,8 @@ export const harnessPages: DocPage[] = [
           {
             label: 'Rust · after active turns have drained',
             language: 'rust',
+            verification: 'compile',
+            exampleId: 'harness-shutdown',
             code: 'use harness_runtime::{Harness, ShutdownReport};\n\nasync fn shutdown_after_turns(harness: &Harness) -> ShutdownReport {\n    harness.shutdown().await\n}',
           },
         ],
@@ -349,6 +444,7 @@ export const harnessPages: DocPage[] = [
     ),
     packageName: 'tool-api',
     sourceUrl: source('crates/tool-api/src/tool_trait.rs'),
+    sources: sources('crates/tool-api/src/tool_trait.rs', 'crates/tool-api/src/context.rs', 'crates/tool-api/src/registry.rs', 'crates/tool-api/src/progress.rs', 'crates/orchestrator/src/turn_loop/tool_dispatch.rs'),
     sections: [
       {
         id: 'tool-contract',
@@ -404,6 +500,8 @@ export const harnessPages: DocPage[] = [
           {
             label: 'Rust · existing Tool implementation required',
             language: 'rust',
+            verification: 'compile',
+            exampleId: 'harness-tool-registry',
             code: 'use std::sync::Arc;\nuse tool_api::{Tool, ToolRegistry};\n\nfn registry_with(tool: Arc<dyn Tool>) -> Arc<ToolRegistry> {\n    let mut registry = ToolRegistry::new();\n    registry.register_builtin(tool);\n    Arc::new(registry)\n}',
           },
         ],
@@ -479,6 +577,7 @@ export const harnessPages: DocPage[] = [
     ),
     packageName: 'plugin',
     sourceUrl: source('crates/plugin/src/manager.rs'),
+    sources: sources('crates/plugin/src/manager.rs', 'crates/plugin/src/lifecycle.rs', 'crates/plugin/src/manifest.rs', 'crates/plugin/src/discovery.rs'),
     sections: [
       {
         id: 'components',
@@ -575,6 +674,7 @@ export const harnessPages: DocPage[] = [
     ),
     packageName: 'client',
     sourceUrl: source('crates/client/src/lib.rs'),
+    sources: sources('crates/client/src/lib.rs', 'crates/client/Cargo.toml', 'crates/client/src/protocol/version.rs', 'crates/client/src/protocol/commands.rs', 'crates/client/src/protocol/events.rs', 'crates/client/src/adapter/output_stream.rs', 'crates/client/src/protocol/message.rs'),
     sections: [
       {
         id: 'modules',
@@ -591,9 +691,10 @@ export const harnessPages: DocPage[] = [
         ],
         code: [
           {
-            label: 'Cargo.toml · client adapter',
+            label: t('Cargo.toml · same local source as the runtime', 'Cargo.toml · 与运行时一致的本地来源'),
             language: 'toml',
-            code: `[dependencies]\nclient = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "${revision}", features = ["adapter"] }`,
+            verification: 'excerpt',
+            code: '[dependencies]\nclient = { path = "../harness-runtime/crates/client", features = ["adapter"] }',
           },
         ],
       },
@@ -625,8 +726,8 @@ export const harnessPages: DocPage[] = [
         apis: [
           {
             name: 'CLIENT_PROTOCOL_VERSION',
-            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "17.0.0";',
-            description: t('Protocol version at this source revision. Native clients must version-lock generated binding layouts with their host.', '此源码版本的协议号。原生客户端生成绑定的布局需要与宿主版本一致。'),
+            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";',
+            description: t('Protocol version in the inspected workspace. Native clients must version-lock generated binding layouts with the host they actually build.', '所检查工作区中的协议号。原生客户端生成绑定的布局需要与实际构建的宿主版本一致。'),
           },
         ],
         note: t(
@@ -647,6 +748,8 @@ export const harnessPages: DocPage[] = [
           {
             label: 'Rust · host-supplied event sink',
             language: 'rust',
+            verification: 'compile',
+            exampleId: 'harness-output-adapter',
             code: 'use std::sync::Arc;\nuse client::adapter::{AdapterOutputStream, ClientEventSink};\n\nfn make_output(sink: Arc<dyn ClientEventSink>) -> AdapterOutputStream {\n    AdapterOutputStream::new(sink)\n}',
           },
         ],
@@ -702,3 +805,116 @@ export const harnessPages: DocPage[] = [
     ],
   },
 ];
+
+const integrationSections: Record<string, DocSection[]> = {
+  harness: [
+    {
+      id: 'embedding-contract',
+      title: t('Host admission, resources and failures', '宿主准入、资源与失败'),
+      paragraphs: [
+        t('Use a Tokio runtime whose worker stack is at least harness_runtime::RUNTIME_THREAD_STACK_SIZE (8 MiB). Platform assembly loads configuration, constructs registries and starts owned services; it can fail before a session is available. The facade constructor alone cannot validate credentials or platform readiness.', '使用工作线程栈至少为 harness_runtime::RUNTIME_THREAD_STACK_SIZE（8 MiB）的 Tokio runtime。平台组装加载配置、构建注册表并启动受其管理的服务，可能在会话可用前失败。仅构建门面无法验证凭据或平台就绪状态。'),
+        t('Choose desktop::build_harness for a Rust host that owns its permission surface, mobile::build_mobile for explicit device services, or headless::run for byte-oriented noninteractive execution. Headless is enabled by desktop and reports execution, durable shutdown and output delivery separately.', 'Rust 宿主自己提供权限界面时选择 desktop::build_harness；显式设备服务选择 mobile::build_mobile；按字节进行非交互执行选择 headless::run。Headless 由 desktop 启用，分别报告执行、持久化关闭和输出交付。'),
+      ],
+      links: [{ label: t('Agent execution and recovery', 'Agent 执行与恢复'), href: '/docs/agent-execution' }],
+      note: t('Existing sdk_surface tests check the opaque SDK contract; platform composition and real provider execution require their own checks. A build result is not a live model or device acceptance result.', '现有 sdk_surface 测试检查不透明 SDK 契约；平台组装与真实供应商执行需要各自验证。构建结果不是模型服务或设备验收结果。'),
+    },
+  ],
+  'harness-sessions': [
+    {
+      id: 'session-errors', title: t('Diagnose a failed turn', '诊断失败轮次'),
+      steps: [
+        t('Record the mounted session ID and host turn_id before admission. Keep model/provider profile and request IDs as separate identities.', '准入前记录已挂载 session ID 与宿主 turn_id。模型／供应商 profile 和 request ID 使用各自独立标识。'),
+        t('Consume output as it arrives; terminal outcomes do not reconstruct discarded deltas. Correlate a tool result with its tool_use_id rather than its displayed name.', '随输出到达而消费；终态结果无法重建已丢弃的增量。用 tool_use_id 关联工具结果，不用显示名称。'),
+        t('On interruption, cancel the owned token and await run. Preserve partial output and the returned outcome or error before permitting another session operation.', '中断时取消所属令牌并等待 run。允许其他会话操作前，保留部分输出及返回结果或错误。'),
+        t('For cold resume, load durable session state through the host composition. An ID plus an empty new runtime is not a restored transcript.', '冷恢复时，通过宿主组合加载持久化会话状态。一个 ID 加上空的新 runtime 并不等于恢复后的对话。'),
+      ],
+      note: t('Streaming protocol checks include truncated streams and tool-result pairing. Separate tests must cover output delivery, permission response routing and durable publication; TurnOutcome alone establishes none of those barriers.', '流协议检查包含截断流与工具结果配对。输出交付、权限响应路由和持久化发布需分别测试；TurnOutcome 单独不能证明这些屏障。'),
+    },
+  ],
+  'harness-lifecycle': [
+    {
+      id: 'mock-lifecycle', title: t('Exercise the copied facade without a provider', '无需供应商即可验证复制的门面示例'),
+      paragraphs: [t('Put this complete test module in the consumer library. Add async-trait = "0.1" and tokio = { version = "1", features = ["macros", "rt"] } to dev-dependencies. It tests service injection, mounted identity, cancellation and shutdown; it does not simulate a model or a filesystem.', '将以下完整测试模块放入消费者库。在 dev-dependencies 中加入 async-trait = "0.1" 与 tokio = { version = "1", features = ["macros", "rt"] }。它验证服务注入、挂载标识、取消和关闭，不模拟模型或文件系统。')],
+      code: [{
+        label: t('Rust · complete mock lifecycle test', 'Rust · 完整模拟生命周期测试'), language: 'rust', verification: 'mock', exampleId: 'harness-lifecycle-mock',
+        code: `#[cfg(test)]
+mod lifecycle_example {
+    use std::sync::Arc;
+    use harness_runtime::{CancellationToken, ConversationMessage, CostSnapshot,
+        HandleError, HarnessBuilder, LifecycleService, RunInput, SessionId,
+        SessionService, ShutdownReport, TurnOutcome};
+
+    struct Host { id: SessionId }
+
+    #[async_trait::async_trait]
+    impl SessionService for Host {
+        async fn run(&self, _input: RunInput, cancel: CancellationToken)
+            -> Result<TurnOutcome, HandleError> {
+            Ok(if cancel.is_cancelled() { TurnOutcome::Cancelled }
+                else { TurnOutcome::EndTurn })
+        }
+        async fn session_id(&self) -> SessionId { self.id }
+        async fn transcript(&self) -> Vec<ConversationMessage> { Vec::new() }
+        async fn cost(&self) -> CostSnapshot { CostSnapshot::default() }
+    }
+
+    #[async_trait::async_trait]
+    impl LifecycleService for Host {
+        async fn shutdown(&self) -> ShutdownReport {
+            ShutdownReport { complete: true, ..Default::default() }
+        }
+    }
+
+    #[tokio::test]
+    async fn facade_cancellation_and_shutdown() {
+        let host = Arc::new(Host { id: SessionId::new() });
+        let harness = HarnessBuilder::new(host.clone(), host.clone()).build();
+        assert_eq!(harness.session().id().await, host.id);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = harness.session().run(RunInput::default(), cancel).await.unwrap();
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert!(harness.shutdown().await.complete);
+    }
+}`,
+      }],
+      note: t('In production, stop new admissions and await every active run future before shutdown. A failed durability barrier keeps ShutdownReport.complete false; retry the same owner sequentially. Do not replace the live runtime just to hide an incomplete report.', '生产中先停止新准入并等待所有活动 run future，再关闭。持久化屏障失败时 ShutdownReport.complete 保持 false，应对同一负责人顺序重试。不能为了隐藏未完成报告而替换活动 runtime。'),
+    },
+  ],
+  'harness-tools': [
+    {
+      id: 'dispatch-failures', title: t('Validation, denial and failed side effects', '校验、拒绝与副作用失败'),
+      paragraphs: [
+        t('The orchestrator resolves canonical identity, validates/coerces input, runs tool policy and hooks, obtains the permission decision, and invokes the tool through tracked dispatch. Do not call a Tool body directly from a provider adapter: that would bypass host authority and the invocation journal.', '编排器解析规范标识、校验／转换输入、执行工具策略与 hooks、取得权限决策，再通过带追踪的调度调用工具。供应商适配器不能直接调用 Tool 主体，否则会绕过宿主权限与调用日志。'),
+        t('Schema rejection, permission denial, call failure and interruption are different outcomes. Use ToolError for failed execution and keep observable input redacted through backfill_observable_input; ToolCallResult supplies the model-facing payload. A failed call may have already changed an external system, so retry policy must belong to the operation.', 'schema 拒绝、权限拒绝、调用失败和中断是不同结果。执行失败使用 ToolError，并通过 backfill_observable_input 对可观察输入脱敏；ToolCallResult 提供模型可见载荷。失败调用可能已改变外部系统，重试策略应由操作自身决定。'),
+      ],
+      code: [{ label: t('Existing registry and tool-contract tests', '现有注册表与工具契约测试'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p tool-api --lib\ncargo test --locked -p test-harness --test tools_hooks_e2e' }],
+      links: [{ label: t('Extension lifecycle', '扩展生命周期'), href: '/docs/extensions-lifecycle' }],
+      note: t('These commands are reproducible checks, not a claim that every registered tool is safe on every device. Device input, shell isolation and external service acceptance are checked in their host.', '这些命令是可重复检查，不代表每个注册工具在所有设备上都已验收。设备输入、shell 隔离与外部服务需要在各自宿主验证。'),
+    },
+  ],
+  'harness-plugins': [
+    {
+      id: 'teardown-recovery', title: t('Refresh and recover registry ownership', '更新注册表并恢复其归属'),
+      paragraphs: [
+        t('Enablement contributes components through the production manager; disabling must remove those exact contributions and stop owned workers. A DisablingFailed plugin stays visible to loaded_plugin_ids for retry, but is not authority for replaying a live Mod. Keep the failure and retry teardown before claiming the plugin is unloaded.', '启用经生产管理器贡献组件；禁用必须删除这些对应组件并停止所属 worker。DisablingFailed 插件继续出现在 loaded_plugin_ids 中以便重试，但不具备重放活动 Mod 的权限。保留失败并重试清理，之后才能宣称插件已卸载。'),
+        t('A refreshed MCP or LSP catalog is a live registry update, not a second builtin copy. Plugin-supplied workflows enter the same workflow registry used by the runtime launcher. Marketplace parsing, trust policy and successful runtime activation are separate checkpoints.', '更新后的 MCP 或 LSP 目录是活动注册表更新，不是复制一组内置工具。插件工作流进入运行时 launcher 使用的同一个工作流注册表。市场解析、信任策略与运行时成功激活是独立检查点。'),
+      ],
+      code: [{ label: t('Plugin unit and LSP registration checks', '插件单元与 LSP 注册检查'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p plugin --lib\ncargo test --locked -p lsp --test plugin_only_registration_test' }],
+      note: t('Existing tests exercise component cleanup, failure retention and verified-plugin-only LSP registration. Installing an actual third-party package additionally requires host trust, transport and process cleanup acceptance.', '现有测试覆盖组件清理、失败保留及仅允许已验证插件注册 LSP。安装真实第三方包还需验收宿主信任、传输与进程清理。'),
+    },
+  ],
+  'harness-client': [
+    {
+      id: 'resume-presentation', title: t('Cold resume and compatibility failures', '冷恢复与兼容性失败'),
+      paragraphs: [
+        t('MessageComplete and resumed history use the same ordered MessageDto block schema. MessageDto.sent_at_ms carries the original persisted Unix time; source transcript UUID mapping supplies historical timestamps instead of matching by text or message position. Inline images and visualization references likewise retain their own identity.', 'MessageComplete 与恢复历史使用同一有序 MessageDto block schema。MessageDto.sent_at_ms 携带原始持久化 Unix 时间；通过源码对话 UUID 映射恢复历史时间，而不是按文本或消息位置匹配。内联图像与可视化引用也保留独立标识。'),
+        t('Rust enums are non-exhaustive; hosts handle unknown future variants without inventing successes. Native enum and record layouts require matching generated bindings and the protocol contract gate. A JSON payload that deserializes does not establish a compatible UniFFI binary layout or correct transport handshake.', 'Rust enum 是非穷尽类型；宿主处理未来未知变体时不能伪造成功。原生 enum 与 record 布局需要匹配生成绑定及协议契约检查。JSON 载荷可反序列化不代表 UniFFI 二进制布局兼容或传输握手正确。'),
+      ],
+      code: [{ label: t('Shared client contracts', '共享客户端契约'), language: 'bash', verification: 'manual', code: 'cargo test --locked -p client --features test-support' }],
+      note: t('The current working-tree protocol constant is 21.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.', '当前工作树协议常量为 21.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。'),
+    },
+  ],
+};
+
+for (const page of harnessPages) page.sections.push(...(integrationSections[page.id] ?? []));

@@ -11,6 +11,7 @@ import type {
   CronJobDto,
   CronRequestDto,
   CronRunDto,
+  FusionAdminCommandDto,
   HookAdminCommandDto,
   HookDto,
   ImageRefDto,
@@ -84,6 +85,7 @@ export type SkillCatalogEvent = Extract<ClientEvent, { type: 'skill_catalog' }>;
 export type SkillDocumentEvent = Extract<ClientEvent, { type: 'skill_document' }>;
 
 export type McpConfigurationSnapshotEvent = Extract<ClientEvent, { type: 'mcp_configuration_snapshot' }>;
+export type FusionCatalogEvent = Extract<ClientEvent, { type: 'fusion_catalog' }>;
 
 export type PluginCatalogEvent = Extract<ClientEvent, { type: 'plugin_catalog' }>;
 
@@ -111,6 +113,8 @@ export interface TrackedSpeechEvent {
 export interface UseBridge {
   /** Stable per-renderer identity shared by ui_attach and parent UI requests. */
   readonly uiSurfaceClientId: string;
+  updatePromptSuggestionContext(context: { session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }): Promise<void>;
+  promptSuggestionFeedback(sessionId: string, uuid: string, action: 'shown' | 'accepted' | 'dismissed'): Promise<void>;
   readonly hosted: boolean;
   readonly loading: boolean;
   readonly bootstrap: BootstrapState | null;
@@ -120,6 +124,7 @@ export interface UseBridge {
   readonly skillCatalogEvent: SkillCatalogEvent | null;
   readonly skillDocumentEvent: SkillDocumentEvent | null;
   readonly mcpConfigurationSnapshotEvent: McpConfigurationSnapshotEvent | null;
+  readonly fusionCatalogEvent: FusionCatalogEvent | null;
   readonly pluginCatalogEvent: PluginCatalogEvent | null;
   readonly configurationOperations: Readonly<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>;
   readonly activeSession: SessionRef | undefined;
@@ -162,7 +167,7 @@ export interface UseBridge {
   sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
   runSlashCommand(raw: string): Promise<void>;
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
-  beginLocalCommand(raw: string): void;
+  beginLocalCommand(raw: string): Promise<void>;
   /** Push a locally-produced command's own output into the transcript. */
   emitCommandOutput(output: string, isError: boolean): void;
   cancel(turnId?: number): Promise<void>;
@@ -290,6 +295,7 @@ export interface UseBridge {
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
   mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
+  fusionAdmin(command: FusionAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop plugin catalog/package/config administration. */
   pluginAdmin(command: PluginAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
   /** Native Desktop hook document validation and persistence. */

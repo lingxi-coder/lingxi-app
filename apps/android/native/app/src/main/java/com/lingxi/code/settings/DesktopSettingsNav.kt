@@ -19,7 +19,7 @@ val desktopSettingsEntries = listOf(
     DesktopSettingsEntry(SettingsRoutes.CREDENTIALS, "Provider credentials", "Models & services", listOf("api key", "auth")),
     DesktopSettingsEntry(SettingsRoutes.CUSTOM_PROVIDERS, "Custom providers & routing", "Models & services", listOf("providers", "aliases", "fallback", "retry")),
     DesktopSettingsEntry(SettingsRoutes.ENGINE_PERMISSIONS, "Permissions", "Coding", listOf("allow", "deny", "ask")),
-    DesktopSettingsEntry(SettingsRoutes.TOOLS_AGENT, "Tools & agent behavior", "Coding", listOf("enabledTools", "thinking", "outputStyle")),
+    DesktopSettingsEntry(SettingsRoutes.TOOLS_AGENT, "Tools & agent behavior", "Coding", listOf("promptSuggestionEnabled", "enabledTools", "thinking", "outputStyle")),
     DesktopSettingsEntry(SettingsRoutes.ENGINE_SKILLS, "Skills", "Coding"),
     DesktopSettingsEntry(SettingsRoutes.ENGINE_MCP, "MCP servers", "Coding"),
     DesktopSettingsEntry(SettingsRoutes.HOOKS, "Hooks", "Coding", listOf("PreToolUse", "PostToolUse")),

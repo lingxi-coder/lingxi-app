@@ -1,0 +1,1647 @@
+{
+  "sourceFingerprint": "d694b5d08dc50ba876ce89d9202fc90a14b8b48420c5877ac8227f1823d7beab",
+  "boundary": "Host Rustdoc compilation; native/device runtime acceptance is separate.",
+  "profiles": [
+    {
+      "id": "harness-engine",
+      "label": {
+        "en": "Harness · engine",
+        "zh": "Harness · 引擎"
+      },
+      "state": "ready",
+      "url": "/rustdoc/harness-engine/harness_runtime/index.html",
+      "packages": [
+        "harness-runtime"
+      ],
+      "features": [
+        "engine"
+      ],
+      "identities": [
+        {
+          "package": "agent",
+          "manifest": "harness-runtime/crates/agent/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "apply-seccomp",
+          "manifest": "harness-runtime/crates/apply-seccomp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "audio-runtime",
+          "manifest": "harness-runtime/crates/audio-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "branding",
+          "manifest": "harness-runtime/crates/branding/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "bridge",
+          "manifest": "harness-runtime/crates/bridge/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "client",
+          "manifest": "harness-runtime/crates/client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "command-api",
+          "manifest": "harness-runtime/crates/command-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "compaction",
+          "manifest": "harness-runtime/crates/compaction/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "configuration-admin",
+          "manifest": "harness-runtime/crates/configuration-admin/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "coordinator",
+          "manifest": "harness-runtime/crates/coordinator/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "core",
+          "manifest": "harness-runtime/crates/core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "cost",
+          "manifest": "harness-runtime/crates/cost/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "cron",
+          "manifest": "harness-runtime/crates/cron/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "fusion",
+          "manifest": "harness-runtime/crates/fusion/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "git2",
+          "manifest": "harness-runtime/third_party/git2-rs/git2/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "harness-runtime",
+          "manifest": "harness-runtime/crates/runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "hooks",
+          "manifest": "harness-runtime/crates/hooks/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "http-client",
+          "manifest": "harness-runtime/crates/http-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "jsonrpc",
+          "manifest": "harness-runtime/crates/jsonrpc/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "libgit2-sys",
+          "manifest": "harness-runtime/third_party/git2-rs/libgit2-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "libssh2-sys",
+          "manifest": "harness-runtime/third_party/libssh2-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper",
+          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-rustls",
+          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-util",
+          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-llm-client",
+          "manifest": "llm-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-reqwest",
+          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "llm-runtime",
+          "manifest": "harness-runtime/crates/llm-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lsp",
+          "manifest": "harness-runtime/crates/lsp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mbedtls-sys",
+          "manifest": "harness-runtime/third_party/mbedtls-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mcp",
+          "manifest": "harness-runtime/crates/mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "memory",
+          "manifest": "harness-runtime/crates/memory/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "migrations",
+          "manifest": "harness-runtime/crates/migrations/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mock_stdio_mcp",
+          "manifest": "harness-runtime/crates/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "msgqueue",
+          "manifest": "harness-runtime/crates/msgqueue/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "orchestrator",
+          "manifest": "harness-runtime/crates/orchestrator/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "outputstyles",
+          "manifest": "harness-runtime/crates/outputstyles/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "permission",
+          "manifest": "harness-runtime/crates/permission/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-android",
+          "manifest": "harness-runtime/crates/platforms/android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-common",
+          "manifest": "harness-runtime/crates/platforms/common/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-ios",
+          "manifest": "harness-runtime/crates/platforms/ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-macos-computer-control",
+          "manifest": "harness-runtime/crates/platforms/macos-computer-control/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-posix",
+          "manifest": "harness-runtime/crates/platforms/posix/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-posix-minimal",
+          "manifest": "harness-runtime/crates/platforms/posix-minimal/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-windows",
+          "manifest": "harness-runtime/crates/platforms/windows/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "plugin",
+          "manifest": "harness-runtime/crates/plugin/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "provider-config",
+          "manifest": "harness-runtime/crates/provider-config/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sandbox",
+          "manifest": "harness-runtime/crates/sandbox/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sandbox-runtime",
+          "manifest": "harness-runtime/crates/sandbox-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "secret",
+          "manifest": "harness-runtime/crates/secret/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "session",
+          "manifest": "harness-runtime/crates/session/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sidequery",
+          "manifest": "harness-runtime/crates/sidequery/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "skill-api",
+          "manifest": "harness-runtime/crates/skill-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "syntect",
+          "manifest": "harness-runtime/third_party/syntect/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "task-store",
+          "manifest": "harness-runtime/crates/task-store/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tasks",
+          "manifest": "harness-runtime/crates/tasks/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "telemetry",
+          "manifest": "harness-runtime/crates/telemetry/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "telemetry-macros",
+          "manifest": "harness-runtime/crates/telemetry-macros/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "test-harness",
+          "manifest": "harness-runtime/crates/test-harness/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-agent",
+          "manifest": "harness-runtime/crates/tools/agent/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-android-use",
+          "manifest": "harness-runtime/crates/tools/android-use/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-api",
+          "manifest": "harness-runtime/crates/tool-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-computer-use",
+          "manifest": "harness-runtime/crates/tools/computer-use/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-cron",
+          "manifest": "harness-runtime/crates/tools/cron/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-file",
+          "manifest": "harness-runtime/crates/tools/file/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-git-mobile",
+          "manifest": "harness-runtime/crates/tools/git-mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-lsp",
+          "manifest": "harness-runtime/crates/tools/lsp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-mcp",
+          "manifest": "harness-runtime/crates/tools/mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-meta",
+          "manifest": "harness-runtime/crates/tools/meta/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-mobile",
+          "manifest": "harness-runtime/crates/tools/mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-plan",
+          "manifest": "harness-runtime/crates/tools/plan/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-shell",
+          "manifest": "harness-runtime/crates/tools/shell/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-shell-mobile",
+          "manifest": "harness-runtime/crates/tools/shell-mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-skill",
+          "manifest": "harness-runtime/crates/tools/skill/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-task",
+          "manifest": "harness-runtime/crates/tools/task/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-ui",
+          "manifest": "harness-runtime/crates/tools/ui/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-web",
+          "manifest": "harness-runtime/crates/tools/web/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-workflow",
+          "manifest": "harness-runtime/crates/tools/workflow/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-worktree",
+          "manifest": "harness-runtime/crates/tools/worktree/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "visualization",
+          "manifest": "harness-runtime/crates/visualization/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "workflow",
+          "manifest": "harness-runtime/crates/workflow/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "harness-desktop",
+      "label": {
+        "en": "Harness · desktop",
+        "zh": "Harness · 桌面"
+      },
+      "state": "ready",
+      "url": "/rustdoc/harness-desktop/harness_runtime/index.html",
+      "packages": [
+        "harness-runtime",
+        "client",
+        "tool-api",
+        "audio-runtime"
+      ],
+      "features": [
+        "harness-runtime/desktop"
+      ],
+      "identities": [
+        {
+          "package": "agent",
+          "manifest": "harness-runtime/crates/agent/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "apply-seccomp",
+          "manifest": "harness-runtime/crates/apply-seccomp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "audio-runtime",
+          "manifest": "harness-runtime/crates/audio-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "branding",
+          "manifest": "harness-runtime/crates/branding/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "bridge",
+          "manifest": "harness-runtime/crates/bridge/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "client",
+          "manifest": "harness-runtime/crates/client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "command-api",
+          "manifest": "harness-runtime/crates/command-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "compaction",
+          "manifest": "harness-runtime/crates/compaction/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "configuration-admin",
+          "manifest": "harness-runtime/crates/configuration-admin/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "coordinator",
+          "manifest": "harness-runtime/crates/coordinator/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "core",
+          "manifest": "harness-runtime/crates/core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "cost",
+          "manifest": "harness-runtime/crates/cost/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "cron",
+          "manifest": "harness-runtime/crates/cron/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "fusion",
+          "manifest": "harness-runtime/crates/fusion/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "git2",
+          "manifest": "harness-runtime/third_party/git2-rs/git2/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "harness-runtime",
+          "manifest": "harness-runtime/crates/runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "hooks",
+          "manifest": "harness-runtime/crates/hooks/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "http-client",
+          "manifest": "harness-runtime/crates/http-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "jsonrpc",
+          "manifest": "harness-runtime/crates/jsonrpc/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "libgit2-sys",
+          "manifest": "harness-runtime/third_party/git2-rs/libgit2-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "libssh2-sys",
+          "manifest": "harness-runtime/third_party/libssh2-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper",
+          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-rustls",
+          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-util",
+          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-llm-client",
+          "manifest": "llm-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-reqwest",
+          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "llm-runtime",
+          "manifest": "harness-runtime/crates/llm-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lsp",
+          "manifest": "harness-runtime/crates/lsp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mbedtls-sys",
+          "manifest": "harness-runtime/third_party/mbedtls-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mcp",
+          "manifest": "harness-runtime/crates/mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "memory",
+          "manifest": "harness-runtime/crates/memory/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "migrations",
+          "manifest": "harness-runtime/crates/migrations/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mock_stdio_mcp",
+          "manifest": "harness-runtime/crates/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "msgqueue",
+          "manifest": "harness-runtime/crates/msgqueue/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "orchestrator",
+          "manifest": "harness-runtime/crates/orchestrator/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "outputstyles",
+          "manifest": "harness-runtime/crates/outputstyles/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "permission",
+          "manifest": "harness-runtime/crates/permission/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-android",
+          "manifest": "harness-runtime/crates/platforms/android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-common",
+          "manifest": "harness-runtime/crates/platforms/common/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-ios",
+          "manifest": "harness-runtime/crates/platforms/ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-macos-computer-control",
+          "manifest": "harness-runtime/crates/platforms/macos-computer-control/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-posix",
+          "manifest": "harness-runtime/crates/platforms/posix/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-posix-minimal",
+          "manifest": "harness-runtime/crates/platforms/posix-minimal/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-windows",
+          "manifest": "harness-runtime/crates/platforms/windows/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "plugin",
+          "manifest": "harness-runtime/crates/plugin/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "provider-config",
+          "manifest": "harness-runtime/crates/provider-config/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sandbox",
+          "manifest": "harness-runtime/crates/sandbox/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sandbox-runtime",
+          "manifest": "harness-runtime/crates/sandbox-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "secret",
+          "manifest": "harness-runtime/crates/secret/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "session",
+          "manifest": "harness-runtime/crates/session/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sidequery",
+          "manifest": "harness-runtime/crates/sidequery/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "skill-api",
+          "manifest": "harness-runtime/crates/skill-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "syntect",
+          "manifest": "harness-runtime/third_party/syntect/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "task-store",
+          "manifest": "harness-runtime/crates/task-store/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tasks",
+          "manifest": "harness-runtime/crates/tasks/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "telemetry",
+          "manifest": "harness-runtime/crates/telemetry/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "telemetry-macros",
+          "manifest": "harness-runtime/crates/telemetry-macros/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "test-harness",
+          "manifest": "harness-runtime/crates/test-harness/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-agent",
+          "manifest": "harness-runtime/crates/tools/agent/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-android-use",
+          "manifest": "harness-runtime/crates/tools/android-use/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-api",
+          "manifest": "harness-runtime/crates/tool-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-computer-use",
+          "manifest": "harness-runtime/crates/tools/computer-use/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-cron",
+          "manifest": "harness-runtime/crates/tools/cron/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-file",
+          "manifest": "harness-runtime/crates/tools/file/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-git-mobile",
+          "manifest": "harness-runtime/crates/tools/git-mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-lsp",
+          "manifest": "harness-runtime/crates/tools/lsp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-mcp",
+          "manifest": "harness-runtime/crates/tools/mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-meta",
+          "manifest": "harness-runtime/crates/tools/meta/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-mobile",
+          "manifest": "harness-runtime/crates/tools/mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-plan",
+          "manifest": "harness-runtime/crates/tools/plan/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-shell",
+          "manifest": "harness-runtime/crates/tools/shell/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-shell-mobile",
+          "manifest": "harness-runtime/crates/tools/shell-mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-skill",
+          "manifest": "harness-runtime/crates/tools/skill/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-task",
+          "manifest": "harness-runtime/crates/tools/task/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-ui",
+          "manifest": "harness-runtime/crates/tools/ui/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-web",
+          "manifest": "harness-runtime/crates/tools/web/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-workflow",
+          "manifest": "harness-runtime/crates/tools/workflow/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-worktree",
+          "manifest": "harness-runtime/crates/tools/worktree/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "visualization",
+          "manifest": "harness-runtime/crates/visualization/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "workflow",
+          "manifest": "harness-runtime/crates/workflow/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "harness-mobile-uniffi",
+      "label": {
+        "en": "Harness · mobile + UniFFI",
+        "zh": "Harness · 移动端与 UniFFI"
+      },
+      "state": "ready",
+      "url": "/rustdoc/harness-mobile-uniffi/harness_runtime/index.html",
+      "packages": [
+        "harness-runtime",
+        "client"
+      ],
+      "features": [
+        "harness-runtime/mobile",
+        "harness-runtime/uniffi"
+      ],
+      "identities": [
+        {
+          "package": "agent",
+          "manifest": "harness-runtime/crates/agent/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "apply-seccomp",
+          "manifest": "harness-runtime/crates/apply-seccomp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "audio-runtime",
+          "manifest": "harness-runtime/crates/audio-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "branding",
+          "manifest": "harness-runtime/crates/branding/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "bridge",
+          "manifest": "harness-runtime/crates/bridge/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "client",
+          "manifest": "harness-runtime/crates/client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "command-api",
+          "manifest": "harness-runtime/crates/command-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "compaction",
+          "manifest": "harness-runtime/crates/compaction/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "configuration-admin",
+          "manifest": "harness-runtime/crates/configuration-admin/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "coordinator",
+          "manifest": "harness-runtime/crates/coordinator/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "core",
+          "manifest": "harness-runtime/crates/core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "cost",
+          "manifest": "harness-runtime/crates/cost/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "cron",
+          "manifest": "harness-runtime/crates/cron/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "fusion",
+          "manifest": "harness-runtime/crates/fusion/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "git2",
+          "manifest": "harness-runtime/third_party/git2-rs/git2/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "harness-runtime",
+          "manifest": "harness-runtime/crates/runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "hooks",
+          "manifest": "harness-runtime/crates/hooks/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "http-client",
+          "manifest": "harness-runtime/crates/http-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "jsonrpc",
+          "manifest": "harness-runtime/crates/jsonrpc/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "libgit2-sys",
+          "manifest": "harness-runtime/third_party/git2-rs/libgit2-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "libssh2-sys",
+          "manifest": "harness-runtime/third_party/libssh2-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper",
+          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-rustls",
+          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-util",
+          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-llm-client",
+          "manifest": "llm-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-reqwest",
+          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "llm-runtime",
+          "manifest": "harness-runtime/crates/llm-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lsp",
+          "manifest": "harness-runtime/crates/lsp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mbedtls-sys",
+          "manifest": "harness-runtime/third_party/mbedtls-sys/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mcp",
+          "manifest": "harness-runtime/crates/mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "memory",
+          "manifest": "harness-runtime/crates/memory/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "migrations",
+          "manifest": "harness-runtime/crates/migrations/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mock_stdio_mcp",
+          "manifest": "harness-runtime/crates/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "msgqueue",
+          "manifest": "harness-runtime/crates/msgqueue/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "orchestrator",
+          "manifest": "harness-runtime/crates/orchestrator/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "outputstyles",
+          "manifest": "harness-runtime/crates/outputstyles/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "permission",
+          "manifest": "harness-runtime/crates/permission/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-android",
+          "manifest": "harness-runtime/crates/platforms/android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-common",
+          "manifest": "harness-runtime/crates/platforms/common/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-ios",
+          "manifest": "harness-runtime/crates/platforms/ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-macos-computer-control",
+          "manifest": "harness-runtime/crates/platforms/macos-computer-control/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-posix",
+          "manifest": "harness-runtime/crates/platforms/posix/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-posix-minimal",
+          "manifest": "harness-runtime/crates/platforms/posix-minimal/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-windows",
+          "manifest": "harness-runtime/crates/platforms/windows/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "plugin",
+          "manifest": "harness-runtime/crates/plugin/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "provider-config",
+          "manifest": "harness-runtime/crates/provider-config/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sandbox",
+          "manifest": "harness-runtime/crates/sandbox/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sandbox-runtime",
+          "manifest": "harness-runtime/crates/sandbox-runtime/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "secret",
+          "manifest": "harness-runtime/crates/secret/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "session",
+          "manifest": "harness-runtime/crates/session/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "sidequery",
+          "manifest": "harness-runtime/crates/sidequery/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "skill-api",
+          "manifest": "harness-runtime/crates/skill-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "syntect",
+          "manifest": "harness-runtime/third_party/syntect/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "task-store",
+          "manifest": "harness-runtime/crates/task-store/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tasks",
+          "manifest": "harness-runtime/crates/tasks/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "telemetry",
+          "manifest": "harness-runtime/crates/telemetry/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "telemetry-macros",
+          "manifest": "harness-runtime/crates/telemetry-macros/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "test-harness",
+          "manifest": "harness-runtime/crates/test-harness/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-agent",
+          "manifest": "harness-runtime/crates/tools/agent/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-android-use",
+          "manifest": "harness-runtime/crates/tools/android-use/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-api",
+          "manifest": "harness-runtime/crates/tool-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-computer-use",
+          "manifest": "harness-runtime/crates/tools/computer-use/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-cron",
+          "manifest": "harness-runtime/crates/tools/cron/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-file",
+          "manifest": "harness-runtime/crates/tools/file/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-git-mobile",
+          "manifest": "harness-runtime/crates/tools/git-mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-lsp",
+          "manifest": "harness-runtime/crates/tools/lsp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-mcp",
+          "manifest": "harness-runtime/crates/tools/mcp/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-meta",
+          "manifest": "harness-runtime/crates/tools/meta/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-mobile",
+          "manifest": "harness-runtime/crates/tools/mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-plan",
+          "manifest": "harness-runtime/crates/tools/plan/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-shell",
+          "manifest": "harness-runtime/crates/tools/shell/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-shell-mobile",
+          "manifest": "harness-runtime/crates/tools/shell-mobile/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-skill",
+          "manifest": "harness-runtime/crates/tools/skill/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-task",
+          "manifest": "harness-runtime/crates/tools/task/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-ui",
+          "manifest": "harness-runtime/crates/tools/ui/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-web",
+          "manifest": "harness-runtime/crates/tools/web/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-workflow",
+          "manifest": "harness-runtime/crates/tools/workflow/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "tool-worktree",
+          "manifest": "harness-runtime/crates/tools/worktree/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "visualization",
+          "manifest": "harness-runtime/crates/visualization/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "workflow",
+          "manifest": "harness-runtime/crates/workflow/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "llm-core",
+      "label": {
+        "en": "LLM · core",
+        "zh": "LLM · 核心"
+      },
+      "state": "ready",
+      "url": "/rustdoc/llm-core/lingxi_llm_client/index.html",
+      "packages": [
+        "lingxi-llm-client"
+      ],
+      "features": [],
+      "identities": [
+        {
+          "package": "lingxi-hyper",
+          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-rustls",
+          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-util",
+          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-llm-client",
+          "manifest": "llm-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-reqwest",
+          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "llm-websocket",
+      "label": {
+        "en": "LLM · WebSocket",
+        "zh": "LLM · WebSocket"
+      },
+      "state": "ready",
+      "url": "/rustdoc/llm-websocket/lingxi_llm_client/index.html",
+      "packages": [
+        "lingxi-llm-client"
+      ],
+      "features": [
+        "responses-websocket",
+        "realtime-websocket"
+      ],
+      "identities": [
+        {
+          "package": "lingxi-hyper",
+          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-rustls",
+          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-util",
+          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-llm-client",
+          "manifest": "llm-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-reqwest",
+          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "llm-tokenizers",
+      "label": {
+        "en": "LLM · all tokenizers",
+        "zh": "LLM · 全部分词器"
+      },
+      "state": "ready",
+      "url": "/rustdoc/llm-tokenizers/lingxi_llm_client/index.html",
+      "packages": [
+        "lingxi-llm-client"
+      ],
+      "features": [
+        "tokenizers-all"
+      ],
+      "identities": [
+        {
+          "package": "lingxi-hyper",
+          "manifest": "llm-client/vendor/lingxi-hyper/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-rustls",
+          "manifest": "llm-client/vendor/lingxi-hyper-rustls/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-hyper-util",
+          "manifest": "llm-client/vendor/lingxi-hyper-util/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-llm-client",
+          "manifest": "llm-client/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "lingxi-reqwest",
+          "manifest": "llm-client/vendor/lingxi-reqwest/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "mobile-api",
+      "label": {
+        "en": "Mobile Linux · API",
+        "zh": "Mobile Linux · 接口"
+      },
+      "state": "ready",
+      "url": "/rustdoc/mobile-api/mobile_linux_api/index.html",
+      "packages": [
+        "mobile-linux-api"
+      ],
+      "features": [],
+      "identities": [
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ffi",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ffi/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ios",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "mobile-core",
+      "label": {
+        "en": "Mobile Linux · rootfs core",
+        "zh": "Mobile Linux · rootfs 核心"
+      },
+      "state": "ready",
+      "url": "/rustdoc/mobile-core/mobile_linux_core/index.html",
+      "packages": [
+        "mobile-linux-core"
+      ],
+      "features": [],
+      "identities": [
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ffi",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ffi/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ios",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "mobile-ffi",
+      "label": {
+        "en": "Mobile Linux · host-supported FFI",
+        "zh": "Mobile Linux · 宿主可编译 FFI"
+      },
+      "state": "ready",
+      "url": "/rustdoc/mobile-ffi/mobile_linux_runtime/index.html",
+      "packages": [
+        "mobile-linux-ffi"
+      ],
+      "features": [],
+      "identities": [
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ffi",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ffi/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ios",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    },
+    {
+      "id": "mobile-pty",
+      "label": {
+        "en": "Mobile Linux · host PTY",
+        "zh": "Mobile Linux · 宿主 PTY"
+      },
+      "state": "ready",
+      "url": "/rustdoc/mobile-pty/platform_pty/index.html",
+      "packages": [
+        "platform-pty"
+      ],
+      "features": [],
+      "identities": [
+        {
+          "package": "mobile-linux-android",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-android/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-api",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-api/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-core",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-core/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ffi",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ffi/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "mobile-linux-ios",
+          "manifest": "mobile-linux-runtime/crates/mobile-linux-ios/Cargo.toml",
+          "source": "working-tree"
+        },
+        {
+          "package": "platform-pty",
+          "manifest": "mobile-linux-runtime/crates/platform-pty/Cargo.toml",
+          "source": "working-tree"
+        }
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "hostTarget": "aarch64-apple-darwin"
+    }
+  ]
+}

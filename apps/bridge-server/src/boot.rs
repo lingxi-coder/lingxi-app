@@ -1341,6 +1341,10 @@ pub async fn assemble_with_credentials(
         let managed = harness_runtime::desktop::managed_settings_overlay().await;
         let active = active_settings_baseline(&paths, &managed);
         SettingsContext {
+            fusion_layers: Some(Arc::new({
+                let config = cfg.clone();
+                move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
+            })),
             paths,
             active: Arc::new(std::sync::RwLock::new(active)),
             managed,

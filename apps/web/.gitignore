@@ -2,6 +2,7 @@
 node_modules
 dist/
 .vite/
+.wrangler/
 *.tsbuildinfo
 
 # Local configuration and logs
@@ -18,3 +19,6 @@ pnpm-debug.log*
 # Test and OS artifacts
 coverage/
 .DS_Store
+
+# Compiler documentation generated from isolated SDK consumers
+public/rustdoc/

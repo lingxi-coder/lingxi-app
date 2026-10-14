@@ -7,6 +7,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.android.MobileLinuxEventFfi
 import com.lingxi.code.bindings.android.MobileLinuxEventKindFfi
 import com.lingxi.code.bindings.android.MobileLinuxTaskSnapshotFfi
@@ -30,6 +31,7 @@ import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -296,6 +298,7 @@ class ChatViewModel(
      */
     private fun bindSource() {
         sourceBindingJob?.cancel()
+        _state.update { it.copy(slashCommands = emptyList()) }
         val boundSource = source
         val generation = sourceGeneration
         sourceBindingJob = viewModelScope.launch {
@@ -361,13 +364,22 @@ class ChatViewModel(
                     if (sourceGeneration == generation) _mcpServers.value = servers
                 }
             }
-            launch {
+            launch(start = CoroutineStart.UNDISPATCHED) {
                 // The generic out-of-band event stream: interactive questions
                 // and background-task transitions ride here, NOT the per-turn
                 // reply stream — a question can outlive its turn's stream and
                 // a task can finish with no turn in flight at all.
                 boundSource.clientEvents.collect { event ->
                     if (sourceGeneration == generation) reduceClientEvent(event)
+                }
+            }
+            launch {
+                // Subscribe before requesting: an in-process catalog can arrive
+                // synchronously, and must belong to this workspace/source.
+                runCatching {
+                    boundSource.submitClientCommand(
+                        ClientCommand.RefreshListings(listOf(ListingKindDto.SLASH_COMMANDS)),
+                    )
                 }
             }
         }
@@ -396,6 +408,27 @@ class ChatViewModel(
             return
         }
         when (event) {
+            is ClientEvent.SlashCommandCatalog -> _state.update { state ->
+                state.copy(slashCommands = event.commands.map { command ->
+                    ConversationSlashCommand(
+                        name = command.name,
+                        aliases = command.aliases,
+                        argumentHint = command.argumentHint,
+                        argumentNames = command.argumentNames,
+                    )
+                })
+            }
+            is ClientEvent.TurnStarted -> {
+                _state.update { it.copy(promptSuggestion = null, promptSuggestionUuid = null, suggestionTurn = it.suggestionTurn + 1) }
+            }
+            is ClientEvent.PromptSuggestionState -> _state.update {
+                it.copy(promptSuggestionEnabled = event.enabled, promptSuggestionNotice = event.notice)
+            }
+            is ClientEvent.PromptSuggestion -> _state.update { state ->
+                if (state.session.id == event.sessionId
+                    && !state.sessionTransitioning && state.pendingQuestions.isEmpty())
+                    state.copy(promptSuggestion = event.suggestion, promptSuggestionUuid = event.uuid) else state
+            }
             is ClientEvent.ScheduledTaskFire -> _state.update { current ->
                 // Session notice arrives before TurnStarted and is not a loop-fold marker.
                 current.copy(messages = current.messages + Message(role = Role.Ai, text = event.message))
@@ -441,7 +474,7 @@ class ChatViewModel(
                 s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == event.requestId })
             }
             is ClientEvent.SessionEnded -> _state.update {
-                it.copy(pendingQuestions = emptyList(), compaction = null)
+                it.copy(pendingQuestions = emptyList(), compaction = null, promptSuggestion = null, promptSuggestionUuid = null)
             }
             is ClientEvent.CompactionStatus -> _state.update {
                 it.copy(compaction = reduceCompactionStatus(it.compaction, event.phase, event.error))
@@ -1578,6 +1611,7 @@ class ChatViewModel(
         _state.update {
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
+                promptSuggestion = null, promptSuggestionUuid = null,
                 messages = restored.transcript, // clear-then-restore (oldest-first)
                 visualizationChip = null,
                 visualizationFollowup = null,
@@ -1590,6 +1624,7 @@ class ChatViewModel(
                 statusLine = null,
                 shellTools = emptyList(),
                 agentRun = null,
+                contextUsage = null,
                 agentRunsByMessageId = reconstructTerminalAgentRuns(restored.transcript),
                 error = null,
                 activeBackgroundTaskIds = emptySet(),
@@ -1786,6 +1821,7 @@ class ChatViewModel(
         _state.update {
             it.copy(
                 session = target,
+                promptSuggestion = null, promptSuggestionUuid = null,
                 messages = emptyList(),
                 visualizationChip = null,
                 visualizationFollowup = null,
@@ -1799,6 +1835,7 @@ class ChatViewModel(
                 compaction = null,
                 shellTools = emptyList(),
                 agentRun = null,
+                contextUsage = null,
                 agentRunsByMessageId = emptyMap(),
                 error = null,
                 planTasks = emptyList(),
@@ -2128,6 +2165,20 @@ class ChatViewModel(
         }
     }
 
+    fun updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Boolean, pendingPermission: Boolean) {
+        viewModelScope.launch {
+            runCatching { source.submitClientCommand(ClientCommand.UpdatePromptSuggestionContext(
+                sessionId, focus, inputEmpty, pendingPermission, false,
+            )) }
+        }
+    }
+
+    fun promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {
+        viewModelScope.launch {
+            runCatching { source.submitClientCommand(ClientCommand.PromptSuggestionFeedback(sessionId, uuid, action)) }
+        }
+    }
+
     /** Dismiss the persistent error banner (its × affordance). */
     fun dismissError() {
         _state.update { it.copy(error = null) }
@@ -2332,6 +2383,7 @@ class ChatViewModel(
 
             is ReplyEvent.Usage -> _state.update {
                 it.copy(
+                    contextUsage = event.usage,
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
                         .updateUsage(event.usage),
                 )

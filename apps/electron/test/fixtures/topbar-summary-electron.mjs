@@ -27,6 +27,20 @@ async function main() {
     const wc = window.webContents;
     const js = (expression) => wc.executeJavaScript(expression);
     const click = async (selector) => { await js(`document.querySelector(${JSON.stringify(selector)}).click()`); await delay(40); };
+    const pointerClick = async (selector) => {
+      const point = await js(`(() => {
+        const button = document.querySelector(${JSON.stringify(selector)});
+        const rect = button.getBoundingClientRect();
+        const x = Math.round(rect.left + rect.width / 2);
+        const y = Math.round(rect.top + rect.height / 2);
+        if (!rect.width || !rect.height || !button.contains(document.elementFromPoint(x, y))) throw new Error('Button is not reachable: ' + ${JSON.stringify(selector)});
+        return { x, y };
+      })()`);
+      wc.sendInputEvent({ type: 'mouseMove', ...point });
+      wc.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+      wc.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+      await delay(40);
+    };
     const clickText = async (scope, text) => {
       await js(`(() => { const target = [...document.querySelectorAll(${JSON.stringify(scope + ' button')})].find(el => el.textContent.includes(${JSON.stringify(text)})); if(!target) throw new Error('Missing button: '+${JSON.stringify(text)}); target.click(); })()`);
       await delay(40);
@@ -51,8 +65,21 @@ async function main() {
     await waitFor(wc, `getComputedStyle(document.querySelector('.runtime-inspector')).opacity === '1'`);
     assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), false);
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).opacity`), '1');
-    await click('[aria-label="Hide right panel"]');
+    assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector-header')).getPropertyValue('-webkit-app-region')`), 'no-drag');
+    await pointerClick('[aria-label="Open pinned summary"]');
+    await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
+    await click('[aria-label="Toggle pinned summary"]');
+    await pointerClick('[aria-label="Expand right panel"]');
+    await waitFor(wc, `Boolean(document.querySelector('[aria-label="Restore panel size"]'))`);
+    assert.equal(await js(`document.querySelector('.runtime-inspector').style.width`), '100%');
+    await pointerClick('[aria-label="Restore panel size"]');
+    assert.equal(await js(`document.querySelector('.runtime-inspector').style.width`), '390px');
+    await pointerClick('[aria-label="Hide right panel"]');
     await waitFor(wc, `!document.querySelector('.runtime-inspector')`);
+    if (process.argv.includes('--inspector-controls-only')) {
+      console.log(JSON.stringify({ controls: ['summary', 'expand', 'restore', 'hide'] }));
+      return;
+    }
     await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     await click('[aria-label="Toggle right panel"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector').getAnimations({subtree:true}).length`), 0);
@@ -85,14 +112,31 @@ async function main() {
 
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
     await settleFixtureAnimations(wc, '#runtime-center-overview');
-    const overview = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); const row = panel.parentElement; return { width: panel.getBoundingClientRect().width, height: panel.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') }; })()`);
+    const overview = await js(`(() => {
+      const panel = document.querySelector('#runtime-center-overview');
+      const row = panel.parentElement;
+      const bounds = panel.getBoundingClientRect();
+      const natural = panel.cloneNode(true);
+      natural.removeAttribute('id');
+      Object.assign(natural.style, { position: 'absolute', width: bounds.width + 'px', height: 'auto', maxHeight: 'none', margin: '0', visibility: 'hidden', animation: 'none' });
+      row.append(natural);
+      const naturalHeight = natural.getBoundingClientRect().height;
+      natural.remove();
+      return { width: bounds.width, height: bounds.height, naturalHeight, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') };
+    })()`);
     assert.equal(overview.width, 300);
     assert.equal(overview.radius, '20px');
     assert.deepEqual(overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
     assert.equal(overview.fourthResource, false);
-    // The rail hugs its sections instead of stretching to the transcript row.
-    assert.ok(overview.height < overview.rowHeight - 20, `summary rail height ${overview.height} fills row ${overview.rowHeight}`);
-    assert.equal(overview.scrollHeight, overview.clientHeight, 'content-sized rail needs no internal scroll');
+    // macOS may constrain the requested window height to the available screen.
+    // The rail hugs its content until it reaches the row's 20px margin budget.
+    const expectedHeight = Math.min(overview.naturalHeight, overview.rowHeight - 20);
+    assert.ok(Math.abs(overview.height - expectedHeight) <= 1, `summary rail height ${overview.height} differs from content/cap height ${expectedHeight}`);
+    if (overview.naturalHeight <= overview.rowHeight - 20) {
+      assert.equal(overview.scrollHeight, overview.clientHeight, 'content-sized rail needs no internal scroll');
+    } else {
+      assert.ok(overview.scrollHeight > overview.clientHeight, 'screen-constrained rail scrolls internally');
+    }
     window.setContentSize(1400, 420);
     await delay(150);
     const cramped = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); const row = panel.parentElement; return { height: panel.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, overflow: getComputedStyle(panel).overflowY }; })()`);
@@ -126,7 +170,7 @@ async function main() {
     await js(`Promise.all(document.querySelector('.runtime-inspector').getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})))`);
     await capture('details-light');
     const heights = await js(`({ chat: document.querySelector('.desktop-topbar').getBoundingClientRect().height, detail: document.querySelector('.runtime-inspector-header').getBoundingClientRect().height, panel: document.querySelector('.runtime-inspector').getBoundingClientRect().width })`);
-    assert.deepEqual(heights, { chat: 56, detail: 56, panel: 390 });
+    assert.deepEqual(heights, { chat: 44, detail: 44, panel: 390 });
     checks.push('independent panels tabs and plan todos separation');
 
     await click('[aria-label="Hide right panel"]');

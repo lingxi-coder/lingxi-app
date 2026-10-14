@@ -292,6 +292,10 @@ class MainActivity : ComponentActivity() {
                             settingsInitialRoute = SettingsRoutes.MAIN
                             settingsOpen = true
                         },
+                        onOpenPermissionSettings = {
+                            settingsInitialRoute = SettingsRoutes.PERMISSION_MODE
+                            settingsOpen = true
+                        },
                         onOpenModelSettings = {
                             settingsInitialRoute = SettingsRoutes.providerList(ProviderKind.Llm.name)
                             settingsOpen = true
@@ -300,6 +304,10 @@ class MainActivity : ComponentActivity() {
                             settingsInitialRoute = providerSettingsId
                                 ?.let { SettingsRoutes.providerEdit(ProviderKind.Llm.name, it) }
                                 ?: SettingsRoutes.providerList(ProviderKind.Llm.name)
+                            settingsOpen = true
+                        },
+                        onOpenVoiceSettings = {
+                            settingsInitialRoute = SettingsRoutes.VOICE
                             settingsOpen = true
                         },
                         onOpenComputerUseSettings = {

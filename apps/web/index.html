@@ -2,12 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      try { document.documentElement.dataset.theme = JSON.parse(localStorage.getItem("lingxi.web.theme")) === "dark" ? "dark" : "light"; }
+      catch { document.documentElement.dataset.theme = "light"; }
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>灵犀 LingXi — 让想法，成为现实。</title>
+    <title>灵犀 LingXi — 你的个人辅助 Agent</title>
     <meta
       name="description"
-      content="灵犀 LingXi：跨平台 AI 开发助手。探索 Harness Runtime、LLM Client 与 Mobile Linux SDK 和开发者文档。"
+      content="灵犀是你的个人辅助 Agent。帮你梳理想法、查找资料、处理日常任务，与你一起把事情做好。"
     />
   </head>
   <body>

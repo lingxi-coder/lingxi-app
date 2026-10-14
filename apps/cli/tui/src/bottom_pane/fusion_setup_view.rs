@@ -1,4 +1,4 @@
-//! `/fusion setup`: the four-step model-configuration wizard, backed by the
+//! `/fusion setup`: the named-strategy configuration wizard, backed by the
 //! pure [`crate::fusion::setup`] reducer.
 //!
 //! Modeled on [`crate::bottom_pane::web_picker_view::WebPickerView`] — arrows
@@ -19,8 +19,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, FusionSetupAction, ViewOutcome};
 use crate::fusion::setup::{
-    handle_fusion_setup_key, FusionSetupOutcome, FusionSetupSnapshot, FusionSetupState,
-    FusionSetupStep, STEP_COUNT,
+    handle_fusion_setup_key, scope_label, FusionSetupOutcome, FusionSetupSnapshot,
+    FusionSetupState, FusionSetupStep, STEP_COUNT,
 };
 use crate::renderable::Renderable;
 
@@ -54,14 +54,20 @@ impl FusionSetupView {
     fn title(&self) -> String {
         let step = self.state.step;
         let label = match step {
+            FusionSetupStep::Strategy => "Strategy",
+            FusionSetupStep::Details => "Name and scope",
             FusionSetupStep::Panels => "Panel models",
             FusionSetupStep::Analyst => "Analyst model",
             FusionSetupStep::Confirm => "Review",
         };
-        format!(
-            "Fusion setup · Step {}/{STEP_COUNT} · {label}",
-            step.number()
-        )
+        let named =
+            !self.state.snapshot.entries.is_empty() || !self.state.snapshot.scopes.is_empty();
+        let (number, total) = if named {
+            (step.number(), STEP_COUNT)
+        } else {
+            (step.number().saturating_sub(2), STEP_COUNT - 2)
+        };
+        format!("Fusion setup · Step {number}/{total} · {label}")
     }
 
     fn list_lines(&self) -> Vec<Line<'static>> {
@@ -122,8 +128,70 @@ impl FusionSetupView {
             .collect()
     }
 
+    fn strategy_lines(&self) -> Vec<Line<'static>> {
+        let start = self.state.selected.saturating_sub(VIEWPORT - 1);
+        let mut lines = vec![Line::from(format!("Filter: {}", self.state.query))];
+        lines.extend(
+            self.state
+                .visible()
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(VIEWPORT)
+                .map(|(position, &index)| {
+                    let label = self.state.snapshot.entries.get(index).map_or_else(
+                        || "+ New strategy".to_string(),
+                        |entry| {
+                            format!(
+                                "{} · {}{}",
+                                entry.name,
+                                scope_label(entry.reference.scope),
+                                if entry.is_default { " · default" } else { "" }
+                            )
+                        },
+                    );
+                    let selected = position == self.state.selected;
+                    Line::from(Span::styled(
+                        format!("{} {label}", if selected { "❯" } else { " " }),
+                        if selected {
+                            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                        } else {
+                            Style::default()
+                        },
+                    ))
+                }),
+        );
+        lines
+    }
+
+    fn details_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            Line::from(format!("Name: {}", self.state.name)),
+            Line::from(format!(
+                "Scope: {}{}",
+                scope_label(self.state.reference.scope),
+                if self.state.is_new {
+                    " · Tab to change"
+                } else {
+                    " · fixed for this strategy"
+                }
+            )),
+            Line::from(Span::styled(
+                "Names are unique within each scope.",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ]
+    }
+
     fn review_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
+        let mut lines = vec![
+            Line::from(format!(
+                "{} · {}",
+                self.state.name.trim(),
+                scope_label(self.state.reference.scope)
+            )),
+            Line::from(""),
+        ];
         let roster = self
             .state
             .panels
@@ -145,12 +213,20 @@ impl FusionSetupView {
         ));
         lines.push(Line::from(""));
         lines.push(Line::from(format!(
-            "[{}] Also enable Fusion for agents and workflows (fusion.enabled)",
+            "[{}] Default strategy for {}",
+            if self.state.make_default { "x" } else { " " },
+            scope_label(self.state.reference.scope)
+        )));
+        lines.push(Line::from(format!(
+            "[{}] Also enable Fusion in this scope (fusion.enabled)",
             if self.state.enable { "x" } else { " " }
         )));
         lines.push(Line::from(Span::styled(
-            "/fusion works either way; this switch only adds the Fusion agent and \
-             parent-session synthesis.",
+            if self.state.enable_override.is_none() {
+                "Inherited; e writes an explicit switch in this scope."
+            } else {
+                "This switch applies to the selected strategy's settings scope."
+            },
             Style::default().add_modifier(Modifier::DIM),
         )));
         lines
@@ -158,13 +234,21 @@ impl FusionSetupView {
 
     fn footer(&self) -> String {
         match self.state.step {
+            FusionSetupStep::Strategy => {
+                "type to filter · ↑↓ select · Enter edit/create · Esc cancel".into()
+            }
+            FusionSetupStep::Details => {
+                "type name · Tab scope (new) · Enter next · ← back · Esc cancel".into()
+            }
             FusionSetupStep::Panels => {
                 "type to filter · Space pick/unpick · Enter next · Esc cancel".to_string()
             }
             FusionSetupStep::Analyst => {
                 "type to filter · Enter pick & next · ← back · Esc cancel".to_string()
             }
-            FusionSetupStep::Confirm => "Enter save · e toggle · ← back · Esc cancel".to_string(),
+            FusionSetupStep::Confirm => {
+                "Enter save · d default · e enable · ← back · Esc cancel".to_string()
+            }
         }
     }
 
@@ -178,7 +262,11 @@ impl FusionSetupView {
             lines.push(Line::from(format!("Filter: {}", self.state.query)));
             lines.extend(self.list_lines());
         } else {
-            lines.extend(self.review_lines());
+            lines.extend(match self.state.step {
+                FusionSetupStep::Strategy => self.strategy_lines(),
+                FusionSetupStep::Details => self.details_lines(),
+                _ => self.review_lines(),
+            });
         }
         if let Some(notice) = self.state.notice.as_ref() {
             lines.push(Line::from(Span::styled(
@@ -230,9 +318,21 @@ impl BottomPaneView for FusionSetupView {
         match handle_fusion_setup_key(&mut self.state, key.code) {
             FusionSetupOutcome::Stay => ViewOutcome::Pending,
             FusionSetupOutcome::Cancel => ViewOutcome::Cancelled,
-            FusionSetupOutcome::Save { roles, enable } => {
-                ViewOutcome::RunFusionSetupAction(FusionSetupAction::Save { roles, enable })
-            }
+            FusionSetupOutcome::Save {
+                reference,
+                name,
+                expected_revision,
+                make_default,
+                roles,
+                enable,
+            } => ViewOutcome::RunFusionSetupAction(FusionSetupAction::Save {
+                reference,
+                name,
+                expected_revision,
+                make_default,
+                roles,
+                enable,
+            }),
         }
     }
 
@@ -261,6 +361,7 @@ mod tests {
             analyst_capable: judge,
             suggested_rank: 0,
             is_session_model: false,
+            available: true,
         }
     }
 
@@ -316,6 +417,44 @@ mod tests {
     #[test]
     fn escape_cancels_without_an_effect() {
         let mut view = view();
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn named_strategy_picker_shows_scope_default_and_new_action() {
+        use crate::fusion::setup::{FusionSetupEntry, FusionSetupScope};
+        use lingxi_core::host::FusionStrategyRef;
+        use lingxi_core::types::scope::WritableScope;
+
+        let mut snapshot = view().state.snapshot.clone();
+        snapshot.entries = vec![FusionSetupEntry {
+            reference: FusionStrategyRef {
+                scope: WritableScope::Project,
+                id: "review".into(),
+            },
+            name: "Code review".into(),
+            roles: Default::default(),
+            max_panel: 8,
+            revision: "v1".into(),
+            is_default: true,
+        }];
+        snapshot.scopes = vec![FusionSetupScope {
+            scope: WritableScope::Project,
+            revision: "v1".into(),
+            enabled: Some(true),
+            error: None,
+        }];
+        let mut view = FusionSetupView::new(snapshot);
+        let text = render_text(&view);
+        assert!(text.contains("Code review · project · default"), "{text}");
+        assert!(text.contains("+ New strategy"), "{text}");
+        view.handle_key(key(KeyCode::Enter));
+        let text = render_text(&view);
+        assert!(text.contains("Name: Code review"), "{text}");
+        assert!(text.contains("project · fixed for this strategy"), "{text}");
         assert!(matches!(
             view.handle_key(key(KeyCode::Esc)),
             ViewOutcome::Cancelled

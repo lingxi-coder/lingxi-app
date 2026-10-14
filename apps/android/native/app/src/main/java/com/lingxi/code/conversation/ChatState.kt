@@ -25,6 +25,11 @@ data class ChatState(
     val isNew: Boolean = false,
     /** True while the assistant reply streams — keeps the run trace live. */
     val streaming: Boolean = false,
+    val promptSuggestion: String? = null,
+    val promptSuggestionUuid: String? = null,
+    val promptSuggestionEnabled: Boolean = true,
+    val promptSuggestionNotice: String? = null,
+    val suggestionTurn: Long = 0,
     /** True while ResumeSession/NewSession is awaiting engine confirmation. */
     val sessionTransitioning: Boolean = false,
     /** Cancel has stopped UI streaming but the engine has not acknowledged it yet. */
@@ -43,6 +48,8 @@ data class ChatState(
      * the engine reports a catalog. The active row is [model].
      */
     val availableModels: List<ModelOption> = emptyList(),
+    /** Engine-owned slash metadata, including argument hints for the draft. */
+    val slashCommands: List<ConversationSlashCommand> = emptyList(),
     /**
      * A transient, user-visible status line (tool activity). `null` hides the
      * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride
@@ -57,6 +64,8 @@ data class ChatState(
     val computerUseRequestKey: String? = null,
     /** The latest turn's live trace; terminal copies are anchored in the transcript. */
     val agentRun: AgentRunState? = null,
+    /** Latest API input footprint, retained between turns and cleared on session switches. */
+    val contextUsage: AgentRunUsage? = null,
     /** Terminal Agent results, anchored after the assistant message they produced. */
     val agentRunsByMessageId: Map<String, AgentRunState> = emptyMap(),
     /** Out-of-band tasks that remain alive after their initiating turn ended. */

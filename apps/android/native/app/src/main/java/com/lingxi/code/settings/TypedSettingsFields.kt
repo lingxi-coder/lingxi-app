@@ -9,13 +9,13 @@ import com.lingxi.code.bindings.client.ModelDetailsDto
 import org.json.JSONArray
 import org.json.JSONObject
 
-private val booleanSettings = setOf("disableArtifact", "disableAgentView", "disableAllHooks", "skipWebFetchPreflight", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled", "syncClaudeAiSkills")
+private val booleanSettings = setOf("promptSuggestionEnabled", "disableArtifact", "disableAgentView", "disableAllHooks", "skipWebFetchPreflight", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled", "syncClaudeAiSkills")
 
 @Composable
 internal fun TypedSettingField(key: String, value: String, onChange: (String) -> Unit, readOnly: Boolean, models: List<ModelDetailsDto>) {
     when {
         key in booleanSettings -> Row {
-            Switch(checked = value == "true", onCheckedChange = { onChange(it.toString()) }, enabled = !readOnly)
+            Switch(checked = value == "true" || (key == "promptSuggestionEnabled" && value == "null"), onCheckedChange = { onChange(it.toString()) }, enabled = !readOnly)
             Text(if (value == "null") "Inherited" else if (value == "true") "Enabled" else "Disabled")
             TextButton(enabled = !readOnly, onClick = { onChange("null") }) { Text(settingsLabel("Inherit")) }
         }

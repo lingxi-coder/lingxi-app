@@ -1,6 +1,7 @@
 import type {
   ClientCommand,
   ComputerAccessResponseDto,
+  FusionAdminCommandDto,
   HookAdminCommandDto,
   ImageRefDto,
   McpAdminCommandDto,
@@ -436,6 +437,24 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       });
       return { type, which };
     }
+    case 'update_prompt_suggestion_context': {
+      exactKeys(input, ['type', 'session_id', 'focus', 'input_empty', 'pending_permission', 'elicitation_active']);
+      for (const key of ['input_empty', 'pending_permission', 'elicitation_active']) {
+        if (typeof input[key] !== 'boolean') throw new Error(`invalid suggestion ${key}`);
+      }
+      return { type, session_id: string(input['session_id'], 'suggestion session id', 128),
+        focus: enumValue(input['focus'], 'suggestion focus', ['focused', 'blurred', 'unknown'] as const),
+        input_empty: input['input_empty'] as boolean, pending_permission: input['pending_permission'] as boolean,
+        elicitation_active: input['elicitation_active'] as boolean };
+    }
+    case 'record_prompt_suggestion_submission':
+      exactKeys(input, ['type', 'text']);
+      return { type, text: validatePrompt(input['text']) };
+    case 'prompt_suggestion_feedback':
+      exactKeys(input, ['type', 'session_id', 'uuid', 'action']);
+      return { type, session_id: string(input['session_id'], 'suggestion session id', 128),
+        uuid: string(input['uuid'], 'suggestion uuid', 128),
+        action: enumValue(input['action'], 'suggestion action', ['shown', 'accepted', 'dismissed'] as const) };
     case 'update_settings':
       exactKeys(input, ['type', 'destination', 'patch_json']);
       return {
@@ -494,6 +513,11 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       exactKeys(input, ['type', 'command']);
       return { type, command: validateAdminCommand<McpAdminCommandDto>(
         input['command'], 'mcp admin', ['get_snapshot'], ['save_server', 'remove_server', 'set_approval'],
+      ) };
+    case 'fusion_admin':
+      exactKeys(input, ['type', 'command']);
+      return { type, command: validateAdminCommand<FusionAdminCommandDto>(
+        input['command'], 'fusion admin', ['get_catalog'], ['save', 'delete', 'set_default', 'set_globals'],
       ) };
     case 'plugin_admin':
       exactKeys(input, ['type', 'command']);

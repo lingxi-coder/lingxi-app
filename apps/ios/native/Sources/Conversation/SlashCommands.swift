@@ -6,6 +6,7 @@ struct ConversationSlashCommand: Identifiable, Equatable, Hashable {
     let description: String
     let aliases: [String]
     let argumentHint: String?
+    var argumentNames: [String] = []
     let menuDescription: String?
     let source: String
     let hidden: Bool
@@ -54,14 +55,42 @@ enum SlashCommandMatcher {
 
     static func argumentHint(
         for text: String,
-        catalog: [ConversationSlashCommand]
+        catalog: [ConversationSlashCommand],
+        cursor: Int? = nil
     ) -> String? {
-        guard hasArgumentBoundary(in: text),
-              let token = commandToken(in: text),
-              let command = catalog.first(where: { $0.matchesExactToken(token) })
+        // Claude Code 2.1.299: a literal space completes an ASCII command
+        // token. Tabs/newlines, a leading space, and cursor zero do not qualify.
+        let bytes = Array(text.utf8)
+        guard (cursor ?? text.count) > 0, bytes.first == 47, bytes.last == 32,
+              let boundary = bytes.firstIndex(of: 32)
         else { return nil }
-        let hint = command.argumentHint?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return hint.isEmpty ? nil : hint
+        let tokenBytes = bytes[1..<boundary]
+        guard tokenBytes.allSatisfy({
+            (65...90).contains($0) || (97...122).contains($0)
+                || (48...57).contains($0) || [46, 58, 95, 45].contains($0)
+        }) else { return nil }
+        let token = String(decoding: tokenBytes, as: UTF8.self)
+        guard
+            let command = catalog.first(where: { $0.name == token })
+                ?? catalog.first(where: { $0.aliases.contains(token) })
+        else { return nil }
+
+        let argumentsStart = boundary + 1
+        if argumentsStart == bytes.count, let hint = command.argumentHint, !hint.isEmpty {
+            return hint
+        }
+        guard !command.argumentNames.isEmpty else { return nil }
+
+        #if canImport(clientFFI)
+            // Count with the same extracted native parser used by the other
+            // clients. Incomplete quotes, substitutions and shell operators
+            // must not be approximated with whitespace splitting here.
+            guard let count = slashCommandArgumentCount(args: String(decoding: bytes[argumentsStart...], as: UTF8.self)),
+                  Int(count) < command.argumentNames.count else { return nil }
+            return command.argumentNames.dropFirst(Int(count)).map { "[\($0)]" }.joined(separator: " ")
+        #else
+            return nil
+        #endif
     }
 
     static func suggestions(
@@ -120,6 +149,11 @@ enum SlashCommandMatcher {
         guard text.first == "/" else { return false }
         guard !hasArgumentBoundary(in: text) else { return false }
         return exactCommand(in: text, catalog: catalog) == nil
+    }
+
+    static func completedInput(for command: ConversationSlashCommand, in text: String) -> String {
+        let matchedAlias = suggestions(for: text, catalog: [command]).first?.matchedAlias
+        return "/\(matchedAlias ?? command.name) "
     }
 
     static func commandToken(in text: String) -> String? {

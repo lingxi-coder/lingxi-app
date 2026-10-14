@@ -1,5 +1,6 @@
 import { AccountService } from './account.js';
 import { accountSessionStore } from './account-storage.js';
+import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
@@ -135,6 +136,8 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#0c0b10',
     titleBarStyle: 'hiddenInset',
+    // Center the 12px native buttons in the renderer's 44px desktop toolbar.
+    trafficLightPosition: { x: 14, y: 16 },
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(moduleDirectory, '../preload/index.cjs'),
@@ -436,7 +439,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
-  host.attachAccount(new AccountService(firebaseConfig, accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
+  host.attachAccount(new AccountService(firebaseConfig, credentialBroker
+    ? brokerAccountSessionStore(credentialBroker)
+    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   scheduled.start();

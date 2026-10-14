@@ -570,7 +570,8 @@ async function assertRendererContract(page, leakPatterns) {
   assert.equal(details.screenLabel, 'LingXi Code Desktop Beta');
   assert.equal(details.hasPrompt, true, 'desktop prompt composer must render');
   assert.match(details.bodyText, /LingXi/);
-  assert.match(details.bodyText, /CODE/);
+  assert.match(details.bodyText, /New chat/);
+  assert.match(details.bodyText, /Scheduled/);
   assert.match(details.bodyText, /Projects/);
   assert.match(details.bodyText, /workspace/);
   assert.equal(

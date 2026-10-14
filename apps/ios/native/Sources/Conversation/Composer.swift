@@ -11,13 +11,14 @@ enum VoiceHoldGesturePolicy {
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
     @Environment(\.theme) private var t
-    @FocusState.Binding var inputFocused: Bool
+    @Binding var inputFocused: Bool
     @Binding var model: ModelOption
     // The picker is driven exclusively by the engine's curated, provider-qualified
     // refs. Empty means the catalog is still loading; no mock rows are invented.
     // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
     var availableModelDetails: [String: ModelRuntimeDetails] = [:]
+    var contextUsage: ConversationUsageSnapshot? = nil
     var activeModelId: String = ""
     var providerConfigured: Bool
     var onSelectModel: (String) -> Void = { _ in }
@@ -49,6 +50,12 @@ struct Composer: View {
     /// `onTranscript` → draft). The caller owns it (see ChatView).
     @Binding var draft: String
     let onSend: (String) -> Void
+    var promptSuggestion: String? = nil
+    var promptSuggestionNotice: String? = nil
+    var suggestionTurnKey: String = ""
+    var onSuggestionFeedback: (String) -> Void = { _ in }
+    @State private var shownSuggestionKey: String?
+    @State private var rejectedSuggestionKey: String?
 
     /// Engine-owned slash-command catalog. An empty loaded catalog is
     /// authoritative; `slashCommandsLoaded == false` renders a loading row and
@@ -105,6 +112,7 @@ struct Composer: View {
         availableModels: [String] = [],
         availableModelDetails: [String: ModelRuntimeDetails] = [:],
         activeModelId: String = "",
+        contextUsage: ConversationUsageSnapshot? = nil,
         providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
         reasoningModelId: String? = nil,
@@ -129,6 +137,10 @@ struct Composer: View {
         recentModels: [String] = [],
         draft: Binding<String>,
         onSend: @escaping (String) -> Void,
+        promptSuggestion: String? = nil,
+        promptSuggestionNotice: String? = nil,
+        suggestionTurnKey: String = "",
+        onSuggestionFeedback: @escaping (String) -> Void = { _ in },
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
         slashCommandPending: Bool = false,
@@ -138,7 +150,7 @@ struct Composer: View {
         sendEnabled: Bool = true,
         onStop: @escaping () -> Void = {},
         onCameraClick: @escaping () -> Void = {},
-        inputFocused: FocusState<Bool>.Binding,
+        inputFocused: Binding<Bool>,
         attachment: ComposerAttachment? = nil,
         onRemoveAttachment: @escaping () -> Void = {},
         visualizationChip: VisualizationContextChip? = nil,
@@ -155,6 +167,7 @@ struct Composer: View {
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
+        self.contextUsage = contextUsage
         self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
         self.reasoningModelId = reasoningModelId
@@ -179,6 +192,10 @@ struct Composer: View {
         self.recentModels = recentModels
         self._draft = draft
         self.onSend = onSend
+        self.promptSuggestion = promptSuggestion
+        self.promptSuggestionNotice = promptSuggestionNotice
+        self.suggestionTurnKey = suggestionTurnKey
+        self.onSuggestionFeedback = onSuggestionFeedback
         self.slashCommands = slashCommands
         self.slashCommandsLoaded = slashCommandsLoaded
         self.slashCommandPending = slashCommandPending
@@ -228,32 +245,58 @@ struct Composer: View {
                         .padding(.horizontal, 4)
                 }
 
-                if let slashArgumentHint {
-                    Text(slashArgumentHint)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(t.text3)
-                        .padding(.horizontal, 4)
-                        .accessibilityLabel("slash_command_argument_hint")
-                        .accessibilityValue(slashArgumentHint)
-                }
-
-                TextField("", text: $draft, prompt: Text("composer_placeholder").foregroundColor(t.text4), axis: .vertical)
-                    .font(.scaledSystem(15.5, relativeTo: .body))
-                    .foregroundStyle(t.text)
-                    .lineLimit(1...5)
-                    .focused($inputFocused)
-                    .submitLabel(.send)
-                    .onSubmit {
-                        send()
-                    }
-                    .accessibilityIdentifier("composer.input")
+                ComposerTextInput(
+                    text: $draft,
+                    isFocused: $inputFocused,
+                    placeholder: visibleSuggestion == nil ? String(localized: "composer_placeholder") : "",
+                    textColor: t.text,
+                    hintColor: t.text4,
+                    argumentHint: { text, cursor in
+                        guard slashCommandsLoaded else { return nil }
+                        return SlashCommandMatcher.argumentHint(for: text, catalog: slashCommands, cursor: cursor)
+                    },
+                    onSubmit: send,
+                    onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
+                )
                     .padding(.horizontal, 4).padding(.vertical, 2)
                     .onChange(of: draft) { _, newValue in
                         if dismissedSlashDraft != newValue {
                             dismissedSlashDraft = nil
                         }
                     }
+                    .onAppear { recordSuggestionPresentation() }
+                    .onChange(of: suggestionTurnKey) { _, _ in recordSuggestionPresentation() }
+                    .overlay(alignment: .topLeading) {
+                        if let visibleSuggestion {
+                            Button(action: acceptSuggestion) {
+                                Text(visibleSuggestion)
+                                    .font(.scaledSystem(15.5, relativeTo: .body))
+                                    .foregroundStyle(t.text4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .accessibilityLabel("Use suggestion: \(visibleSuggestion)")
+                            .accessibilityIdentifier("composer.prompt-suggestion")
+                            .onAppear {
+                                if shownSuggestionKey != suggestionTurnKey {
+                                    shownSuggestionKey = suggestionTurnKey
+                                    onSuggestionFeedback("shown")
+                                }
+                            }
+                            .onChange(of: suggestionTurnKey) { _, _ in
+                                if shownSuggestionKey != suggestionTurnKey {
+                                    shownSuggestionKey = suggestionTurnKey
+                                    onSuggestionFeedback("shown")
+                                }
+                            }
+                        }
+                    }
 
+                if let promptSuggestionNotice {
+                    Text(promptSuggestionNotice)
+                        .font(.caption).foregroundStyle(t.text4)
+                }
                 if let fastModeError {
                     Text(fastModeError)
                         .font(.caption)
@@ -265,6 +308,7 @@ struct Composer: View {
                         attachmentButton
                         permissionChip
                         Spacer(minLength: 8)
+                        contextWindow
                         modelChip
                         turnActions
                     }
@@ -593,14 +637,21 @@ struct Composer: View {
         .accessibilityIdentifier("composer.model")
     }
 
+    @ViewBuilder
+    private var contextWindow: some View {
+        if let snapshot = ComposerContextUsage(usage: contextUsage, capacity: availableModelDetails[activeModelId]?.contextWindowTokens) {
+            ComposerContextWindow(snapshot: snapshot)
+        }
+    }
+
     private var permissionChip: some View {
         Button { inputFocused = false; controlsOpen = true } label: {
             Label(permissionLabel, systemImage: effectivePermissionMode == "bypassPermissions"
                   ? "exclamationmark.shield" : "checkmark.shield")
-                .font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
+                .labelStyle(.iconOnly)
+                .font(.scaledSystem(17, weight: .medium, relativeTo: .body))
                 .foregroundStyle(effectivePermissionMode == "bypassPermissions" ? .orange : t.text2)
-                .padding(.horizontal, 4)
-                .frame(minHeight: 44)
+                .frame(minWidth: 44, minHeight: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
@@ -614,10 +665,11 @@ struct Composer: View {
             HStack(spacing: 0) {
                 permissionChip
                 Spacer(minLength: 8)
+                contextWindow
                 modelChip
             }
             VStack(alignment: .leading, spacing: 0) {
-                permissionChip
+                HStack(spacing: 0) { permissionChip; contextWindow }
                 modelChip
             }
         }
@@ -649,11 +701,6 @@ struct Composer: View {
         return SlashCommandMatcher.suggestions(for: draft, catalog: slashCommands)
     }
 
-    private var slashArgumentHint: String? {
-        guard slashCommandsLoaded else { return nil }
-        return SlashCommandMatcher.argumentHint(for: draft, catalog: slashCommands)
-    }
-
     private var shouldShowSlashPanel: Bool {
         guard dismissedSlashDraft != draft else { return false }
         if isWaitingForSlashCatalog { return true }
@@ -683,9 +730,34 @@ struct Composer: View {
     }
 
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
-        let accepted = command.canonicalTrigger
+        let accepted = SlashCommandMatcher.completedInput(for: command, in: draft)
         draft = accepted
         dismissedSlashDraft = accepted
+        inputFocused = true
+    }
+
+    private func recordSuggestionPresentation() {
+        guard promptSuggestion != nil, shownSuggestionKey != suggestionTurnKey,
+              rejectedSuggestionKey != suggestionTurnKey else { return }
+        if visibleSuggestion != nil {
+            shownSuggestionKey = suggestionTurnKey
+            onSuggestionFeedback("shown")
+        } else {
+            rejectedSuggestionKey = suggestionTurnKey
+            onSuggestionFeedback("dismissed")
+        }
+    }
+
+    private var visibleSuggestion: String? {
+        guard rejectedSuggestionKey != suggestionTurnKey, draft.isEmpty, !streaming, sendEnabled, attachment == nil,
+              visualizationChip == nil else { return nil }
+        return promptSuggestion
+    }
+
+    private func acceptSuggestion() {
+        guard let suggestion = visibleSuggestion else { return }
+        onSuggestionFeedback("accepted")
+        draft = suggestion
         inputFocused = true
     }
 
@@ -789,5 +861,65 @@ private struct AttachmentThumb: View {
             Spacer()
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
+    }
+}
+
+/// Matches Desktop's latest input footprint, including both cache counters.
+struct ComposerContextUsage: Equatable {
+    let used: UInt64
+    let capacity: UInt64
+    var fraction: Double { min(1, Double(used) / Double(capacity)) }
+    var percent: Int { Int((fraction * 100).rounded()) }
+
+    init?(usage: ConversationUsageSnapshot?, capacity: UInt64?) {
+        guard let usage, let capacity, capacity > 0 else { return nil }
+        let (inputAndRead, readOverflow) = usage.inputTokens.addingReportingOverflow(usage.cacheReadTokens)
+        let (used, writeOverflow) = inputAndRead.addingReportingOverflow(usage.cacheCreationTokens)
+        guard !readOverflow, !writeOverflow else { return nil }
+        self.used = used
+        self.capacity = capacity
+    }
+}
+
+private struct ComposerContextWindow: View {
+    @Environment(\.theme) private var t
+    let snapshot: ComposerContextUsage
+    @State private var showsDetails = false
+
+    private var summary: String {
+        "\(snapshot.percent)% used (\(100 - snapshot.percent)% left)"
+    }
+    private var tokens: String {
+        "\(ModelDetailFormat.tokenCount(snapshot.used)) / \(ModelDetailFormat.tokenCount(snapshot.capacity)) tokens used"
+    }
+
+    var body: some View {
+        Button { showsDetails = true } label: {
+            ZStack {
+                Circle().stroke(t.border, lineWidth: 3)
+                if snapshot.used > 0 {
+                    Circle().trim(from: 0, to: snapshot.fraction)
+                        .stroke(t.text3, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+            }
+            .frame(width: 16, height: 16)
+            .frame(width: 44, height: 44)
+            .contentShape(.rect)
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .accessibilityLabel("Context window (estimated)")
+        .accessibilityValue("\(summary). \(tokens)")
+        .accessibilityIdentifier("composer.context-window")
+        .popover(isPresented: $showsDetails) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Context window:").fontWeight(.semibold)
+                Text(summary)
+                Text(tokens)
+            }
+            .font(.callout)
+            .padding()
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }

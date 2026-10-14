@@ -96,7 +96,9 @@ function Fixture() {
     <Theme.Provider value={palette}>
       <div data-compact-calls={compactCalls} className="desktop-shell" style={{ width: '100vw', height: '100vh', position: 'relative', display: 'flex', overflow: 'hidden', background: palette.stageBg, color: palette.text }}>
         <main className="desktop-main" style={{ minWidth: 0, position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
-          <BetaTopBar bridge={bridge as never} runtimeCenterOpen={center.overviewOpen} onToggleRuntimeCenter={() => setOverview(!center.overviewOpen)} />
+          <div style={{ display: 'flex', height: 'var(--desktop-toolbar-height, 44px)', flexShrink: 0 }}>
+            <BetaTopBar bridge={bridge as never} runtimeCenterOpen={center.overviewOpen} onToggleRuntimeCenter={() => setOverview(!center.overviewOpen)} />
+          </div>
           {/* Mirrors App.tsx: the summary is a rail inside `.desktop-chat-layout`,
               so this fixture exercises the same container query the app does. */}
           <div className="desktop-chat-layout" data-runtime-inspector-open={center.inspectorOpen ? 'true' : undefined}>

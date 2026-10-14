@@ -103,14 +103,14 @@ export function DocsLayout({ children, locale, pageId, theme, onThemeToggle, onL
       <header className="developer-header">
         <RouteLink href="/" className="developer-wordmark"><Brand compact /><span className="developer-brand-divider" /><span>{t('Developer Docs', '开发者文档')}</span></RouteLink>
         <nav className="developer-topnav" aria-label={t('SDK navigation', 'SDK 导航')}>
-          <RouteLink href="/docs" className={activeGroup === 'start' ? 'selected' : ''}>{t('Overview', '概览')}</RouteLink>
+          <RouteLink href="/docs" className={['start', 'system', 'operations'].includes(activeGroup) ? 'selected' : ''}>{t('Overview', '概览')}</RouteLink>
           <RouteLink href="/docs/harness" className={activeGroup === 'harness' ? 'selected' : ''}>Harness</RouteLink>
           <RouteLink href="/docs/llm-client" className={activeGroup === 'llm' ? 'selected' : ''}>LLM Client</RouteLink>
           <RouteLink href="/docs/mobile-linux" className={activeGroup === 'mobile' ? 'selected' : ''}>Mobile Linux</RouteLink>
         </nav>
         <div className="developer-controls">
           <a href="https://github.com/lingxi-coder" target="_blank" rel="noreferrer" className="developer-github">GitHub ↗</a>
-          <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+          <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
           <button type="button" onClick={() => onLocaleChange(locale === 'zh' ? 'en' : 'zh')} aria-label={t('Switch to Chinese', '切换为英文')} className="developer-language">{locale === 'zh' ? 'EN' : '中文'}</button>
         </div>
       </header>

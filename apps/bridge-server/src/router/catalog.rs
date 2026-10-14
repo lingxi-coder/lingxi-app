@@ -93,6 +93,14 @@ impl EngineCommandRouter {
                 description: cmd.description,
                 aliases: cmd.aliases,
                 argument_hint: cmd.argument_hint,
+                argument_names: if matches!(
+                    cmd.kind,
+                    command_api::SlashCommandKind::Builtin { .. }
+                ) {
+                    Vec::new()
+                } else {
+                    cmd.argument_names
+                },
                 menu_description: cmd.menu_description,
             })
             .collect();
@@ -105,6 +113,7 @@ impl EngineCommandRouter {
                 source: "builtin".to_string(),
                 aliases: Vec::new(),
                 argument_hint: None,
+                argument_names: Vec::new(),
                 menu_description: None,
                 hidden: false,
             });

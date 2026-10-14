@@ -914,6 +914,7 @@ function validateCommand(name: string, v: unknown): void {
     case 'mcp_admin':
     case 'plugin_admin':
     case 'hook_admin':
+    case 'fusion_admin':
       validateConfigurationAdminCommand(o['command']);
       break;
     case 'get_audio_session_context':
@@ -1059,6 +1060,12 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['sequence']) &&
           isString(o['event_json']),
       );
+      break;
+    case 'prompt_suggestion_state':
+      assert.ok(typeof o['enabled'] === 'boolean' && (o['notice'] === null || isString(o['notice'])));
+      break;
+    case 'prompt_suggestion':
+      assert.ok(isString(o['suggestion']) && isString(o['session_id']) && isString(o['uuid']));
       break;
     case 'turn_ended':
       assert.ok(['end_turn', 'max_turns', 'cancelled'].includes(rec(o['outcome'])['type'] as string));
@@ -1459,13 +1466,19 @@ function validateEvent(name: string, v: unknown): void {
       if ('error' in o) assert.ok(isString(o['error']));
       break;
     case 'configuration_operation':
-      assert.ok(['skill', 'mcp', 'plugin', 'hook'].includes(o['domain'] as string));
+      assert.ok(['skill', 'mcp', 'plugin', 'hook', 'fusion'].includes(o['domain'] as string));
       assert.ok(isNumber(o['operation_id']));
       assert.ok(['started', 'progress', 'succeeded', 'failed'].includes(o['status'] as string));
       assert.ok(['applied', 'restart_required', 'not_applicable'].includes(o['effect'] as string));
       if ('message' in o) assert.ok(isString(o['message']));
       if ('details_json' in o) assert.ok(isString(o['details_json']));
       break;
+    case 'fusion_strategy_resolved':
+      assert.ok(isNumber(o['operation_id']));
+      if ('selection_json' in o) assert.ok(isString(o['selection_json']));
+      if ('error' in o) assert.ok(isString(o['error']));
+      break;
+    case 'fusion_catalog':
     case 'skill_catalog':
       assert.ok(isString(o['catalog_json']));
       break;

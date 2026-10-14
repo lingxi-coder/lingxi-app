@@ -39,7 +39,7 @@ struct DesktopSettingsEntry: Identifiable {
         .init(id: "custom-providers", titleKey: "settings_parity_custom_providers", group: "模型与服务", page: .customProviders, layered: true, keys: ["providers", "routing", "models", "aliases", "fallback", "retry"]),
         .init(id: "fusion", titleKey: "settings_parity_fusion", group: "模型与服务", page: .fusion, layered: true, keys: ["fusion", "panelModels", "analystModel"]),
         .init(id: "permissions", titleKey: "settings_parity_permissions", group: "编码", page: .permissions, layered: true, keys: ["permissions", "allow", "deny", "ask"]),
-        .init(id: "tools-agent", titleKey: "settings_parity_tools_agent", group: "编码", page: .toolsAgent, layered: true, keys: ["enabledTools", "outputStyle", "modelOverrides", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled", "disableAllHooks", "skipWebFetchPreflight"]),
+        .init(id: "tools-agent", titleKey: "settings_parity_tools_agent", group: "编码", page: .toolsAgent, layered: true, keys: ["promptSuggestionEnabled", "enabledTools", "outputStyle", "modelOverrides", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled", "disableAllHooks", "skipWebFetchPreflight"]),
         .init(id: "skills", titleKey: "settings_title_skills", group: "编码", page: .skills, layered: true, keys: ["skills", "syncClaudeAiSkills", "reload"]),
         .init(id: "mcp", titleKey: "settings_mcp_servers", group: "编码", page: .mcpList, keys: ["mcp", "server"]),
         .init(id: "hooks", titleKey: "settings_parity_hooks", group: "编码", page: .hooks, layered: true, keys: ["hooks", "ConfigChange", "PreToolUse", "PostToolUse"]),

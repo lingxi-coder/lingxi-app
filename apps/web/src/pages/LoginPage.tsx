@@ -11,15 +11,15 @@ export function LoginPage({ locale, region, onRegionChange }: { locale: Locale; 
   return (
     <div className="login-page">
       <section className="login-story">
-        <span className="eyebrow"><IconSpark width={15} height={15} /> LingXi continuity · UI prototype</span>
-        <h1>{t('Your work should remember where you left it.', '你的工作，应该记得你停在哪里。')}</h1>
-        <p>{t('The intended account experience keeps tasks, approvals, and API activity attached to one personal identity. No account backend is connected in this prototype.', '目标账号体验会让任务、审批与 API 活动归属于同一个个人身份；此原型尚未接入账号后端。')}</p>
-        <div className="login-terminal"><div><IconTerminal width={16} height={16} /> task_08 / checkout</div><code>context restored <b>100%</b><br />approval received <b>mobile</b><br />next action <b>run tests</b></code></div>
+        <span className="eyebrow"><IconSpark width={15} height={15} /> {t('Your personal AI agent', '你的个人辅助 Agent')}</span>
+        <h1>{t('A helping hand, from thought to action.', '从想法到行动，灵犀与你一起。')}</h1>
+        <p>{t('LingXi helps you think things through and take care of everyday tasks. This sign-in preview is not yet connected to an account service.', '灵犀帮你梳理想法、处理日常任务。当前为登录界面预览，尚未接入账号服务。')}</p>
+        <div className="login-terminal"><div><IconTerminal width={16} height={16} /> {t('Task example / Plan my day', '任务示例 / 安排今天')}</div><code>{t('Gather ideas', '收集想法')} <b>{t('Done', '完成')}</b><br />{t('Organize priorities', '梳理重点')} <b>{t('Done', '完成')}</b><br />{t('Next step', '下一步')} <b>{t('Make a plan', '安排计划')}</b></code></div>
         <ul><li><IconCheck width={15} height={15} /> {t('Passwordless by default', '默认无密码登录')}</li><li><IconCheck width={15} height={15} /> {t('Region-aware, always switchable', '按地区推荐，始终可以切换')}</li><li><IconCheck width={15} height={15} /> {t('Individual account v1', '首版个人账号')}</li></ul>
       </section>
       <section className="login-card">
         <div className="login-region"><span><IconGlobe width={16} height={16} /> {t('Sign-in region', '登录地区')}</span><div className="segmented-control"><button type="button" className={region === 'global' ? 'active' : ''} onClick={() => { onRegionChange('global'); setMethod('email'); }}>Global</button><button type="button" className={region === 'china' ? 'active' : ''} onClick={() => { onRegionChange('china'); setMethod('phone'); }}>中国</button></div></div>
-        <span className="eyebrow">Developer Console</span><h2>{t('Welcome to LingXi', '欢迎来到 LingXi')}</h2><p>{region === 'china' ? t('Use phone, WeChat, or email to continue.', '使用手机号、微信或邮箱继续。') : t('Use email or GitHub to continue.', '使用邮箱或 GitHub 继续。')}</p>
+        <span className="eyebrow">{t('Personal account', '个人账号')}</span><h2>{t('Welcome to LingXi', '欢迎来到灵犀')}</h2><p>{region === 'china' ? t('Use phone, WeChat, or email to continue.', '使用手机号、微信或邮箱继续。') : t('Use email or GitHub to continue.', '使用邮箱或 GitHub 继续。')}</p>
         <div className="auth-methods">
           {region === 'china' ? <><button type="button" className={method === 'phone' ? 'active' : ''} onClick={() => setMethod('phone')}>{t('Phone code', '手机验证码')}</button><button type="button" disabled title={t('Unavailable in prototype', '原型中不可用')}>WeChat · {t('Unavailable', '不可用')}</button><button type="button" className={method === 'email' ? 'active' : ''} onClick={() => setMethod('email')}>{t('Email code', '邮箱验证码')}</button></> : <><button type="button" className={method === 'email' ? 'active' : ''} onClick={() => setMethod('email')}>{t('Email code', '邮箱验证码')}</button><button type="button" disabled title={t('Unavailable in prototype', '原型中不可用')}>GitHub · {t('Unavailable', '不可用')}</button></>}
         </div>

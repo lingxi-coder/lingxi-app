@@ -6,7 +6,8 @@
 
 use crossterm::event::KeyCode;
 use lingxi_core::host::fusion_setup::FusionModelRoles;
-use lingxi_core::host::{FusionModelChoice, FusionModelRole};
+use lingxi_core::host::{FusionModelChoice, FusionModelRole, FusionStrategyRef};
+use lingxi_core::types::scope::WritableScope;
 
 /// One model the wizard can offer, derived from the session's live catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,9 @@ pub struct FusionCandidate {
     pub suggested_rank: u16,
     /// Whether this is the model the session itself is talking to.
     pub is_session_model: bool,
+    /// False for a saved panel whose provider/model is currently unavailable.
+    /// Such rows may be removed but cannot be added to a roster.
+    pub available: bool,
 }
 
 impl FusionCandidate {
@@ -47,6 +51,46 @@ impl FusionCandidate {
     }
 }
 
+/// A persisted named strategy offered by the setup picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionSetupEntry {
+    /// Stable identity and immutable settings scope.
+    pub reference: FusionStrategyRef,
+    /// User-assigned strategy name.
+    pub name: String,
+    /// Panel roster and analyst.
+    pub roles: FusionModelRoles,
+    /// Maximum panel count configured for this strategy.
+    pub max_panel: u8,
+    /// Revision required by optimistic save validation.
+    pub revision: String,
+    /// Whether this is its scope's default strategy.
+    pub is_default: bool,
+}
+
+/// One writable settings scope captured when the wizard opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FusionSetupScope {
+    /// User, project, or local settings.
+    pub scope: WritableScope,
+    /// Revision required when creating a strategy in this scope.
+    pub revision: String,
+    /// Scope-local Fusion enable switch. `None` inherits other settings layers.
+    pub enabled: Option<bool>,
+    /// A configuration diagnostic that prevents writes to this scope.
+    pub error: Option<String>,
+}
+
+/// Human-readable spelling of a writable Fusion scope.
+#[must_use]
+pub const fn scope_label(scope: WritableScope) -> &'static str {
+    match scope {
+        WritableScope::User => "user",
+        WritableScope::Project => "project",
+        WritableScope::Local => "local",
+    }
+}
+
 /// What the wizard opens with: the live catalog plus what is already configured.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FusionSetupSnapshot {
@@ -58,6 +102,10 @@ pub struct FusionSetupSnapshot {
     pub enabled: bool,
     /// The largest roster the current settings allow (`fusion.maxPanel`).
     pub max_panel: u8,
+    /// Named strategies, kept distinct across scopes.
+    pub entries: Vec<FusionSetupEntry>,
+    /// Available writable scopes and their current revisions.
+    pub scopes: Vec<FusionSetupScope>,
 }
 
 /// The persisted half of the wizard's input: what `settings.json` says today.
@@ -71,6 +119,10 @@ pub struct FusionSettingsSnapshot {
     pub enabled: bool,
     /// `fusion.maxPanel` (2..=8). Zero means "use the documented default".
     pub max_panel: u8,
+    /// Named strategies, kept distinct across scopes.
+    pub entries: Vec<FusionSetupEntry>,
+    /// Available writable scopes and their current revisions.
+    pub scopes: Vec<FusionSetupScope>,
 }
 
 /// Build the wizard's candidate list from the session's live model rows.
@@ -96,6 +148,7 @@ pub fn candidates_from_rows(rows: &[crate::session::ModelRow]) -> Vec<FusionCand
                 suggested_rank: llm_runtime::hints_for(profile, &row.request_model)
                     .map_or(0, |hints| hints.quality_rank),
                 is_session_model: row.is_current,
+                available: true,
             })
         })
         .collect()
@@ -104,6 +157,10 @@ pub fn candidates_from_rows(rows: &[crate::session::ModelRow]) -> Vec<FusionCand
 /// Which question the wizard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FusionSetupStep {
+    /// Select an existing strategy or create one.
+    Strategy,
+    /// Set its name and, for new strategies, its scope.
+    Details,
     /// Pick the panel roster.
     Panels,
     /// Pick the analyst.
@@ -119,22 +176,26 @@ impl FusionSetupStep {
         match self {
             Self::Panels => Some(FusionModelRole::Panels),
             Self::Analyst => Some(FusionModelRole::Analyst),
-            Self::Confirm => None,
+            Self::Strategy | Self::Details | Self::Confirm => None,
         }
     }
 
-    /// One-based step number, for the `Step n/3` header.
+    /// One-based step number, for the `Step n/5` header.
     #[must_use]
     pub const fn number(self) -> usize {
         match self {
-            Self::Panels => 1,
-            Self::Analyst => 2,
-            Self::Confirm => 3,
+            Self::Strategy => 1,
+            Self::Details => 2,
+            Self::Panels => 3,
+            Self::Analyst => 4,
+            Self::Confirm => 5,
         }
     }
 
     const fn next(self) -> Self {
         match self {
+            Self::Strategy => Self::Details,
+            Self::Details => Self::Panels,
             Self::Panels => Self::Analyst,
             Self::Analyst => Self::Confirm,
             Self::Confirm => Self::Confirm,
@@ -143,14 +204,16 @@ impl FusionSetupStep {
 
     const fn previous(self) -> Self {
         match self {
-            Self::Panels | Self::Analyst => Self::Panels,
+            Self::Strategy | Self::Details => Self::Strategy,
+            Self::Panels => Self::Details,
+            Self::Analyst => Self::Panels,
             Self::Confirm => Self::Analyst,
         }
     }
 }
 
 /// Total wizard steps, for the `Step n/N` header.
-pub const STEP_COUNT: usize = 3;
+pub const STEP_COUNT: usize = 5;
 
 /// What the wizard asks its owner to do after one key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,13 +222,36 @@ pub enum FusionSetupOutcome {
     Stay,
     /// Save this configuration and close.
     Save {
+        /// Stable strategy identity.
+        reference: FusionStrategyRef,
+        /// Name to persist in the selected scope.
+        name: String,
+        /// Scope revision captured when setup opened.
+        expected_revision: String,
+        /// Whether this strategy should be the scope default.
+        make_default: bool,
         /// The chosen panel and analyst roles.
         roles: FusionModelRoles,
-        /// Whether to also set `fusion.enabled` (agents + workflows).
-        enable: bool,
+        /// Scope-local switch to write; `None` leaves inherited settings intact.
+        enable: Option<bool>,
     },
     /// Closed without saving.
     Cancel,
+}
+
+/// Unsaved edits retained when the operator returns to the strategy picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FusionSetupDraft {
+    reference: FusionStrategyRef,
+    name: String,
+    expected_revision: String,
+    make_default: bool,
+    is_new: bool,
+    panels: Vec<FusionModelChoice>,
+    analyst: Option<FusionModelChoice>,
+    enable: bool,
+    enable_override: Option<bool>,
+    max_panel: u8,
 }
 
 /// The wizard's live state.
@@ -185,13 +271,25 @@ pub struct FusionSetupState {
     pub analyst: Option<FusionModelChoice>,
     /// Whether to set `fusion.enabled` on save.
     pub enable: bool,
+    /// Explicit scope-local switch, retained separately from the displayed value.
+    pub enable_override: Option<bool>,
+    /// Stable strategy being created or edited.
+    pub reference: FusionStrategyRef,
+    /// Editable name, unique within the selected scope.
+    pub name: String,
+    /// Expected settings revision for save.
+    pub expected_revision: String,
+    /// Whether save should make this strategy the scope default.
+    pub make_default: bool,
+    /// Whether the scope can still be changed before first save.
+    pub is_new: bool,
     /// A message explaining why the last key did not advance the wizard.
     pub notice: Option<String>,
+    drafts: Vec<FusionSetupDraft>,
 }
 
 impl FusionSetupState {
-    /// Open the wizard seeded from what is already configured, so re-running it
-    /// to change one role does not make the operator retype the other two.
+    /// Open the wizard with the current named strategies and model catalog.
     #[must_use]
     pub fn from_snapshot(snapshot: FusionSetupSnapshot) -> Self {
         let panels = snapshot
@@ -204,20 +302,40 @@ impl FusionSetupState {
         let keep = |choice: &Option<FusionModelChoice>| -> Option<FusionModelChoice> {
             choice
                 .as_ref()
-                .filter(|c| snapshot.candidates.iter().any(|row| &row.choice == *c))
+                .filter(|c| {
+                    snapshot
+                        .candidates
+                        .iter()
+                        .any(|row| &row.choice == *c && row.analyst_capable)
+                })
                 .cloned()
         };
         let analyst = keep(&snapshot.roles.analyst);
         let enable = snapshot.enabled;
+        let strategy_picker = !snapshot.entries.is_empty() || !snapshot.scopes.is_empty();
         let mut state = Self {
             snapshot,
-            step: FusionSetupStep::Panels,
+            step: if strategy_picker {
+                FusionSetupStep::Strategy
+            } else {
+                FusionSetupStep::Panels
+            },
             query: String::new(),
             selected: 0,
             panels,
             analyst,
             enable,
+            enable_override: None,
+            reference: FusionStrategyRef {
+                scope: WritableScope::User,
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+            name: "Fusion".into(),
+            expected_revision: String::new(),
+            make_default: false,
+            is_new: true,
             notice: None,
+            drafts: Vec::new(),
         };
         state.reset_highlight();
         state
@@ -226,6 +344,27 @@ impl FusionSetupState {
     /// The candidate indices this step shows, after role filtering and search.
     #[must_use]
     pub fn visible(&self) -> Vec<usize> {
+        if self.step == FusionSetupStep::Strategy {
+            let query = self.query.to_lowercase();
+            return self
+                .snapshot
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    entry.name.to_lowercase().contains(&query)
+                        || scope_label(entry.reference.scope).contains(&query)
+                })
+                .map(|(index, _)| index)
+                .chain(std::iter::once(self.snapshot.entries.len()))
+                .collect();
+        }
+        if matches!(
+            self.step,
+            FusionSetupStep::Details | FusionSetupStep::Confirm
+        ) {
+            return Vec::new();
+        }
         self.snapshot
             .candidates
             .iter()
@@ -245,6 +384,7 @@ impl FusionSetupState {
     /// The highlighted candidate, if the current step lists any.
     #[must_use]
     pub fn highlighted(&self) -> Option<&FusionCandidate> {
+        self.step.role()?;
         let visible = self.visible();
         let index = *visible.get(self.selected)?;
         self.snapshot.candidates.get(index)
@@ -266,7 +406,9 @@ impl FusionSetupState {
         match self.step {
             FusionSetupStep::Panels => self.panel_position(choice).is_some(),
             FusionSetupStep::Analyst => self.analyst.as_ref() == Some(choice),
-            FusionSetupStep::Confirm => false,
+            FusionSetupStep::Strategy | FusionSetupStep::Details | FusionSetupStep::Confirm => {
+                false
+            }
         }
     }
 
@@ -283,6 +425,31 @@ impl FusionSetupState {
     #[must_use]
     pub fn blocking_reason(&self) -> Option<String> {
         match self.step {
+            FusionSetupStep::Strategy => None,
+            FusionSetupStep::Details => {
+                if let Some(error) = self
+                    .snapshot
+                    .scopes
+                    .iter()
+                    .find(|scope| scope.scope == self.reference.scope)
+                    .and_then(|scope| scope.error.clone())
+                {
+                    return Some(error);
+                }
+                let name = self.name.trim();
+                if name.is_empty() {
+                    return Some("Give this strategy a name.".into());
+                }
+                self.snapshot
+                    .entries
+                    .iter()
+                    .any(|entry| {
+                        entry.reference.scope == self.reference.scope
+                            && entry.reference.id != self.reference.id
+                            && entry.name == name
+                    })
+                    .then(|| "A strategy with this name already exists in this scope.".into())
+            }
             FusionSetupStep::Panels => (self.panels.len() < 2).then(|| {
                 "Pick at least 2 panel models — Fusion compares independent answers, \
                  so one model is not a panel."
@@ -297,6 +464,10 @@ impl FusionSetupState {
     }
 
     fn reset_highlight(&mut self) {
+        if self.step.role().is_none() {
+            self.selected = 0;
+            return;
+        }
         // Open each list on something useful: the first already-picked row,
         // else the session's own model, else the top of the list.
         let visible = self.visible();
@@ -339,6 +510,8 @@ impl FusionSetupState {
                     .position(|picked| *picked == candidate.choice)
                 {
                     self.panels.remove(position);
+                } else if !candidate.available {
+                    self.notice = Some("Connect this provider before adding this model.".into());
                 } else if self.panels.len() >= usize::from(self.snapshot.max_panel) {
                     self.notice = Some(format!(
                         "fusion.maxPanel is {} — remove one before adding another.",
@@ -349,19 +522,175 @@ impl FusionSetupState {
                 }
             }
             FusionSetupStep::Analyst => self.analyst = Some(candidate.choice),
-            FusionSetupStep::Confirm => {}
+            FusionSetupStep::Strategy | FusionSetupStep::Details | FusionSetupStep::Confirm => {}
         }
     }
 
+    fn select_strategy(&mut self) {
+        self.snapshot
+            .candidates
+            .retain(|candidate| candidate.available);
+        let Some(index) = self.visible().get(self.selected).copied() else {
+            return;
+        };
+        let selected = self
+            .snapshot
+            .entries
+            .get(index)
+            .map(|entry| &entry.reference);
+        if let Some(draft) = self
+            .drafts
+            .iter()
+            .find(|draft| {
+                selected.map_or(draft.is_new, |reference| {
+                    !draft.is_new && &draft.reference == reference
+                })
+            })
+            .cloned()
+        {
+            self.reference = draft.reference;
+            self.name = draft.name;
+            self.expected_revision = draft.expected_revision;
+            self.make_default = draft.make_default;
+            self.is_new = draft.is_new;
+            self.panels = draft.panels;
+            self.analyst = draft.analyst;
+            self.enable = draft.enable;
+            self.enable_override = draft.enable_override;
+            self.snapshot.max_panel = draft.max_panel;
+            self.add_saved_panel_candidates();
+            return;
+        }
+        if let Some(entry) = self.snapshot.entries.get(index).cloned() {
+            self.snapshot.max_panel = entry.max_panel.clamp(2, 8);
+            self.reference = entry.reference;
+            self.name = entry.name;
+            self.expected_revision = entry.revision;
+            self.make_default = entry.is_default;
+            self.is_new = false;
+            // A disconnected provider must not silently delete saved roster
+            // entries when the operator only edits the strategy's name.
+            self.panels = entry.roles.panels;
+            self.analyst = entry.roles.analyst.filter(|choice| {
+                self.snapshot
+                    .candidates
+                    .iter()
+                    .any(|c| &c.choice == choice && c.analyst_capable)
+            });
+        } else {
+            self.snapshot.max_panel = 8;
+            self.reference = FusionStrategyRef {
+                scope: self
+                    .snapshot
+                    .scopes
+                    .first()
+                    .map_or(WritableScope::User, |scope| scope.scope),
+                id: uuid::Uuid::new_v4().to_string(),
+            };
+            self.name.clear();
+            self.panels.clear();
+            self.analyst = None;
+            self.make_default = false;
+            self.is_new = true;
+        }
+        self.add_saved_panel_candidates();
+        self.sync_scope();
+    }
+
+    fn add_saved_panel_candidates(&mut self) {
+        for choice in &self.panels {
+            if !self
+                .snapshot
+                .candidates
+                .iter()
+                .any(|candidate| &candidate.choice == choice)
+            {
+                self.snapshot.candidates.push(FusionCandidate {
+                    choice: choice.clone(),
+                    display: choice.model.clone(),
+                    provider_label: format!("{} · unavailable", choice.profile),
+                    analyst_capable: false,
+                    suggested_rank: 0,
+                    is_session_model: false,
+                    available: false,
+                });
+            }
+        }
+    }
+
+    fn retain_draft(&mut self) {
+        self.drafts.retain(|draft| {
+            if self.is_new {
+                !draft.is_new
+            } else {
+                draft.is_new || draft.reference != self.reference
+            }
+        });
+        self.drafts.push(FusionSetupDraft {
+            reference: self.reference.clone(),
+            name: self.name.clone(),
+            expected_revision: self.expected_revision.clone(),
+            make_default: self.make_default,
+            is_new: self.is_new,
+            panels: self.panels.clone(),
+            analyst: self.analyst.clone(),
+            enable: self.enable,
+            enable_override: self.enable_override,
+            max_panel: self.snapshot.max_panel,
+        });
+    }
+
+    fn sync_scope(&mut self) {
+        if let Some(scope) = self
+            .snapshot
+            .scopes
+            .iter()
+            .find(|scope| scope.scope == self.reference.scope)
+        {
+            self.enable = scope.enabled.unwrap_or(self.snapshot.enabled);
+            self.enable_override = scope.enabled;
+            self.expected_revision = scope.revision.clone();
+        }
+    }
+
+    fn cycle_scope(&mut self) {
+        if !self.is_new {
+            return;
+        }
+        let scopes: Vec<_> = self
+            .snapshot
+            .scopes
+            .iter()
+            .map(|scope| scope.scope)
+            .collect();
+        if scopes.is_empty() {
+            return;
+        }
+        let index = scopes
+            .iter()
+            .position(|scope| *scope == self.reference.scope)
+            .unwrap_or(0);
+        self.reference.scope = scopes[(index + 1) % scopes.len()];
+        self.sync_scope();
+        self.notice = None;
+    }
+
     fn advance(&mut self) -> Option<FusionSetupOutcome> {
+        if self.step == FusionSetupStep::Strategy {
+            self.select_strategy();
+        }
         if let Some(reason) = self.blocking_reason() {
             self.notice = Some(reason);
             return None;
         }
         if self.step == FusionSetupStep::Confirm {
             return Some(FusionSetupOutcome::Save {
+                reference: self.reference.clone(),
+                name: self.name.trim().to_string(),
+                expected_revision: self.expected_revision.clone(),
+                make_default: self.make_default,
                 roles: self.roles(),
-                enable: self.enable,
+                enable: self.enable_override,
             });
         }
         self.step = self.step.next();
@@ -372,8 +701,14 @@ impl FusionSetupState {
     }
 
     fn retreat(&mut self) {
-        if self.step == FusionSetupStep::Panels {
+        if self.step == FusionSetupStep::Panels
+            && self.snapshot.entries.is_empty()
+            && self.snapshot.scopes.is_empty()
+        {
             return;
+        }
+        if self.step == FusionSetupStep::Details {
+            self.retain_draft();
         }
         self.step = self.step.previous();
         self.query.clear();
@@ -388,6 +723,26 @@ impl FusionSetupState {
 /// and otherwise advances — so the common path (arrow to a model, Enter) works
 /// without learning that Space is the toggle.
 pub fn handle_fusion_setup_key(state: &mut FusionSetupState, code: KeyCode) -> FusionSetupOutcome {
+    if state.step == FusionSetupStep::Details {
+        match code {
+            KeyCode::Esc => return FusionSetupOutcome::Cancel,
+            KeyCode::Tab => state.cycle_scope(),
+            KeyCode::Left | KeyCode::BackTab => state.retreat(),
+            KeyCode::Backspace => {
+                state.name.pop();
+                state.notice = None;
+            }
+            KeyCode::Char(c) => {
+                state.name.push(c);
+                state.notice = None;
+            }
+            KeyCode::Enter => {
+                state.advance();
+            }
+            _ => {}
+        }
+        return FusionSetupOutcome::Stay;
+    }
     match code {
         KeyCode::Esc => return FusionSetupOutcome::Cancel,
         KeyCode::Up => {
@@ -400,14 +755,20 @@ pub fn handle_fusion_setup_key(state: &mut FusionSetupState, code: KeyCode) -> F
             }
         }
         KeyCode::Left | KeyCode::BackTab => state.retreat(),
-        KeyCode::Char(' ') if state.step != FusionSetupStep::Confirm => {
+        KeyCode::Char(' ') if state.step.role().is_some() => {
             state.toggle_highlighted();
+        }
+        KeyCode::Char('d' | 'D') if state.step == FusionSetupStep::Confirm => {
+            state.make_default = !state.make_default;
         }
         KeyCode::Char('e' | 'E') if state.step == FusionSetupStep::Confirm => {
             state.enable = !state.enable;
+            state.enable_override = Some(state.enable);
         }
         KeyCode::Enter => {
-            if state.step != FusionSetupStep::Confirm && state.blocking_reason().is_some() {
+            if state.step == FusionSetupStep::Analyst
+                || (state.step == FusionSetupStep::Panels && state.blocking_reason().is_some())
+            {
                 state.toggle_highlighted();
             }
             if let Some(outcome) = state.advance() {
@@ -439,6 +800,7 @@ mod tests {
             analyst_capable: judge,
             suggested_rank: 0,
             is_session_model: false,
+            available: true,
         }
     }
 
@@ -452,6 +814,7 @@ mod tests {
             roles: FusionModelRoles::default(),
             enabled: false,
             max_panel: 8,
+            ..FusionSetupSnapshot::default()
         }
     }
 
@@ -468,6 +831,282 @@ mod tests {
             }
         }
         last
+    }
+
+    fn named_snapshot() -> FusionSetupSnapshot {
+        let mut snapshot = snapshot();
+        snapshot.scopes = [
+            WritableScope::User,
+            WritableScope::Project,
+            WritableScope::Local,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, scope)| FusionSetupScope {
+            scope,
+            revision: format!("revision-{index}"),
+            enabled: Some(scope == WritableScope::Project),
+            error: None,
+        })
+        .collect();
+        snapshot.entries = vec![FusionSetupEntry {
+            reference: FusionStrategyRef {
+                scope: WritableScope::User,
+                id: "review".into(),
+            },
+            name: "Review".into(),
+            roles: FusionModelRoles {
+                panels: snapshot.candidates[..2]
+                    .iter()
+                    .map(|candidate| candidate.choice.clone())
+                    .collect(),
+                analyst: Some(snapshot.candidates[0].choice.clone()),
+            },
+            revision: "revision-0".into(),
+            max_panel: 8,
+            is_default: true,
+        }];
+        snapshot
+    }
+
+    #[test]
+    fn editing_a_strategy_keeps_its_identity_scope_and_revision() {
+        let mut state = FusionSetupState::from_snapshot(named_snapshot());
+        assert_eq!(state.step, FusionSetupStep::Strategy);
+        press(&mut state, &[KeyCode::Enter]);
+        assert_eq!(state.step, FusionSetupStep::Details);
+        assert!(!state.is_new);
+        press(
+            &mut state,
+            &[KeyCode::Tab, KeyCode::Char('!'), KeyCode::Enter],
+        );
+        assert_eq!(state.reference.scope, WritableScope::User);
+        assert_eq!(state.panels.len(), 2);
+        let result = press(
+            &mut state,
+            &[KeyCode::Enter, KeyCode::Enter, KeyCode::Enter],
+        );
+        let FusionSetupOutcome::Save {
+            reference,
+            name,
+            expected_revision,
+            make_default,
+            ..
+        } = result
+        else {
+            panic!("expected save");
+        };
+        assert_eq!(reference.id, "review");
+        assert_eq!(name, "Review!");
+        assert_eq!(expected_revision, "revision-0");
+        assert!(make_default);
+    }
+
+    #[test]
+    fn new_strategy_gets_a_new_id_and_the_chosen_scopes_revision() {
+        let mut state = FusionSetupState::from_snapshot(named_snapshot());
+        press(&mut state, &[KeyCode::Down, KeyCode::Enter]);
+        assert!(state.is_new);
+        assert!(state.name.is_empty());
+        assert_ne!(state.reference.id, "review");
+        assert!(state.panels.is_empty());
+        press(&mut state, &[KeyCode::Enter]);
+        assert_eq!(state.step, FusionSetupStep::Details);
+        assert!(state.notice.as_deref().unwrap().contains("name"));
+        for character in "Review".chars() {
+            press(&mut state, &[KeyCode::Char(character)]);
+        }
+        press(&mut state, &[KeyCode::Enter]);
+        assert!(state.notice.as_deref().unwrap().contains("already exists"));
+        press(&mut state, &[KeyCode::Tab, KeyCode::Enter]);
+        assert_eq!(
+            state.step,
+            FusionSetupStep::Panels,
+            "the same name is valid in another scope"
+        );
+        assert_eq!(state.reference.scope, WritableScope::Project);
+        assert_eq!(state.expected_revision, "revision-1");
+        assert!(state.enable);
+    }
+
+    #[test]
+    fn editing_an_inherited_scope_does_not_write_the_global_enable_switch() {
+        let mut snapshot = named_snapshot();
+        snapshot.enabled = true;
+        snapshot.scopes[0].enabled = None;
+        let mut state = FusionSetupState::from_snapshot(snapshot);
+        press(
+            &mut state,
+            &[KeyCode::Enter, KeyCode::Char('!'), KeyCode::Enter],
+        );
+        assert!(
+            state.enable,
+            "the checkbox displays the inherited effective value"
+        );
+        let result = press(
+            &mut state,
+            &[KeyCode::Enter, KeyCode::Enter, KeyCode::Enter],
+        );
+        let FusionSetupOutcome::Save { enable, .. } = result else {
+            panic!("expected save");
+        };
+        assert_eq!(
+            enable, None,
+            "a rename must not pin or disable inherited settings"
+        );
+    }
+
+    #[test]
+    fn an_explicit_enable_toggle_is_saved_even_for_an_inherited_scope() {
+        let mut snapshot = named_snapshot();
+        snapshot.enabled = true;
+        snapshot.scopes[0].enabled = None;
+        let mut state = FusionSetupState::from_snapshot(snapshot);
+        press(
+            &mut state,
+            &[
+                KeyCode::Enter,
+                KeyCode::Enter,
+                KeyCode::Enter,
+                KeyCode::Enter,
+            ],
+        );
+        let result = press(&mut state, &[KeyCode::Char('e'), KeyCode::Enter]);
+        let FusionSetupOutcome::Save { enable, .. } = result else {
+            panic!("expected save");
+        };
+        assert_eq!(enable, Some(false));
+    }
+
+    #[test]
+    fn editing_keeps_unavailable_saved_panels_and_allows_explicit_removal() {
+        let mut snapshot = named_snapshot();
+        let unavailable = FusionModelChoice::new("offline", "saved-model");
+        snapshot.entries[0]
+            .roles
+            .panels
+            .insert(1, unavailable.clone());
+        let saved_panels = snapshot.entries[0].roles.panels.clone();
+        let mut state = FusionSetupState::from_snapshot(snapshot);
+        press(
+            &mut state,
+            &[KeyCode::Enter, KeyCode::Char('!'), KeyCode::Enter],
+        );
+        assert_eq!(state.panels, saved_panels);
+        let result = press(
+            &mut state,
+            &[KeyCode::Enter, KeyCode::Enter, KeyCode::Enter],
+        );
+        let FusionSetupOutcome::Save { roles, .. } = result else {
+            panic!("expected save");
+        };
+        assert_eq!(
+            roles.panels, saved_panels,
+            "rename must preserve roster and order"
+        );
+
+        state.step = FusionSetupStep::Panels;
+        state.selected = state
+            .visible()
+            .iter()
+            .position(|&index| state.snapshot.candidates[index].choice == unavailable)
+            .unwrap();
+        press(&mut state, &[KeyCode::Char(' ')]);
+        assert!(!state.panels.contains(&unavailable));
+        press(&mut state, &[KeyCode::Char(' ')]);
+        assert!(
+            !state.panels.contains(&unavailable),
+            "disconnected models are removal-only"
+        );
+        assert!(state.notice.as_deref().unwrap().contains("Connect"));
+
+        // Leaving an edit must not offer this saved-only route on a new strategy.
+        state.step = FusionSetupStep::Strategy;
+        state.selected = 1;
+        press(&mut state, &[KeyCode::Enter]);
+        assert!(state
+            .snapshot
+            .candidates
+            .iter()
+            .all(|candidate| candidate.available));
+    }
+
+    #[test]
+    fn selected_strategy_supplies_its_panel_cap_and_new_strategy_uses_engine_maximum() {
+        let mut snapshot = named_snapshot();
+        snapshot.entries[0].max_panel = 2;
+        let mut state = FusionSetupState::from_snapshot(snapshot);
+        press(&mut state, &[KeyCode::Enter]);
+        assert_eq!(state.snapshot.max_panel, 2);
+        press(&mut state, &[KeyCode::Left, KeyCode::Down, KeyCode::Enter]);
+        assert!(state.is_new);
+        assert_eq!(state.snapshot.max_panel, 8);
+    }
+
+    #[test]
+    fn switching_strategies_retains_unsaved_roles_name_and_new_strategy_scope() {
+        let mut state = FusionSetupState::from_snapshot(named_snapshot());
+        press(&mut state, &[KeyCode::Enter, KeyCode::Char('!')]);
+        state.panels.reverse();
+        state.analyst = Some(state.snapshot.candidates[1].choice.clone());
+        state.enable = true;
+        let edited_roles = state.roles();
+        press(&mut state, &[KeyCode::Left, KeyCode::Down, KeyCode::Enter]);
+        press(&mut state, &[KeyCode::Char('N'), KeyCode::Tab]);
+        let new_reference = state.reference.clone();
+        press(&mut state, &[KeyCode::Left, KeyCode::Enter]);
+        assert_eq!(state.name, "Review!");
+        assert_eq!(state.roles(), edited_roles);
+        assert!(state.enable);
+        press(&mut state, &[KeyCode::Left, KeyCode::Down, KeyCode::Enter]);
+        assert_eq!(state.name, "N");
+        assert_eq!(state.reference, new_reference);
+        assert_eq!(state.reference.scope, WritableScope::Project);
+    }
+
+    #[test]
+    fn analyst_enter_selects_the_highlighted_model_even_with_an_existing_pick() {
+        let mut state = state();
+        state.analyst = Some(state.snapshot.candidates[0].choice.clone());
+        state.step = FusionSetupStep::Analyst;
+        press(&mut state, &[KeyCode::Down, KeyCode::Enter]);
+        assert_eq!(state.step, FusionSetupStep::Confirm);
+        assert_eq!(
+            state.analyst,
+            Some(state.snapshot.candidates[1].choice.clone())
+        );
+    }
+
+    #[test]
+    fn opening_drops_an_analyst_that_no_longer_supports_structured_output() {
+        let mut snapshot = snapshot();
+        snapshot.roles.analyst = Some(snapshot.candidates[2].choice.clone());
+        let state = FusionSetupState::from_snapshot(snapshot);
+        assert!(state.analyst.is_none());
+    }
+
+    #[test]
+    fn invalid_scope_configuration_blocks_without_rewriting_it() {
+        let mut snapshot = named_snapshot();
+        snapshot.scopes[0].error =
+            Some("Legacy Fusion configuration must be replaced explicitly.".into());
+        let mut state = FusionSetupState::from_snapshot(snapshot);
+        press(&mut state, &[KeyCode::Enter, KeyCode::Enter]);
+        assert_eq!(state.step, FusionSetupStep::Details);
+        assert!(state.notice.as_deref().unwrap().contains("Legacy"));
+    }
+
+    #[test]
+    fn default_toggle_is_only_active_on_review() {
+        let mut state = FusionSetupState::from_snapshot(named_snapshot());
+        press(&mut state, &[KeyCode::Char('d')]);
+        assert_eq!(state.query, "d");
+        assert!(!state.make_default);
+        state.step = FusionSetupStep::Confirm;
+        press(&mut state, &[KeyCode::Char('d')]);
+        assert!(state.make_default);
+        press(&mut state, &[KeyCode::Char('d')]);
+        assert!(!state.make_default);
     }
 
     #[test]
@@ -487,7 +1126,7 @@ mod tests {
                 KeyCode::Enter,
             ],
         );
-        let FusionSetupOutcome::Save { roles, enable } = outcome else {
+        let FusionSetupOutcome::Save { roles, enable, .. } = outcome else {
             panic!("expected a save, got {outcome:?}");
         };
         assert_eq!(
@@ -499,7 +1138,10 @@ mod tests {
         );
         assert!(roles.analyst.is_some());
         assert!(roles.is_configured());
-        assert!(!enable, "the switch defaults to what settings already said");
+        assert!(
+            enable.is_none(),
+            "untouched enable settings must be inherited"
+        );
     }
 
     /// A one-model roster is the exact shape the engine reports as missing, so

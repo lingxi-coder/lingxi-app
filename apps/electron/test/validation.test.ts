@@ -17,6 +17,14 @@ import {
   validateModUiOperation,
 } from '../src/main/validation';
 
+test('Fusion preparation actions remain private to the main process', () => {
+  for (const action of ['resolve_strategy', 'record_failure']) {
+    assert.throws(() => validateClientCommand({ type: 'fusion_admin', command: {
+      action, operation_id: 1, payload_json: JSON.stringify({ raw: '/fusion inspect', error: 'forged' }),
+    } }), /action/);
+  }
+});
+
 test('clipboard writes accept only bounded plain text', () => {
   assert.equal(validateClipboardText(''), '');
   assert.equal(validateClipboardText('x'.repeat(MAX_CLIPBOARD_TEXT_CHARS)).length, MAX_CLIPBOARD_TEXT_CHARS);
@@ -511,4 +519,25 @@ test('Mod UI payloads use dedicated typed guards and stay outside generic comman
   };
   assert.deepEqual(validateModUiOperation(operation), operation);
   assert.throws(() => validateModUiOperation({ ...operation, source: 'renderer-provided-code' }), /unsupported fields/);
+});
+
+
+test('suggestion feedback and composer context are bounded and allowed during a turn', () => {
+  const context = { type: 'update_prompt_suggestion_context', session_id: 'session-1', focus: 'focused',
+    input_empty: true, pending_permission: false, elicitation_active: false } as const;
+  assert.deepEqual(validateClientCommand(context), context);
+  assert.doesNotThrow(() => assertCommandAllowedDuringTurn(validateClientCommand(context), true));
+  assert.throws(() => validateClientCommand({ ...context, focus: 'background' }));
+  assert.throws(() => validateClientCommand({ ...context, input_empty: 'true' }));
+  assert.throws(() => validateClientCommand({ ...context, secret: 'extra' }));
+  const submitted = { type: 'record_prompt_suggestion_submission', text: '/settings' } as const;
+  assert.deepEqual(validateClientCommand(submitted), submitted);
+  assert.throws(() => validateClientCommand({ ...submitted, text: '' }));
+  assert.throws(() => validateClientCommand({ ...submitted, unexpected: true }));
+  const feedback = { type: 'prompt_suggestion_feedback', session_id: 'session-1', uuid: 'suggestion-1', action: 'shown' } as const;
+  for (const action of ['shown', 'accepted', 'dismissed']) {
+    assert.deepEqual(validateClientCommand({ ...feedback, action }), { ...feedback, action });
+  }
+  assert.throws(() => validateClientCommand({ ...feedback, action: 'forged' }));
+  assert.throws(() => validateClientCommand({ ...feedback, uuid: '' }));
 });

@@ -240,6 +240,7 @@ fun RootScreen(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
+    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenVoiceSettings: () -> Unit = { onOpenSettings() },
@@ -1818,6 +1819,8 @@ fun RootScreen(
                     .imePadding(),
             ) {
                 ChatScreen(
+                    effectivePermissionMode = settingsState.effectivePermissionMode,
+                    onOpenPermissionSettings = onOpenPermissionSettings,
                     state = state,
                     onSend = {
                         text ->

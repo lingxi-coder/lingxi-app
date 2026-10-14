@@ -525,10 +525,12 @@ final class ConversationModel: ObservableObject {
     /// The widget the next prompt follows up on; consumed by `send`.
     @Published var visualizationChip: VisualizationContextChip?
 
+    @Published var contextUsage: ConversationUsageSnapshot? = nil
     @Published var activeSessionId: String = "" {
         didSet {
             promptSuggestion = nil
             promptSuggestionUuid = nil
+            if oldValue != activeSessionId { contextUsage = nil }
             restoreTranscriptDisclosures()
             visualizationChip = nil
             visualizationFollowup = nil

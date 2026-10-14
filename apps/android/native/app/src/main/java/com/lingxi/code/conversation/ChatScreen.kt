@@ -27,7 +27,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.LightMode
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton as MaterialIconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetValue
@@ -83,7 +92,7 @@ import kotlinx.coroutines.delay
 /**
  * The conversation surface — the Android analog of the iOS `ChatView`.
  *
- * Composes the top bar (menu / title with a 「模式 · 工作区」 subtitle / new-chat), a scrolling
+ * Composes the top bar (drawer / title with mode and workspace / overflow menu), a scrolling
  * message list (with the live execution trace and the new-chat empty state),
  * and the [Composer]. The conversation itself is owned by [state]; user
  * intents are hoisted to the caller's [ChatViewModel] via the callbacks.
@@ -147,6 +156,8 @@ fun ChatScreen(
     modelSetupRequired: Boolean = false,
     /** Opens settings directly at the LLM Provider page. */
     onOpenModelSettings: () -> Unit = {},
+    effectivePermissionMode: String = "auto",
+    onOpenPermissionSettings: () -> Unit = {},
     /** Settings/credential state displayed alongside each provider section. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
     /** Opens the matching provider editor, or the provider list for null. */
@@ -278,6 +289,8 @@ fun ChatScreen(
             val isNewChat = renderItems.any { it is ChatRenderItem.Empty }
             TopBar(
                 title = state.session.title,
+                isDark = isDark,
+                onToggleTheme = onToggleTheme,
                 subtitle = listOf(sessionModeLabel(sessionMode), workspaceName)
                     .filter(String::isNotBlank)
                     .joinToString(" · "),
@@ -376,6 +389,9 @@ fun ChatScreen(
                 onTextChange = onDraftChange,
                 model = state.model,
                 availableModels = state.availableModels,
+                contextUsage = state.contextUsage.takeUnless { state.sessionTransitioning },
+                effectivePermissionMode = effectivePermissionMode,
+                onOpenPermissionSettings = onOpenPermissionSettings,
                 onModelChange = onSelectModel,
                 onSend = {
                     if (modelSetupRequired) {
@@ -486,6 +502,8 @@ data class ComputerUseSetupStatus(
 @Composable
 private fun TopBar(
     title: String,
+    isDark: Boolean,
+    onToggleTheme: () -> Unit,
     subtitle: String,
     subtitleColor: Color,
     onOpenDrawer: () -> Unit,
@@ -548,13 +566,41 @@ private fun TopBar(
                 )
             }
         }
-        IconButton(
-            name = LXIconName.Edit,
-            color = t.accent,
-            size = 18.dp,
-            onClick = onNewChat,
-            contentDescription = stringResource(R.string.chat_new_chat),
-        )
+        Box {
+            var menuExpanded by remember { mutableStateOf(false) }
+            MaterialIconButton(onClick = { menuExpanded = !menuExpanded }) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = stringResource(R.string.composer_more),
+                    tint = t.text,
+                )
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = {
+                        Text(stringResource(if (isDark) R.string.chat_toggle_theme_light else R.string.chat_toggle_theme_dark))
+                    },
+                    leadingIcon = {
+                        Icon(if (isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode, contentDescription = null)
+                    },
+                    onClick = {
+                        menuExpanded = false
+                        onToggleTheme()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.chat_new_chat)) },
+                    leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                    onClick = {
+                        menuExpanded = false
+                        onNewChat()
+                    },
+                )
+            }
+        }
     }
 }
 

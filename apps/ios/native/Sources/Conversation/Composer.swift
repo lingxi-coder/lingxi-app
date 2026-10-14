@@ -18,6 +18,7 @@ struct Composer: View {
     // `model` remains in the view API for compatibility with its existing owner.
     var availableModels: [String] = []
     var availableModelDetails: [String: ModelRuntimeDetails] = [:]
+    var contextUsage: ConversationUsageSnapshot? = nil
     var activeModelId: String = ""
     var activeModelDisplay: String? = nil
     var providerConfigured: Bool
@@ -101,8 +102,12 @@ struct Composer: View {
     var voiceCapturePhase: VoiceCapturePhase = .idle
     var voiceInteractionMode: VoiceInteractionMode? = nil
 
-    @State private var modelOpen = false
-    @State private var controlsOpen = false
+    /// Owned by the chat so the session panel can open the same pickers.
+    @Binding var modelOpen: Bool
+    @Binding var controlsOpen: Bool
+    /// A Chat session has no file permissions to ask about, so only Code
+    /// sessions get the permission chip.
+    var showsPermissionChip: Bool = true
     @State private var holding = false
     @State private var cancellingHold = false
     @State private var suppressMicTap = false
@@ -114,6 +119,7 @@ struct Composer: View {
         availableModelDetails: [String: ModelRuntimeDetails] = [:],
         activeModelId: String = "",
         activeModelDisplay: String? = nil,
+        contextUsage: ConversationUsageSnapshot? = nil,
         providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
         reasoningModelId: String? = nil,
@@ -162,13 +168,17 @@ struct Composer: View {
         onMicTap: @escaping () -> Void = {},
         onFlowModeTap: @escaping () -> Void = {},
         voiceCapturePhase: VoiceCapturePhase = .idle,
-        voiceInteractionMode: VoiceInteractionMode? = nil
+        voiceInteractionMode: VoiceInteractionMode? = nil,
+        modelOpen: Binding<Bool>,
+        controlsOpen: Binding<Bool>,
+        showsPermissionChip: Bool = true
     ) {
         self._model = model
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
         self.activeModelDisplay = activeModelDisplay
+        self.contextUsage = contextUsage
         self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
         self.reasoningModelId = reasoningModelId
@@ -218,6 +228,9 @@ struct Composer: View {
         self.onFlowModeTap = onFlowModeTap
         self.voiceCapturePhase = voiceCapturePhase
         self.voiceInteractionMode = voiceInteractionMode
+        self._modelOpen = modelOpen
+        self._controlsOpen = controlsOpen
+        self.showsPermissionChip = showsPermissionChip
     }
 
     var body: some View {
@@ -307,8 +320,9 @@ struct Composer: View {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 0) {
                         attachmentButton
-                        permissionChip
+                        if showsPermissionChip { permissionChip }
                         Spacer(minLength: 8)
+                        contextWindow
                         modelChip
                         turnActions
                     }
@@ -639,14 +653,21 @@ struct Composer: View {
         .accessibilityIdentifier("composer.model")
     }
 
+    @ViewBuilder
+    private var contextWindow: some View {
+        if let snapshot = ComposerContextUsage(usage: contextUsage, capacity: availableModelDetails[activeModelId]?.contextWindowTokens) {
+            ComposerContextWindow(snapshot: snapshot)
+        }
+    }
+
     private var permissionChip: some View {
         Button { inputFocused = false; controlsOpen = true } label: {
             Label(permissionLabel, systemImage: effectivePermissionMode == "bypassPermissions"
                   ? "exclamationmark.shield" : "checkmark.shield")
-                .font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
+                .labelStyle(.iconOnly)
+                .font(.scaledSystem(17, weight: .medium, relativeTo: .body))
                 .foregroundStyle(effectivePermissionMode == "bypassPermissions" ? .orange : t.text2)
-                .padding(.horizontal, 4)
-                .frame(minHeight: 44)
+                .frame(minWidth: 44, minHeight: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
@@ -658,12 +679,13 @@ struct Composer: View {
     private var configurationSummary: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 0) {
-                permissionChip
+                if showsPermissionChip { permissionChip }
                 Spacer(minLength: 8)
+                contextWindow
                 modelChip
             }
             VStack(alignment: .leading, spacing: 0) {
-                permissionChip
+                HStack(spacing: 0) { permissionChip; contextWindow }
                 modelChip
             }
         }
@@ -866,5 +888,65 @@ private struct AttachmentThumb: View {
             Spacer()
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
+    }
+}
+
+/// Matches Desktop's latest input footprint, including both cache counters.
+struct ComposerContextUsage: Equatable {
+    let used: UInt64
+    let capacity: UInt64
+    var fraction: Double { min(1, Double(used) / Double(capacity)) }
+    var percent: Int { Int((fraction * 100).rounded()) }
+
+    init?(usage: ConversationUsageSnapshot?, capacity: UInt64?) {
+        guard let usage, let capacity, capacity > 0 else { return nil }
+        let (inputAndRead, readOverflow) = usage.inputTokens.addingReportingOverflow(usage.cacheReadTokens)
+        let (used, writeOverflow) = inputAndRead.addingReportingOverflow(usage.cacheCreationTokens)
+        guard !readOverflow, !writeOverflow else { return nil }
+        self.used = used
+        self.capacity = capacity
+    }
+}
+
+private struct ComposerContextWindow: View {
+    @Environment(\.theme) private var t
+    let snapshot: ComposerContextUsage
+    @State private var showsDetails = false
+
+    private var summary: String {
+        "\(snapshot.percent)% used (\(100 - snapshot.percent)% left)"
+    }
+    private var tokens: String {
+        "\(ModelDetailFormat.tokenCount(snapshot.used)) / \(ModelDetailFormat.tokenCount(snapshot.capacity)) tokens used"
+    }
+
+    var body: some View {
+        Button { showsDetails = true } label: {
+            ZStack {
+                Circle().stroke(t.border, lineWidth: 3)
+                if snapshot.used > 0 {
+                    Circle().trim(from: 0, to: snapshot.fraction)
+                        .stroke(t.text3, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+            }
+            .frame(width: 16, height: 16)
+            .frame(width: 44, height: 44)
+            .contentShape(.rect)
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .accessibilityLabel("Context window (estimated)")
+        .accessibilityValue("\(summary). \(tokens)")
+        .accessibilityIdentifier("composer.context-window")
+        .popover(isPresented: $showsDetails) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Context window:").fontWeight(.semibold)
+                Text(summary)
+                Text(tokens)
+            }
+            .font(.callout)
+            .padding()
+            .presentationCompactAdaptation(.popover)
+        }
     }
 }

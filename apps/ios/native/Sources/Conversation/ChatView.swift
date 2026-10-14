@@ -187,6 +187,7 @@ struct ChatView: View {
                          availableModelDetails: convo.availableModelDetails,
                          activeModelId: convo.activeModelId,
                          activeModelDisplay: convo.activeModelSource,
+                         contextUsage: convo.sessionTransitionPending ? nil : convo.contextUsage,
                          providerConfigured: convo.providerConfigured,
                          onSelectModel: { reference in
                              source.setModel(reference)
@@ -533,13 +534,12 @@ struct ChatView: View {
                 .accessibilityIdentifier("conversation.summary.category.\(category.rawValue)")
             }
         } label: {
-            Image(systemName: "list.bullet.rectangle")
+            Image(systemName: "ellipsis.circle")
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(t.accent)
-                .frame(width: 38, height: 36)
-                .contentShape(.rect)
         }
+        .menuStyle(.automatic)
+        .buttonStyle(.automatic)
+        .tint(t.accent)
         .accessibilityLabel("Open conversation summary")
         .accessibilityIdentifier("conversation.summary-menu")
     }

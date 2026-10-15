@@ -29,11 +29,11 @@ struct PermissionModePage: View {
             }
             if store.effectivePermissionMode != store.permissionMode {
                 Text("当前有效模式：\(store.effectivePermissionMode)")
-                    .font(.system(size: 12)).foregroundColor(.secondary).padding(.horizontal, 4)
+                    .font(.caption).foregroundColor(.secondary).padding(.horizontal, 4)
             }
             if let error = store.permissionModeError, !error.isEmpty {
                 Text(error)
-                    .font(.system(size: 12)).foregroundColor(.red).padding(.horizontal, 4)
+                    .font(.caption).foregroundColor(.red).padding(.horizontal, 4)
             }
         }
         .alert("确认高风险权限模式", isPresented: Binding(
@@ -77,14 +77,14 @@ struct TypeScriptLspModePage: View {
             }
             if !store.typescriptLspAvailable && store.typescriptLspMode != "off" {
                 Text("当前设备的 TypeScript 运行时不可用；已安全降级为关闭。")
-                    .font(.system(size: 12)).foregroundColor(.secondary).padding(.horizontal, 4)
+                    .font(.caption).foregroundColor(.secondary).padding(.horizontal, 4)
             } else if store.effectiveTypescriptLspMode != store.typescriptLspMode {
                 Text("当前有效模式：\(store.effectiveTypescriptLspMode)")
-                    .font(.system(size: 12)).foregroundColor(.secondary).padding(.horizontal, 4)
+                    .font(.caption).foregroundColor(.secondary).padding(.horizontal, 4)
             }
             if let error = store.typescriptLspError, !error.isEmpty {
                 Text(error)
-                    .font(.system(size: 12)).foregroundColor(.red).padding(.horizontal, 4)
+                    .font(.caption).foregroundColor(.red).padding(.horizontal, 4)
             }
         }
     }

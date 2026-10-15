@@ -124,7 +124,7 @@ struct AskUserQuestionCard: View {
                 resolve { await onCancel() }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(t.text3)
                     .frame(width: 36, height: 36)
                     .contentShape(Circle())
@@ -164,7 +164,7 @@ struct AskUserQuestionCard: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(t.text3)
                         .accessibilityHidden(true)
                 }
@@ -338,10 +338,10 @@ struct AnsweredQuestionsView: View {
                         .accessibilityHidden(true)
                     Text("chat_asked_questions \(rows.count)")
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 11, weight: .regular))
+                        .font(.caption.weight(.regular))
                         .accessibilityHidden(true)
                 }
-                .font(.system(size: 14))
+                .font(.subheadline)
                 .foregroundStyle(summaryColor)
                 .frame(minHeight: 44)
                 .contentShape(.rect)
@@ -354,7 +354,7 @@ struct AnsweredQuestionsView: View {
                         Text(rows[index].question).foregroundStyle(summaryColor.opacity(0.85))
                         Text(rows[index].answer ?? String(localized: "chat_question_no_answer")).foregroundStyle(summaryColor.opacity(0.5))
                     }
-                    .font(.system(size: 14))
+                    .font(.subheadline)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)

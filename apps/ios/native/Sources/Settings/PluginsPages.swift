@@ -103,7 +103,7 @@ private struct PluginPill: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 13, weight: .semibold))
+            Text(title).font(.footnote.weight(.semibold))
                 .foregroundColor(enabled ? t.accent : t.text4)
                 .padding(.horizontal, 14).padding(.vertical, 6)
                 .background(t.accent.opacity(enabled ? 0.12 : 0.05))
@@ -129,7 +129,7 @@ private struct PluginNoteRow: View {
     @Environment(\.theme) private var t
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 13)).foregroundColor(t.text3)
+        Text(text).font(.footnote).foregroundColor(t.text3)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14).padding(.vertical, 12)
     }
@@ -197,7 +197,7 @@ struct PluginsPage: View {
     @ViewBuilder private var content: some View {
         if let error {
             Text(String(localized: "plugins_operation_failed \(error)"))
-                .font(.system(size: 13)).foregroundColor(t.danger).padding(.bottom, 12)
+                .font(.footnote).foregroundColor(t.danger).padding(.bottom, 12)
         }
 
         SettingsSection(label: String(localized: "plugins_section_installed")) {
@@ -278,7 +278,7 @@ struct PluginsPage: View {
                                 ) { run(key, ["action": "marketplace_remove", "name": marketplace.name]) }
                             }
                         } label: {
-                            Text("⋯").font(.system(size: 18)).foregroundColor(busy == nil ? t.text2 : t.text4)
+                            Text("⋯").font(.body).foregroundColor(busy == nil ? t.text2 : t.text4)
                                 .padding(.horizontal, 8).padding(.vertical, 2)
                         }
                         .disabled(busy != nil)
@@ -369,20 +369,20 @@ struct PluginDetailPage: View {
             HStack(spacing: 14) {
                 PluginIconTile(id: plugin.id, size: 56)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(plugin.displayName).font(.system(size: 18, weight: .semibold)).foregroundColor(t.text)
-                    Text(pluginSubtitle(vendor: details.vendor, version: plugin.version)).font(.system(size: 13)).foregroundColor(t.text3)
+                    Text(plugin.displayName).font(.body.weight(.semibold)).foregroundColor(t.text)
+                    Text(pluginSubtitle(vendor: details.vendor, version: plugin.version)).font(.footnote).foregroundColor(t.text3)
                 }
             }
             .padding(.bottom, 14)
             if !plugin.description.isEmpty {
-                Text(plugin.description).font(.system(size: 14)).foregroundColor(t.text2).lineSpacing(4).padding(.bottom, 16)
+                Text(plugin.description).font(.subheadline).foregroundColor(t.text2).lineSpacing(4).padding(.bottom, 16)
             }
             if let error {
                 Text(String(localized: "plugins_operation_failed \(error)"))
-                    .font(.system(size: 13)).foregroundColor(t.danger).padding(.bottom, 12)
+                    .font(.footnote).foregroundColor(t.danger).padding(.bottom, 12)
             }
             if let notice {
-                Text(notice).font(.system(size: 13)).foregroundColor(t.text3).padding(.bottom, 12)
+                Text(notice).font(.footnote).foregroundColor(t.text3).padding(.bottom, 12)
             }
 
             SettingsSection {

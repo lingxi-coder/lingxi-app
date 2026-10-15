@@ -200,18 +200,18 @@ struct SessionDetailsView: View {
                             endPoint: .bottomTrailing
                         ))
                     Image(systemName: "waveform.path.ecg")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
                 }
                 .frame(width: 52, height: 52)
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(session.title)
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .font(.system(.title3, design: .rounded).weight(.bold))
                         .foregroundStyle(t.text)
                         .lineLimit(2)
                     Text(session.id)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(t.text4)
                         .lineLimit(1)
                         .textSelection(.enabled)
@@ -263,15 +263,15 @@ struct SessionDetailsView: View {
     private func detailLine(icon: String, label: String, value: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(t.text3)
                 .frame(width: 18)
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .font(.caption.weight(.medium))
                 .foregroundStyle(t.text3)
             Spacer(minLength: 8)
             Text(value)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(t.text2)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
@@ -282,12 +282,12 @@ struct SessionDetailsView: View {
     private func metric(value: String, label: String, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.system(.body, design: .rounded).weight(.bold))
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.caption.weight(.medium))
                 .foregroundStyle(t.text4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -304,16 +304,16 @@ struct SessionDetailsView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(t.accent)
                     .frame(width: 30, height: 30)
                     .background(t.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .font(.system(.callout, design: .rounded).weight(.bold))
                         .foregroundStyle(t.text)
                     Text(subtitle)
-                        .font(.system(size: 11.5))
+                        .font(.caption)
                         .foregroundStyle(t.text4)
                 }
             }
@@ -333,15 +333,15 @@ struct SessionDetailsView: View {
             AgentAvatar(agentID: worker.id, size: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(worker.name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(t.text)
                 Text(worker.agentType)
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .foregroundStyle(t.text4)
             }
             Spacer()
             Text(worker.status)
-                .font(.system(size: 11, weight: .medium))
+                .font(.caption.weight(.medium))
                 .foregroundStyle(t.text3)
         }
     }
@@ -354,19 +354,19 @@ struct SessionDetailsView: View {
                 .padding(.top, 5)
             VStack(alignment: .leading, spacing: 3) {
                 Text(task.title)
-                    .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                    .font(.system(.footnote, design: .monospaced).weight(.semibold))
                     .foregroundStyle(t.text)
                     .lineLimit(2)
                 if let detail = task.detail, !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 11))
+                        .font(.caption)
                         .foregroundStyle(t.text4)
                         .lineLimit(2)
                 }
             }
             Spacer(minLength: 4)
             Text(task.status)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.caption.weight(.medium))
                 .foregroundStyle(task.accent)
         }
     }
@@ -374,10 +374,10 @@ struct SessionDetailsView: View {
     private func emptyRow(icon: String, title: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 14))
+                .font(.subheadline)
                 .foregroundStyle(t.text4)
             Text(title)
-                .font(.system(size: 12.5))
+                .font(.footnote)
                 .foregroundStyle(t.text4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

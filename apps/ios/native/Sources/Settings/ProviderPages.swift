@@ -145,7 +145,7 @@ struct ModelsSettingsPage: View {
         let preset = repository.preset(for: state.profile.presetID)
         return SettingsRow(
             labelView: AnyView(HStack(spacing: 6) {
-                Text(state.profile.name).font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
+                Text(state.profile.name).font(.subheadline.weight(.medium)).foregroundColor(t.text)
                 if state.profile.isDefault { badge(String(localized: "settings_badge_default"), t.accent) }
                 if !state.profile.enabled { badge(String(localized: "settings_badge_disabled"), t.text4) }
                 if state.oauthState?.signedIn == true { badge(String(localized: "settings_provider_status_oauth"), t.ok) }
@@ -153,7 +153,7 @@ struct ModelsSettingsPage: View {
             subView: AnyView(HStack(spacing: 5) {
                 Circle().fill(state.legacyStatus.dot(t)).frame(width: 6, height: 6)
                 Text("\(state.statusLabel) · \(state.profile.modelID.isEmpty ? "—" : state.profile.modelID)")
-                    .font(.system(size: 11.5, design: .monospaced)).foregroundColor(t.text4).lineLimit(1)
+                    .font(.system(.caption, design: .monospaced)).foregroundColor(t.text4).lineLimit(1)
             }),
             chevron: true,
             isLast: true,
@@ -178,7 +178,7 @@ struct ModelsSettingsPage: View {
     }
 
     private func badge(_ text: String, _ color: Color) -> some View {
-        Text(text).font(.system(size: 10, weight: .medium)).foregroundColor(color)
+        Text(text).font(.caption.weight(.medium)).foregroundColor(color)
             .padding(.horizontal, 6).padding(.vertical, 1)
             .background(color.tint(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
     }
@@ -314,7 +314,7 @@ private struct ProviderTile: View {
 
     var body: some View {
         Text(String(name.prefix(1)))
-            .font(.system(size: 13, weight: .bold))
+            .font(.footnote.weight(.bold))
             .foregroundStyle(preset.color)
             .frame(width: 28, height: 28)
             .background(preset.color.mix(with: t.surface, amount: 0.18))
@@ -361,8 +361,8 @@ struct ProviderListPage: View {
 
     private var unsupportedProviderNotice: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(String(localized: "settings_provider_not_connected")).font(.system(size: 13.5, weight: .semibold)).foregroundColor(t.text)
-            Text(String(localized: "settings_provider_unsupported_notice \(kind.title)")) .font(.system(size: 11.5)).foregroundColor(t.text4).lineSpacing(4)
+            Text(String(localized: "settings_provider_not_connected")).font(.footnote.weight(.semibold)).foregroundColor(t.text)
+            Text(String(localized: "settings_provider_unsupported_notice \(kind.title)")) .font(.caption).foregroundColor(t.text4).lineSpacing(4)
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(14).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
     }

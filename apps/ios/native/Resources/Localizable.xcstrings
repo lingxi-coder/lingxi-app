@@ -2,6 +2,74 @@
   "sourceLanguage": "zh-Hans",
   "version": "1.0",
   "strings": {
+    "settings_appearance_system": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跟随系统"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跟隨系統"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "システム"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템"
+          }
+        }
+      }
+    },
+    "settings_appearance_system_sub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动使用设备的浅色或深色外观"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自動使用裝置的淺色或深色外觀"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use your device’s light or dark appearance"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デバイスのライト／ダークの外観を使用"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기기의 라이트 또는 다크 모드 사용"
+          }
+        }
+      }
+    },
     "CFBundleDisplayName": {
       "localizations": {
         "zh-Hans": {
@@ -34121,31 +34189,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "午夜紫 + 低饱和"
+            "value": "柔和舒适的系统深色外观"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "午夜紫 + 低飽和"
+            "value": "柔和舒適的系統深色外觀"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Midnight purple, low saturation"
+            "value": "A comfortable dark system appearance"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ミッドナイトパープル + 低彩度"
+            "value": "落ち着いたシステムのダークな外観"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "미드나잇 퍼플 + 낮은 채도"
+            "value": "편안한 시스템 다크 스타일"
           }
         }
       }
@@ -34189,31 +34257,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "暖白纸感 + 半透卡片"
+            "value": "明亮清晰的系统外观"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "暖白紙感 + 半透卡片"
+            "value": "明亮清晰的系統外觀"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Warm paper white, translucent cards"
+            "value": "A clear, bright system appearance"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "温かみのある紙のような白 + 半透明カード"
+            "value": "明るく見やすいシステムの外観"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "따뜻한 화이트 종이 질감 + 반투명 카드"
+            "value": "밝고 선명한 시스템 스타일"
           }
         }
       }

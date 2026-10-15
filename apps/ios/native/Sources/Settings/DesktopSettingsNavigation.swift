@@ -160,7 +160,6 @@ struct SettingsGroupPage: View {
                 .accessibilityIdentifier(entry.accessibilityID)
             }
         }
-        .accessibilityIdentifier("settings.group.page.\(group.rawValue)")
     }
 }
 
@@ -183,7 +182,7 @@ private struct SettingsAccountCard: View {
                     .overlay {
                         if let initial = name?.first {
                             Text(String(initial).uppercased())
-                                .font(.system(size: 17, weight: .semibold))
+                                .font(.body.weight(.semibold))
                                 .foregroundColor(.white)
                         } else {
                             LXIcon(name: .sparkle, size: 18, color: .white, stroke: 1.8)
@@ -191,11 +190,11 @@ private struct SettingsAccountCard: View {
                     }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name ?? String(localized: "drawer_account_signed_out_title"))
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(t.text)
                         .lineLimit(1)
                     if let subtitle {
-                        Text(subtitle).font(.system(size: 12)).foregroundColor(t.text4).lineLimit(1)
+                        Text(subtitle).font(.caption).foregroundColor(t.text4).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 8)

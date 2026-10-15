@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Reusable settings building blocks (Section / Row / RadioList)
 
-/// Grouped inset card with optional uppercase label + footer note.
+/// Grouped inset card with optional label + footer note.
 struct SettingsSection<Content: View>: View {
     @Environment(\.theme) private var t
     var label: String? = nil
@@ -12,22 +12,17 @@ struct SettingsSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let label {
-                Text(label.uppercased())
-                    .font(.system(size: 11, weight: .semibold)).tracking(0.6)
+                Text(label)
+                    .font(.footnote)
                     .foregroundColor(t.text4)
-                    .padding(.horizontal, 4).padding(.bottom, 8)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
             }
             VStack(spacing: 0) { content }
                 .background(t.surface)
                 .clipShape(.rect(cornerRadius: 16))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(t.border, lineWidth: 0.5)
-                }
-                .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
             if let footer {
-                Text(footer).font(.system(size: 11)).foregroundColor(t.text4)
-                    .lineSpacing(4).padding(.horizontal, 4).padding(.top, 8)
+                Text(footer).font(.footnote).foregroundColor(t.text4)
+                    .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16).padding(.top, 8)
             }
         }
         .padding(.bottom, 22)
@@ -38,6 +33,7 @@ struct SettingsSection<Content: View>: View {
 /// optional leading icon tile, title, sub, trailing value/accessory, chevron.
 struct SettingsRow<Trailing: View>: View {
     @Environment(\.theme) private var t
+    @Environment(\.dynamicTypeSize) private var typeSize
     var icon: LXIconName? = nil
     var iconColor: Color? = nil
     var label: String = ""
@@ -83,33 +79,41 @@ struct SettingsRow<Trailing: View>: View {
                         .frame(width: 32, height: 32)
                         .background(c.mix(with: t.surface, amount: 0.16))
                         .clipShape(.rect(cornerRadius: 9))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 9)
-                                .stroke(c.tint(0.28), lineWidth: 0.5)
+                }
+                let layout = typeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                    : AnyLayout(HStackLayout(spacing: 8))
+                layout {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let labelView { labelView }
+                        else {
+                            Text(label).font(.body)
+                                .foregroundStyle(danger ? t.danger : t.text)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    if let labelView { labelView }
-                    else {
-                        Text(label).font(.system(size: 14, weight: .medium))
-                            .foregroundColor(danger ? t.danger : t.text).lineLimit(1)
+                        if let subView { subView }
+                        else if let sub {
+                            Text(sub).font(.footnote).foregroundStyle(t.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
-                    if let subView { subView }
-                    else if let sub {
-                        Text(sub).font(.system(size: 11.5)).foregroundColor(t.text4).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 8) {
+                        if let value {
+                            Text(value).font(.body).foregroundStyle(valueColor ?? t.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        trailing
+                            .environment(\.settingsControlLabel, label.isEmpty ? (sub ?? "") : label)
                     }
                 }
-                Spacer(minLength: 4)
-                if let value {
-                    Text(value).font(.system(size: 13)).foregroundColor(valueColor ?? t.text3).lineLimit(1)
-                }
-                trailing
                 if chevron && onTap != nil {
                     LXIcon(name: .chevronR, size: 13, color: t.text4)
                 }
             }
-            .padding(.horizontal, 14).padding(.vertical, 11)
-            if !isLast { Rectangle().fill(t.border).frame(height: 0.5) }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .frame(minHeight: 48)
+            if !isLast { Divider().padding(.leading, icon == nil ? 16 : 60) }
         }
         .contentShape(Rectangle())
     }
@@ -121,7 +125,6 @@ private struct SettingsRowButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(configuration.isPressed ? pressedFill : .clear)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -154,26 +157,27 @@ struct RadioList: View {
                     VStack(spacing: 0) {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(o.label).font(.system(size: 14, weight: .medium)).foregroundColor(t.text)
-                                if let sub = o.sub { Text(sub).font(.system(size: 11.5)).foregroundColor(t.text4) }
+                                Text(o.label).font(.body).foregroundColor(t.text)
+                                if let sub = o.sub { Text(sub).font(.footnote).foregroundColor(t.text4) }
                             }
                             Spacer()
                             if value == o.value { LXIcon(name: .check, size: 16, color: t.accent, stroke: 2.5) }
                         }
                         .padding(.horizontal, 14).padding(.vertical, 12)
-                        if i < options.count - 1 { Rectangle().fill(t.border).frame(height: 0.5) }
+                        if i < options.count - 1 { Divider().padding(.leading, 16) }
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SettingsRowButtonStyle(pressedFill: t.surfaceHover))
+                .accessibilityAddTraits(value == o.value ? [.isSelected] : [])
             }
         }
         .background(t.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
+
     }
 }
 
-/// A dashed "+ add …" full-width button.
+/// A consistent native add action used by collection editors.
 struct DashedAddButton: View {
     @Environment(\.theme) private var t
     let title: String
@@ -181,11 +185,14 @@ struct DashedAddButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                LXIcon(name: .plus, size: 15, color: t.text2, stroke: 2)
-                Text(title).font(.system(size: 13.5, weight: .medium)).foregroundColor(t.text2)
+                Image(systemName: "plus.circle.fill")
+                Text(title)
             }
-            .frame(maxWidth: .infinity).padding(13)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, style: StrokeStyle(lineWidth: 1, dash: [4,3])))
+            .font(.body)
+            .foregroundStyle(t.accent)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .padding(.vertical, 4)
+            .background(t.surface, in: .rect(cornerRadius: 12))
         }
         .buttonStyle(.plain)
     }
@@ -208,7 +215,7 @@ struct SettingsField: View {
                 TextField(placeholder, text: $text)
             }
         }
-        .font(.system(size: 13.5, design: mono ? .monospaced : .default))
+        .font(.system(.body, design: mono ? .monospaced : .default))
         .foregroundColor(t.text)
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
@@ -223,7 +230,7 @@ struct FieldLabel: View {
     @Environment(\.theme) private var t
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 12, weight: .medium)).foregroundColor(t.text3)
+        Text(text).font(.subheadline).foregroundColor(t.text3)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 6)
     }
@@ -234,7 +241,7 @@ struct FieldHint: View {
     let text: AttributedString
     init(_ s: String) { self.text = (try? AttributedString(markdown: s)) ?? AttributedString(s) }
     var body: some View {
-        Text(text).font(.system(size: 10.5)).foregroundColor(t.text4)
+        Text(text).font(.footnote).foregroundColor(t.text4)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 4).padding(.bottom, 14)
     }

@@ -6,7 +6,6 @@ struct CronRootView: View {
     /// Opens the new-task form with these instructions already filled in.
     let initialPrompt: String?
     let onDismiss: (() -> Void)?
-    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var closeAlert = false
 
     init(
@@ -22,27 +21,16 @@ struct CronRootView: View {
     }
 
     var body: some View {
-        @Bindable var repository = repository
         Group {
-            if sizeClass == .regular {
-                NavigationSplitView {
-                    taskList
-                        .navigationTitle("Scheduled")
-                        .navigationSplitViewColumnWidth(min: 320, ideal: 420, max: 550)
-                } detail: {
-                    NavigationStack {
-                        if let route = repository.routePath.last { destination(route) }
-                        else { ContentUnavailableView("Scheduled tasks", systemImage: "clock", description: Text("Select a task or create a new one.")) }
-                    }
-                }
+            // RootView owns navigation on both phone and tablet. Keep one
+            // navigation bar and let the repository retain editor/run history.
+            if let route = repository.routePath.last {
+                destination(route)
             } else {
-                NavigationStack(path: $repository.routePath) {
-                    taskList
-                        .navigationTitle("Scheduled")
-                        .navigationDestination(for: CronRoute.self) { destination($0) }
-                }
+                taskList.navigationTitle("Scheduled")
             }
         }
+        .navigationBarBackButtonHidden()
         .task {
             repository.resetRoutes()
             await repository.refresh()

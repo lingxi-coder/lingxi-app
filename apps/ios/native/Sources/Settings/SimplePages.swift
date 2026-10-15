@@ -228,7 +228,7 @@ private struct BlurbText: View {
     @Environment(\.theme) private var t
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4)
+        Text(text).font(.caption).foregroundColor(t.text3).lineSpacing(4)
             .frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, 14)
     }
 }

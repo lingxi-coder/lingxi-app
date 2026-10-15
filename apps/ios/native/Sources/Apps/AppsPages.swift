@@ -135,7 +135,7 @@ private struct AppActionPill: View {
             let filled = action != .open
             Button(action: onTap) {
                 Text(actionTitle(action))
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(filled ? Color.white : t.accent)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 7)
@@ -269,7 +269,7 @@ private struct AppsPageContent: View {
                     Text("apps_mine_empty").foregroundStyle(t.text3)
                     Button { tab = .market } label: {
                         Text("apps_browse_market")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 18)
                             .padding(.vertical, 11)
@@ -318,7 +318,7 @@ private struct AppsPageContent: View {
                     }
                 }
                 Text(app.name)
-                    .font(.system(size: 12))
+                    .font(.caption)
                     .foregroundStyle(t.text2)
                     .lineLimit(1)
             }
@@ -375,7 +375,7 @@ private struct AppsPageContent: View {
                             HStack(spacing: 12) {
                                 AppCover(name: app.name, category: app.category, size: 48)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(app.name).font(.system(size: 15, weight: .semibold)).foregroundStyle(t.text).lineLimit(1)
+                                    Text(app.name).font(.subheadline.weight(.semibold)).foregroundStyle(t.text).lineLimit(1)
                                     if !app.summary.isEmpty {
                                         Text(app.summary).font(.footnote).foregroundStyle(t.text3).lineLimit(2)
                                     }
@@ -578,7 +578,7 @@ struct MarketAppPage: View {
             Button(action: run) {
                 HStack(spacing: 8) {
                     if action == .installing || action == .removing { ProgressView().controlSize(.small) }
-                    Text(actionTitle(action)).font(.system(size: 15, weight: .semibold))
+                    Text(actionTitle(action)).font(.subheadline.weight(.semibold))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -691,7 +691,7 @@ struct AppRuntimeView: View {
                     Button { onShowDetails(appId) } label: { Label("apps_details", systemImage: "info.circle") }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 15, weight: .bold))
+                        .font(.subheadline.weight(.bold))
                         .frame(width: 46, height: 32)
                         .contentShape(Rectangle())
                 }
@@ -701,7 +701,7 @@ struct AppRuntimeView: View {
             }
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .frame(width: 46, height: 32)
                     .contentShape(Rectangle())
             }

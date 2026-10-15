@@ -22,12 +22,12 @@ struct SkillDetailPage: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(sky.tint(0.35), lineWidth: 0.5))
                     .padding(.bottom, 12)
-                Text(s.name).font(.system(size: 18, weight: .bold)).foregroundColor(t.text)
-                Text("\(s.sourceLabel) · \(s.author)").font(.system(size: 12)).foregroundColor(t.text4).padding(.top, 4)
+                Text(s.name).font(.body.weight(.bold)).foregroundColor(t.text)
+                Text("\(s.sourceLabel) · \(s.author)").font(.caption).foregroundColor(t.text4).padding(.top, 4)
             }
             .padding(.top, 8).padding(.bottom, 18)
 
-            Text(s.desc).font(.system(size: 13)).foregroundColor(t.text2).lineSpacing(5)
+            Text(s.desc).font(.footnote).foregroundColor(t.text2).lineSpacing(5)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))

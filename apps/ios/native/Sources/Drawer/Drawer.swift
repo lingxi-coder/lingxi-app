@@ -231,7 +231,7 @@ struct Drawer: View {
         HStack(spacing: 8) {
             LXIcon(name: .search, size: 16, color: t.text4, stroke: 2)
             TextField("drawer_search_all_placeholder", text: $query)
-                .font(.scaledSystem(14, relativeTo: .subheadline))
+                .font(.body)
                 .foregroundColor(t.text)
                 .focused($searchFocused)
                 .submitLabel(.search)
@@ -242,9 +242,11 @@ struct Drawer: View {
                     query = ""
                     searchFocused = false
                 } label: {
-                    LXIcon(name: .x, size: 14, color: t.text4, stroke: 2).frame(width: 22, height: 22)
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(t.text2)
+                        .frame(minWidth: 44, minHeight: 44)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "drawer_clear_search_a11y"))
             }
         }
         .padding(.horizontal, 14)
@@ -278,7 +280,7 @@ struct Drawer: View {
                     HStack(spacing: 10) {
                         AppCover(name: app.name, category: app.category, size: 22)
                         Text(app.name)
-                            .font(.system(size: 13.5, weight: .medium))
+                            .font(.footnote.weight(.medium))
                             .foregroundColor(t.text2)
                             .lineLimit(1)
                         Spacer()
@@ -297,7 +299,7 @@ struct Drawer: View {
                     HStack(spacing: 10) {
                         LXIcon(name: .folder, size: 15, color: t.text3, stroke: 1.8)
                         Text(project.record.name)
-                            .font(.system(size: 13.5, weight: .medium))
+                            .font(.footnote.weight(.medium))
                             .foregroundColor(t.text2)
                             .lineLimit(1)
                         Spacer()
@@ -315,7 +317,7 @@ struct Drawer: View {
                 Button { openCron(cron.scope.scopeID, cron.task.id) } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(cron.task.prompt)
-                            .font(.system(size: 13.5, weight: .medium))
+                            .font(.footnote.weight(.medium))
                             .foregroundColor(t.text2)
                             .lineLimit(1)
                         Text(cron.task.human).font(.caption).foregroundColor(t.text4).lineLimit(1)
@@ -361,10 +363,10 @@ struct Drawer: View {
             Button(action: openApps) {
                 HStack(spacing: 12) {
                     Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(t.text2)
                         .frame(width: 22)
-                    Text("apps_title").font(.system(size: 14.5, weight: .medium)).foregroundColor(t.text)
+                    Text("apps_title").font(.subheadline.weight(.medium)).foregroundColor(t.text)
                     Spacer(minLength: 8)
                 }
                 .padding(.vertical, 11)
@@ -401,11 +403,11 @@ struct Drawer: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 LXIcon(name: icon, size: 17, color: t.text2, stroke: 1.8).frame(width: 22)
-                Text(title).font(.system(size: 14.5, weight: .medium)).foregroundColor(t.text)
+                Text(title).font(.subheadline.weight(.medium)).foregroundColor(t.text)
                 Spacer(minLength: 8)
                 if let detail {
                     Text(detail)
-                        .font(.system(size: 12, weight: highlighted ? .semibold : .regular))
+                        .font(.caption.weight(highlighted ? .semibold : .regular))
                         .foregroundColor(highlighted ? t.accent : t.text4)
                 }
                 LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 1.7)
@@ -428,7 +430,7 @@ struct Drawer: View {
                     filter = chip
                 } label: {
                     Text(chip.title)
-                        .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+                        .font(.footnote.weight(selected ? .semibold : .medium))
                         .foregroundColor(selected ? t.text : t.text3)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -459,7 +461,7 @@ struct Drawer: View {
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 11.5, weight: .semibold))
+            .font(.caption.weight(.semibold))
             .foregroundColor(t.text4)
             .padding(.horizontal, 10)
             .padding(.top, 10)
@@ -470,7 +472,7 @@ struct Drawer: View {
         VStack(spacing: 10) {
             LXIcon(name: icon, size: 24, color: t.text4, stroke: 1.8)
             Text(text)
-                .font(.system(size: 13))
+                .font(.footnote)
                 .foregroundColor(t.text4)
                 .multilineTextAlignment(.center)
         }
@@ -489,12 +491,12 @@ struct Drawer: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(row.title)
-                            .font(.system(size: 13.5, weight: active ? .semibold : .medium))
+                            .font(.footnote.weight(active ? .semibold : .medium))
                             .foregroundColor(active ? t.text : t.text2)
                             .lineLimit(1)
                         if row.pinnedAt != nil {
                             Image(systemName: "pin.fill")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.caption.weight(.semibold))
                                 .foregroundColor(t.text4)
                         }
                     }
@@ -534,11 +536,11 @@ struct Drawer: View {
         case .running:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
-                Text("chat_status_running").font(.system(size: 10.5, weight: .medium)).foregroundColor(t.accent)
+                Text("chat_status_running").font(.caption.weight(.medium)).foregroundColor(t.accent)
             }
         case .awaitingConfirmation:
             Text("drawer_status_awaiting")
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundColor(t.statusTesting)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
@@ -558,7 +560,7 @@ struct Drawer: View {
                         .overlay {
                             if let initial = account?.displayName.trimmingCharacters(in: .whitespaces).first {
                                 Text(String(initial).uppercased())
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(.subheadline.weight(.semibold))
                                     .foregroundColor(.white)
                             } else {
                                 LXIcon(name: .sparkle, size: 16, color: .white, stroke: 1.8)
@@ -566,11 +568,11 @@ struct Drawer: View {
                         }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(account?.displayName ?? String(localized: "drawer_account_signed_out_title"))
-                            .font(.system(size: 14, weight: .medium))
+                            .font(.subheadline.weight(.medium))
                             .foregroundColor(t.text)
                             .lineLimit(1)
                         Text(account?.email ?? String(localized: "drawer_account_signed_out_subtitle"))
-                            .font(.system(size: 11.5))
+                            .font(.caption)
                             .foregroundColor(t.text4)
                             .lineLimit(1)
                     }

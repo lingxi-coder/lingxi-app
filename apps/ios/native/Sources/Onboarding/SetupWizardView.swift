@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - First-run setup wizard
 //
 // Port of the prototype's `SetupWizard` (lingxi-iphone.html). A 6-step first-run
-// flow over the sci-fi orb backdrop: welcome → name the assistant → configure
+// flow using the app's native grouped surfaces: welcome → name the assistant → configure
 // a Provider credential and model → review web capabilities → choose native
 // speech behavior → finish.
 // On finish it writes the chosen values to `AppState` and marks `setupDone`, so
@@ -11,6 +11,7 @@ import SwiftUI
 
 struct SetupWizardView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.theme) private var t
     @Environment(VoiceCapabilityModel.self) private var voiceCapability
     @Bindable var store: SettingsStore
     /// Open the full settings flow without dismissing onboarding.
@@ -33,12 +34,7 @@ struct SetupWizardView: View {
 
     var body: some View {
         ZStack {
-            RadialGradient(colors: [Color(okl: 0.19, 0.07, 275), Color(srgb: 0.020, 0.020, 0.035)],
-                           center: UnitPoint(x: 0.5, y: 0.26), startRadius: 0, endRadius: 560)
-                .ignoresSafeArea()
-            RadialGradient(colors: [.clear, .black.opacity(0.5)],
-                           center: UnitPoint(x: 0.5, y: 0.34), startRadius: 140, endRadius: 480)
-                .ignoresSafeArea().allowsHitTesting(false)
+            t.windowBg.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 header
@@ -53,8 +49,7 @@ struct SetupWizardView: View {
                                 alignment: .center
                             )
                             .id(step)
-                            .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
-                                                    removal: .opacity))
+                            .transition(.opacity)
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .accessibilityIdentifier("onboarding.content")
@@ -93,11 +88,11 @@ struct SetupWizardView: View {
         HStack(spacing: 12) {
             if step > 0 {
                 Button { withAnimation(.easeOut(duration: 0.3)) { step = max(0, step - 1) } } label: {
-                    LXIcon(name: .chevronR, size: 17, color: Color(okl: 0.88, 0.02, 275), stroke: 2)
+                    LXIcon(name: .chevronR, size: 17, color: t.accent, stroke: 2)
                         .scaleEffect(x: -1, y: 1)
-                        .frame(width: 36, height: 36)
-                        .background(.white.opacity(0.06), in: Circle())
-                        .overlay(Circle().stroke(.white.opacity(0.12), lineWidth: 0.5))
+                        .frame(width: 44, height: 44)
+                        .background(t.surface, in: Circle())
+
                 }
                 // The label already draws its own circle; without `.plain` the
                 // system default style paints a second, rounded-rect plate
@@ -106,23 +101,23 @@ struct SetupWizardView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("onboarding_back")
             } else {
-                Color.clear.frame(width: 36, height: 36)
+                Color.clear.frame(width: 44, height: 44)
             }
             HStack(spacing: 5) {
                 ForEach(0..<Self.total, id: \.self) { k in
                     Capsule()
                         .fill(k <= step
-                              ? AnyShapeStyle(LinearGradient(colors: [Color(okl: 0.72, 0.18, 268), Color(okl: 0.70, 0.18, 318)], startPoint: .leading, endPoint: .trailing))
-                              : AnyShapeStyle(Color.white.opacity(0.12)))
+                              ? AnyShapeStyle(t.accent)
+                              : AnyShapeStyle(t.surfaceActive))
                         .frame(height: 3)
                 }
             }
-            // Symmetric twin of the leading 36×36 slot. Width-only made this
+            // Symmetric twin of the leading 44×44 slot. Width-only made this
             // an UNBOUNDED-height Color: the header became a flexible VStack
             // child, grabbed ~half the leftover vertical space (~300pt), and
             // the progress bar rendered centered a third of the way down the
             // screen on every step.
-            Color.clear.frame(width: 36, height: 36)
+            Color.clear.frame(width: 44, height: 44)
         }
         .padding(.horizontal, 18)
         .padding(.top, 8)
@@ -134,32 +129,20 @@ struct SetupWizardView: View {
     private var footer: some View {
         VStack(spacing: 12) {
             Button(action: next) {
-                HStack(spacing: 8) {
-                    Text(cta).font(.system(size: 16, weight: .semibold)).kerning(0.5)
-                    LXIcon(name: step == Self.total - 1 ? .sparkle : .arrowRight, size: 17,
-                           color: ctaDisabled ? Color(okl: 0.60, 0.02, 280) : .white, stroke: 2)
-                }
-                .foregroundColor(ctaDisabled ? Color(okl: 0.60, 0.02, 280) : .white)
-                .frame(maxWidth: .infinity).frame(height: 54)
-                .background {
-                    if ctaDisabled { Color.white.opacity(0.1) }
-                    else { LinearGradient(colors: [Color(okl: 0.70, 0.19, 270), Color(okl: 0.66, 0.20, 305)], startPoint: .topLeading, endPoint: .bottomTrailing) }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .shadow(color: ctaDisabled ? .clear : Color(okl: 0.66, 0.20, 290, 0.4), radius: 12, y: 8)
+                Label(cta, systemImage: step == Self.total - 1 ? "checkmark" : "arrow.forward")
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 32)
             }
-            // Same omission as the back chevron: the gradient/opacity fill and
-            // the 16pt clip are the button's own, so the default style's plate
-            // shows through around them. `.plain` also drops the automatic
-            // disabled dimming, which is already expressed explicitly above.
-            .buttonStyle(.plain)
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .tint(t.accent)
             .disabled(ctaDisabled)
             .accessibilityIdentifier("onboarding.primaryAction")
 
             if let skip = skipLabel {
                 Button(skip) { withAnimation(.easeOut(duration: 0.3)) { step += 1 } }
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundColor(Color(okl: 0.60, 0.03, 275))
+                    .font(.footnote.weight(.medium))
+                    .foregroundColor(t.text2)
             }
         }
         .padding(.horizontal, 30)
@@ -172,8 +155,7 @@ struct SetupWizardView: View {
         switch step {
         case 0:
             VStack(spacing: 0) {
-                OrbCanvas(phase: .idle, cyFrac: 0.5)
-                    .frame(height: 220)
+                badge(.sparkles)
                 wizH(String(localized: "onboarding_welcome_title"))
                 wizSub(String(localized: "onboarding_welcome_subtitle"))
             }
@@ -185,14 +167,14 @@ struct SetupWizardView: View {
                 wizField(text: $assistantName, placeholder: String(localized: "app_name"))
                 HStack {
                     HStack(spacing: 8) {
-                        Circle().fill(Color(okl: 0.72, 0.18, 150)).frame(width: 7, height: 7)
-                            .shadow(color: Color(okl: 0.72, 0.18, 150), radius: 4)
+                        Circle().fill(t.ok).frame(width: 7, height: 7)
+                            .shadow(color: t.ok, radius: 4)
                         Text(assistantName.isEmpty ? String(localized: "app_name") : assistantName)
-                            .font(.system(size: 14, weight: .medium)).foregroundColor(Color(okl: 0.88, 0.04, 285))
+                            .font(.subheadline.weight(.medium)).foregroundColor(t.text)
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(Color(okl: 0.70, 0.18, 285, 0.14), in: Capsule())
-                    .overlay(Capsule().stroke(Color(okl: 0.70, 0.18, 285, 0.3), lineWidth: 0.5))
+                    .background(t.accent.opacity(0.12), in: Capsule())
+                    .overlay(Capsule().stroke(t.accent.opacity(0.25), lineWidth: 0.5))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, 18)
@@ -221,8 +203,8 @@ struct SetupWizardView: View {
                     completionRow(String(localized: "onboarding_done_row_voiceover"), voiceCapability.effectiveVoiceLabel)
                 }
                 .padding(16)
-                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
-                .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.12), lineWidth: 0.5))
+                .background(t.surface, in: RoundedRectangle(cornerRadius: 15))
+                .overlay(RoundedRectangle(cornerRadius: 15).stroke(t.border, lineWidth: 0.5))
             }
         }
     }
@@ -245,8 +227,8 @@ struct SetupWizardView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 Text(String(localized: "settings_title_add_llm"))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(t.text2)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 LazyVStack(spacing: 10) {
@@ -331,34 +313,34 @@ struct SetupWizardView: View {
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 13) {
-                LXIcon(name: icon, size: 19, color: .white, stroke: 1.8)
+                LXIcon(name: icon, size: 19, color: t.accent, stroke: 1.8)
                     .frame(width: 40, height: 40)
-                    .background(Color(okl: 0.70, 0.18, 285, 0.18), in: RoundedRectangle(cornerRadius: 11))
+                    .background(t.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color(okl: 0.95, 0.02, 285))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(t.text)
                     Text(detail)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Color(okl: 0.66, 0.03, 280))
+                        .font(.caption)
+                        .foregroundStyle(t.text2)
                         .lineLimit(2)
                 }
                 Spacer(minLength: 8)
                 VStack(alignment: .trailing, spacing: 5) {
                     Text(value)
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(Color(okl: 0.78, 0.05, 280))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(t.text2)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.35))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(t.text2)
                 }
             }
             .padding(14)
-            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
+            .background(t.surface, in: RoundedRectangle(cornerRadius: 15))
             .overlay {
                 RoundedRectangle(cornerRadius: 15)
-                    .stroke(.white.opacity(0.12), lineWidth: 0.5)
+                    .stroke(t.border, lineWidth: 0.5)
             }
         }
         .buttonStyle(.plain)
@@ -381,7 +363,7 @@ struct SetupWizardView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("settings_language_title")
                     .font(.caption.bold())
-                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                    .foregroundStyle(t.text2)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], spacing: 8) {
                     voiceLanguageButton(
                         String(localized: "onboarding_voice_language_system"),
@@ -393,7 +375,7 @@ struct SetupWizardView: View {
                 }
                 Text("voice_recognition_mode")
                     .font(.caption.bold())
-                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                    .foregroundStyle(t.text2)
                     .padding(.top, 8)
                 ForEach(voiceCapability.recognitionModes) { mode in
                     voiceModeButton(mode)
@@ -428,12 +410,12 @@ struct SetupWizardView: View {
                         .buttonStyle(.borderedProminent)
                     }
                     .padding(14)
-                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+                    .background(t.surface, in: RoundedRectangle(cornerRadius: 14))
                 }
 
                 Text("onboarding_voice_voice_title")
                     .font(.caption.bold())
-                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                    .foregroundStyle(t.text2)
                     .padding(.top, 8)
 
                 HStack(spacing: 12) {
@@ -458,7 +440,7 @@ struct SetupWizardView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
-                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14))
+                .background(t.surface, in: RoundedRectangle(cornerRadius: 14))
             }
 
             Text(voiceCapability.effectiveRecognitionLabel)
@@ -512,7 +494,7 @@ struct SetupWizardView: View {
             voiceCapability.setLanguage(value)
         }
         .buttonStyle(.bordered)
-        .tint(voiceCapability.language == value ? Color(okl: 0.70, 0.18, 285) : .gray)
+        .tint(voiceCapability.language == value ? t.accent : .gray)
     }
 
     private func voiceModeButton(_ mode: VoiceRecognitionMode) -> some View {
@@ -521,7 +503,7 @@ struct SetupWizardView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: voiceCapability.mode == mode ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(voiceCapability.mode == mode ? Color(okl: 0.70, 0.18, 285) : .gray)
+                    .foregroundStyle(voiceCapability.mode == mode ? t.accent : .gray)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(mode.title).font(.body.bold())
                     Text(mode.detail).font(.caption).foregroundStyle(.secondary)
@@ -530,7 +512,7 @@ struct SetupWizardView: View {
             }
             .padding(14)
             .background(
-                .white.opacity(voiceCapability.mode == mode ? 0.10 : 0.04),
+                voiceCapability.mode == mode ? t.surfaceActive : t.surface,
                 in: RoundedRectangle(cornerRadius: 14)
             )
         }
@@ -539,9 +521,9 @@ struct SetupWizardView: View {
 
     private func completionRow(_ label: String, _ value: String) -> some View {
         HStack {
-            Text(label).foregroundStyle(Color(okl: 0.68, 0.04, 280))
+            Text(label).foregroundStyle(t.text2)
             Spacer()
-            Text(value).foregroundStyle(Color(okl: 0.95, 0.02, 285)).bold()
+            Text(value).foregroundStyle(t.text).bold()
         }
         .font(.subheadline)
     }
@@ -550,30 +532,29 @@ struct SetupWizardView: View {
     private func badge(_ icon: LXIconName) -> some View {
         LXIcon(name: icon, size: 30, color: .white, stroke: 1.9)
             .frame(width: 66, height: 66)
-            .background(LinearGradient(colors: [Color(okl: 0.66, 0.20, 270), Color(okl: 0.62, 0.21, 312)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .background(t.accent)
             .clipShape(RoundedRectangle(cornerRadius: 20))
-            .shadow(color: Color(okl: 0.60, 0.20, 290, 0.4), radius: 16, y: 12)
             .padding(.bottom, 22)
     }
     private func wizH(_ text: String) -> some View {
-        Text(text).font(.system(size: 25, weight: .bold)).kerning(0.4)
-            .foregroundColor(Color(okl: 0.97, 0.02, 285))
+        Text(text).font(.title2.weight(.bold))
+            .foregroundColor(t.text)
             .multilineTextAlignment(.center).padding(.bottom, 10)
     }
     private func wizSub(_ text: String) -> some View {
-        Text(text).font(.system(size: 14.5)).lineSpacing(4)
-            .foregroundColor(Color(okl: 0.70, 0.03, 275))
+        Text(text).font(.subheadline).lineSpacing(4)
+            .foregroundColor(t.text2)
             .multilineTextAlignment(.center).frame(maxWidth: 290).padding(.bottom, 26)
     }
     private func wizField(text: Binding<String>, placeholder: String) -> some View {
-        TextField("", text: text, prompt: Text(placeholder).foregroundColor(Color(okl: 0.50, 0.02, 285)))
+        TextField("", text: text, prompt: Text(placeholder).foregroundColor(t.text2))
             .focused($fieldFocused)
             .multilineTextAlignment(.center)
-            .font(.system(size: 21, weight: .semibold)).kerning(1)
-            .foregroundColor(Color(okl: 0.96, 0.02, 285))
+            .font(.title3.weight(.semibold))
+            .foregroundColor(t.text)
             .padding(.horizontal, 18).padding(.vertical, 16)
-            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
-            .overlay(RoundedRectangle(cornerRadius: 15).stroke(.white.opacity(0.18), lineWidth: 0.5))
+            .background(t.surface, in: RoundedRectangle(cornerRadius: 15))
+            .overlay(RoundedRectangle(cornerRadius: 15).stroke(t.border, lineWidth: 0.5))
             .submitLabel(.next)
     }
 

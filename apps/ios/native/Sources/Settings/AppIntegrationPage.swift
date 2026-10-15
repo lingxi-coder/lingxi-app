@@ -55,7 +55,7 @@ struct AppIntegrationPage: View {
                     Label("settings_platform_note_2", systemImage: "hand.raised")
                     Label("settings_platform_note_3", systemImage: "square.and.arrow.up")
                 }
-                .font(.system(size: 12.5))
+                .font(.footnote)
                 .foregroundStyle(t.text2)
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)

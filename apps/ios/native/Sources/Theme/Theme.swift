@@ -1,5 +1,6 @@
 import SwiftUI
 import Observation
+import UIKit
 
 // MARK: - Theme environment
 //
@@ -49,7 +50,7 @@ final class AppState {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        themeRaw = defaults.string(forKey: "theme") ?? "dark"
+        themeRaw = defaults.string(forKey: "theme") ?? "system"
         accentId = defaults.string(forKey: "accent") ?? "oklch(70% 0.18 268)"
         density = defaults.string(forKey: "density") ?? "comfortable"
         fontSize = defaults.object(forKey: "fontSize") == nil ? 15 : defaults.double(forKey: "fontSize")
@@ -73,7 +74,10 @@ final class AppState {
         #endif
     }
 
-    var isDark: Bool { themeRaw == "dark" }
+    /// Updated at the scene boundary so palette-dependent rendering (including
+    /// code highlighting) follows the effective system appearance as well.
+    var systemIsDark = UITraitCollection.current.userInterfaceStyle == .dark
+    var isDark: Bool { themeRaw == "system" ? systemIsDark : themeRaw == "dark" }
 
     func setTheme(_ value: String) { themeRaw = value }
     func toggleTheme() { themeRaw = isDark ? "light" : "dark" }
@@ -85,5 +89,31 @@ final class AppState {
         return p
     }
 
-    var colorScheme: ColorScheme { isDark ? .dark : .light }
+    var colorScheme: ColorScheme? {
+        switch themeRaw {
+        case "light": .light
+        case "dark": .dark
+        default: nil
+        }
+    }
+}
+
+/// Apply accessibility preferences once at the scene boundary, including sheets.
+struct NativeAppearancePreferences: ViewModifier {
+    let app: AppState
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: scheme, initial: true) { _, value in
+                app.systemIsDark = value == .dark
+            }
+            .transaction { transaction in
+                if reduceMotion {
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                }
+            }
+    }
 }

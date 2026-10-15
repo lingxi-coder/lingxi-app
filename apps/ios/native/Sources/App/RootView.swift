@@ -363,7 +363,7 @@ struct RootView: View {
             } detail: {
                 NavigationStack(path: $navigation.path) {
                     HStack(spacing: 0) {
-                        detailSurface.frame(maxWidth: .infinity)
+                        detailSurface.frame(minWidth: 0, maxWidth: .infinity)
                             .environment(\.openPlanDocument, { document, previous in
                                 guard workspaceWidth >= 840 else { return false }
                                 if let previous {
@@ -772,7 +772,12 @@ struct RootView: View {
                     : nil,
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
-                    sessionDetailsSheetOpen = true
+                    if workspaceWidth >= 840 {
+                        selectedPlanDocument = nil
+                        sessionInspectorOpen = true
+                    } else {
+                        sessionDetailsSheetOpen = true
+                    }
                 },
                 onOpenShellTask: { request in
                     navigation.openTerminal(
@@ -956,7 +961,6 @@ struct RootView: View {
                     markCronResultsSeen()
                 }
                 .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
-                .toolbar(.hidden, for: .navigationBar)
         case .cronRun(let runID):
             CronRootView(repository: cronRepository, initialRoute: .run(runID: runID), onDismiss: { popRoute() })
                 .onAppear {
@@ -964,7 +968,6 @@ struct RootView: View {
                     markCronResultsSeen()
                 }
                 .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
-                .toolbar(.hidden, for: .navigationBar)
         case .cronNew(let prompt):
             CronRootView(
                 repository: cronRepository,
@@ -977,7 +980,6 @@ struct RootView: View {
                 markCronResultsSeen()
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
-            .toolbar(.hidden, for: .navigationBar)
         case .apps:
             AppsPage(
                 market: LocalApps.market,

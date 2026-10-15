@@ -85,7 +85,7 @@ struct ModelPickerSheet: View {
                     matches: matches
                 ) {
                     Text(LocalizedStringKey(emptyStateKey))
-                        .font(.system(size: 13))
+                        .font(.footnote)
                         .foregroundStyle(t.text3)
                         .listRowBackground(Color.clear)
                 } else {

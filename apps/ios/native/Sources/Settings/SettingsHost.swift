@@ -150,9 +150,6 @@ struct SettingsHost: View {
             switchTo: onSwitchProject
         ))
         .background(t.windowBg)
-        // Settings controls draw their own cards and fills. Avoid the automatic
-        // tinted capsule that newer iOS versions add around custom labels.
-        .buttonStyle(.plain)
         // Pull the real MCP listing when the sheet opens; mirror it into the store
         // (so the existing MCP page renders real servers) once it arrives.
         .onAppear {
@@ -267,6 +264,7 @@ struct SettingsHost: View {
             }
                 .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 28)
         }
+        .scrollDismissesKeyboard(.interactively)
         .id(pageKey(for: page))
         .transition(.opacity)
     }
@@ -283,6 +281,7 @@ struct SettingsHost: View {
 
     private func navigationPage(for page: SettingsPage) -> some View {
         pageContent(for: page)
+            .background(t.windowBg.ignoresSafeArea())
             .navigationTitle(title(of: page))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -290,7 +289,7 @@ struct SettingsHost: View {
                     if page == .main {
                         Button(action: onClose) {
                             LXIcon(name: .x, size: 18, color: t.text3, stroke: 1.8)
-                                .frame(width: 34, height: 34)
+                                .frame(minWidth: 44, minHeight: 44)
                         }
                         .accessibilityLabel(String(localized: "settings_close_accessibility"))
                         .accessibilityIdentifier("settings.close")
@@ -301,11 +300,11 @@ struct SettingsHost: View {
                         EmptyView()
                     } else if case .mcpEdit(let serverID) = page {
                         Button("settings_save") { saveMcpAndClose(serverID) }
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.subheadline.weight(.semibold))
                             .foregroundColor(t.accent)
                     } else {
                         Button("settings_done") { handleDone(for: page) }
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.subheadline.weight(.semibold))
                             .foregroundColor(t.accent)
                     }
                 }

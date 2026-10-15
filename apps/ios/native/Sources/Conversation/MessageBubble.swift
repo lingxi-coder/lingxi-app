@@ -152,12 +152,6 @@ struct MessageBubble: View, Equatable {
                 // Constrain the readable column, not the bubble itself. The
                 // bubble keeps its intrinsic width for short prompts while the
                 // outer trailing column caps long prompts at Desktop's 700pt.
-                .containerRelativeFrame(
-                    .horizontal,
-                    alignment: .trailing
-                ) { viewport, _ in
-                    min(700, min(max(0, viewport - 32), 860) * 0.9)
-                }
                 .frame(maxWidth: 700, alignment: .trailing)
                 // A subagent's prompt arrives as the first USER bubble of its
                 // child transcript, and those run to thousands of characters —

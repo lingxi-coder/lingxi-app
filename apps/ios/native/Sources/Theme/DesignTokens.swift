@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - oklch → sRGB helper
 //
@@ -39,7 +40,7 @@ extension Color {
 }
 
 /// A resolved palette for one appearance (dark or light).
-/// Mirrors the `tokens(dark)` factory in the prototype exactly.
+/// Uses the native iOS grouped surface and semantic color hierarchy.
 struct Palette {
     let appBg: Color
     let windowBg: Color
@@ -85,78 +86,6 @@ struct Palette {
     let diffAddGutter: Color
     let diffRemoveGutter: Color
 
-    /// Conversation-only neutral palette matching the Desktop renderer. The
-    /// rest of iOS keeps its existing richer surfaces; ChatView can inject this
-    /// palette at its boundary without changing settings, drawer, or composer
-    /// styling elsewhere in the app.
-    static func desktopConversation(isDark: Bool) -> Palette {
-        if isDark {
-            return Palette(
-                appBg: Color(srgb: 0.1098, 0.1098, 0.1176),
-                windowBg: Color(srgb: 0.1176, 0.1176, 0.1255),
-                sidebarBg: Color(srgb: 0.1529, 0.1529, 0.1608),
-                surface: Color(srgb: 0.1725, 0.1725, 0.1804),
-                surfaceHover: Color(srgb: 0.2118, 0.2118, 0.2196),
-                surfaceActive: Color(srgb: 0.2549, 0.2549, 0.2667),
-                border: Color.white.opacity(0.09),
-                borderStrong: Color.white.opacity(0.18),
-                text: Color(srgb: 0.9608, 0.9608, 0.9686),
-                text2: Color(srgb: 0.7608, 0.7608, 0.7804),
-                text3: Color(srgb: 0.6314, 0.6314, 0.6510),
-                text4: Color(srgb: 0.5686, 0.5686, 0.5882),
-                accent: Color(srgb: 0.0392, 0.5176, 1.0),
-                accent2: Color(srgb: 0.3922, 0.6667, 1.0),
-                accent3: Color(srgb: 0.3922, 0.8235, 1.0),
-                ok: Color(srgb: 0.1961, 0.8431, 0.2941),
-                composerBg: Color(srgb: 0.1725, 0.1725, 0.1804),
-                ambient: LinearGradientStops(top: .clear, bottom: .clear),
-                statusConnected: Color(srgb: 0.1961, 0.8431, 0.2941),
-                statusIdle: Color(srgb: 0.5686, 0.5686, 0.5882),
-                statusTesting: Color(srgb: 1.0, 0.8392, 0.0392),
-                statusError: Color(srgb: 1.0, 0.4118, 0.3804),
-                danger: Color(srgb: 1.0, 0.4118, 0.3804),
-                isDark: true,
-                diffAddBg: Color(srgb: 0.1961, 0.8431, 0.2941, 0.13),
-                diffRemoveBg: Color(srgb: 1.0, 0.4118, 0.3804, 0.12),
-                diffAddWordBg: Color(srgb: 0.1961, 0.8431, 0.2941, 0.32),
-                diffRemoveWordBg: Color(srgb: 1.0, 0.4118, 0.3804, 0.30),
-                diffAddGutter: Color(srgb: 0.3600, 0.8000, 0.5400),
-                diffRemoveGutter: Color(srgb: 0.9600, 0.4600, 0.4500)
-            )
-        }
-        return Palette(
-            appBg: Color(srgb: 0.8980, 0.8980, 0.9059),
-            windowBg: Color.white,
-            sidebarBg: Color(srgb: 0.9490, 0.9490, 0.9569),
-            surface: Color.white,
-            surfaceHover: Color(srgb: 0.9490, 0.9490, 0.9569),
-            surfaceActive: Color(srgb: 0.8980, 0.8980, 0.9176),
-            border: Color(srgb: 0.2353, 0.2353, 0.2627, 0.10),
-            borderStrong: Color(srgb: 0.2353, 0.2353, 0.2627, 0.22),
-            text: Color(srgb: 0.1137, 0.1137, 0.1216),
-            text2: Color(srgb: 0.3176, 0.3176, 0.3294),
-            text3: Color(srgb: 0.3882, 0.3882, 0.4000),
-            text4: Color(srgb: 0.4314, 0.4314, 0.4510),
-            accent: Color(srgb: 0.0, 0.4, 0.8392),
-            accent2: Color(srgb: 0.0000, 0.4000, 0.8392),
-            accent3: Color(srgb: 0.0000, 0.4784, 0.6235),
-            ok: Color(srgb: 0.1412, 0.5412, 0.2392),
-            composerBg: Color.white,
-            ambient: LinearGradientStops(top: .clear, bottom: .clear),
-            statusConnected: Color(srgb: 0.1412, 0.5412, 0.2392),
-            statusIdle: Color(srgb: 0.4314, 0.4314, 0.4510),
-            statusTesting: Color(srgb: 0.6000, 0.3961, 0.0000),
-            statusError: Color(srgb: 0.7882, 0.2039, 0.1725),
-            danger: Color(srgb: 0.7882, 0.2039, 0.1725),
-            isDark: false,
-            diffAddBg: Color(srgb: 0.1412, 0.5412, 0.2392, 0.11),
-            diffRemoveBg: Color(srgb: 0.7800, 0.1400, 0.1400, 0.09),
-            diffAddWordBg: Color(srgb: 0.1412, 0.5412, 0.2392, 0.26),
-            diffRemoveWordBg: Color(srgb: 0.7800, 0.1400, 0.1400, 0.22),
-            diffAddGutter: Color(srgb: 0.0000, 0.4400, 0.2200),
-            diffRemoveGutter: Color(srgb: 0.7000, 0.1200, 0.1200)
-        )
-    }
 }
 
 /// Helper carrying the ambient gradient color + the window bg fade target.
@@ -166,85 +95,46 @@ struct LinearGradientStops {
 }
 
 enum DesignTokens {
-
-    // MARK: Dark palette  (tokens(true))
-    static let dark = Palette(
-        appBg:         Color(srgb: 0.0392, 0.0392, 0.0470),                 // #0a0a0c
-        windowBg:      Color(srgb: 0.0358, 0.0430, 0.0640),                 // oklch(15% 0.012 270)
-        sidebarBg:     Color(srgb: 0.0226, 0.0279, 0.0471),                 // oklch(13% 0.012 270)
-        surface:       Color(srgb: 0.0585, 0.0680, 0.0955),                 // oklch(18% 0.015 270)
-        surfaceHover:  Color(srgb: 0.0897, 0.1029, 0.1415),                 // oklch(22% 0.020 270)
-        surfaceActive: Color(srgb: 0.1372, 0.1579, 0.2193),                 // oklch(28% 0.030 270)
-        border:        Color(srgb: 0.1485, 0.1594, 0.1902, 0.6),            // oklch(28% 0.015 270 / 0.6)
-        borderStrong:  Color(srgb: 0.2130, 0.2283, 0.2717, 0.8),            // oklch(35% 0.020 270 / 0.8)
-        text:          Color(srgb: 0.9423, 0.9475, 0.9616),                 // oklch(96% 0.005 270)
-        text2:         Color(srgb: 0.6303, 0.6445, 0.6837),                 // oklch(72% 0.015 270)
-        text3:         Color(srgb: 0.3931, 0.4103, 0.4583),                 // oklch(52% 0.020 270)
-        text4:         Color(srgb: 0.2434, 0.2591, 0.3034),                 // oklch(38% 0.020 270)
-        accent:        Color(srgb: 0.4340, 0.5865, 1.0000),                 // oklch(70% 0.18 268)
-        accent2:       Color(srgb: 0.8090, 0.4552, 0.8891),                 // oklch(70% 0.18 320)
-        accent3:       Color(srgb: 0.0000, 0.7601, 0.7664),                 // oklch(72% 0.16 195)
-        ok:            Color(srgb: 0.2305, 0.7257, 0.4545),                 // oklch(70% 0.15 155)
-        composerBg:    Color(srgb: 0.0756, 0.0855, 0.1137),                 // oklch(20% 0.015 270)
-        ambient:       LinearGradientStops(
-                          top: Color(srgb: 0.1700, 0.1300, 0.4200, 0.20),   // oklch(40% 0.15 268 / .20)
-                          bottom: .clear),
-        statusConnected: Color(srgb: 0.2305, 0.7257, 0.4545),              // oklch(70% 0.15 155)
-        statusIdle:      Color(srgb: 0.2434, 0.2591, 0.3034),              // text4
-        statusTesting:   Color(srgb: 0.8959, 0.6198, 0.1315),              // oklch(75% 0.15 75)
-        statusError:     Color(srgb: 0.9436, 0.3038, 0.2990),              // oklch(65% 0.20 25)
-        danger:          Color(srgb: 0.9436, 0.3038, 0.2990),              // oklch(65% 0.20 25)
-        isDark:          true,
-        diffAddBg:       Color(srgb: 0.2305, 0.7257, 0.4545, 0.13),
-        diffRemoveBg:    Color(srgb: 0.9436, 0.3038, 0.2990, 0.12),
-        diffAddWordBg:   Color(srgb: 0.2305, 0.7257, 0.4545, 0.32),
-        diffRemoveWordBg: Color(srgb: 0.9436, 0.3038, 0.2990, 0.30),
-        diffAddGutter:   Color(srgb: 0.3600, 0.8000, 0.5400),
-        diffRemoveGutter: Color(srgb: 0.9600, 0.4600, 0.4500)
-    )
-
-    // MARK: Light palette  (tokens(false))
-    static let light = Palette(
-        appBg:         Color(srgb: 0.8118, 0.7882, 0.8471),                 // #cfc9d8
-        windowBg:      Color(srgb: 0.9804, 0.9725, 0.9608),                 // #faf8f5
-        sidebarBg:     Color(srgb: 0.9423, 0.9475, 0.9616),                 // oklch(96% 0.005 270)
-        surface:       Color(srgb: 1.0, 1.0, 1.0),                          // #ffffff
-        surfaceHover:  Color(srgb: 0.9392, 0.9475, 0.9700),                 // oklch(96% 0.008 270)
-        surfaceActive: Color(srgb: 0.8751, 0.8952, 0.9508),                 // oklch(92% 0.020 270)
-        border:        Color(srgb: 0.8361, 0.8441, 0.8662),                 // oklch(88% 0.008 270)
-        borderStrong:  Color(srgb: 0.7563, 0.7681, 0.8005),                 // oklch(82% 0.012 270)
-        text:          Color(srgb: 0.0736, 0.0852, 0.1191),                 // oklch(20% 0.018 270)
-        text2:         Color(srgb: 0.2640, 0.2799, 0.3248),                 // oklch(40% 0.020 270)
-        text3:         Color(srgb: 0.4608, 0.4785, 0.5279),                 // oklch(58% 0.020 270)
-        text4:         Color(srgb: 0.6062, 0.6203, 0.6592),                 // oklch(70% 0.015 270)
-        accent:        Color(srgb: 0.1913, 0.3056, 0.8696),                 // oklch(50% 0.22 268)
-        accent2:       Color(srgb: 0.6518, 0.1966, 0.7474),                 // oklch(55% 0.22 320)
-        accent3:       Color(srgb: 0.0000, 0.5200, 0.5362),                 // oklch(52% 0.18 195)
-        ok:            Color(srgb: 0.0000, 0.5455, 0.2695),                 // oklch(55% 0.16 155)
-        composerBg:    Color(srgb: 1.0, 1.0, 1.0),                          // #ffffff
-        ambient:       LinearGradientStops(
-                          top: Color(srgb: 0.7400, 0.7900, 0.9700, 0.45),   // oklch(80% 0.10 268 / .45)
-                          bottom: .clear),
-        statusConnected: Color(srgb: 0.2305, 0.7257, 0.4545),
-        statusIdle:      Color(srgb: 0.6062, 0.6203, 0.6592),
-        statusTesting:   Color(srgb: 0.8959, 0.6198, 0.1315),
-        statusError:     Color(srgb: 0.9436, 0.3038, 0.2990),
-        danger:          Color(srgb: 0.9436, 0.3038, 0.2990),
-        isDark:          false,
-        diffAddBg:       Color(srgb: 0.0000, 0.5455, 0.2695, 0.11),
-        diffRemoveBg:    Color(srgb: 0.7800, 0.1400, 0.1400, 0.09),
-        diffAddWordBg:   Color(srgb: 0.0000, 0.5455, 0.2695, 0.26),
-        diffRemoveWordBg: Color(srgb: 0.7800, 0.1400, 0.1400, 0.22),
-        diffAddGutter:   Color(srgb: 0.0000, 0.4400, 0.2200),
-        diffRemoveGutter: Color(srgb: 0.7000, 0.1200, 0.1200)
-    )
+    static let dark = nativePalette(isDark: true)
+    static let light = nativePalette(isDark: false)
 
     static func palette(dark isDark: Bool) -> Palette { isDark ? dark : light }
 
-    /// Desktop-neutral colors scoped to the conversation surface. Callers may
-    /// override `accent` after construction to retain the user's chosen hue.
-    static func chatPalette(dark isDark: Bool) -> Palette {
-        Palette.desktopConversation(isDark: isDark)
+    /// Semantic UIKit colors follow appearance, accessibility contrast and
+    /// elevated presentation. All screens use this same surface hierarchy.
+    private static func nativePalette(isDark: Bool) -> Palette {
+        Palette(
+            appBg: Color(uiColor: .systemGroupedBackground),
+            windowBg: Color(uiColor: .systemGroupedBackground),
+            sidebarBg: Color(uiColor: .systemGroupedBackground),
+            surface: Color(uiColor: .secondarySystemGroupedBackground),
+            surfaceHover: Color(uiColor: .tertiarySystemFill),
+            surfaceActive: Color(uiColor: .secondarySystemFill),
+            border: Color(uiColor: .separator),
+            borderStrong: Color(uiColor: .opaqueSeparator),
+            text: Color(uiColor: .label),
+            text2: Color(uiColor: .secondaryLabel),
+            text3: Color(uiColor: .secondaryLabel),
+            text4: Color(uiColor: .secondaryLabel),
+            accent: Color(uiColor: .systemBlue),
+            accent2: Color(uiColor: .systemPurple),
+            accent3: Color(uiColor: .systemTeal),
+            ok: Color(uiColor: .systemGreen),
+            composerBg: Color(uiColor: .secondarySystemGroupedBackground),
+            ambient: LinearGradientStops(top: .clear, bottom: .clear),
+            statusConnected: Color(uiColor: .systemGreen),
+            statusIdle: Color(uiColor: .tertiaryLabel),
+            statusTesting: Color(uiColor: .systemOrange),
+            statusError: Color(uiColor: .systemRed),
+            danger: Color(uiColor: .systemRed),
+            isDark: isDark,
+            diffAddBg: Color.green.opacity(isDark ? 0.13 : 0.11),
+            diffRemoveBg: Color.red.opacity(isDark ? 0.12 : 0.09),
+            diffAddWordBg: Color.green.opacity(isDark ? 0.32 : 0.26),
+            diffRemoveWordBg: Color.red.opacity(isDark ? 0.30 : 0.22),
+            diffAddGutter: Color(uiColor: .systemGreen),
+            diffRemoveGutter: Color(uiColor: .systemRed)
+        )
     }
 }
 
@@ -259,12 +149,12 @@ struct AccentOption: Identifiable, Equatable {
 
 enum Accents {
     static let all: [AccentOption] = [
-        .init(id: "oklch(70% 0.18 268)", name: String(localized: "settings_accent_indigo"), color: Color(srgb: 0.4340, 0.5865, 1.0000)),
-        .init(id: "oklch(70% 0.18 320)", name: String(localized: "settings_accent_rose"), color: Color(srgb: 0.8090, 0.4552, 0.8891)),
-        .init(id: "oklch(72% 0.16 195)", name: String(localized: "settings_accent_cyan"), color: Color(srgb: 0.0000, 0.7601, 0.7664)),
-        .init(id: "oklch(72% 0.16 155)", name: String(localized: "settings_accent_teal"), color: Color(srgb: 0.2085, 0.7571, 0.4656)),
-        .init(id: "oklch(74% 0.16 75)",  name: String(localized: "settings_accent_amber"), color: Color(srgb: 0.8960, 0.6013, 0.0000)),
-        .init(id: "oklch(70% 0.20 30)",  name: String(localized: "settings_accent_brick"), color: Color(srgb: 1.0000, 0.3802, 0.3010)),
+        .init(id: "oklch(70% 0.18 268)", name: String(localized: "settings_accent_indigo"), color: Color(uiColor: .systemIndigo)),
+        .init(id: "oklch(70% 0.18 320)", name: String(localized: "settings_accent_rose"), color: Color(uiColor: .systemPink)),
+        .init(id: "oklch(72% 0.16 195)", name: String(localized: "settings_accent_cyan"), color: Color(uiColor: .systemTeal)),
+        .init(id: "oklch(72% 0.16 155)", name: String(localized: "settings_accent_teal"), color: Color(uiColor: .systemGreen)),
+        .init(id: "oklch(74% 0.16 75)",  name: String(localized: "settings_accent_amber"), color: Color(uiColor: .systemOrange)),
+        .init(id: "oklch(70% 0.20 30)",  name: String(localized: "settings_accent_brick"), color: Color(uiColor: .systemRed)),
     ]
     static func color(for id: String) -> Color {
         all.first(where: { $0.id == id })?.color ?? all[0].color

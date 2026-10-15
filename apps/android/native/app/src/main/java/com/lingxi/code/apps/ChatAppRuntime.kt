@@ -2,6 +2,8 @@ package com.lingxi.code.apps
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.Configuration
+import android.view.ContextThemeWrapper
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -46,7 +48,16 @@ class ChatAppRuntime(private val context: Context, private val host: () -> Local
             capabilityError()?.let { throw MarketException(it) }
             handles[id]?.let { return@withContext it }
             val domain = "$id.lingxi-app.invalid"
-            WebView(context).apply {
+            // WebView derives prefers-color-scheme from its Context theme's
+            // isLightTheme attribute, not Compose or the system setting alone.
+            val night = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES
+            val webContext = ContextThemeWrapper(
+                context,
+                if (night) android.R.style.Theme_Material_NoActionBar
+                else android.R.style.Theme_Material_Light_NoActionBar,
+            )
+            WebView(webContext).apply {
                 WebViewCompat.setProfile(this, profile(id))
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true

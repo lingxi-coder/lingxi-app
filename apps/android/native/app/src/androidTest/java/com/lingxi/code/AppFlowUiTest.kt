@@ -6,6 +6,7 @@ import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -56,6 +57,29 @@ class AppFlowUiTest {
             WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST
 
         assertEquals(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE, adjustMode)
+    }
+
+    @Test
+    fun keyboardKeepsTheActualComposerAboveTheIme() {
+        val input = rule.onNode(androidx.compose.ui.test.hasSetTextAction() and androidx.compose.ui.test.hasImeAction(androidx.compose.ui.text.input.ImeAction.Send))
+        input.performClick()
+        rule.runOnUiThread {
+            androidx.core.view.WindowCompat.getInsetsController(rule.activity.window, rule.activity.window.decorView)
+                .show(androidx.core.view.WindowInsetsCompat.Type.ime())
+        }
+        rule.waitUntil(10_000) {
+            rule.activity.window.decorView.rootWindowInsets?.isVisible(android.view.WindowInsets.Type.ime()) == true
+        }
+        input.performTextInput("Keyboard layout check")
+        val imeTop = rule.activity.windowManager.currentWindowMetrics.bounds.height() -
+            rule.activity.window.decorView.rootWindowInsets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+        val action = rule.onNodeWithTag(UiTags.COMPOSER_SEND).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        org.junit.Assert.assertTrue("Composer must stay above the keyboard", action.bottom <= imeTop + 1f)
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val file = java.io.File(instrumentation.targetContext.getExternalFilesDir("chat-chrome-audit"), "actual-window-keyboard.png")
+        file.parentFile?.mkdirs()
+        file.outputStream().use { instrumentation.uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
     }
 
     @Test

@@ -1929,4 +1929,15 @@
     <string name="settings_appearance_system">跟随系统</string>
     <string name="settings_appearance_system_sub">使用设备的浅色或深色外观。</string>
     <string name="settings_keyboard_system_description">键盘、输入语言和输入法偏好由 Android 系统管理。</string>
+    <string name="chat_summary_more">对话更多</string>
+    <string name="chat_summary_changes">更改</string>
+    <string name="chat_summary_tools">工具</string>
+    <string name="chat_summary_agents">代理与后台任务</string>
+    <string name="chat_summary_resources">资源</string>
+    <string name="chat_summary_plan">计划</string>
+    <string name="chat_summary_changes_empty">此对话暂无文件更改</string>
+    <string name="chat_summary_tools_empty">此对话暂无工具调用</string>
+    <string name="chat_summary_agents_empty">此对话暂无代理或后台任务</string>
+    <string name="chat_summary_resources_empty">此对话暂无附件或资源</string>
+    <string name="chat_summary_plan_empty">此对话暂无计划</string>
 </resources>

@@ -281,27 +281,31 @@ fun ChatScreen(
     Box(modifier = modifier.fillMaxSize().background(t.windowBg)) {
         Column(modifier = Modifier.fillMaxSize()) {
             val isNewChat = renderItems.any { it is ChatRenderItem.Empty }
-            TopBar(
-                title = state.session.title,
-                subtitle = listOf(sessionModeLabel(sessionMode), workspaceName)
-                    .filter(String::isNotBlank)
-                    .joinToString(" · "),
-                subtitleColor = t.modeColor(sessionMode),
-                onOpenDrawer = onOpenDrawer,
-                onTitleClick = onOpenSessionPanel?.takeIf { !isNewChat && state.session.id != "new" },
-                onNewChat = onNewChat,
-                onOpenSideChats = onOpenSideChats,
-            )
+            val currentOnVisualizationFollowup by rememberUpdatedState(onVisualizationFollowup)
+            val visualizationContext = remember(visualizationHost, state.session.id, isDark) {
+                VisualizationScreenContext(
+                    host = visualizationHost,
+                    sessionId = state.session.id,
+                    dark = isDark,
+                    onFollowup = { currentOnVisualizationFollowup(it) },
+                )
+            }
+            CompositionLocalProvider(LocalAppCardHost provides localAppCardLinks,
+                LocalVisualizationContext provides visualizationContext) {
+                TopBar(
+                    title = state.session.title,
+                    subtitle = listOf(sessionModeLabel(sessionMode), workspaceName)
+                        .filter(String::isNotBlank)
+                        .joinToString(" · "),
+                    subtitleColor = t.modeColor(sessionMode),
+                    onOpenDrawer = onOpenDrawer,
+                    onTitleClick = onOpenSessionPanel?.takeIf { !isNewChat && state.session.id != "new" },
+                    onNewChat = onNewChat,
+                    onOpenSideChats = onOpenSideChats,
+                    state = state,
+                )
+            }
             Box(modifier = Modifier.weight(1f)) {
-                val currentOnVisualizationFollowup by rememberUpdatedState(onVisualizationFollowup)
-                val visualizationContext = remember(visualizationHost, state.session.id, isDark) {
-                    VisualizationScreenContext(
-                        host = visualizationHost,
-                        sessionId = state.session.id,
-                        dark = isDark,
-                        onFollowup = { currentOnVisualizationFollowup(it) },
-                    )
-                }
                 CompositionLocalProvider(
                     LocalVisualizationContext provides visualizationContext,
                     LocalAppCardHost provides localAppCardLinks,
@@ -501,6 +505,7 @@ private fun TopBar(
     title: String, subtitle: String, subtitleColor: Color,
     onOpenDrawer: () -> Unit, onTitleClick: (() -> Unit)?, onNewChat: () -> Unit,
     onOpenSideChats: (() -> Unit)?,
+    state: ChatState,
 ) {
     val t = LingXiTheme.palette
     val sessionPanelLabel = stringResource(R.string.chat_session_panel_a11y)
@@ -528,6 +533,7 @@ private fun TopBar(
                 }
             }
             IconButton(LXIconName.Edit, t.text, 24.dp, onNewChat, stringResource(R.string.chat_new_chat))
+            ConversationSummaryMenu(state)
         },
         expandedHeight = maxOf(64.dp, (48 * androidx.compose.ui.platform.LocalDensity.current.fontScale).dp),
         windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
@@ -830,62 +836,15 @@ private fun StatusRow(text: String) {
 /** An actionable configuration state, kept separate from runtime failures. */
 @Composable
 private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
-    val t = LingXiTheme.palette
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier
-            .testTag(UiTags.MODEL_SETUP_BANNER)
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp)
-            .padding(top = 4.dp, bottom = 4.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(t.accent.tint(0.10f))
-            .border(0.5.dp, t.accent.tint(0.35f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(t.accent.tint(0.16f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(name = LXIconName.Cog, size = 15.dp, color = t.accent, stroke = 2f)
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = stringResource(R.string.chat_model_not_configured_title),
-                color = t.text,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = stringResource(R.string.chat_model_not_configured_detail),
-                color = t.text2,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                lineHeight = (12.5f * 1.4f).sp,
-            )
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(t.accent)
-                .clickable(onClick = onOpenModelSettings)
-                .testTag(UiTags.MODEL_SETUP_ACTION)
-                .padding(horizontal = 10.dp, vertical = 7.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.chat_go_to_settings),
-                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            LXIcon(name = LXIconName.ChevronR, size = 11.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, stroke = 2f)
-        }
-    }
+    SetupNotice(
+        title = stringResource(R.string.chat_model_not_configured_title),
+        detail = stringResource(R.string.chat_model_not_configured_detail),
+        icon = LXIconName.Cog,
+        action = stringResource(R.string.chat_go_to_settings),
+        onAction = onOpenModelSettings,
+        tag = UiTags.MODEL_SETUP_BANNER,
+        actionTag = UiTags.MODEL_SETUP_ACTION,
+    )
 }
 
 /**
@@ -912,94 +871,18 @@ internal fun ComputerUseSetupBanner(
     onOpenComputerUseSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val t = LingXiTheme.palette
-    val dismissComputerUseSetupDescription = stringResource(R.string.chat_computer_use_dismiss)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier
-            .testTag(UiTags.COMPUTER_USE_SETUP_BANNER)
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp)
-            .padding(top = 4.dp, bottom = 4.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(t.accent.tint(0.10f))
-            .border(0.5.dp, t.accent.tint(0.35f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(t.accent.tint(0.16f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(
-                name = LXIconName.Sparkle,
-                size = 15.dp,
-                color = t.accent,
-                stroke = 2f,
-            )
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = stringResource(R.string.chat_computer_use_unavailable_title),
-                color = t.text,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = stringResource(R.string.chat_computer_use_unavailable_detail, missingStepsLabel(status)),
-                color = t.text2,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                lineHeight = (12.5f * 1.4f).sp,
-            )
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(t.accent)
-                .clickable(onClick = onOpenComputerUseSettings)
-                .semantics { role = Role.Button }
-                .testTag(UiTags.COMPUTER_USE_SETUP_ACTION)
-                .heightIn(min = 48.dp)
-                .padding(horizontal = 10.dp, vertical = 7.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.chat_go_enable),
-                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            LXIcon(
-                name = LXIconName.ChevronR,
-                size = 11.dp,
-                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
-                stroke = 2f,
-            )
-        }
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onDismiss)
-                .semantics {
-                    contentDescription = dismissComputerUseSetupDescription
-                    role = Role.Button
-                }
-                .testTag(UiTags.COMPUTER_USE_SETUP_DISMISS),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(
-                name = LXIconName.X,
-                size = 15.dp,
-                color = t.text3,
-                stroke = 1.9f,
-            )
-        }
-    }
+    SetupNotice(
+        title = stringResource(R.string.chat_computer_use_unavailable_title),
+        detail = stringResource(R.string.chat_computer_use_unavailable_detail, missingStepsLabel(status)),
+        icon = LXIconName.Sparkle,
+        action = stringResource(R.string.chat_go_enable),
+        onAction = onOpenComputerUseSettings,
+        tag = UiTags.COMPUTER_USE_SETUP_BANNER,
+        actionTag = UiTags.COMPUTER_USE_SETUP_ACTION,
+        onDismiss = onDismiss,
+        dismissLabel = stringResource(R.string.chat_computer_use_dismiss),
+        dismissTag = UiTags.COMPUTER_USE_SETUP_DISMISS,
+    )
 }
 
 /**

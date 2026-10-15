@@ -2,7 +2,7 @@ package com.lingxi.code
 
 import android.view.WindowManager
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -113,14 +113,19 @@ class AppFlowUiTest {
         rule.onNodeWithText("知识库").assertDoesNotExist()
         rule.onNodeWithText("记忆").assertDoesNotExist()
 
-        // Push to 外观 (Appearance).
+        // Appearance lives inside the native General settings group.
+        rule.onNodeWithTag(UiTags.settingsGroup("general")).performScrollTo().performClick()
         rule.onNodeWithText("外观").performScrollTo().performClick()
         rule.waitForIdle()
         // The Appearance page shows its 主题 section + theme radios.
         rule.onNodeWithText("主题").assertIsDisplayed()
         rule.onNodeWithText("强调色").assertIsDisplayed()
 
-        // System back pops one page → back at the settings root.
+        // System back returns through the group and then the settings root.
+        androidx.test.platform.app.InstrumentationRegistry
+            .getInstrumentation().runOnMainSync { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        rule.waitForIdle()
+        rule.onNodeWithText(rule.activity.getString(com.lingxi.code.R.string.settings_group_general)).assertIsDisplayed()
         androidx.test.platform.app.InstrumentationRegistry
             .getInstrumentation().runOnMainSync { rule.activity.onBackPressedDispatcher.onBackPressed() }
         rule.waitForIdle()
@@ -134,6 +139,7 @@ class AppFlowUiTest {
         openDrawer()
         rule.onNodeWithTag(UiTags.DRAWER_SETTINGS).performClick()
         rule.waitForIdle()
+        rule.onNodeWithTag(UiTags.settingsGroup("general")).performScrollTo().performClick()
         rule.onNodeWithText("外观").performScrollTo().performClick()
         rule.waitForIdle()
 
@@ -172,7 +178,8 @@ private class SkipOnboardingRule : TestRule {
                     .getInstrumentation()
                 val context = instrumentation.targetContext
                 val store = AppearanceStore(context)
-                val wasDone = runBlocking { store.prefs.first().setupDone }
+                val original = runBlocking { store.prefs.first() }
+                val wasDone = original.setupDone
                 val notificationPermission = android.Manifest.permission.POST_NOTIFICATIONS
                 val hadNotificationPermission =
                     android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU ||
@@ -190,7 +197,11 @@ private class SkipOnboardingRule : TestRule {
                 try {
                     base.evaluate()
                 } finally {
-                    if (!wasDone) runBlocking { store.setSetupDone(false) }
+                    runBlocking {
+                        store.setSetupDone(original.setupDone)
+                        store.setThemeMode(original.themeMode)
+                        store.setAccent(original.accentId)
+                    }
                 }
             }
         }

@@ -3,6 +3,10 @@ package com.lingxi.code.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,6 +70,8 @@ fun AppearancePage(
         SettingsSection(label = stringResource(R.string.settings_section_theme)) {
             RadioList(
                 options = listOf(
+                    RadioOption("system", stringResource(R.string.settings_appearance_system),
+                        stringResource(R.string.settings_appearance_system_sub)),
                     RadioOption(
                         "light",
                         stringResource(R.string.settings_appearance_light),
@@ -77,9 +83,9 @@ fun AppearancePage(
                         stringResource(R.string.settings_appearance_dark_sub),
                     ),
                 ),
-                selected = if (isDark) "dark" else "light",
+                selected = prefs.themeMode.raw,
                 onSelect = { v ->
-                    scope.launch { store.setThemeMode(if (v == "dark") ThemeMode.Dark else ThemeMode.Light) }
+                    scope.launch { store.setThemeMode(ThemeMode.from(v)) }
                 },
             )
         }
@@ -136,7 +142,7 @@ fun AppearancePage(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("A", color = t.text4, fontSize = 11.sp)
+                    Text("A", color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
                     Slider(
                         value = fontSize,
                         onValueChange = { v -> scope.launch { store.setFontSize(v.roundToInt().toFloat()) } },
@@ -149,7 +155,7 @@ fun AppearancePage(
                         ),
                         modifier = Modifier.weight(1f),
                     )
-                    Text("A", color = t.text4, fontSize = 17.sp)
+                    Text("A", color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 }
                 Text(
                     text = stringResource(R.string.settings_font_size_preview_android),
@@ -168,6 +174,7 @@ fun AppearancePage(
 }
 
 /** The 6-swatch accent grid — selection draws an inner ring + an outer halo. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccentGrid(
     selectedId: String,
@@ -175,11 +182,11 @@ private fun AccentGrid(
     modifier: Modifier = Modifier,
 ) {
     val t = LingXiTheme.palette
-    Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    FlowRow(modifier = modifier.fillMaxWidth(), maxItemsInEachRow = 3, horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Accents.all.forEach { a ->
             val selected = selectedId == a.id
             Column(
-                modifier = Modifier.weight(1f).clickable { onSelect(a.id) },
+                modifier = Modifier.weight(1f).selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(a.id) }),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
@@ -190,23 +197,22 @@ private fun AccentGrid(
                             Modifier
                                 .size(34.dp)
                                 .scale(1.18f)
-                                .border(2.dp, a.color, CircleShape),
+                                .border(2.dp, Accents.color(a.id, t.isDark), CircleShape),
                         )
                     }
                     Box(
                         Modifier
                             .size(34.dp)
                             .clip(CircleShape)
-                            .background(a.color)
+                            .background(Accents.color(a.id, t.isDark))
                             .then(if (selected) Modifier.border(2.5.dp, t.windowBg, CircleShape) else Modifier),
                     )
                 }
                 Text(
                     a.localizedName(),
                     color = t.text3,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+
                 )
             }
         }

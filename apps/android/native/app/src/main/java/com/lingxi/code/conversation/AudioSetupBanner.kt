@@ -42,9 +42,9 @@ internal fun AudioSetupBanner(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.accent)
-            Text(stringResource(guidance.titleRes), color = t.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(guidance.titleRes), color = t.text, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize, fontWeight = FontWeight.SemiBold)
         }
-        Text(stringResource(guidance.detailRes), color = t.text2, fontSize = 12.5f.sp,
+        Text(stringResource(guidance.detailRes), color = t.text2, fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
             lineHeight = 18.sp, modifier = Modifier.padding(top = 5.dp))
         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
             TextButton(onClick = onDismiss, modifier = Modifier.testTag("conversation.audio-setup.dismiss")) {

@@ -771,9 +771,9 @@
     <string name="settings_app_open_terminal_detail">ショートカットと lingxi://open_terminal ディープリンクに対応</string>
     <string name="settings_appearance">外観</string>
     <string name="settings_appearance_dark">ダーク</string>
-    <string name="settings_appearance_dark_sub">ミッドナイトパープル + 低彩度</string>
+    <string name="settings_appearance_dark_sub">暗い環境に適したダーク表示</string>
     <string name="settings_appearance_light">ライト</string>
-    <string name="settings_appearance_light_sub">温かみのある紙のような白 + 半透明カード</string>
+    <string name="settings_appearance_light_sub">明るい環境に適したライト表示</string>
     <string name="settings_auto">自動</string>
     <string name="settings_auto_recall">自動検索</string>
     <string name="settings_auto_recall_sub">質問のたびに関連する内容を自動的に呼び出します</string>
@@ -1926,4 +1926,7 @@
     <string name="settings_group_models_hub_summary">プロバイダ、ルーティング、検索、取得</string>
     <string name="settings_group_voice">音声</string>
     <string name="settings_group_voice_summary">認識、読み上げ、オフラインモデル</string>
+    <string name="settings_appearance_system">システム設定</string>
+    <string name="settings_appearance_system_sub">端末のライト・ダーク設定に従います。</string>
+    <string name="settings_keyboard_system_description">キーボード、入力言語、入力方法は Android のシステム設定で管理します。</string>
 </resources>

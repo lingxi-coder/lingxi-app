@@ -771,9 +771,9 @@
     <string name="settings_app_open_terminal_detail">支持快捷指令与 lingxi://open_terminal 深链</string>
     <string name="settings_appearance">外观</string>
     <string name="settings_appearance_dark">深色</string>
-    <string name="settings_appearance_dark_sub">午夜紫 + 低饱和</string>
+    <string name="settings_appearance_dark_sub">适合弱光环境的深色界面</string>
     <string name="settings_appearance_light">浅色</string>
-    <string name="settings_appearance_light_sub">暖白纸感 + 半透卡片</string>
+    <string name="settings_appearance_light_sub">适合明亮环境的浅色界面</string>
     <string name="settings_auto">自动</string>
     <string name="settings_auto_recall">自动检索</string>
     <string name="settings_auto_recall_sub">每次提问自动召回相关片段</string>
@@ -1926,4 +1926,7 @@
     <string name="settings_group_models_hub_summary">提供商、路由、搜索与抓取</string>
     <string name="settings_group_voice">语音</string>
     <string name="settings_group_voice_summary">识别、朗读、离线模型</string>
+    <string name="settings_appearance_system">跟随系统</string>
+    <string name="settings_appearance_system_sub">使用设备的浅色或深色外观。</string>
+    <string name="settings_keyboard_system_description">键盘、输入语言和输入法偏好由 Android 系统管理。</string>
 </resources>

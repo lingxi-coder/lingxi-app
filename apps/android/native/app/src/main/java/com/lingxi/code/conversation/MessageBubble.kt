@@ -108,7 +108,7 @@ fun MessageBubble(
                     Text(
                         text = message.text,
                         color = t.text,
-                        fontSize = 15.5f.sp,
+                        fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
                         lineHeight = (15.5f * 1.5f).sp,
                         // `maxLines`, not the assistant branch's `heightIn`: this
                         // bubble is one Text clipped to a BubbleShape, so a height
@@ -152,7 +152,7 @@ fun MessageBubble(
                     Text(
                         text = toggleLabel,
                         color = t.accent,
-                        fontSize = 11.5f.sp,
+                        fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                         fontWeight = FontWeight.Medium,
                     )
                 }
@@ -232,7 +232,7 @@ fun MessageBubble(
                             Text(
                                 text = toggleLabel,
                                 color = t.accent,
-                                fontSize = 11.5f.sp,
+                                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                                 fontWeight = FontWeight.Medium,
                             )
                         }
@@ -291,7 +291,7 @@ private fun AttachedImages(images: List<ImageRefDto>) {
                 Text(
                     text = "[Image #${index + 1}]",
                     color = t.text3,
-                    fontSize = 11.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                     modifier = Modifier
                         .clip(RoundedCornerShape(11.dp))
                         .background(t.surfaceActive)
@@ -315,10 +315,10 @@ fun AssistantAvatar(
         modifier = modifier
             .size(size)
             .clip(RoundedCornerShape(corner))
-            .background(Brush.linearGradient(colors = listOf(t.accent, t.accent2))),
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer),
         contentAlignment = Alignment.Center,
     ) {
-        LXIcon(name = LXIconName.Sparkle, size = glyph, color = Color.White, stroke = 2f)
+        LXIcon(name = LXIconName.Sparkle, size = glyph, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer, stroke = 2f)
     }
 }
 
@@ -354,7 +354,7 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
                 text = text,
                 style = androidx.compose.ui.text.TextStyle(
                     color = t.text,
-                    fontSize = 15.5f.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
                     lineHeight = (15.5f * 1.6f).sp,
                 ),
                 onClick = { offset ->
@@ -375,7 +375,7 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
         is MdBlock.Quote -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.size(width = 3.dp, height = 24.dp).background(t.border))
             Text(inlineSpans(block.spans, t.surfaceHover, t.text2, t.accent),
-                color = t.text3, fontSize = 15.sp, lineHeight = 23.sp)
+                color = t.text3, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize, lineHeight = 23.sp)
         }
         is MdBlock.CodeBlock -> CodeBlockView(block)
 
@@ -405,7 +405,7 @@ private fun ListRow(
         Text(
             text = marker,
             color = t.text3,
-            fontSize = 15.5f.sp,
+            fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
             lineHeight = (15.5f * 1.6f).sp,
             modifier = Modifier.widthIn(min = 18.dp),
         )
@@ -414,7 +414,7 @@ private fun ListRow(
             text = text,
             style = androidx.compose.ui.text.TextStyle(
                 color = t.text,
-                fontSize = 15.5f.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
                 lineHeight = (15.5f * 1.6f).sp,
             ),
             modifier = Modifier.weight(1f),
@@ -446,10 +446,10 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
                 text = block.language.ifBlank { "text" },
                 modifier = Modifier.weight(1f),
                 color = t.text4,
-                fontSize = 11.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 fontFamily = FontFamily.Monospace,
             )
-            Box(Modifier.size(40.dp).clickable { clipboard.setText(AnnotatedString(block.code)) },
+            Box(Modifier.size(48.dp).clickable { clipboard.setText(AnnotatedString(block.code)) },
                 contentAlignment = Alignment.Center) {
                 LXIcon(LXIconName.Copy, size = 16.dp, color = t.text3, contentDescription = stringResource(R.string.terminal_copy_button))
             }
@@ -458,7 +458,7 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
             text = block.code,
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             color = t.text2,
-            fontSize = 13.5f.sp,
+            fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
             lineHeight = (13.5f * 1.5f).sp,
             fontFamily = FontFamily.Monospace,
         )
@@ -528,7 +528,7 @@ private fun MarkdownTable(table: MdBlock.Table, onOpenLink: (String) -> Unit) {
                     ClickableText(text,
                         modifier = Modifier.width(180.dp).border(0.5.dp, palette.border).padding(10.dp),
                         style = androidx.compose.ui.text.TextStyle(
-                            color = palette.text, fontSize = 14.sp, lineHeight = 22.sp,
+                            color = palette.text, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize, lineHeight = 22.sp,
                             fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
                             textAlign = when (table.alignment[column]) {
                                 TableAlignment.Left -> TextAlign.Start

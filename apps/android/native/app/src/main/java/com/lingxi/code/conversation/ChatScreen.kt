@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -494,100 +495,53 @@ data class ComputerUseSetupStatus(
         }.joinToString("、")
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun TopBar(
-    title: String,
-    subtitle: String,
-    subtitleColor: Color,
-    onOpenDrawer: () -> Unit,
-    onTitleClick: (() -> Unit)?,
-    onNewChat: () -> Unit,
+    title: String, subtitle: String, subtitleColor: Color,
+    onOpenDrawer: () -> Unit, onTitleClick: (() -> Unit)?, onNewChat: () -> Unit,
     onOpenSideChats: (() -> Unit)?,
 ) {
     val t = LingXiTheme.palette
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .padding(top = 6.dp, bottom = 10.dp),
-    ) {
-        IconButton(
-            name = LXIconName.Menu,
-            color = t.text,
-            size = 20.dp,
-            onClick = onOpenDrawer,
-            contentDescription = stringResource(R.string.chat_open_side_drawer),
-            modifier = Modifier.testTag(UiTags.OPEN_DRAWER),
-        )
-        // The title block is the entry to the session panel; the subtitle says
-        // which mode (and so whether files can change) and workspace this is.
-        val sessionPanelLabel = stringResource(R.string.chat_session_panel_a11y)
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 8.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .then(
-                    if (onTitleClick != null) {
-                        Modifier
-                            .testTag(UiTags.SESSION_TITLE)
-                            .semantics { contentDescription = sessionPanelLabel }
-                            .clickable(onClick = onTitleClick)
-                    } else {
-                        Modifier
-                    },
-                )
-                .padding(vertical = 2.dp),
-        ) {
-            Text(
-                text = title,
-                color = t.text,
-                fontSize = 14.5f.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (subtitle.isNotBlank()) {
-                Text(
-                    text = subtitle,
-                    color = subtitleColor,
-                    fontSize = 11.5f.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+    val sessionPanelLabel = stringResource(R.string.chat_session_panel_a11y)
+    androidx.compose.material3.TopAppBar(
+        title = {
+            Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .then(if (onTitleClick != null) Modifier.testTag(UiTags.SESSION_TITLE)
+                    .semantics { contentDescription = sessionPanelLabel }.clickable(onClick = onTitleClick) else Modifier),
+                verticalArrangement = Arrangement.Center) {
+                Text(title, color = t.text, style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (subtitle.isNotBlank()) Text(subtitle, color = subtitleColor,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-        }
-        onOpenSideChats?.let { open ->
-            androidx.compose.material3.TextButton(onClick = open) { Text(stringResource(R.string.side_chat_title)) }
-        }
-        IconButton(
-            name = LXIconName.Edit,
-            color = t.accent,
-            size = 18.dp,
-            onClick = onNewChat,
-            contentDescription = stringResource(R.string.chat_new_chat),
-        )
-    }
+        },
+        navigationIcon = {
+            IconButton(LXIconName.Menu, t.text, 24.dp, onOpenDrawer,
+                stringResource(R.string.chat_open_side_drawer), Modifier.testTag(UiTags.OPEN_DRAWER))
+        },
+        actions = {
+            onOpenSideChats?.let { open ->
+                androidx.compose.material3.IconButton(onClick = open) {
+                    LXIcon(LXIconName.Message, contentDescription = stringResource(R.string.side_chat_title))
+                }
+            }
+            IconButton(LXIconName.Edit, t.text, 24.dp, onNewChat, stringResource(R.string.chat_new_chat))
+        },
+        expandedHeight = maxOf(64.dp, (48 * androidx.compose.ui.platform.LocalDensity.current.fontScale).dp),
+        windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+    )
 }
 
-/** A 38×38 tappable icon button (the iOS `iconButton` frame). */
+/** Material supplies press feedback, semantics and a 48dp touch target. */
 @Composable
 private fun IconButton(
-    name: LXIconName,
-    color: Color,
-    size: Dp,
-    onClick: () -> Unit,
-    contentDescription: String? = null,
-    modifier: Modifier = Modifier,
+    name: LXIconName, color: Color, size: Dp, onClick: () -> Unit,
+    contentDescription: String? = null, modifier: Modifier = Modifier,
 ) {
-    Box(
-        modifier = modifier.size(38.dp).clip(CircleShape).clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        LXIcon(name = name, size = size, color = color, stroke = 1.8f, contentDescription = contentDescription)
+    androidx.compose.material3.IconButton(onClick = onClick, modifier = modifier) {
+        LXIcon(name = name, size = size, color = color, contentDescription = contentDescription)
     }
 }
 
@@ -646,7 +600,10 @@ private fun MessageList(
             contentType = { it.contentType },
         ) { item ->
             when (item) {
-                ChatRenderItem.Empty -> EmptyState()
+                ChatRenderItem.Empty -> BoxWithConstraints(Modifier.fillParentMaxHeight().fillMaxWidth()) {
+                    val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
+                    EmptyState(compact = maxHeight < (200 * fontScale).dp, modifier = Modifier.fillMaxSize())
+                }
                 is ChatRenderItem.Tools -> ToolGroupView(
                     TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall,
                 )
@@ -697,7 +654,7 @@ private fun JumpToLatestButton(onClick: () -> Unit, modifier: Modifier = Modifie
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .size(34.dp)
+            .size(48.dp)
             .clip(CircleShape)
             .background(t.surface)
             .border(0.5.dp, t.border, CircleShape)
@@ -712,44 +669,49 @@ private fun JumpToLatestButton(onClick: () -> Unit, modifier: Modifier = Modifie
     }
 }
 
-/** Hero shown for a brand-new (empty) chat. */
+/** The empty chat uses the remaining viewport; configuration banners can shrink it. */
 @Composable
-private fun EmptyState() {
+private fun EmptyState(compact: Boolean, modifier: Modifier = Modifier) {
     val t = LingXiTheme.palette
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 420.dp)
-            .padding(horizontal = 24.dp),
+            .padding(horizontal = 24.dp, vertical = if (compact) 8.dp else 16.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(52.dp)
-                .clip(RoundedCornerShape(15.dp))
-                .background(Brush.linearGradient(listOf(t.accent, t.accent2)))
-                .padding(bottom = 0.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(name = LXIconName.Sparkle, size = 26.dp, color = Color.White, stroke = 1.8f)
+        if (!compact) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                LXIcon(name = LXIconName.Sparkle, size = 26.dp,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+            Spacer(Modifier.size(18.dp))
         }
-        Spacer(Modifier.size(18.dp))
         Text(
             stringResource(R.string.chat_start_new_conversation),
             color = t.text,
-            fontSize = 21.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.size(7.dp))
-        Text(
-            stringResource(R.string.chat_new_chat_hint),
-            color = t.text4,
-            fontSize = 14.sp,
-            lineHeight = (14f * 1.5f).sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
-            modifier = Modifier.widthIn(max = 260.dp),
         )
+        if (!compact) {
+            Spacer(Modifier.size(7.dp))
+            Text(
+                stringResource(R.string.chat_new_chat_hint),
+                color = t.text4,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 260.dp),
+            )
+        }
     }
 }
 
@@ -821,9 +783,9 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
             color = color,
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
-            Text(title, color = color, fontSize = 12.5f.sp, fontWeight = FontWeight.Medium)
+            Text(title, color = color, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
             if (detail.isNotEmpty()) {
-                Text(detail, color = t.text4, fontSize = 10.5f.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(detail, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             if (progress.status == CompactionProgressStatus.Running && percent != null) {
                 LinearProgressIndicator(
@@ -854,7 +816,7 @@ private fun StatusRow(text: String) {
     Text(
         text = text,
         color = t.text4,
-        fontSize = 12.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier
@@ -895,13 +857,13 @@ private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
             Text(
                 text = stringResource(R.string.chat_model_not_configured_title),
                 color = t.text,
-                fontSize = 13.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
                 text = stringResource(R.string.chat_model_not_configured_detail),
                 color = t.text2,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 lineHeight = (12.5f * 1.4f).sp,
             )
         }
@@ -917,11 +879,11 @@ private fun ModelSetupBanner(onOpenModelSettings: () -> Unit) {
         ) {
             Text(
                 text = stringResource(R.string.chat_go_to_settings),
-                color = Color.White,
-                fontSize = 12.sp,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
-            LXIcon(name = LXIconName.ChevronR, size = 11.dp, color = Color.White, stroke = 2f)
+            LXIcon(name = LXIconName.ChevronR, size = 11.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, stroke = 2f)
         }
     }
 }
@@ -983,13 +945,13 @@ internal fun ComputerUseSetupBanner(
             Text(
                 text = stringResource(R.string.chat_computer_use_unavailable_title),
                 color = t.text,
-                fontSize = 13.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
                 text = stringResource(R.string.chat_computer_use_unavailable_detail, missingStepsLabel(status)),
                 color = t.text2,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 lineHeight = (12.5f * 1.4f).sp,
             )
         }
@@ -1007,14 +969,14 @@ internal fun ComputerUseSetupBanner(
         ) {
             Text(
                 text = stringResource(R.string.chat_go_enable),
-                color = Color.White,
-                fontSize = 12.sp,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
             LXIcon(
                 name = LXIconName.ChevronR,
                 size = 11.dp,
-                color = Color.White,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
                 stroke = 2f,
             )
         }
@@ -1076,19 +1038,19 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
                 .background(t.danger),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 11.dp, color = Color.White, stroke = 2.4f)
+            LXIcon(name = LXIconName.X, size = 11.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onError, stroke = 2.4f)
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = headline,
                 color = t.danger,
-                fontSize = 13.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
                 text = error.message,
                 color = t.text2,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 lineHeight = (12.5f * 1.4f).sp,
                 maxLines = 4,
                 overflow = TextOverflow.Ellipsis,

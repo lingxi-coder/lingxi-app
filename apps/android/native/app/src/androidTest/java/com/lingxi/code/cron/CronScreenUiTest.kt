@@ -10,7 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.captureToImage
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onRoot
@@ -65,7 +65,7 @@ class CronScreenUiTest {
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
                 }
             }
-            val expression = compose.onNode(hasText("Advanced 5-field cron (minute hour day month weekday)") and hasSetTextAction())
+            val expression = compose.onNode(hasText(context.getString(com.lingxi.code.R.string.cron_advanced_expression_label)) and hasSetTextAction())
             expression.performScrollTo().performTextClearance()
             expression.performTextInput("invalid")
             compose.onNodeWithText("Save changes").performScrollTo().performClick()

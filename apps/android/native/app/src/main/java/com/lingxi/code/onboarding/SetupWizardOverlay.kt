@@ -8,6 +8,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -148,7 +150,7 @@ private fun SetupWizardContent(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.radialGradient(listOf(oklch(0.19f, 0.07f, 275f), Color(0xFF050509)))),
+            .background(MaterialTheme.colorScheme.background),
     ) {
         Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).imePadding()) {
             // header — back chevron + segmented progress
@@ -157,27 +159,12 @@ private fun SetupWizardContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (step > 0) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(Color.White.copy(alpha = 0.06f), CircleShape)
-                            .border(0.5.dp, Color.White.copy(alpha = 0.12f), CircleShape)
-                            .clickable { step = (step - 1).coerceAtLeast(0) },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        // ChevronR mirrored → a left chevron (back).
-                        Box(Modifier.rotate(180f)) {
-                            LXIcon(
-                                LXIconName.ChevronR,
-                                size = 17.dp,
-                                color = oklch(0.88f, 0.02f, 275f),
-                                stroke = 2f,
-                                contentDescription = stringResource(R.string.onboarding_back),
-                            )
-                        }
+                    androidx.compose.material3.IconButton(onClick = { step = (step - 1).coerceAtLeast(0) }) {
+                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.onboarding_back))
                     }
                 } else {
-                    Spacer(Modifier.size(36.dp))
+                    Spacer(Modifier.size(48.dp))
                 }
                 Spacer(Modifier.width(12.dp))
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -187,15 +174,15 @@ private fun SetupWizardContent(
                                 .weight(1f)
                                 .height(3.dp)
                                 .background(
-                                    if (k <= step) Brush.horizontalGradient(listOf(oklch(0.72f, 0.18f, 268f), oklch(0.70f, 0.18f, 318f)))
-                                    else androidx.compose.ui.graphics.SolidColor(Color.White.copy(alpha = 0.12f)),
+                                    if (k <= step) androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary)
+                                    else androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outlineVariant),
                                     RoundedCornerShape(99.dp),
                                 ),
                         )
                     }
                 }
                 Spacer(Modifier.width(12.dp))
-                Spacer(Modifier.size(36.dp))
+                Spacer(Modifier.size(48.dp))
             }
 
             // body
@@ -223,8 +210,8 @@ private fun SetupWizardContent(
                         Spacer(Modifier.height(18.dp))
                         Row(
                             modifier = Modifier
-                                .background(oklch(0.70f, 0.18f, 285f, 0.14f), CircleShape)
-                                .border(0.5.dp, oklch(0.70f, 0.18f, 285f, 0.3f), CircleShape)
+                                .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                                .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -232,8 +219,8 @@ private fun SetupWizardContent(
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 stringResource(R.string.onboarding_wake_word_preview, wakeWordName),
-                                color = oklch(0.88f, 0.04f, 285f),
-                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium,
                             )
                         }
@@ -260,81 +247,17 @@ private fun SetupWizardContent(
 
             // footer
             Column(Modifier.padding(horizontal = 30.dp).padding(top = 14.dp, bottom = 42.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .background(
-                            if (ctaDisabled) androidx.compose.ui.graphics.SolidColor(Color.White.copy(alpha = 0.1f))
-                            else Brush.linearGradient(listOf(oklch(0.70f, 0.19f, 270f), oklch(0.66f, 0.20f, 305f))),
-                            RoundedCornerShape(16.dp),
-                        )
-                        .clickable(enabled = !ctaDisabled) { next() },
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
+                androidx.compose.material3.Button(
+                    onClick = { next() }, enabled = !ctaDisabled,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
                 ) {
-                    val fg = if (ctaDisabled) oklch(0.60f, 0.02f, 280f) else Color.White
-                    Text(cta, color = fg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(cta, style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.width(8.dp))
-                    LXIcon(if (step == TOTAL - 1) LXIconName.Sparkle else LXIconName.ArrowRight, size = 17.dp, color = fg, stroke = 2f)
+                    LXIcon(if (step == TOTAL - 1) LXIconName.Sparkle else LXIconName.ArrowRight,
+                        color = MaterialTheme.colorScheme.onPrimary)
                 }
             }
         }
-    }
-}
-
-// Retained for the future Settings-based enrollment entry point; deliberately
-// absent from the active onboarding step mapping above.
-@Composable
-private fun VoiceprintStep(vp: VpState, pct: Float, userName: String, onRecord: () -> Unit) {
-    Badge(LXIconName.Mic)
-    WizH(stringResource(R.string.onboarding_voiceprint_title))
-    WizSub(stringResource(R.string.onboarding_voiceprint_subtitle))
-    Box(Modifier.size(140.dp), contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(108.dp)) {
-            val sw = 4.dp.toPx()
-            drawCircle(Color.White.copy(alpha = 0.1f), radius = size.minDimension / 2f - sw / 2f, style = Stroke(width = sw))
-            drawArc(
-                color = oklch(0.70f, 0.19f, 290f),
-                startAngle = -90f,
-                sweepAngle = 360f * (pct / 100f),
-                useCenter = false,
-                topLeft = Offset(sw / 2f, sw / 2f),
-                size = Size(size.width - sw, size.height - sw),
-                style = Stroke(width = sw, cap = StrokeCap.Round),
-            )
-        }
-        Box(
-            modifier = Modifier
-                .size(88.dp)
-                .background(
-                    if (vp == VpState.Done) Brush.linearGradient(listOf(oklch(0.70f, 0.16f, 150f), oklch(0.64f, 0.16f, 165f)))
-                    else Brush.linearGradient(listOf(oklch(0.66f, 0.20f, 270f), oklch(0.62f, 0.21f, 312f))),
-                    CircleShape,
-                )
-                .clickable(enabled = vp != VpState.Rec, onClick = onRecord),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(if (vp == VpState.Done) LXIconName.Check else LXIconName.Mic, size = 34.dp, color = Color.White, stroke = 2f)
-        }
-    }
-    Spacer(Modifier.height(20.dp))
-    val status = when (vp) {
-        VpState.Idle -> stringResource(R.string.onboarding_voiceprint_status_idle)
-        VpState.Rec -> stringResource(R.string.onboarding_voiceprint_status_recording, pct.toInt())
-        VpState.Done -> stringResource(R.string.onboarding_voiceprint_status_done)
-    }
-    Text(status, color = if (vp == VpState.Done) oklch(0.74f, 0.15f, 155f) else oklch(0.78f, 0.04f, 280f),
-        fontSize = 14.sp, fontWeight = FontWeight.Medium)
-    if (vp != VpState.Done) {
-        Spacer(Modifier.height(8.dp))
-        val speaker = userName.ifBlank { stringResource(R.string.onboarding_voiceprint_self_pronoun) }
-        Text(
-            stringResource(R.string.onboarding_voiceprint_sample_phrase, speaker),
-            color = oklch(0.86f, 0.03f, 280f),
-            fontSize = 15.sp,
-            fontStyle = FontStyle.Italic,
-        )
     }
 }
 
@@ -343,50 +266,33 @@ private fun Badge(icon: LXIconName) {
     Box(
         modifier = Modifier
             .size(66.dp)
-            .background(Brush.linearGradient(listOf(oklch(0.66f, 0.20f, 270f), oklch(0.62f, 0.21f, 312f))), RoundedCornerShape(20.dp)),
+            .background(androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary), RoundedCornerShape(20.dp)),
         contentAlignment = Alignment.Center,
     ) {
-        LXIcon(icon, size = 30.dp, color = Color.White, stroke = 1.9f)
+        LXIcon(icon, size = 30.dp, color = MaterialTheme.colorScheme.onPrimary, stroke = 1.9f)
     }
     Spacer(Modifier.height(22.dp))
 }
 
 @Composable
 private fun WizH(text: String) {
-    Text(text, color = oklch(0.97f, 0.02f, 285f), fontSize = 25.sp, fontWeight = FontWeight.Bold,
+    Text(text, color = MaterialTheme.colorScheme.onSurface, style = androidx.compose.material3.MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold,
         textAlign = TextAlign.Center)
     Spacer(Modifier.height(10.dp))
 }
 
 @Composable
 private fun WizSub(text: String) {
-    Text(text, color = oklch(0.70f, 0.03f, 275f), fontSize = 14.5.sp, lineHeight = 23.sp,
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, lineHeight = 23.sp,
         textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 290.dp))
     Spacer(Modifier.height(26.dp))
 }
 
 @Composable
 private fun WizField(value: String, placeholder: String, onChange: (String) -> Unit) {
-    BasicTextField(
-        value = value,
-        onValueChange = onChange,
-        singleLine = true,
-        textStyle = TextStyle(color = oklch(0.96f, 0.02f, 285f), fontSize = 21.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center),
-        cursorBrush = androidx.compose.ui.graphics.SolidColor(oklch(0.85f, 0.15f, 290f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(15.dp))
-            .border(0.5.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(15.dp))
-            .padding(horizontal = 18.dp, vertical = 16.dp),
-        decorationBox = { inner ->
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth()) {
-                if (value.isEmpty()) {
-                    Text(placeholder, color = oklch(0.50f, 0.02f, 285f), fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
-                }
-                inner()
-            }
-        },
-    )
+    androidx.compose.material3.OutlinedTextField(value, onChange,
+        modifier = Modifier.fillMaxWidth(), label = { Text(placeholder) }, singleLine = true,
+        textStyle = MaterialTheme.typography.bodyLarge)
 }
 
 // MARK: - Offline voice language-pack step ------------------------------------
@@ -415,15 +321,15 @@ private fun VoicePackStep(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(if (selected == "") oklch(0.70f, 0.18f, 285f, 0.16f) else Color.White.copy(alpha = 0.04f), RoundedCornerShape(15.dp))
-                .border(1.dp, if (selected == "") oklch(0.70f, 0.18f, 285f, 0.55f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(15.dp))
+                .background(if (selected == "") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(15.dp))
+                .border(1.dp, if (selected == "") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
                 .clickable { onSelect("") }
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(stringResource(R.string.onboarding_voice_pack_skip), color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-                Text(stringResource(R.string.onboarding_voice_pack_skip_detail), color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+                Text(stringResource(R.string.onboarding_voice_pack_skip), color = MaterialTheme.colorScheme.onSurface, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.onboarding_voice_pack_skip_detail), color = MaterialTheme.colorScheme.onSurfaceVariant, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
             }
             RadioDot(selected == "")
         }
@@ -450,15 +356,15 @@ private fun VoicePackRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(if (selected) oklch(0.70f, 0.18f, 285f, 0.16f) else Color.White.copy(alpha = 0.04f), RoundedCornerShape(15.dp))
-            .border(1.dp, if (selected) oklch(0.70f, 0.18f, 285f, 0.55f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(15.dp))
+            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(15.dp))
+            .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
             .clickable { onSelect() }
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(pack.localizedTitle(), color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
-                Text("${pack.localizedSubtitle()} · $sizeText", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+                Text(pack.localizedTitle(), color = MaterialTheme.colorScheme.onSurface, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                Text("${pack.localizedSubtitle()} · $sizeText", color = MaterialTheme.colorScheme.onSurfaceVariant, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
             }
             RadioDot(selected)
         }
@@ -468,7 +374,7 @@ private fun VoicePackRow(
             is ModelState.Ready -> Text(
                 stringResource(R.string.onboarding_voice_pack_ready),
                 color = oklch(0.74f, 0.15f, 155f),
-                fontSize = 13.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
             )
             is ModelState.Queued -> VoicePackProgressStatus(
@@ -501,12 +407,10 @@ private fun VoicePackRow(
             }
             is ModelState.Failed -> DownloadBtn(
                 stringResource(R.string.onboarding_voice_pack_failed, activeModelLabel, agg.message),
-                oklch(0.65f, 0.2f, 25f),
                 onDownload,
             )
             ModelState.NotInstalled -> DownloadBtn(
                 stringResource(R.string.onboarding_voice_pack_download_action, sizeText),
-                oklch(0.66f, 0.2f, 288f),
                 onDownload,
             )
         }
@@ -552,7 +456,7 @@ private fun VoicePackProgressStatus(
         0f
     }
     Box(
-        Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(Color.White.copy(alpha = 0.1f)),
+        Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(MaterialTheme.colorScheme.outlineVariant),
     ) {
         Box(
             Modifier.fillMaxWidth(pct).height(6.dp).clip(RoundedCornerShape(99.dp))
@@ -563,8 +467,8 @@ private fun VoicePackProgressStatus(
     Text(
         "$status · ${formatDownloadPercent(progress.downloadedBytes, progress.totalBytes)}" +
             "（${formatDownloadSize(progress.downloadedBytes)} / ${formatDownloadSize(progress.totalBytes)}）",
-        color = oklch(0.78f, 0.04f, 280f),
-        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
     )
 }
 
@@ -592,28 +496,12 @@ private fun formatDownloadPercent(bytes: Long, total: Long): String {
 
 @Composable
 private fun RadioDot(on: Boolean) {
-    Box(
-        modifier = Modifier
-            .size(22.dp)
-            .background(if (on) oklch(0.66f, 0.2f, 288f) else Color.Transparent, CircleShape)
-            .border(1.5.dp, if (on) oklch(0.70f, 0.18f, 285f) else Color.White.copy(alpha = 0.25f), CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (on) LXIcon(LXIconName.Check, size = 13.dp, color = Color.White, stroke = 3f)
-    }
+    androidx.compose.material3.RadioButton(selected = on, onClick = null)
 }
 
 @Composable
-private fun DownloadBtn(text: String, color: Color, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(11.dp))
-            .background(color)
-            .clickable { onClick() }
-            .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text, color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+private fun DownloadBtn(text: String, onClick: () -> Unit) {
+    androidx.compose.material3.Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Text(text)
     }
 }

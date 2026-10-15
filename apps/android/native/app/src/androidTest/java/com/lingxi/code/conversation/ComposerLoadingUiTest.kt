@@ -14,7 +14,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performTextInput
-import androidx.compose.ui.test.performTextInputSelection
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextRange
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.components.UiTags
@@ -72,7 +73,13 @@ class ComposerLoadingUiTest {
 
         val input = rule.onNode(hasSetTextAction())
         input.assertIsEnabled().performClick().performTextInput(text)
-        input.performTextInputSelection(selection)
+        // The convenience input-selection action sorts min/max, so it cannot
+        // represent a backward handle selection. Preserve the supplied anchor
+        // and focus explicitly, then verify them before and after loading.
+        input.performSemanticsAction(SemanticsActions.SetSelection) {
+            it(selection.start, selection.end, true)
+        }
+        input.assert(SemanticsMatcher.expectValue(SemanticsProperties.TextSelectionRange, selection))
         rule.onNodeWithTag(UiTags.COMPOSER_SEND).assertIsNotEnabled()
         input.performImeAction()
         rule.runOnIdle {

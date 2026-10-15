@@ -146,7 +146,7 @@ fun ProjectsPage(
                 Text(
                     text = statusMessage,
                     color = t.accent,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(bottom = 12.dp),
                 )
             }
@@ -154,7 +154,7 @@ fun ProjectsPage(
                 Text(
                     text = stringResource(R.string.drawer_no_projects_detail),
                     color = t.text4,
-                    fontSize = 13.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 12.dp),
                 )
             } else {
@@ -237,7 +237,7 @@ fun ProjectPage(
                 .padding(16.dp),
         ) {
             if (project.desc.isNotBlank()) {
-                Text(project.desc, color = t.text4, fontSize = 12.sp, modifier = Modifier.padding(bottom = 12.dp))
+                Text(project.desc, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp))
             }
             // The one primary action: a new conversation in this project.
             Row(
@@ -251,11 +251,11 @@ fun ProjectPage(
                     .clickable { onNewSession(filter.mode) }
                     .padding(vertical = 13.dp),
             ) {
-                LXIcon(name = LXIconName.Edit, size = 16.dp, color = androidx.compose.ui.graphics.Color.White, stroke = 1.9f)
+                LXIcon(name = LXIconName.Edit, size = 16.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, stroke = 1.9f)
                 Text(
                     stringResource(R.string.chat_new_chat),
-                    color = androidx.compose.ui.graphics.Color.White,
-                    fontSize = 14.sp,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -279,7 +279,7 @@ fun ProjectPage(
                             RecentsFilter.Code -> stringResource(R.string.session_mode_code)
                         },
                         color = if (active) tint else t.text3,
-                        fontSize = 13.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                         fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                         modifier = Modifier
                             .clip(shape)
@@ -295,7 +295,7 @@ fun ProjectPage(
                 Text(
                     text = stringResource(R.string.drawer_no_sessions),
                     color = t.text4,
-                    fontSize = 13.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 10.dp),
                 )
             } else {

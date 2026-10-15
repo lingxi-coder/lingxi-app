@@ -9,25 +9,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
-/**
- * Brand theme.
- *
- * Wires a Material 3 [MaterialTheme] (typography + shapes + a derived color
- * scheme) and, crucially, provides the full brand [Palette] through the
- * [LocalPalette] CompositionLocal — the Compose analog of the iOS
- * `@Environment(\.theme)` injection. Surfaces read `LocalPalette.current` (or
- * the [theme] convenience accessor) to reach the exact brand tokens that the
- * Material color scheme can't fully express (text2/3/4, surfaceHover, ambient,
- * status dots, …).
- *
- * The active palette is resolved from the appearance ([darkTheme]) and the
- * selected [accentId], so theme + accent are live and single-sourced.
- */
-
-/**
- * CompositionLocal carrying the resolved brand [Palette]. Defaults to the dark
- * palette so previews and detached composables still render with brand color.
- */
+/** Shared Material palette used by native and custom conversation surfaces. */
 val LocalPalette = staticCompositionLocalOf { DesignTokens.dark }
 
 /** Convenience accessor mirroring the iOS `@Environment(\.theme) var t`. */
@@ -41,7 +23,7 @@ object LingXiTheme {
  * and tests without a DataStore.
  */
 fun resolvePalette(dark: Boolean, accentId: String): Palette =
-    DesignTokens.palette(dark).withAccent(Accents.color(forId = accentId))
+    DesignTokens.palette(dark).withAccent(Accents.color(forId = accentId, dark = dark))
 
 /**
  * Theme wrapper.
@@ -59,7 +41,8 @@ fun LingXiTheme(
     val palette = resolvePalette(dark = darkTheme, accentId = accentId)
     val colorScheme = palette.toColorScheme()
 
-    CompositionLocalProvider(LocalPalette provides palette) {
+    CompositionLocalProvider(LocalPalette provides palette,
+        androidx.compose.material3.LocalContentColor provides palette.text) {
         MaterialTheme(
             colorScheme = colorScheme,
             typography = LXTypography,
@@ -69,47 +52,23 @@ fun LingXiTheme(
     }
 }
 
-/**
- * Project the brand [Palette] onto a Material 3 color scheme so stock M3
- * components (TopAppBar, Scaffold, Switch, NavigationDrawer) pick up brand
- * color out of the box. Brand-only tokens stay on [Palette] / [LocalPalette].
- */
-private fun Palette.toColorScheme() = if (isDark) {
-    darkColorScheme(
+/** Resolve foregrounds and containers together, including custom accents. */
+internal fun Palette.toColorScheme(): androidx.compose.material3.ColorScheme {
+    val base = if (isDark) darkColorScheme() else lightColorScheme()
+    val container = androidx.compose.ui.graphics.lerp(windowBg, accent, if (isDark) 0.22f else 0.12f)
+    return base.copy(
         primary = accent,
-        onPrimary = Color.White,
-        secondary = accent2,
-        tertiary = accent3,
-        background = windowBg,
-        onBackground = text,
-        surface = surface,
-        onSurface = text,
-        surfaceVariant = surfaceHover,
-        onSurfaceVariant = text2,
-        surfaceContainer = surface,
-        surfaceContainerHigh = surfaceHover,
-        surfaceContainerHighest = surfaceActive,
-        outline = border,
-        outlineVariant = borderStrong,
-        error = danger,
-    )
-} else {
-    lightColorScheme(
-        primary = accent,
-        onPrimary = Color.White,
-        secondary = accent2,
-        tertiary = accent3,
-        background = windowBg,
-        onBackground = text,
-        surface = surface,
-        onSurface = text,
-        surfaceVariant = surfaceHover,
-        onSurfaceVariant = text2,
-        surfaceContainer = surface,
-        surfaceContainerHigh = surfaceHover,
-        surfaceContainerHighest = surfaceActive,
-        outline = border,
-        outlineVariant = borderStrong,
-        error = danger,
+        onPrimary = if (isDark) Color(0xFF1C1B1F) else Color.White,
+        primaryContainer = container, onPrimaryContainer = text,
+        secondary = accent2, tertiary = accent3,
+        background = windowBg, onBackground = text,
+        surface = windowBg, onSurface = text,
+        surfaceVariant = surfaceActive, onSurfaceVariant = text2,
+        surfaceContainerLow = surface, surfaceContainer = surfaceHover,
+        surfaceContainerHigh = surfaceActive,
+        surfaceContainerHighest = base.surfaceContainerHighest,
+        outline = borderStrong, outlineVariant = border,
+        inversePrimary = Accents.color(Accents.DEFAULT_ID, !isDark),
+        surfaceTint = accent, error = danger,
     )
 }

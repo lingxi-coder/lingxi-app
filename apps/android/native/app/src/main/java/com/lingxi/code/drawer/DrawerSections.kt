@@ -78,7 +78,7 @@ internal fun ChatsSection(
             Text(
                 text = group.uppercase(),
                 color = t.text4,
-                fontSize = 11.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 letterSpacing = 0.6.sp,
                 modifier = Modifier
@@ -97,7 +97,7 @@ internal fun ChatsSection(
         Text(
             text = stringResource(R.string.drawer_chats_temp_notice),
             color = t.text4,
-            fontSize = 11.5f.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
             lineHeight = (11.5f + 4f).sp,
             modifier = Modifier
                 .padding(horizontal = 14.dp)
@@ -123,7 +123,7 @@ private fun ChatRow(chat: Chat, active: Boolean, onClick: () -> Unit) {
             Text(
                 text = chat.title,
                 color = if (active) t.text else t.text2,
-                fontSize = 14.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -131,7 +131,7 @@ private fun ChatRow(chat: Chat, active: Boolean, onClick: () -> Unit) {
             Text(
                 text = "${chat.activity} · ${chat.preview}",
                 color = t.text4,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -161,7 +161,7 @@ internal fun EngineSessionsSection(
                 Text(
                     text = stringResource(R.string.drawer_sessions_loading),
                     color = t.text4,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier
                         .padding(horizontal = 14.dp)
                         .padding(top = 8.dp),
@@ -172,7 +172,7 @@ internal fun EngineSessionsSection(
                 Text(
                     text = state.errorMessage ?: stringResource(R.string.drawer_sessions_load_failed),
                     color = t.statusError,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     lineHeight = 18.sp,
                     modifier = Modifier
                         .padding(horizontal = 14.dp)
@@ -184,7 +184,7 @@ internal fun EngineSessionsSection(
                 Text(
                     text = stringResource(R.string.drawer_no_sessions),
                     color = t.text4,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier
                         .padding(horizontal = 14.dp)
                         .padding(top = 8.dp),
@@ -204,7 +204,7 @@ internal fun EngineSessionsSection(
             Text(
                 text = stringResource(R.string.drawer_no_matching_sessions),
                 color = t.text4,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 modifier = Modifier
                     .padding(horizontal = 14.dp)
                     .padding(top = 8.dp),
@@ -230,7 +230,7 @@ private fun EngineSessionRow(row: SessionRow, active: Boolean, onClick: () -> Un
             Text(
                 text = row.title,
                 color = if (active) t.text else t.text2,
-                fontSize = 14.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -238,7 +238,7 @@ private fun EngineSessionRow(row: SessionRow, active: Boolean, onClick: () -> Un
             Text(
                 text = stringResource(R.string.drawer_session_meta, row.relativeTime, row.messageCount),
                 color = t.text4,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -288,7 +288,7 @@ internal fun ProjectsSection(
             Text(
                 text = statusMessage,
                 color = LingXiTheme.palette.accent,
-                fontSize = 11.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp),
             )
         }
@@ -309,7 +309,7 @@ internal fun ProjectsSection(
             Text(
                 text = stringResource(R.string.drawer_no_projects_detail),
                 color = LingXiTheme.palette.text4,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
             )
         }
@@ -356,7 +356,7 @@ private fun ProjectRow(
                 Text(
                     text = project.name,
                     color = t.text,
-                    fontSize = 14.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -364,7 +364,7 @@ private fun ProjectRow(
                 Text(
                     text = project.desc,
                     color = t.text4,
-                    fontSize = 11.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -372,7 +372,7 @@ private fun ProjectRow(
             Text(
                 text = project.sessions.size.toString(),
                 color = t.text4,
-                fontSize = 11.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -412,7 +412,7 @@ private fun ProjectRow(
                             .padding(vertical = 7.dp),
                     ) {
                         LXIcon(name = LXIconName.Plus, size = 11.dp, color = t.text4, stroke = 2f)
-                        Text(stringResource(R.string.drawer_project_new_session_short), color = t.text4, fontSize = 12.5f.sp)
+                        Text(stringResource(R.string.drawer_project_new_session_short), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                     }
                     if (project.storageKind == "saf-mirror") {
                         Row(
@@ -434,7 +434,7 @@ private fun ProjectRow(
                                     stringResource(R.string.drawer_reimport_short)
                                 },
                                 color = t.accent,
-                                fontSize = 11.5f.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.clickable(
                                     onClick = if (authorizationLost) onReauthorize else onReimport,
                                 ),
@@ -442,7 +442,7 @@ private fun ProjectRow(
                             Text(
                                 text = stringResource(R.string.drawer_export_back_short),
                                 color = t.accent,
-                                fontSize = 11.5f.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.clickable(onClick = onExport),
                             )
                         }
@@ -464,7 +464,7 @@ private fun ProjectIcon(project: Project) {
             .border(0.5.dp, project.color.tint(0.28f), RoundedCornerShape(7.dp)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(project.icon, color = project.color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(project.icon, color = project.color, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -494,7 +494,7 @@ private fun SessionRow(
                 Text(
                     text = session.title,
                     color = if (active) t.text else t.text2,
-                    fontSize = 13.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -503,7 +503,7 @@ private fun SessionRow(
             Text(
                 text = stringResource(R.string.drawer_project_session_meta, session.activity, session.msgs),
                 color = t.text4,
-                fontSize = 11.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -527,7 +527,7 @@ internal fun CronsSection(
             Text(
                 text = stringResource(R.string.drawer_no_crons),
                 color = LingXiTheme.palette.text4,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
             )
         }
@@ -556,7 +556,7 @@ private fun CronCard(cron: Cron, onClick: () -> Unit) {
             Text(
                 text = cron.title,
                 color = t.text,
-                fontSize = 14.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -567,7 +567,7 @@ private fun CronCard(cron: Cron, onClick: () -> Unit) {
         Text(
             text = cron.desc,
             color = t.text3,
-            fontSize = 12.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             lineHeight = (12f + 2f).sp,
         )
         Spacer(Modifier.height(7.dp))
@@ -575,7 +575,7 @@ private fun CronCard(cron: Cron, onClick: () -> Unit) {
             Text(
                 text = cron.cron,
                 color = t.text2,
-                fontSize = 11.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier
@@ -583,11 +583,11 @@ private fun CronCard(cron: Cron, onClick: () -> Unit) {
                     .background(t.surfaceActive)
                     .padding(horizontal = 7.dp, vertical = 3.dp),
             )
-            Text("→", color = t.text4, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            Text("→", color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
             Text(
                 text = cron.next,
                 color = if (cron.enabled) t.accent else t.text4,
-                fontSize = 11.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Medium,
             )
@@ -637,7 +637,7 @@ internal fun DashedButton(label: String, onClick: () -> Unit = {}) {
             .padding(11.dp),
     ) {
         LXIcon(name = LXIconName.Plus, size = 13.dp, color = t.text3, stroke = 2f)
-        Text(label, color = t.text3, fontSize = 13.sp)
+        Text(label, color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
     }
 }
 

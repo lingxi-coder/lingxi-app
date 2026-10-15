@@ -22,7 +22,7 @@ struct ProjectsPage: View {
         List {
             if projects.isEmpty {
                 Text("drawer_no_projects_detail")
-                    .font(.system(size: 13))
+                    .font(.footnote)
                     .foregroundStyle(t.text4)
                     .listRowBackground(Color.clear)
                     .accessibilityIdentifier("projects.empty")
@@ -34,12 +34,12 @@ struct ProjectsPage: View {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
                                 Text(project.record.name)
-                                    .font(.system(size: 15, weight: .semibold))
+                                    .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(t.text)
                                     .lineLimit(1)
                                 if workspacePinnedAt[ConversationScope.project(project.id).workspaceKey] != nil {
                                     Image(systemName: "pin.fill")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .font(.caption.weight(.semibold))
                                         .foregroundStyle(t.text4)
                                 }
                             }
@@ -228,7 +228,7 @@ struct ProjectPage: View {
                 HStack(spacing: 8) {
                     Button { onNewSession(filter.mode) } label: {
                         Label("chat_new_chat", systemImage: "square.and.pencil")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                             .background(t.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -238,7 +238,7 @@ struct ProjectPage: View {
                     .accessibilityIdentifier("project.new-session")
                     Button(action: onOpenTerminal) {
                         Label("settings_linux_section_terminal", systemImage: "terminal")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                             .background(t.surfaceActive, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -250,7 +250,7 @@ struct ProjectPage: View {
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets())
                 Text(project.workspace.guestPath)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(t.text4)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 0, trailing: 4))
@@ -265,7 +265,7 @@ struct ProjectPage: View {
                 .accessibilityIdentifier("project.filter")
                 if rows.isEmpty {
                     Text("drawer_no_sessions")
-                        .font(.system(size: 13))
+                        .font(.footnote)
                         .foregroundStyle(t.text4)
                 }
                 ForEach(rows) { row in
@@ -274,7 +274,7 @@ struct ProjectPage: View {
                             row.mode.glyph(t, size: 15)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(row.title)
-                                    .font(.system(size: 14, weight: row.id == activeSession ? .semibold : .medium))
+                                    .font(.subheadline.weight(row.id == activeSession ? .semibold : .medium))
                                     .foregroundStyle(t.text)
                                     .lineLimit(1)
                                 Text("\(row.mode.title) · \(row.relativeTime) · \(row.messageCount)")
@@ -296,7 +296,7 @@ struct ProjectPage: View {
                     Button { onOpenCron(task.scope.scopeID, task.task.id) } label: {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(task.task.prompt)
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.subheadline.weight(.medium))
                                 .foregroundStyle(t.text)
                                 .lineLimit(1)
                             Text(task.task.human).font(.caption).foregroundStyle(t.text4).lineLimit(1)

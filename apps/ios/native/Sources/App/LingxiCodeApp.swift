@@ -28,6 +28,7 @@ struct LingxiCodeApp: App {
                 .environment(voice)
                 .environment(LocalizationManager.shared)
                 .environment(\.theme, app.palette)
+                .modifier(NativeAppearancePreferences(app: app))
                 .preferredColorScheme(app.colorScheme)
                 .tint(app.palette.accent)
         }

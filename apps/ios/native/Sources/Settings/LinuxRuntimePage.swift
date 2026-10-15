@@ -393,7 +393,7 @@ struct LinuxRuntimePage: View {
 
     private var blurb: some View {
         Text("settings_linux_blurb")
-            .font(.system(size: 11.5))
+            .font(.caption)
             .foregroundStyle(t.text3)
             .lineSpacing(4)
             .padding(.bottom, 14)
@@ -542,7 +542,7 @@ struct LinuxRuntimePage: View {
                                 Button(String(localized: "settings_linux_stop_task")) {
                                     Task { await stopTask(taskID: task.id) }
                                 }
-                                .font(.system(size: 12, weight: .medium))
+                                .font(.caption.weight(.medium))
                             }
                         } else {
                             EmptyView()
@@ -641,10 +641,10 @@ struct LinuxRuntimePage: View {
                 ProgressView().controlSize(.small)
             } else if enabled {
                 Button(buttonTitle, action: action)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.caption.weight(.medium))
             } else {
                 Text("settings_status_not_enabled")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(t.text4)
             }
         }
@@ -671,9 +671,9 @@ struct LinuxRuntimePage: View {
                 Button(action.label) {
                     Task { await run(action, mode: store.linuxRuntime.selectedMode) }
                 }
-                .font(.system(size: 12, weight: .medium))
+                .font(.caption.weight(.medium))
             } else {
-                Text("settings_status_not_enabled").font(.system(size: 12, weight: .medium)).foregroundStyle(t.text4)
+                Text("settings_status_not_enabled").font(.caption.weight(.medium)).foregroundStyle(t.text4)
             }
         }
     }

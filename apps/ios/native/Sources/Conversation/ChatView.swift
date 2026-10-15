@@ -12,9 +12,7 @@ struct ChatView: View {
     #endif
 
     @Environment(AppState.self) private var app
-    /// Chat keeps the desktop-neutral palette scoped to this surface. Child
-    /// views receive the same resolved value through the environment below.
-    private var t: Palette { DesignTokens.chatPalette(dark: app.isDark) }
+    @Environment(\.theme) private var t
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

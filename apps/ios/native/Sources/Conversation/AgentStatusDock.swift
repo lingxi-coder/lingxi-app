@@ -103,18 +103,18 @@ struct AgentStatusDock: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(agent.name)
-                            .font(.system(size: 13.5, weight: .medium))
+                            .font(.footnote.weight(.medium))
                             .foregroundStyle(theme.text)
                             .lineLimit(1)
                         if !agent.agentType.isEmpty {
                             Text(agent.agentType)
-                                .font(.system(size: 10.5))
+                                .font(.caption)
                                 .foregroundStyle(theme.text4)
                                 .lineLimit(1)
                         }
                         if isReadOnly && selectionID == selectedAgentID {
                             Text(String(localized: "chat_agent_read_only"))
-                                .font(.system(size: 9.5, weight: .medium))
+                                .font(.caption.weight(.medium))
                                 .foregroundStyle(theme.text3)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
@@ -127,14 +127,14 @@ struct AgentStatusDock: View {
                         fallback: AgentStatusPresentation(rawValue: agent.status).label,
                         model: agent.modelDisplayLabel
                     ))
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .foregroundStyle(theme.text3)
                     .lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 if selectedAgentID == selectionID {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(.footnote.weight(.semibold))
                         .foregroundStyle(theme.accent)
                 }
             }

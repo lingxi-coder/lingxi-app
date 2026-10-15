@@ -352,7 +352,7 @@ struct SlashCommandOutputCard: View {
                     stroke: 1.8
                 )
                 Text(output.command)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(t.text)
                     .textSelection(.enabled)
                 Spacer(minLength: 0)
@@ -360,7 +360,7 @@ struct SlashCommandOutputCard: View {
 
             if !output.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(output.text)
-                    .font(.system(size: 12.5))
+                    .font(.footnote)
                     .foregroundStyle(output.isError ? t.danger : t.text2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)

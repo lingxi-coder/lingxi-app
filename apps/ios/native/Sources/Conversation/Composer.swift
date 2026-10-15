@@ -291,7 +291,7 @@ struct Composer: View {
                         if let visibleSuggestion {
                             Button(action: acceptSuggestion) {
                                 Text(visibleSuggestion)
-                                    .font(.scaledSystem(15.5, relativeTo: .body))
+                                    .font(.body)
                                     .foregroundStyle(t.text4)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
@@ -351,11 +351,6 @@ struct Composer: View {
                     .stroke(inputFocused ? t.accent.tint(0.52) : t.borderStrong,
                             lineWidth: inputFocused ? 1 : 0.5)
             }
-            .shadow(
-                color: inputFocused ? t.accent.tint(0.12) : .black.opacity(0.06),
-                radius: inputFocused ? 12 : 8,
-                y: 4
-            )
             .animation(.easeOut(duration: 0.18), value: inputFocused)
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
@@ -404,18 +399,6 @@ struct Composer: View {
                 onConfirmBypassPermissions: onConfirmBypassPermissions,
                 onDismiss: { controlsOpen = false }
             )
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button {
-                    inputFocused = false
-                } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                }
-                .accessibilityLabel("composer_done")
-                .accessibilityIdentifier("composer.keyboard.dismiss")
-            }
         }
         #if canImport(harness_runtimeFFI)
             .onChange(of: modelOpen) { _, _ in

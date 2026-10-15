@@ -26,13 +26,13 @@ struct MCPEditPage: View {
                 Circle().fill(dot).frame(width: 8, height: 8)
                     .overlay(Circle().stroke(dot.tint(0.22), lineWidth: 3).scaleEffect(1.75))
                 Text("mcp_edit_status_tools_available \(server.status.label) \(server.tools.map(String.init) ?? "—")")
-                    .font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
+                    .font(.footnote.weight(.medium)).foregroundColor(t.text2)
                 Spacer()
                 Button {
                     host.refreshMcp()
                 } label: {
                     Text("mcp_reconnect")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.caption.weight(.medium))
                         .foregroundColor(t.text2)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -98,7 +98,7 @@ struct MCPEditPage: View {
             }
             Button { host.removeMcpServer(server) } label: {
                 Text("mcp_remove_server")
-                    .font(.system(size: 13.5, weight: .medium))
+                    .font(.footnote.weight(.medium))
                     .foregroundColor(t.danger)
                     .frame(maxWidth: .infinity)
                     .padding(12)

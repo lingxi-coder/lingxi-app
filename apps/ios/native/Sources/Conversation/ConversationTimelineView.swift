@@ -328,7 +328,7 @@ private struct ConversationThoughtRow: View {
 
     var body: some View {
         Text("chat_thinking")
-            .font(.system(size: 13, weight: .medium))
+            .font(.footnote.weight(.medium))
             .foregroundStyle(t.text3)
             .runtimeTextSweep(isActive: isRunning, highlightColor: t.text)
             .padding(.horizontal, 10)
@@ -367,19 +367,19 @@ private struct ConversationToolBatchRow: View {
                     LXIcon(name: batchIcon, size: 14, color: t.text3, stroke: 1.6)
                     HStack(spacing: 8) {
                         Text(summary)
-                            .font(.system(size: 11.5))
+                            .font(.caption)
                             .foregroundStyle(t.text4)
                             .lineLimit(1)
                     }
                     .runtimeTextSweep(isActive: containsRunningTool, highlightColor: t.text)
                     if failedToolCount > 0 {
                         Text("· \(failedToolCount) failed")
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(.caption.weight(.medium))
                             .foregroundStyle(t.danger)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(t.text4)
                         .timelineChevron(
                             isHighlighted: isFocused,
@@ -480,7 +480,7 @@ private struct ConversationTimelineNoticeRow: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(notice.text)
-                .font(.system(size: 12))
+                .font(.caption)
                 .foregroundStyle(t.text3)
                 .lineLimit(2)
             Spacer(minLength: 0)

@@ -4,7 +4,6 @@ struct DreamPage: View {
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
 
-    @State private var orbPulse = false
     private let rose = Color(srgb: 0.809, 0.4552, 0.8891) // oklch(70% 0.18 320)
 
     private struct Activity { let key: String; let label: String; let sub: String }
@@ -30,18 +29,17 @@ struct DreamPage: View {
                         .fill(RadialGradient(colors: [rose, Color(srgb: 0.1289,0.214,0.6526)],
                                              center: .init(x: 0.3, y: 0.3), startRadius: 2, endRadius: 70))
                         .frame(width: 76, height: 76)
-                        .opacity(orbPulse ? 0.8 : 0.45)
+                        .opacity(0.65)
                     Circle().fill(t.windowBg).frame(width: 64, height: 64)
                         .overlay(LXIcon(name: .dream, size: 32, color: rose, stroke: 1.6))
                 }
                 .padding(.bottom, 14)
-                Text("settings_dream_mode").font(.system(size: 19, weight: .bold)).foregroundColor(t.text)
+                Text("settings_dream_mode").font(.title3.weight(.bold)).foregroundColor(t.text)
                 Text("dream_description_blurb")
-                    .font(.system(size: 12.5)).foregroundColor(t.text3)
+                    .font(.footnote).foregroundColor(t.text3)
                     .multilineTextAlignment(.center).lineSpacing(5).padding(.top, 6).padding(.horizontal, 16)
             }
             .padding(.top, 12).padding(.bottom, 22)
-            .onAppear { withAnimation(.easeInOut(duration: 3).repeatForever()) { orbPulse = true } }
 
             SettingsSection {
                 SettingsRow(label: String(localized: "dream_enable"), sub: store.dream.lastRun, chevron: false, isLast: true) {

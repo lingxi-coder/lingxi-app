@@ -51,10 +51,10 @@ struct AudioSetupBanner: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(guidance.title, systemImage: "mic")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(theme.text)
             Text(guidance.detail)
-                .font(.system(size: 12.5))
+                .font(.footnote)
                 .foregroundStyle(theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 14) {
@@ -70,7 +70,7 @@ struct AudioSetupBanner: View {
                     .contentShape(Rectangle())
                     .accessibilityIdentifier("conversation.audio-setup.configure")
             }
-            .font(.system(size: 13, weight: .medium))
+            .font(.footnote.weight(.medium))
             .buttonStyle(.plain)
             .frame(minHeight: 44)
         }

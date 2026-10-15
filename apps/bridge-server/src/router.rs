@@ -228,6 +228,9 @@ pub trait CommandRouter: Send + Sync + 'static {
     fn abort_realtime_audio(&self) {}
     /// Wait for the native session to release tools and provider transport.
     async fn stop_realtime_audio(&self) {}
+    /// Drain connection-owned in-memory child conversations before their event
+    /// sink is released. Routers without such state need no close hook.
+    async fn connection_closed(&self) {}
     /// Route one decoded [`ClientCommand`], emitting any reply event(s) through
     /// `sink`. Pure side-effecting: it never blocks the caller for a turn (the
     /// turn path lives on [`crate::server::TurnDriver`]).
@@ -393,6 +396,13 @@ pub struct EngineCommandRouter {
     /// present it lets the router emit `SlashCommandCatalog` pulls and
     /// `CommandsChanged` pushes from the same live registry snapshot.
     slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
+    /// Ready parent and isolated recipe for RAM-only child conversations.
+    side_chat_runtime: Option<(
+        Arc<orchestrator::ConversationOrchestrator>,
+        Arc<dyn harness_runtime::side_chat::SideChatFactory>,
+    )>,
+    /// One child manager per bridge connection generation.
+    side_chat_manager: tokio::sync::Mutex<Option<Arc<harness_runtime::side_chat::SideChatManager>>>,
     /// Optional persisted-session catalog/replay context. Production boot wires
     /// it; lightweight users of the routing seam can omit it.
     session_store: Option<SessionStoreContext>,
@@ -456,6 +466,36 @@ impl EngineCommandRouter {
     pub(crate) fn with_cron_firer(mut self, firer: Arc<crate::cron_host::HostCronFirer>) -> Self {
         self.cron_firer = Some(firer);
         self
+    }
+
+    /// Install the ready parent and isolated factory used by side-chat wire commands.
+    pub(crate) fn with_side_chat_runtime(
+        mut self,
+        parent: Arc<orchestrator::ConversationOrchestrator>,
+        factory: Arc<dyn harness_runtime::side_chat::SideChatFactory>,
+    ) -> Self {
+        self.side_chat_runtime = Some((parent, factory));
+        self
+    }
+
+    async fn side_chat_manager(
+        &self,
+        owner: Arc<dyn ClientEventSink>,
+    ) -> Result<Arc<harness_runtime::side_chat::SideChatManager>, String> {
+        let mut manager = self.side_chat_manager.lock().await;
+        if let Some(manager) = manager.as_ref() {
+            return Ok(manager.clone());
+        }
+        let Some((parent, factory)) = &self.side_chat_runtime else {
+            return Err("side chat is unavailable on this bridge".into());
+        };
+        let created = harness_runtime::side_chat::SideChatManager::new(
+            parent.clone(),
+            factory.clone(),
+            owner,
+        );
+        *manager = Some(created.clone());
+        Ok(created)
     }
 
     /// Move this process's live-session presence only after the engine has
@@ -583,6 +623,8 @@ impl EngineCommandRouter {
             tasks,
             dispatcher,
             slash_registry,
+            side_chat_runtime: None,
+            side_chat_manager: tokio::sync::Mutex::new(None),
             session_store: None,
             session_agent_observer: None,
             team_registry: None,
@@ -821,6 +863,14 @@ impl CommandRouter for EngineCommandRouter {
             controller.stop().await;
         }
     }
+    async fn connection_closed(&self) {
+        let manager = self.side_chat_manager.lock().await.take();
+        if let Some(manager) = manager {
+            if let Err(error) = manager.shutdown().await {
+                tracing::warn!(%error, "side-chat shutdown reported cleanup failures");
+            }
+        }
+    }
     async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
         if self.team_registry.is_none() {
             return Err("desktop runtime snapshot is unavailable".into());
@@ -992,6 +1042,129 @@ impl CommandRouter for EngineCommandRouter {
                     client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
                 self.dispatch_mod_ui_client_operation_result(request_id, operation, sink.as_ref())
                     .await;
+            }
+            ClientCommand::SideChatCreate {
+                request_id,
+                initial_input,
+            } => {
+                let manager = self.side_chat_manager(sink.clone()).await;
+                let result = match manager {
+                    Ok(manager) => {
+                        manager
+                            .create(request_id.clone(), initial_input, None, None)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(message) = result {
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: Some(request_id),
+                        side_id: None,
+                        message,
+                    })
+                    .await;
+                }
+            }
+            ClientCommand::SideChatList {} => match self.side_chat_manager(sink.clone()).await {
+                Ok(manager) => {
+                    sink.emit(ClientEvent::SideChatList {
+                        side_ids: manager.list().await,
+                    })
+                    .await;
+                }
+                Err(message) => {
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: None,
+                        side_id: None,
+                        message,
+                    })
+                    .await;
+                }
+            },
+            ClientCommand::SideChatGet { side_id } => {
+                match self.side_chat_manager(sink.clone()).await {
+                    Ok(manager) => {
+                        if let Err(message) = manager.emit_snapshot(&side_id).await {
+                            sink.emit(ClientEvent::SideChatError {
+                                request_id: None,
+                                side_id: Some(side_id),
+                                message,
+                            })
+                            .await;
+                        }
+                    }
+                    Err(message) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: None,
+                            side_id: Some(side_id),
+                            message,
+                        })
+                        .await;
+                    }
+                }
+            }
+            ClientCommand::SideChatEnd { side_id } => {
+                match self.side_chat_manager(sink.clone()).await {
+                    Ok(manager) => match manager.end(&side_id).await {
+                        Ok(()) => {
+                            sink.emit(ClientEvent::SideChatEnded { side_id }).await;
+                        }
+                        Err(message) => {
+                            sink.emit(ClientEvent::SideChatError {
+                                request_id: None,
+                                side_id: Some(side_id),
+                                message,
+                            })
+                            .await;
+                        }
+                    },
+                    Err(message) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: None,
+                            side_id: Some(side_id),
+                            message,
+                        })
+                        .await;
+                    }
+                }
+            }
+            ClientCommand::SideChatSubmit {
+                side_id,
+                request_id,
+                command_json,
+            } => {
+                let manager = match self.side_chat_manager(sink.clone()).await {
+                    Ok(manager) => manager,
+                    Err(message) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: Some(request_id),
+                            side_id: Some(side_id),
+                            message,
+                        })
+                        .await;
+                        return;
+                    }
+                };
+                let command = match serde_json::from_str::<ClientCommand>(&command_json) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: Some(request_id),
+                            side_id: Some(side_id),
+                            message: format!("invalid nested side-chat command: {error}"),
+                        })
+                        .await;
+                        return;
+                    }
+                };
+                if let Err(message) = manager.submit(&side_id, request_id.clone(), command).await {
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: Some(request_id),
+                        side_id: Some(side_id),
+                        message,
+                    })
+                    .await;
+                }
             }
             // Both arms write the durable automation store — `started` binds a
             // session id into it, `complete` records a run result — so they sit

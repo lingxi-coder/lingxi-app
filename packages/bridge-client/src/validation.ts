@@ -16,6 +16,7 @@ import type {
   ClientEvent,
   FusionCatalogDto,
   MessageDto,
+  PermissionRequest,
   SessionAgentMessageRowDto,
   NativeUiClientAddressDto,
   NativeUiComponent,
@@ -1343,8 +1344,107 @@ export function validateClientEvent(value: unknown): ClientEvent {
     case 'audio_capabilities_changed':
       exactKeys(input, ['type', 'capabilities'], 'client event');
       return { type, capabilities: audioCapabilities(input['capabilities']) };
+    case 'side_chat_created':
+      exactKeys(input, ['type', 'request_id', 'side_id'], 'client event');
+      return {
+        type,
+        request_id: string(input['request_id'], 'side chat request id'),
+        side_id: string(input['side_id'], 'side chat id'),
+      };
+    case 'side_chat_list':
+      exactKeys(input, ['type', 'side_ids'], 'client event');
+      return { type, side_ids: stringArray(input['side_ids'], 'side chat ids') };
+    case 'side_chat_snapshot':
+      exactKeys(input, ['type', 'side_id', 'events_json'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        events_json: stringArray(input['events_json'], 'side chat replay events'),
+      };
+    case 'side_chat_event':
+      exactKeys(input, ['type', 'side_id', 'event_json'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        event_json: string(input['event_json'], 'side chat event JSON'),
+      };
+    case 'side_chat_permission':
+      exactKeys(input, ['type', 'side_id', 'request'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        request: sideChatPermissionRequest(input['request']),
+      };
+    case 'side_chat_submitted':
+      exactKeys(input, ['type', 'side_id', 'request_id'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        request_id: string(input['request_id'], 'side chat request id'),
+      };
+    case 'side_chat_ended':
+      exactKeys(input, ['type', 'side_id'], 'client event');
+      return { type, side_id: string(input['side_id'], 'side chat id') };
+    case 'side_chat_error':
+      exactKeys(input, ['type', 'request_id', 'side_id', 'message'], 'client event');
+      return {
+        type,
+        ...(input['request_id'] === undefined ? {} : { request_id: string(input['request_id'], 'side chat request id') }),
+        ...(input['side_id'] === undefined ? {} : { side_id: string(input['side_id'], 'side chat id') }),
+        message: string(input['message'], 'side chat error'),
+      };
   }
   return input as ClientEvent;
+}
+
+function sideChatPermissionRequest(value: unknown): PermissionRequest {
+  const request = object(value, 'side chat permission request');
+  exactKeys(request, [
+    'request_id', 'kind', 'worker', 'owner', 'suppress_always_allow_rule', 'auto_mode_prompt',
+  ], 'side chat permission request');
+  integer(request['request_id'], 'side chat permission request id');
+
+  const kind = object(request['kind'], 'side chat permission kind');
+  switch (kind['type']) {
+    case 'tool_use_confirm':
+      exactKeys(kind, ['type', 'tool_name', 'tool_input_json', 'default_allow'], 'side chat permission kind');
+      string(kind['tool_name'], 'side chat permission tool');
+      string(kind['tool_input_json'], 'side chat permission tool input');
+      boolean(kind['default_allow'], 'side chat permission default allow');
+      break;
+    case 'exit_plan_mode':
+      exactKeys(kind, ['type', 'plan'], 'side chat permission kind');
+      string(kind['plan'], 'side chat permission plan');
+      break;
+    case 'bypass_permissions_mode':
+      exactKeys(kind, ['type'], 'side chat permission kind');
+      break;
+    default:
+      throw new Error('invalid side chat permission kind');
+  }
+
+  if (request['worker'] !== undefined) {
+    const worker = object(request['worker'], 'side chat permission worker');
+    exactKeys(worker, ['name', 'color', 'team'], 'side chat permission worker');
+    string(worker['name'], 'side chat permission worker name');
+    string(worker['color'], 'side chat permission worker color');
+    if (worker['team'] !== undefined) string(worker['team'], 'side chat permission worker team');
+  }
+  if (request['owner'] !== undefined) {
+    const owner = object(request['owner'], 'side chat permission owner');
+    exactKeys(owner, ['session_id', 'turn_id', 'worker_name'], 'side chat permission owner');
+    if (owner['session_id'] !== undefined) string(owner['session_id'], 'side chat permission owner session');
+    if (owner['turn_id'] !== undefined) integer(owner['turn_id'], 'side chat permission owner turn');
+    if (owner['worker_name'] !== undefined) string(owner['worker_name'], 'side chat permission owner worker');
+  }
+  if (request['suppress_always_allow_rule'] !== undefined) {
+    boolean(request['suppress_always_allow_rule'], 'side chat permission always-allow suppression');
+  }
+  if (request['auto_mode_prompt'] !== undefined
+    && !['workflow_bash', 'exit_plan_mode'].includes(String(request['auto_mode_prompt']))) {
+    throw new Error('invalid side chat auto-mode prompt');
+  }
+  return request as unknown as PermissionRequest;
 }
 
 export function validateServerHello(value: unknown): ServerHello {

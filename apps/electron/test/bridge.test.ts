@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { BridgeClient } from '@lingxi/bridge-client';
+import type { ClientEvent } from '@lingxi/bridge-client';
 
 import { SessionRuntime } from '../src/main/bridge.js';
 import {
@@ -442,6 +443,68 @@ test('session runtime replay resets at resume and reconstructs later transcript 
   assert.deepEqual(first.map((entry) => entry.sequence), [3, 4, 5]);
   (first[2]!.event as { text: string }).text = 'mutated';
   assert.equal((runtime.replaySnapshot()[2]!.event as { text: string }).text, 'hello');
+});
+
+test('SideChat events stay out of renderer delivery and transcript replay', () => {
+  const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  client.sendCommand = () => { throw new Error('unexpected command'); };
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const webContents = fakeWebContents(sent);
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    envelopeEvents: true,
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  (runtime as any).generation = 1;
+  runtime.registerWindow(webContents as any, 'app://desktop/index.html');
+  (runtime as any).wireClient(client, 1);
+
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', { type: 'text_delta', text: 'public transcript event' });
+  const deliveredBeforeSideChat = sent.filter(({ channel }) => channel === CH_EVENT).length;
+
+  const sideChatEvents: ClientEvent[] = [
+    { type: 'side_chat_created', request_id: 'create-1', side_id: 'side-1' },
+    { type: 'side_chat_list', side_ids: ['side-1'] },
+    { type: 'side_chat_snapshot', side_id: 'side-1', events_json: ['{"type":"text_delta","text":"private child text"}'] },
+    { type: 'side_chat_event', side_id: 'side-1', event_json: '{"type":"text_delta","text":"private child text"}' },
+    {
+      type: 'side_chat_permission',
+      side_id: 'side-1',
+      request: {
+        request_id: 7,
+        kind: { type: 'tool_use_confirm', tool_name: 'Read', tool_input_json: '{}', default_allow: true },
+      },
+    },
+    { type: 'side_chat_submitted', side_id: 'side-1', request_id: 'submit-1' },
+    { type: 'side_chat_ended', side_id: 'side-1' },
+    { type: 'side_chat_error', request_id: 'submit-1', side_id: 'side-1', message: 'private child failure' },
+  ];
+  for (const event of sideChatEvents) client.emit('event', event);
+
+  assert.equal(
+    sent.filter(({ channel }) => channel === CH_EVENT).length,
+    deliveredBeforeSideChat,
+    'SideChat child transcript, snapshot, and permission events must not reach renderer subscribers',
+  );
+  assert.deepEqual(
+    runtime.replaySnapshot().map(({ event }) => event.type),
+    ['session_resumed', 'text_delta'],
+    'private SideChat events must not enter replay available to a reloaded renderer',
+  );
+
+  client.emit('event', { type: 'text_delta', text: 'public event after SideChat' });
+  const envelopes = sent
+    .filter(({ channel }) => channel === CH_EVENT)
+    .map(({ payload }) => payload as { sequence: number; event: { type: string } });
+  assert.deepEqual(envelopes.map(({ event }) => event.type), [
+    'session_resumed', 'text_delta', 'text_delta',
+  ], 'ordinary transcript events remain renderer-visible');
+  assert.deepEqual(envelopes.map(({ sequence }) => sequence), [1, 2, 3],
+    'private SideChat events do not consume renderer replay sequence numbers');
+  assert.deepEqual(runtime.replaySnapshot().map(({ sequence }) => sequence), [1, 2, 3]);
 });
 
 test('resumed usage and cumulative status reach the renderer and survive replay without an active turn', () => {

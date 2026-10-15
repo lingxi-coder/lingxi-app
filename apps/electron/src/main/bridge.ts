@@ -8,6 +8,7 @@ import {
   validateUiClientOperationResponseJson,
   validateUiControlMetadataJson,
 } from '@lingxi/bridge-client';
+import { CLIENT_EVENT_DISPOSITIONS } from '../shared/clientCommands.js';
 import type {
   AskUserQuestionRequestDto,
   AudioOperationRequestDto,
@@ -807,6 +808,11 @@ export class SessionRuntime {
   }
 
   private broadcastClientEvent(event: ClientEvent): void {
+    // SideChat events are consumed only by the host-side SideChat request
+    // owner. Keep their child transcript and permission payloads out of the
+    // renderer event channel and its replay buffer until a UI is explicitly
+    // added. Other host-private event families keep their existing routing.
+    if (event.type.startsWith('side_chat_') && CLIENT_EVENT_DISPOSITIONS[event.type] === 'host_private') return;
     const envelope = this.eventEnvelope(event, true);
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);

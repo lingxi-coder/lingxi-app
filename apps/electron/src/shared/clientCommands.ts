@@ -84,6 +84,11 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   stop_realtime_audio: 'host_private',
   get_audio_session_context: 'host_private',
   update_audio_capabilities: 'host_private',
+  side_chat_create: 'host_private',
+  side_chat_list: 'host_private',
+  side_chat_get: 'host_private',
+  side_chat_end: 'host_private',
+  side_chat_submit: 'host_private',
 } as const satisfies Record<ClientCommand['type'], DesktopDisposition>;
 
 export const REFRESH_LISTING_DISPOSITIONS = {
@@ -203,6 +208,14 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   realtime_audio_event: 'host_private',
   audio_session_context: 'host_private',
   audio_capabilities_changed: 'host_private',
+  side_chat_created: 'host_private',
+  side_chat_list: 'host_private',
+  side_chat_snapshot: 'host_private',
+  side_chat_event: 'host_private',
+  side_chat_permission: 'host_private',
+  side_chat_submitted: 'host_private',
+  side_chat_ended: 'host_private',
+  side_chat_error: 'host_private',
 } as const satisfies Record<ClientEvent['type'], DesktopDisposition>;
 
 /**

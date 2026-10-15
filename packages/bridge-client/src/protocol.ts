@@ -741,7 +741,15 @@ export type ClientCommand =
   | { type: 'realtime_audio_input'; input_json: string }
   | { type: 'stop_realtime_audio' }
   | { type: 'get_audio_session_context' }
-  | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto };
+  | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto }
+  // Lightweight in-memory child conversations (client-protocol protocol 25).
+  // ClientTextDto remains an ordinary JSON string on the wire; command_json is
+  // a JSON-encoded ClientCommand carried as a string, not a nested object.
+  | { type: 'side_chat_create'; request_id: string; initial_input?: string }
+  | { type: 'side_chat_list' }
+  | { type: 'side_chat_get'; side_id: string }
+  | { type: 'side_chat_end'; side_id: string }
+  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1908,7 +1916,16 @@ export type ClientEvent =
   | { type: 'audio_cancel'; identity: AudioOperationIdDto }
   | { type: 'realtime_audio_event'; session_id: string; event_json: string }
   | { type: 'audio_session_context'; session_id: string; profile_id: string; account_scope: string }
-  | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto };
+  | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto }
+  // Lightweight in-memory child-conversation lifecycle and replay events.
+  | { type: 'side_chat_created'; request_id: string; side_id: string }
+  | { type: 'side_chat_list'; side_ids: string[] }
+  | { type: 'side_chat_snapshot'; side_id: string; events_json: string[] }
+  | { type: 'side_chat_event'; side_id: string; event_json: string }
+  | { type: 'side_chat_permission'; side_id: string; request: PermissionRequest }
+  | { type: 'side_chat_submitted'; side_id: string; request_id: string }
+  | { type: 'side_chat_ended'; side_id: string }
+  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs

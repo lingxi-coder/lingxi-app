@@ -1845,6 +1845,10 @@ pub async fn assemble_with_credentials(
         Some(dispatcher),
         Some(runtime.shared_command_registry.clone()),
     )
+    .with_side_chat_runtime(
+        runtime.orchestrator.clone(),
+        runtime.side_chat_factory.clone(),
+    )
     .with_cron_firer(cron_firer)
     .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
     .with_credentials(runtime.credentials.clone())

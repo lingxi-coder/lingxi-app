@@ -3299,6 +3299,37 @@ impl BridgeConnection {
                         .await;
                 }
             }
+            command @ (ClientCommand::SideChatCreate { .. }
+            | ClientCommand::SideChatList {}
+            | ClientCommand::SideChatGet { .. }
+            | ClientCommand::SideChatEnd { .. }
+            | ClientCommand::SideChatSubmit { .. }) => {
+                let sink = self.unscoped_event_sink();
+                if let Some(router) = self.router.clone() {
+                    router.route(command, sink).await;
+                } else {
+                    let (request_id, side_id) = match &command {
+                        ClientCommand::SideChatCreate { request_id, .. } => {
+                            (Some(request_id.clone()), None)
+                        }
+                        ClientCommand::SideChatGet { side_id }
+                        | ClientCommand::SideChatEnd { side_id } => (None, Some(side_id.clone())),
+                        ClientCommand::SideChatSubmit {
+                            side_id,
+                            request_id,
+                            ..
+                        } => (Some(request_id.clone()), Some(side_id.clone())),
+                        ClientCommand::SideChatList {} => (None, None),
+                        _ => unreachable!("side-chat command group is exhaustive"),
+                    };
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id,
+                        side_id,
+                        message: "side chat command router is unavailable".into(),
+                    })
+                    .await;
+                }
+            }
             ClientCommand::UiAttach { surface, client_id } => {
                 let _lifecycle = self.ui_lifecycle_gate.lock().await;
                 let mut owned = self.ui_attached_clients.lock().await;
@@ -4515,6 +4546,7 @@ impl BridgeConnection {
         }
         if let Some(router) = &self.router {
             router.stop_realtime_audio().await;
+            router.connection_closed().await;
         }
         self.abort_and_join_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);

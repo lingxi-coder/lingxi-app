@@ -113,6 +113,11 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   stop_realtime_audio: true,
   get_audio_session_context: true,
   update_audio_capabilities: true,
+  side_chat_create: true,
+  side_chat_list: true,
+  side_chat_get: true,
+  side_chat_end: true,
+  side_chat_submit: true,
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
@@ -216,6 +221,14 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   realtime_audio_event: true,
   audio_session_context: true,
   audio_capabilities_changed: true,
+  side_chat_created: true,
+  side_chat_list: true,
+  side_chat_snapshot: true,
+  side_chat_event: true,
+  side_chat_permission: true,
+  side_chat_submitted: true,
+  side_chat_ended: true,
+  side_chat_error: true,
 };
 
 /**

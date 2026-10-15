@@ -100,3 +100,28 @@ test('engine audio response and capability commands stay private to main', () =>
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.audio_response, 'host_private');
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.update_audio_capabilities, 'host_private');
 });
+
+test('side-chat protocol stays host-private until Desktop adds a UI surface', () => {
+  for (const type of [
+    'side_chat_create',
+    'side_chat_list',
+    'side_chat_get',
+    'side_chat_end',
+    'side_chat_submit',
+  ] as const) {
+    assert.equal(CLIENT_COMMAND_DISPOSITIONS[type], 'host_private');
+    assert.equal(ALLOWED_CLIENT_COMMAND_TYPES.includes(type as never), false);
+  }
+  for (const type of [
+    'side_chat_created',
+    'side_chat_list',
+    'side_chat_snapshot',
+    'side_chat_event',
+    'side_chat_permission',
+    'side_chat_submitted',
+    'side_chat_ended',
+    'side_chat_error',
+  ] as const) {
+    assert.equal(CLIENT_EVENT_DISPOSITIONS[type], 'host_private');
+  }
+});

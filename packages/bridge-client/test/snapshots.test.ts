@@ -1011,6 +1011,27 @@ function validateCommand(name: string, v: unknown): void {
     case 'update_audio_capabilities':
       validateAudioCapabilities(o['capabilities']);
       break;
+    case 'side_chat_create':
+      exactObjectKeys(o, ['type', 'request_id'], ['initial_input'], `command snapshot ${name}`);
+      assert.ok(isString(o['request_id']));
+      if ('initial_input' in o) assert.ok(isString(o['initial_input']));
+      break;
+    case 'side_chat_list':
+      exactObjectKeys(o, ['type'], [], `command snapshot ${name}`);
+      break;
+    case 'side_chat_get':
+    case 'side_chat_end':
+      exactObjectKeys(o, ['type', 'side_id'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['side_id']));
+      break;
+    case 'side_chat_submit': {
+      exactObjectKeys(o, ['type', 'side_id', 'request_id', 'command_json'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['side_id']) && isString(o['request_id']) && isString(o['command_json']));
+      const nested = rec(JSON.parse(o['command_json'] as string));
+      assert.ok(!String(nested['type']).startsWith('side_chat_'), 'nested command must not recursively manage side chats');
+      validateCommand(`${name} nested command`, nested);
+      break;
+    }
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
   }
@@ -1542,6 +1563,50 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'audio_capabilities_changed':
       validateAudioCapabilities(o['capabilities']);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_created':
+      exactObjectKeys(o, ['type', 'request_id', 'side_id'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['request_id']) && isString(o['side_id']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_list':
+      exactObjectKeys(o, ['type', 'side_ids'], [], `event snapshot ${name}`);
+      validateStringArray(o['side_ids']);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_snapshot':
+      exactObjectKeys(o, ['type', 'side_id', 'events_json'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['side_id']));
+      validateStringArray(o['events_json']);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_event':
+      exactObjectKeys(o, ['type', 'side_id', 'event_json'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['side_id']) && isString(o['event_json']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_permission':
+      exactObjectKeys(o, ['type', 'side_id', 'request'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['side_id']));
+      validatePermissionRequest(o['request']);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_submitted':
+      exactObjectKeys(o, ['type', 'side_id', 'request_id'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['side_id']) && isString(o['request_id']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_ended':
+      exactObjectKeys(o, ['type', 'side_id'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['side_id']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'side_chat_error':
+      exactObjectKeys(o, ['type', 'message'], ['request_id', 'side_id'], `event snapshot ${name}`);
+      assert.ok(isString(o['message']));
+      if ('request_id' in o) assert.ok(isString(o['request_id']));
+      if ('side_id' in o) assert.ok(isString(o['side_id']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'cron_run_bound':

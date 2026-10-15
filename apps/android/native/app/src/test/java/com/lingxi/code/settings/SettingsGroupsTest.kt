@@ -11,14 +11,29 @@ class SettingsGroupsTest {
     private val all = settingsGroupEntries(computerUseAvailable = true)
 
     @Test
-    fun `the six groups keep the designed order and each lists pages`() {
+    fun `the groups keep the designed order and each lists pages`() {
         assertEquals(
-            listOf("models", "modes", "phone", "general", "data", "about"),
+            listOf("models", "voice", "modes", "phone", "general", "data", "about"),
             SettingsGroup.entries.map { it.key },
         )
         SettingsGroup.entries.forEach { group ->
             assertTrue("${group.key} is empty", all.any { it.group == group })
         }
+    }
+
+    @Test
+    fun `models and voice open their page directly, the rest list pages`() {
+        assertEquals("settings/providers/Llm", SettingsGroup.Models.directRoute)
+        assertEquals(SettingsRoutes.VOICE, SettingsGroup.Voice.directRoute)
+        SettingsGroup.entries
+            .filter { it != SettingsGroup.Models && it != SettingsGroup.Voice }
+            .forEach { assertNull("${it.key} should list pages", it.directRoute) }
+    }
+
+    @Test
+    fun `voice is no longer a models page`() {
+        val voice = all.single { it.route == SettingsRoutes.VOICE }
+        assertEquals(SettingsGroup.Voice, voice.group)
     }
 
     @Test

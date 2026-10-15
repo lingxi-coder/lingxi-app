@@ -1144,6 +1144,21 @@ visionDelegationEnabled: true)
             XCTAssertFalse(source.model.isNew)
         }
 
+        func testInitialSessionStartedAdoptsOwnerOfOptimisticFirstPrompt() {
+            let source = makeSource()
+            let prompt = Message(role: .user, text: "Draw a bicycle")
+            source.model.messages = [prompt]
+            source.model.items = [.message(prompt)]
+            source.model.streaming = true
+
+            source.applyForTesting(.sessionStarted(sessionId: "first-session", mode: .code))
+
+            XCTAssertEqual(source.model.activeSessionId, "first-session")
+            XCTAssertEqual(source.model.messages, [prompt])
+            XCTAssertEqual(source.model.items, [.message(prompt)])
+            XCTAssertTrue(source.model.streaming)
+        }
+
         /// The loaded transition is the persistence trigger. It must never be
         /// observable before the rows carried by the same engine event, or a
         /// crash between the two publications can durably erase the old index.

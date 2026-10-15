@@ -3919,7 +3919,12 @@ final class EngineConversationSource: ConversationSource {
             // delayed/bootstrap event. Keep both the visible transcript and
             // its owning session id together instead of publishing mismatched
             // state (rows from A while commands target B).
-            if isSwitch && hadVisibleTranscript && !confirmedNewSession {
+            // The first send appends its optimistic user row before the lazy
+            // engine reports its initial session. Adopt that first owner even
+            // with visible rows, or widgets receive an empty session id and
+            // incorrectly render as unavailable until history is reopened.
+            let adoptingInitialSession = model.activeSessionId.isEmpty && !hasConfirmedSessionState
+            if isSwitch && hadVisibleTranscript && !confirmedNewSession && !adoptingInitialSession {
                 return
             }
             if isSwitch && !model.streaming

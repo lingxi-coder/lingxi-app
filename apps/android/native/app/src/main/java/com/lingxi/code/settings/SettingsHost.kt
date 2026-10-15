@@ -329,6 +329,7 @@ fun SettingsHost(
                         onEdit = { id -> navController.navigate(SettingsRoutes.providerEdit(kind.name, id)) },
                         onAdd = { navController.navigate(SettingsRoutes.providerPicker(kind.name)) },
                         onReconnectEngine = reconnectSafely,
+                        onNavigate = { navController.navigate(it) },
                     )
                 }
                 page(SettingsRoutes.PROVIDER_PICKER) {
@@ -478,7 +479,9 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
             SettingsGroup.fromKey(entry.arguments?.getString("group"))
                 ?.let { stringResource(it.title) }
                 ?: stringResource(SettingsTitles.MAIN)
-        SettingsRoutes.PROVIDER_LIST -> stringResource(providerKindArg(entry).titleRes)
+        SettingsRoutes.PROVIDER_LIST -> providerKindArg(entry).let {
+            if (it == ProviderKind.Llm) stringResource(R.string.settings_group_models_hub) else stringResource(it.titleRes)
+        }
         SettingsRoutes.PROVIDER_PICKER ->
             stringResource(R.string.provider_add_kind_fmt, stringResource(providerKindArg(entry).titleRes))
         SettingsRoutes.PROVIDER_EDIT -> {

@@ -47,7 +47,7 @@ struct DesktopSettingsEntry: Identifiable {
         .init(id: "general", titleKey: "settings_parity_general", group: "个人", page: .general, keys: ["general", "language", "notifications", "input"]),
         .init(id: "account", titleKey: "settings_title_account", group: "个人", page: .account, keys: ["account", "login", "auth"]),
         .init(id: "appearance", titleKey: "settings_appearance", group: "个人", page: .appearance, keys: ["appearance", "theme", "dark", "light"], mobileGroup: .general),
-        .init(id: "voice", titleKey: "settings_parity_voice", group: "个人", page: .voice, keys: ["voice", "tts", "stt"], mobileGroup: .models),
+        .init(id: "voice", titleKey: "settings_parity_voice", group: "个人", page: .voice, keys: ["voice", "tts", "stt"], mobileGroup: .voice),
         .init(id: "archived-chats", titleKey: "settings_parity_archived", group: "个人", page: .archivedChats, keys: ["archived", "restore"], mobileGroup: .data),
         .init(id: "projects", titleKey: "settings_parity_projects_trust", group: "个人", page: .projectsTrust, keys: ["project", "trustedDirectories"], mobileGroup: .data),
         .init(id: "provider-credentials", titleKey: "settings_parity_credentials", group: "模型与服务", page: .providerList(.init(.llm)), keys: ["credential", "API key", "keychain"], mobileGroup: .models),
@@ -108,7 +108,7 @@ struct MainSettingsPage: View {
                             label: group.title,
                             sub: group.summary,
                             isLast: group == SettingsGroup.allCases.last,
-                            onTap: { host.push(.group(group)) }
+                            onTap: { host.push(group.directPage ?? .group(group)) }
                         )
                         .accessibilityIdentifier("settings.group.\(group.rawValue)")
                     }

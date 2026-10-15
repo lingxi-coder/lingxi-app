@@ -10,12 +10,10 @@ struct SettingsPages: View {
         switch page {
         case .main:                       MainSettingsPage(store: store, host: host)
         case .account:                    DesktopAccountPage(host: host)
+        case .group(.models):             ModelsSettingsPage(store: store, host: host)
+        case .group(.voice):              VoicePage(store: store)
         case .group(let group):           SettingsGroupPage(group: group, host: host)
-        case .providerList(let b):
-            VStack {
-                ProviderListPage(store: store, host: host, kind: b.kind)
-                if b.kind == .llm { EngineProfileCredentialsEditor() }
-            }
+        case .providerList(let b):        ProviderListPage(store: store, host: host, kind: b.kind)
         case .providerPicker(let b):      ProviderPickerPage(store: store, host: host, kind: b.kind)
         case .providerEdit(let b, let id): ProviderEditPage(store: store, host: host, kind: b.kind, providerId: id)
         case .voice:                      VoicePage(store: store)

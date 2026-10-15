@@ -132,6 +132,24 @@ struct VoiceOfflineModelStatus: Identifiable, Equatable {
     let model: GeneratedOfflineModelEntry
     let state: VoiceModelState
     var id: String { model.id }
+
+    /// The catalog name in the interface language, falling back to English.
+    var displayName: String {
+        model.displayName[Locale.current.language.languageCode?.identifier ?? "en"]
+            ?? model.displayName["en"]
+            ?? model.id
+    }
+
+    var sizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: model.approxSizeBytes, countStyle: .file)
+    }
+
+    var isBusyOrFailed: Bool {
+        switch state {
+        case .queued, .downloading, .verifying, .extracting, .failed: true
+        case .notInstalled, .ready: false
+        }
+    }
 }
 
 enum VoiceConfigurationIssueKind: Equatable {
@@ -828,6 +846,32 @@ final class VoiceCapabilityModel {
         for model in GeneratedVoiceModelCatalog.packFor(languageBase(effectiveLanguageIdentifier)) {
             modelStore.cancel(model.id)
         }
+        refreshCapabilities()
+    }
+
+    /// Every catalog model with its install state, for the per-model list.
+    var allOfflineModels: [VoiceOfflineModelStatus] {
+        GeneratedVoiceModelCatalog.all.map {
+            VoiceOfflineModelStatus(model: $0, state: modelStates[$0.id] ?? .notInstalled)
+        }
+    }
+
+    func installOfflineModel(_ modelID: String) {
+        guard let entry = GeneratedVoiceModelCatalog.byID(modelID) else { return }
+        modelStore.download(entry)
+        syncModelStatesUntilSettled()
+    }
+
+    func cancelOfflineModel(_ modelID: String) {
+        modelStore.cancel(modelID)
+        refreshCapabilities()
+    }
+
+    func removeOfflineModel(_ modelID: String) {
+        guard let entry = GeneratedVoiceModelCatalog.byID(modelID) else { return }
+        // A model that an audio session still holds stays installed; the row
+        // simply keeps showing it as ready.
+        modelStore.remove(entry)
         refreshCapabilities()
     }
 

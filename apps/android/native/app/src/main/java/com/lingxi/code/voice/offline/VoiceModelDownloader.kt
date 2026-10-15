@@ -364,6 +364,17 @@ object VoiceModelDownloader {
         set(entry.id, if (isReady(entry)) ModelState.Ready else ModelState.NotInstalled)
     }
 
+    /**
+     * Delete one installed model from disk. An in-flight download is cancelled
+     * first so a late write cannot recreate the directory.
+     */
+    @Synchronized
+    fun remove(entry: GeneratedOfflineModelEntry) {
+        jobs.remove(entry.id)?.cancel()
+        if (appContext != null) modelDir(entry.id).deleteRecursively()
+        set(entry.id, ModelState.NotInstalled)
+    }
+
     private fun set(id: String, state: ModelState) = _states.update { it + (id to state) }
 
     @Synchronized

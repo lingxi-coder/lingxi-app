@@ -66,7 +66,7 @@ internal fun SettingsHomePage(onNavigate: (String) -> Unit) {
                         icon = group.icon,
                         isLast = index == SettingsGroup.entries.lastIndex,
                         modifier = Modifier.testTag(UiTags.settingsGroup(group.key)),
-                        onTap = { onNavigate(SettingsRoutes.group(group.key)) },
+                        onTap = { onNavigate(group.directRoute ?: SettingsRoutes.group(group.key)) },
                     )
                 }
             }

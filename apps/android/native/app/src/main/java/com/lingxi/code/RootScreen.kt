@@ -248,8 +248,6 @@ fun RootScreen(
     onOpenCronSettings: (String?) -> Unit = { onOpenSettings() },
     /** Open the scheduled-task page on a new task prefilled with the given prompt. */
     onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
-    /** Open the permission-mode settings page. */
-    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and

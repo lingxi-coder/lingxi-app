@@ -1929,4 +1929,15 @@
     <string name="settings_appearance_system">System default</string>
     <string name="settings_appearance_system_sub">Follow the device’s light or dark appearance.</string>
     <string name="settings_keyboard_system_description">Android manages keyboards, input languages and input method preferences.</string>
+    <string name="chat_summary_more">More conversation options</string>
+    <string name="chat_summary_changes">Changes</string>
+    <string name="chat_summary_tools">Tools</string>
+    <string name="chat_summary_agents">Agents and background tasks</string>
+    <string name="chat_summary_resources">Resources</string>
+    <string name="chat_summary_plan">Plan</string>
+    <string name="chat_summary_changes_empty">No file changes in this conversation.</string>
+    <string name="chat_summary_tools_empty">No tool calls in this conversation.</string>
+    <string name="chat_summary_agents_empty">No agents or background tasks in this conversation.</string>
+    <string name="chat_summary_resources_empty">No attachments or resources in this conversation.</string>
+    <string name="chat_summary_plan_empty">No plan in this conversation.</string>
 </resources>

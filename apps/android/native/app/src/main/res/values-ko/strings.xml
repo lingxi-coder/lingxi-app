@@ -1929,4 +1929,15 @@
     <string name="settings_appearance_system">시스템 설정</string>
     <string name="settings_appearance_system_sub">기기의 밝은 테마 또는 어두운 테마를 따릅니다。</string>
     <string name="settings_keyboard_system_description">키보드, 입력 언어 및 입력 방식은 Android 시스템 설정에서 관리합니다.</string>
+    <string name="chat_summary_more">대화 더보기</string>
+    <string name="chat_summary_changes">변경 사항</string>
+    <string name="chat_summary_tools">도구</string>
+    <string name="chat_summary_agents">에이전트 및 백그라운드 작업</string>
+    <string name="chat_summary_resources">리소스</string>
+    <string name="chat_summary_plan">계획</string>
+    <string name="chat_summary_changes_empty">이 대화에는 파일 변경 사항이 없습니다</string>
+    <string name="chat_summary_tools_empty">이 대화에는 도구 호출이 없습니다</string>
+    <string name="chat_summary_agents_empty">이 대화에는 에이전트 또는 백그라운드 작업이 없습니다</string>
+    <string name="chat_summary_resources_empty">이 대화에는 첨부 파일 또는 리소스가 없습니다</string>
+    <string name="chat_summary_plan_empty">이 대화에는 계획이 없습니다</string>
 </resources>

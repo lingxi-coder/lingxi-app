@@ -184,7 +184,7 @@ fun Composer(
             onTextChange(suggestion)
         }
     }
-    val shape = RoundedCornerShape(22.dp)
+    val shape = RoundedCornerShape(16.dp)
 
     Column(
         modifier = modifier
@@ -271,78 +271,98 @@ fun Composer(
                 Text(promptSuggestionNotice, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
-                Spacer(Modifier.weight(1f))
-                ComposerContextWindow(contextUsage, model.details?.contextWindowTokens)
-                ModelChip(
-                    model = model,
-                    models = availableModels,
-                    modelSetupRequired = modelSetupRequired,
-                    onOpenModelSettings = onOpenModelSettings,
-                    providerStatuses = modelProviderStatuses,
-                    onOpenProviderSettings = onOpenProviderSettings,
-                    onModelChange = onModelChange,
-                    reasoning = reasoning,
-                    onReasoningChange = onReasoningChange,
-                )
-            }
+            val turnActions: @Composable () -> Unit = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
 
-            // Action row: attach · spacer · mic|send.
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconHit(onClick = {}) {
-                    LXIcon(
-                        name = LXIconName.Plus,
-                        size = 18.dp,
-                        color = t.text3,
-                        stroke = 1.8f,
-                        contentDescription = stringResource(R.string.composer_more),
-                    )
-                }
-                // Camera affordance: tap drives a real on-device capture through
-                // the same CameraController the engine bridges onto
-                // `traits::CameraControl`; the result surfaces as the attachment
-                // chip above (mirrors the mic → transcript surfacing).
-                IconHit(
-                    onClick = { if (enabled) onCameraClick() },
-                    modifier = Modifier.testTag(UiTags.COMPOSER_CAMERA),
-                ) {
-                    LXIcon(
-                        name = LXIconName.Paperclip,
-                        size = 18.dp,
-                        color = t.text3,
-                        stroke = 1.8f,
-                        contentDescription = stringResource(R.string.composer_camera),
-                    )
-                }
-                Spacer(Modifier.weight(1f))
-                val stopGeneratingDescription = stringResource(R.string.composer_stop_generating)
-                // The Discard affordance is a DIFFERENT action from Stop: it
-                // throws away a parked background checkpoint rather than
-                // interrupting live generation. It used to announce
-                // "Stop generating" to TalkBack, which is the one thing it does
-                // not do.
-                val discardRecoveryDescription =
-                    stringResource(R.string.composer_discard_background_turn)
-                val sendDescription = stringResource(R.string.composer_send)
-                val recordDescription = stringResource(R.string.composer_record)
-                val startRecordingLabel = stringResource(R.string.composer_start_recording)
-                val flowModeOnDescription = stringResource(R.string.voice_close_flow_mode_a11y)
-                val flowModeOffDescription = stringResource(R.string.composer_flow_mode)
-                when {
-                    // Keep Stop and pending Send available together while the
-                    // agent is working.
-                    isStreaming -> Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    val stopGeneratingDescription = stringResource(R.string.composer_stop_generating)
+                    // The Discard affordance is a DIFFERENT action from Stop: it
+                    // throws away a parked background checkpoint rather than
+                    // interrupting live generation. It used to announce
+                    // "Stop generating" to TalkBack, which is the one thing it does
+                    // not do.
+                    val discardRecoveryDescription =
+                        stringResource(R.string.composer_discard_background_turn)
+                    val sendDescription = stringResource(R.string.composer_send)
+                    val recordDescription = stringResource(R.string.composer_record)
+                    val startRecordingLabel = stringResource(R.string.composer_start_recording)
+                    val flowModeOnDescription = stringResource(R.string.voice_close_flow_mode_a11y)
+                    val flowModeOffDescription = stringResource(R.string.composer_flow_mode)
+                    if (voiceInputSupported) Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .voiceHold(
+                                onTap = { if (enabled) onMicClick() },
+                                onStart = { if (enabled) onMicHoldStart() },
+                                onRelease = { if (enabled) onMicHoldRelease() },
+                            )
+                            .semantics {
+                                contentDescription = recordDescription
+                                onClick(label = startRecordingLabel) {
+                                    if (enabled) onMicClick()
+                                    enabled
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Box(
+                        LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f)
+                    }
+
+                    when {
+                        // Keep Stop and pending Send available together while the
+                        // agent is working.
+                        isStreaming -> Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(t.accent)
+                                    .clickable(onClick = onStop)
+                                    .testTag(UiTags.COMPOSER_STOP),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(12.dp)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
+                                        .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
+                                )
+                            }
+                            if (hasText) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(CircleShape)
+                                        .background(t.accent)
+                                        .clickable(enabled = enabled) {
+                                            if (modelSetupRequired) onOpenModelSettings() else onSend()
+                                        }
+                                        .testTag(UiTags.COMPOSER_SEND),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    LXIcon(
+                                        name = LXIconName.ArrowUp,
+                                        size = 16.dp,
+                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                                        contentDescription = sendDescription,
+                                    )
+                                }
+                            }
+                        }
+                        // A recovered WaitingForUser checkpoint has no local
+                        // executor, but still owns the durable session identity.
+                        // Keep the composer action visible so the user can submit
+                        // the correlated discard and wait for terminal confirmation.
+                        showDiscardRecovery -> Box(
                             modifier = Modifier
                                 .size(48.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .clip(CircleShape)
                                 .background(t.accent)
-                                .clickable(onClick = onStop)
-                                .testTag(UiTags.COMPOSER_STOP),
+                                .clickable(onClick = onDiscardRecovery)
+                                .testTag(UiTags.COMPOSER_DISCARD),
                             contentAlignment = Alignment.Center,
                         ) {
                             Box(
@@ -350,113 +370,92 @@ fun Composer(
                                     .size(12.dp)
                                     .clip(RoundedCornerShape(3.dp))
                                     .background(androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
-                                    .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
+                                    .clearAndSetSemantics {
+                                        contentDescription = discardRecoveryDescription
+                                    },
                             )
                         }
-                        if (hasText) {
-                            Box(
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(t.accent)
-                                    .clickable(enabled = enabled) {
-                                        if (modelSetupRequired) onOpenModelSettings() else onSend()
-                                    }
-                                    .testTag(UiTags.COMPOSER_SEND),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                LXIcon(
-                                    name = LXIconName.ArrowUp,
-                                    size = 16.dp,
-                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
-                                    contentDescription = sendDescription,
-                                )
-                            }
-                        }
-                    }
-                    // A recovered WaitingForUser checkpoint has no local
-                    // executor, but still owns the durable session identity.
-                    // Keep the composer action visible so the user can submit
-                    // the correlated discard and wait for terminal confirmation.
-                    showDiscardRecovery -> Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(t.accent)
-                            .clickable(onClick = onDiscardRecovery)
-                            .testTag(UiTags.COMPOSER_DISCARD),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(12.dp)
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
-                                .clearAndSetSemantics {
-                                    contentDescription = discardRecoveryDescription
-                                },
-                        )
-                    }
-                    // Idle with text: the accent Send button.
-                    hasText -> Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(t.accent)
-                            .clickable(enabled = enabled) {
-                                if (modelSetupRequired) onOpenModelSettings() else onSend()
-                            }
-                            .testTag(UiTags.COMPOSER_SEND),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, contentDescription = sendDescription)
-                    }
-                    // Idle, empty: separate ordinary recording and Flow Mode.
-                    else -> Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (voiceInputSupported) Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .voiceHold(
-                                    onTap = { if (enabled) onMicClick() },
-                                    onStart = { if (enabled) onMicHoldStart() },
-                                    onRelease = { if (enabled) onMicHoldRelease() },
-                                )
-                                .semantics {
-                                    contentDescription = recordDescription
-                                    onClick(label = startRecordingLabel) {
-                                        if (enabled) onMicClick()
-                                        enabled
-                                    }
-                                },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f)
-                        }
-                        if (voiceConversationSupported) Box(
+                        // Idle with text: the accent Send button.
+                        hasText -> Box(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(CircleShape)
-                                .background(if (flowModeActive) t.accent else t.text)
-                                .clickable(enabled = enabled, onClick = onFlowModeClick)
-                                .semantics {
-                                    contentDescription = if (flowModeActive) {
-                                        flowModeOnDescription
-                                    } else {
-                                        flowModeOffDescription
-                                    }
-                                },
+                                .background(t.accent)
+                                .clickable(enabled = enabled) {
+                                    if (modelSetupRequired) onOpenModelSettings() else onSend()
+                                }
+                                .testTag(UiTags.COMPOSER_SEND),
                             contentAlignment = Alignment.Center,
                         ) {
-                            LXIcon(
-                                name = LXIconName.AudioWave,
-                                size = 18.dp,
-                                color = if (flowModeActive) androidx.compose.material3.MaterialTheme.colorScheme.onPrimary else t.windowBg,
-                                stroke = 1.65f,
-                            )
+                            LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, contentDescription = sendDescription)
                         }
+                        // Idle, empty: separate ordinary recording and Flow Mode.
+                        else -> Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (voiceConversationSupported) Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(if (flowModeActive) t.accent.tint(0.15f) else Color.Transparent)
+                                    .clickable(enabled = enabled, onClick = onFlowModeClick)
+                                    .semantics {
+                                        contentDescription = if (flowModeActive) {
+                                            flowModeOnDescription
+                                        } else {
+                                            flowModeOffDescription
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LXIcon(
+                                    name = LXIconName.AudioWave,
+                                    size = 18.dp,
+                                    color = if (flowModeActive) t.accent else t.text2,
+                                    stroke = 1.65f,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            val attachmentAction: @Composable () -> Unit = {
+                IconHit(onClick = { if (enabled) onCameraClick() }, modifier = Modifier.testTag(UiTags.COMPOSER_CAMERA)) {
+                    LXIcon(LXIconName.Plus, size = 20.dp, color = t.text3,
+                        contentDescription = stringResource(R.string.composer_camera))
+                }
+            }
+            val configuration: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
+                ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
+                ComposerContextWindow(contextUsage, model.details?.contextWindowTokens)
+                Box(Modifier.weight(1f)) {
+                    ModelChip(
+                        model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
+                        onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                        onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
+                        reasoning = reasoning, onReasoningChange = onReasoningChange,
+                    )
+                }
+            }
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val wrapControls = maxWidth < 300.dp ||
+                    (contextUsage != null && maxWidth < 348.dp) ||
+                    androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.3f
+                if (wrapControls) {
+                    Column {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { configuration() }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            attachmentAction()
+                            Spacer(Modifier.weight(1f))
+                            turnActions()
+                        }
+                    }
+                } else {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        attachmentAction()
+                        configuration()
+                        turnActions()
                     }
                 }
             }
@@ -613,6 +612,7 @@ private fun ModelChip(
                 color = if (modelSetupRequired) t.accent else t.text2,
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
             )
             LXIcon(
                 name = if (modelSetupRequired) LXIconName.ChevronR else LXIconName.Chevron,

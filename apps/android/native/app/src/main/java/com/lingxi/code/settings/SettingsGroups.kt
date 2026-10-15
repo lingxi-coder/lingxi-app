@@ -6,17 +6,29 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.model.ProviderKind
 
 /**
- * The six groups of the phone settings home: 账户卡片 + 6 组 + 搜索 instead of the
+ * The groups of the phone settings home: 账户卡片 + 7 组 + 搜索 instead of the
  * desktop's sixteen-row list. A group page lists the existing settings pages
  * unchanged; nothing here adds or edits a page.
+ *
+ * A group with a [directRoute] has no list page of its own: the home row opens
+ * that page straight away (the model hub and the voice page are pages, not
+ * menus of one or two rows).
  */
 internal enum class SettingsGroup(
     val key: String,
     @StringRes val title: Int,
     @StringRes val summary: Int,
     val icon: LXIconName,
+    val directRoute: String? = null,
 ) {
-    Models("models", R.string.settings_group_models, R.string.settings_group_models_summary, LXIconName.Sparkle),
+    Models(
+        "models", R.string.settings_group_models_hub, R.string.settings_group_models_hub_summary, LXIconName.Sparkle,
+        directRoute = SettingsRoutes.providerList(ProviderKind.Llm.name),
+    ),
+    Voice(
+        "voice", R.string.settings_group_voice, R.string.settings_group_voice_summary, LXIconName.Mic,
+        directRoute = SettingsRoutes.VOICE,
+    ),
     Modes("modes", R.string.settings_group_modes, R.string.settings_group_modes_summary, LXIconName.Workflow),
     Phone("phone", R.string.settings_group_phone, R.string.settings_group_phone_summary, LXIconName.Terminal),
     General("general", R.string.settings_group_general, R.string.settings_group_general_summary, LXIconName.Cog),
@@ -50,11 +62,13 @@ internal data class SettingsGroupEntry(
  * Scheduled tasks live in the drawer, not in settings.
  */
 private val allEntries = listOf(
+    SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.providerList(ProviderKind.Llm.name), "Models & providers", listOf("model", "llm", "provider", "vision")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.CREDENTIALS, "Provider credentials", listOf("api key", "auth")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.CUSTOM_PROVIDERS, "Custom providers & routing", listOf("providers", "aliases", "fallback", "retry")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.providerList(ProviderKind.Search.name), "Web search providers", listOf("search")),
     SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.providerList(ProviderKind.Fetch.name), "Web fetch providers", listOf("fetch")),
-    SettingsGroupEntry(SettingsGroup.Models, SettingsRoutes.VOICE, "Voice & audio", listOf("tts", "stt", "audio")),
+
+    SettingsGroupEntry(SettingsGroup.Voice, SettingsRoutes.VOICE, "Voice & audio", listOf("tts", "stt", "audio", "speech", "microphone")),
 
     SettingsGroupEntry(SettingsGroup.Modes, SettingsRoutes.ENGINE_SKILLS, "Skills"),
     SettingsGroupEntry(SettingsGroup.Modes, SettingsRoutes.PLUGINS, "Plugins & marketplace"),

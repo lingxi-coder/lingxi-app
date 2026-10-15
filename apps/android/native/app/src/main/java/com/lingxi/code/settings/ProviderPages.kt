@@ -33,6 +33,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -47,6 +48,7 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.ModelDetailsDialog
 import com.lingxi.code.components.ModelDetailsInfoButton
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.mix
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.CatalogModelDetails
@@ -119,6 +121,7 @@ fun ProviderListPage(
     onEdit: (id: String) -> Unit,
     onAdd: () -> Unit,
     onReconnectEngine: () -> Unit = {},
+    onNavigate: (route: String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val arr = state.providers(kind)
@@ -181,14 +184,14 @@ fun ProviderListPage(
             Column(Modifier.padding(top = 22.dp)) {
                 SettingsSection(
                     label = stringResource(R.string.settings_section_advanced),
-                    footer = stringResource(R.string.settings_provider_advanced_footer),
                 ) {
                     SettingsRow(
                         icon = LXIconName.Workflow,
                         iconColor = t.accent,
-                        label = "Vision Delegation",
-                        sub = "Allow non-vision models to batch-analyze images through an internal delegate.",
+                        label = stringResource(R.string.settings_provider_vision_delegation),
+                        sub = stringResource(R.string.settings_provider_vision_delegation_hint),
                         chevron = false,
+                        isLast = true,
                         trailing = {
                             com.lingxi.code.components.LXToggle(
                                 checked = state.visionDelegationEnabled,
@@ -196,23 +199,24 @@ fun ProviderListPage(
                             )
                         },
                     )
-                    SettingsRow(
-                        icon = LXIconName.Sparkle, iconColor = t.accent,
-                        label = stringResource(R.string.settings_provider_smart_routing), sub = stringResource(R.string.settings_provider_not_wired_mobile), chevron = false,
-                        trailing = {
-                            Text(stringResource(R.string.settings_linux_task_unavailable), color = t.text4, fontSize = 12.sp)
-                        },
+                }
+            }
+            Column(Modifier.padding(top = 22.dp)) {
+                SettingsSection {
+                    val pages = listOf(
+                        SettingsRoutes.CUSTOM_PROVIDERS to "Custom providers & routing",
+                        SettingsRoutes.providerList(ProviderKind.Search.name) to "Web search providers",
+                        SettingsRoutes.providerList(ProviderKind.Fetch.name) to "Web fetch providers",
+                        SettingsRoutes.CREDENTIALS to "Provider credentials",
                     )
-                    SettingsRow(
-                        label = stringResource(R.string.settings_provider_streaming_policy),
-                        sub = stringResource(R.string.settings_provider_streaming_policy_sub),
-                        icon = LXIconName.Workflow,
-                        chevron = false,
-                        isLast = true,
-                        trailing = {
-                            Text(stringResource(R.string.settings_provider_not_configurable), color = t.text4, fontSize = 12.sp)
-                        },
-                    )
+                    pages.forEachIndexed { index, (route, title) ->
+                        SettingsRow(
+                            label = settingsLabel(title),
+                            isLast = index == pages.lastIndex,
+                            modifier = Modifier.testTag(UiTags.settingsPage(route)),
+                            onTap = { onNavigate(route) },
+                        )
+                    }
                 }
             }
         }

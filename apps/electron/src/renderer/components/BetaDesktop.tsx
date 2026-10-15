@@ -1,3 +1,4 @@
+import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
 import { AudioSetupGuide } from './AudioSetupGuide';
 import { ComposerSlashArgumentHint } from './ComposerSlashArgumentHint';
@@ -238,12 +239,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
       pinnedSection,
     },
   });
+  const needsInput = sessionNeedsInput(status);
   const highlighted = active || opening;
   const attention = opening
     ? { label: 'Opening session', color: t.accent }
     : status?.connection.status === 'error' || status?.error
     ? { label: 'Session error', color: t.danger }
-    : status?.pendingInteractions
+    : needsInput
       ? { label: 'Waiting for input', color: t.warn }
       : (status?.turnActive || status?.backgroundAgentsRunning)
         ? { label: 'Running', color: t.ok }
@@ -336,7 +338,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
         title={pinnedSection ? `${title}\n${projectPath}` : title}
-        aria-label={`${title}, ${sessionMetadata}`}
+        aria-label={`${title}, ${sessionMetadata}${needsInput ? ", Needs input" : ""}`}
         data-session-project-path={projectPath}
         style={{
           width: '100%', minHeight: 34, display: 'flex', alignItems: 'center', gap: pinnedSection ? 5 : 10,
@@ -350,12 +352,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         {pinnedSection && <Icon name="chat" size={15} stroke={1.7} />}
         <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
+          {needsInput && <NeedsInputBadge />}
           {opening
             ? <SidebarSessionProgress label="Opening session" />
             // A session ERROR shows as a ringed mark at this row's trailing edge
             // instead (below), so it is not repeated inline here.
             : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" />
-            : attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+            : !needsInput && attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
         <span className="sidebar-session-metadata" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
           {sessionMetadata}
@@ -397,12 +400,16 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat, children, topbar }: {
   bridge: UseBridge;
+  activityView?: boolean;
+  onToggleActivityView?(): void;
   onOpenSettings(): void;
   scheduled?: boolean;
   onOpenScheduled?(): void;
   onOpenChat?(): void;
+  children?: ReactNode;
+  topbar?: ReactNode;
 }) {
   const t = useT();
   const asideRef = useRef<HTMLElement>(null);
@@ -738,9 +745,18 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
   return (
     <>
-    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} style={{ '--rail-material': t.appBg, '--sidebar-material': t.sidebarBg, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
+    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} data-workspace={children ? 'true' : undefined} style={{ '--rail-material': t.sidebarBg, '--sidebar-material': t.sidebarPanelBg, '--desktop-surface': t.stageBg, '--desktop-sidebar-width': `${sidebarWidth}px`, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
+      <div className="drag-region desktop-window-toolbar">
+        <div className="desktop-sidebar-brand">
+          <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
+          <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
+          <button type="button" className="sidebar-header-icon" aria-label={activityView ? "Turn off activity view" : "Turn on activity view"} title={`${activityView ? "Turn off" : "Turn on"} activity view (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><Icon name="bell" size={18} stroke={1.65} /></button>
+          <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
+        </div>
+        {topbar}
+      </div>
+      <div className="desktop-body">
       <nav className="desktop-nav-rail no-drag" aria-label="Main navigation">
-        <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
         <button type="button" className="desktop-rail-button" data-active={!scheduled || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label="Scheduled tasks" title="Scheduled tasks" onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
@@ -749,13 +765,14 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         <button type="button" className="desktop-rail-button" aria-label="Review changes" title="Review changes" onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={settingsLabel()} title={settingsLabel()} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
       </nav>
+    <div className="desktop-surface">
     <aside
       id="desktop-session-sidebar"
       className="desktop-sidebar"
       ref={asideRef}
       aria-hidden={sidebarCollapsed || undefined}
       data-resizing={resizingSidebar || undefined}
-      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderWidth: '0 0.5px', borderStyle: 'solid', borderColor: t.border, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
+      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
       <div className="drag-region desktop-sidebar-brand" style={{ height: 'var(--desktop-toolbar-height, 44px)', flexShrink: 0, padding: '5px 12px 4px 64px', borderBottom: `0.5px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
         <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1 }}>LingXi</strong>
@@ -765,7 +782,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
       {searchOpen && <div className="sidebar-search"><Icon name="search" size={15} stroke={1.7} /><input ref={searchInputRef} type="search" aria-label="Search chats and projects" placeholder="Search chats and projects" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label="Close search" onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
-      <div style={{ padding: '2px 12px 14px' }}>
+      <div style={{ padding: '16px 12px 14px' }}>
         <button
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
@@ -1135,6 +1152,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         style={{ color: t.accent }}
       />
     </aside>
+    {children}
+    </div>
+    </div>
     </div>
     {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
     {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession} error={renameError} onClose={() => { if (!renamingSession) setRenameTarget(null); }} onConfirm={(title) => void confirmRename(title)} />}

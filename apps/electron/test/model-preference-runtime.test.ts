@@ -12,7 +12,10 @@ const defaultRef = { projectPath: '/workspace', sessionId: '11111111-2222-4333-8
 function runtime(store: SettingsStore, ref = defaultRef) {
   const commands: ClientCommand[] = [];
   const observed: string[] = [];
-  const client = Object.assign(new EventEmitter(), { sendCommand: (command: ClientCommand) => commands.push(command) });
+  const client = Object.assign(new EventEmitter(), { sendCommand: (command: ClientCommand) => {
+    // Audio context refreshes are independent of model persistence.
+    if (command.type !== 'get_audio_session_context') commands.push(command);
+  } });
   const instance = new SessionRuntime({
     ...ref,
     launchConfig: () => ({ workspace: '/workspace', trusted: true, model: store.getPublic().model }),

@@ -241,6 +241,7 @@ fun RootScreen(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
     onOpenModelSettings: () -> Unit = {},
+    onOpenPermissionSettings: () -> Unit = { onOpenSettings() },
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     onOpenComputerUseSettings: () -> Unit = { onOpenSettings() },
     onOpenVoiceSettings: () -> Unit = { onOpenSettings() },
@@ -1819,6 +1820,9 @@ fun RootScreen(
                     .imePadding(),
             ) {
                 ChatScreen(
+                    onSuggestionContext = chatViewModel::updatePromptSuggestionContext,
+                    onSuggestionFeedback = chatViewModel::promptSuggestionFeedback,
+                    pendingPermission = pendingPermission != null,
                     effectivePermissionMode = settingsState.effectivePermissionMode,
                     onOpenPermissionSettings = onOpenPermissionSettings,
                     state = state,

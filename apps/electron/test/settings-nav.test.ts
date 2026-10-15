@@ -12,17 +12,17 @@ test('the nav declares all eighteen pages across four groups', () => {
   );
 });
 
-test('layered is a data property, not a group property — scope ownership is independent', () => {
+test('layered is a data property, not a group property — account formats and other pages break the correspondence', () => {
   // layered means "this page's values live in the four settings layers and need
   // the layer switcher to pick a target". Group is a navigation concept and
   // does not determine this. Named here explicitly so a future edit that
   // "fixes" one of these back to match its group is caught, not shipped:
   //   - mcp: inside 编码, but NOT layered (its own three-scope storage, no layers).
   //   - custom-providers: outside 编码, but layered (writes settings.providers/routing).
-  //   - fusion: owns its user/project/local filter and scoped strategy writes.
+  //   - fusion: its strategy list owns the three settings scopes and its filter.
   const layeredIds = new Set([
     'permissions', 'tools-agent', 'skills', 'hooks', 'plugins',
-    'custom-providers',
+    'provider-credentials', 'custom-providers',
   ]);
   for (const page of SETTINGS_NAV) {
     assert.equal(

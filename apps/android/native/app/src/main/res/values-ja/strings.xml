@@ -1914,4 +1914,9 @@
     <string name="composer_effort_high">高</string>
     <string name="composer_effort_xhigh">最高</string>
     <string name="composer_effort_max">最大</string>
+    <string name="CFBundleDisplayName">灵犀</string>
+    <string name="NSCameraUsageDescription">灵犀はモデルによる解析のため、カメラで写真を撮影します。</string>
+    <string name="NSMicrophoneUsageDescription">灵犀は音声心流（フローモード）入力のためにマイクを使用します。</string>
+    <string name="NSPhotoLibraryUsageDescription">灵犀はモデルによる解析のため、写真ライブラリから画像を選択します。</string>
+    <string name="NSSpeechRecognitionUsageDescription">灵犀は音声認識を使用して、あなたの発話をテキストに変換します。</string>
 </resources>

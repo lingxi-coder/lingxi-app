@@ -29,7 +29,8 @@ export const SETTINGS_NAV: NavPage[] = [
   { id: 'archived-chats', label: '已归档会话', group: '个人', icon: 'archive', needsEngine: false, layered: false, searchKeys: ['archived', 'chats', '归档', '会话', 'restore', '恢复'], implemented: true },
   { id: 'projects', label: '项目与信任', group: '个人', icon: 'folder', needsEngine: false, layered: false, searchKeys: ['project', '项目', 'trust', '信任', 'pinned'], implemented: true },
 
-  { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: false, layered: false, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain'], implemented: true },
+  // Account credentials are device-local; the request-format card edits settings.routing.
+  { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: false, layered: true, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain', 'defaultProtocols', '默认格式', '请求格式'], implemented: true },
   // 组↔layered 的例外 1/3：不在 编码 组，但是 layered。settings.providers /
   // settings.routing 是活在四层设置文件里的普通设置键，写入前必须选定目标层——
   // 与它挂在哪个导航分组下无关。

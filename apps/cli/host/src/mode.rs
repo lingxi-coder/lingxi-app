@@ -154,7 +154,8 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 .into_iter()
                 .take(ids.len())
                 .filter_map(|command| {
-                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput { queue_delivery: None,
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
+                        queue_delivery: None,
                         text: command.text()?.to_owned(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),

@@ -127,7 +127,8 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
             batch
                 .into_iter()
                 .filter_map(|command| {
-                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput { queue_delivery: None,
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
+                        queue_delivery: None,
                         text: command.text()?.to_owned(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
@@ -1466,9 +1467,9 @@ mod tests {
         );
         let calls = streaming.captured_calls().await;
         let content = first_user_content(&calls[0].messages);
-        assert!(content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")));
+        assert!(content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")
+        ));
         assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
 

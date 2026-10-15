@@ -1940,4 +1940,6 @@
     <string name="chat_summary_agents_empty">No agents or background tasks in this conversation.</string>
     <string name="chat_summary_resources_empty">No attachments or resources in this conversation.</string>
     <string name="chat_summary_plan_empty">No plan in this conversation.</string>
+    <string name="voice_rate_decrease">Decrease speech rate by 0.1</string>
+    <string name="voice_rate_increase">Increase speech rate by 0.1</string>
 </resources>

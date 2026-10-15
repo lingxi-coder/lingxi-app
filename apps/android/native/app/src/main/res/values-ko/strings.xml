@@ -1940,4 +1940,6 @@
     <string name="chat_summary_agents_empty">이 대화에는 에이전트 또는 백그라운드 작업이 없습니다</string>
     <string name="chat_summary_resources_empty">이 대화에는 첨부 파일 또는 리소스가 없습니다</string>
     <string name="chat_summary_plan_empty">이 대화에는 계획이 없습니다</string>
+    <string name="voice_rate_decrease">말하기 속도를 0.1 낮추기</string>
+    <string name="voice_rate_increase">말하기 속도를 0.1 높이기</string>
 </resources>

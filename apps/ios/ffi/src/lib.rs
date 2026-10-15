@@ -165,6 +165,8 @@ pub use host::build_ios_engine;
 #[cfg(feature = "uniffi")]
 pub use host::build_ios_engine_with_config;
 #[cfg(feature = "uniffi")]
+pub use host::create_ios_side_chat;
+#[cfg(feature = "uniffi")]
 pub use host::build_mobile_engine;
 pub use host::PlatformImpls;
 #[cfg(test)]

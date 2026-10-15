@@ -996,6 +996,35 @@ export function validateClientEvent(value: unknown): ClientEvent {
   const input = object(value, 'client event');
   const type = string(input['type'], 'client event type');
   switch (type) {
+    case 'side_chat_permission': {
+      exactKeys(input, ['type', 'side_id', 'request']);
+      const request = object(input['request'], 'side permission');
+      integer(request['request_id'], 'side permission id');
+      object(request['kind'], 'side permission kind');
+      return { type, side_id: string(input['side_id'], 'side id'), request: request as unknown as import('./protocol.js').PermissionRequest };
+    }
+    case 'side_chat_submitted':
+    case 'side_chat_created':
+      exactKeys(input, ['type', 'request_id', 'side_id']);
+      return { type, request_id: string(input['request_id'], 'side request id'), side_id: string(input['side_id'], 'side id') };
+    case 'side_chat_list':
+      exactKeys(input, ['type', 'side_ids']);
+      if (!Array.isArray(input['side_ids'])) throw new Error('invalid side ids');
+      return { type, side_ids: input['side_ids'].map(value => string(value, 'side id')) };
+    case 'side_chat_snapshot':
+      exactKeys(input, ['type', 'side_id', 'events_json']);
+      if (!Array.isArray(input['events_json'])) throw new Error('invalid side events');
+      return { type, side_id: string(input['side_id'], 'side id'), events_json: input['events_json'].map(value => string(value, 'side event JSON')) };
+    case 'side_chat_event':
+      exactKeys(input, ['type', 'side_id', 'event_json']);
+      return { type, side_id: string(input['side_id'], 'side id'), event_json: string(input['event_json'], 'side event JSON') };
+    case 'side_chat_ended':
+      exactKeys(input, ['type', 'side_id']);
+      return { type, side_id: string(input['side_id'], 'side id') };
+    case 'side_chat_error':
+      exactKeys(input, ['type', 'request_id', 'side_id', 'message']);
+      return { type, ...(input['request_id'] === undefined ? {} : { request_id: string(input['request_id'], 'side request id') }), ...(input['side_id'] === undefined ? {} : { side_id: string(input['side_id'], 'side id') }), message: string(input['message'], 'side error') };
+
     case 'ui_control_result':
       exactKeys(input, ['type', 'request_id', 'response_json', 'metadata_json', 'error'], 'client event');
       if (input['response_json'] === undefined && input['error'] === undefined) {

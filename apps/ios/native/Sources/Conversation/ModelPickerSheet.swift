@@ -37,6 +37,7 @@ struct ModelPickerSheet: View {
     var fastModePending = false
     var fastModeError: String? = nil
     var onSetFastMode: (Bool) -> Void = { _ in }
+    var showsFastMode = true
 
     @State private var requestedModel: String?
     @State private var detent: PresentationDetent = .large
@@ -63,7 +64,7 @@ struct ModelPickerSheet: View {
                             onSelect: onSelectReasoning
                         )
                         .id(activeModelId)
-                        if detailsByReference[activeModelId]?.supportsFastMode == true {
+                        if showsFastMode && detailsByReference[activeModelId]?.supportsFastMode == true {
                             Toggle("Fast Mode", isOn: Binding(get: { fastModeEnabled }, set: onSetFastMode))
                                 .disabled(fastModePending || modelSwitchPending)
                                 .accessibilityIdentifier("composer.model.fast-mode")

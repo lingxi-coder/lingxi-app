@@ -978,6 +978,7 @@ struct RootView: View {
     /// Explain a refused switch while preserving the source that still owns
     /// background work, durable recovery, or the current cancellation barrier.
     private var scopeSwitchRefusalMessage: String {
+        if source.hasLiveSideChats { return String(localized: "side_chat_end_before_restart") }
         if !ConversationSourceReplacementPolicy.allowsReplacement(of: source.model) {
             return String(localized: "chat_error_finish_background_turn_first")
         }
@@ -1194,6 +1195,10 @@ struct RootView: View {
         allowInactiveRecovery: Bool = false
     ) throws {
         guard source === previous else { throw CancellationError() }
+        guard !previous.hasLiveSideChats else {
+            throw NSError(domain: "ConversationSourceReplacement", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: String(localized: "side_chat_end_before_restart")])
+        }
         guard ConversationSourceReplacementPolicy.allowsReplacement(
             of: previous.model,
             allowInactiveRecovery: allowInactiveRecovery
@@ -1306,6 +1311,10 @@ struct RootView: View {
               )
         else { return false }
         if scope != activeScope || targetMode != activeMode {
+            guard !source.hasLiveSideChats else {
+                projectStore.errorMessage = String(localized: "side_chat_end_before_restart")
+                return false
+            }
             guard ConversationSourceReplacementPolicy.allowsReplacement(
                 of: source.model,
                 allowInactiveRecovery: allowRecoveryRouting
@@ -1346,6 +1355,7 @@ struct RootView: View {
         Task { @MainActor in
             var rollback: ProjectActiveSelectionRollback?
             do {
+                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 if allowRecoveryRouting && previousSource.model.hasInactiveDurableRecovery {
                     previousSource.handleBackground()
                 } else {
@@ -1735,6 +1745,9 @@ struct RootView: View {
         conversationBackgroundAlerts.setScenePhase(phase)
         switch phase {
         case .background:
+            #if canImport(harness_runtimeFFI)
+            (source as? EngineConversationSource)?.sideChats.cancelCurrentTurns()
+            #endif
             persistConversationScope()
             voiceInteraction.handleBackground()
             conversationBackgroundExecution.setTurnActive(
@@ -1749,6 +1762,9 @@ struct RootView: View {
             }
             Task { await cronRepository.handleSceneDidEnterBackground() }
         case .active:
+            #if canImport(harness_runtimeFFI)
+            (source as? EngineConversationSource)?.sideChats.handleForeground()
+            #endif
             conversationBackgroundExecution.setTurnActive(
                 source.model.requiresBackgroundExecution,
                 turnID: source.model.activeTurnToken?.clientTurnId
@@ -1939,6 +1955,9 @@ struct RootView: View {
         sessionID: String,
         turnToken: ConversationTurnToken?
     ) {
+        #if canImport(harness_runtimeFFI)
+        (source as? EngineConversationSource)?.sideChats.cancelCurrentTurns()
+        #endif
         guard let turnToken else { return }
         Task { @MainActor in
             do {

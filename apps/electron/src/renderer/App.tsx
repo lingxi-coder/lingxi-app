@@ -1,3 +1,5 @@
+import { useSideChats } from './bridge/useSideChats';
+import { SideChatPanel } from './components/SideChatPanel';
 import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
 import {
@@ -67,6 +69,7 @@ export function App() {
   // the scope-bound panels on it empties the terminal tab strip and makes any
   // terminal opened in that window fail validation.
   const settledSession = bridge.activeSession?.sessionId?.startsWith('pending-new:') ? undefined : bridge.activeSession;
+  const sideChats = useSideChats(settledSession?.sessionId);
   const gitScope = selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
   const terminalProject = bridge.activeSession?.projectPath ?? workspace?.path;
   const terminal = useTerminalPanel(terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null, page === 'chat' && settingsRoute === null);
@@ -133,6 +136,9 @@ export function App() {
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <BetaTopBar
             bridge={bridge}
+            sideChatOpen={sideChats.open && Boolean(sideChats.selected)}
+            sideChatAvailable={sideChats.sides.length > 0}
+            onToggleSideChat={() => sideChats.setOpen(!sideChats.open)}
             terminalOpen={terminal.open}
             terminalAvailable={Boolean(terminalProject && window.lingxi?.terminal)}
             onToggleTerminal={terminal.toggle}
@@ -194,6 +200,7 @@ export function App() {
                 <BetaComposer
                   bridge={bridge}
                   ready={ready}
+                  onCreateSide={sideChats.create}
                   onOpenSettings={() => {
                     // `/config` from the composer opens the same full-page
                     // surface the gear does, so it owes the same focus contract:
@@ -239,7 +246,7 @@ export function App() {
           />
 
           </main>
-          {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={planBridge} />}
+          {page === 'chat' && !bridge.sessionLoading && (sideChats.open && sideChats.selected ? <SideChatPanel controller={sideChats} /> : <RuntimeCenterInspector bridge={planBridge} />)}
           </div>
           <TerminalPanel controller={terminal} />
           </div>

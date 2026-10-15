@@ -598,6 +598,8 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      // Side envelopes belong solely to the RAM-only side controller.
+      if (event.type.startsWith('side_chat_')) return;
       const eventProjectPath = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId)?.projectPath
         ?? (pendingSessionRef.current?.sessionId.startsWith('pending-new:')
           ? pendingSessionRef.current.projectPath

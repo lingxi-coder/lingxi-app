@@ -107,7 +107,19 @@ final class EngineConversationSource: ConversationSource {
     private var nextCancellationOperationID: UInt64 = 1
     private var activeSessionTransitionOperationID: UInt64?
     private var nextSessionTransitionOperationID: UInt64 = 1
-    private let durableTurns: DurableConversationTurnClientStore
+    private let durableTurns: DurableConversationTurnClientStore?
+    private(set) var sideID: String?
+    private var sideEnded = false
+    private var sideClosing = false
+    private var pendingSideInput: (String, [ImageRefDto])?
+    private var failedSideInput: (String, [ImageRefDto])?
+    var onSideSubmissionFailure: ((String, [ImageRefDto]) -> Void)? {
+        didSet { deliverFailedSideSubmission() }
+    }
+    var isSideChat: Bool { durableTurns == nil }
+    var isTemporaryConversation: Bool { isSideChat }
+    lazy var sideChats = SideChatCollection(parent: self)
+    var hasLiveSideChats: Bool { !sideChats.entries.isEmpty || sideChats.creating }
     private var reattachedTurnIDs = Set<UInt64>()
     /// A non-terminal durable recovery owns the single turn slot even when
     /// the UI is no longer streaming. Keep this id until ResumeTurn reports
@@ -177,11 +189,12 @@ final class EngineConversationSource: ConversationSource {
     init(
         config: EngineConfig,
         handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle,
-        permissionModeRepository: PermissionModeConfigurationRepository? = nil
+        permissionModeRepository: PermissionModeConfigurationRepository? = nil,
+        memoryOnly: Bool = false
     ) {
         self.config = config
         sessionMode = config.sessionMode
-        self.durableTurns = DurableConversationTurnClientStore(config: config)
+        self.durableTurns = memoryOnly ? nil : DurableConversationTurnClientStore(config: config)
         self.handleBuilder = handleBuilder
         self.permissionModeRepository = permissionModeRepository
             ?? PermissionModeConfigurationRepository()
@@ -192,7 +205,7 @@ final class EngineConversationSource: ConversationSource {
         self.model = ConversationModel(
             messages: [],
             model: MockData.models.first(where: { $0.id == config.model })
-                ?? MockData.models[0])
+                ?? MockData.models[0], persistDisclosures: !memoryOnly)
         // Out-of-band model state: the configured id (empty ⇒ engine default,
         // filled by the first `ModelList`). Never a branded mock id here.
         self.model.activeModelId = config.model
@@ -212,6 +225,7 @@ final class EngineConversationSource: ConversationSource {
     // MARK: ConversationSource
 
     func startNewConversation() {
+        guard !isSideChat else { return }
         // A paused/waiting durable turn is still owned by the engine even
         // though `model.streaming` is false. Do not clear its checkpoint or
         // replace the session until recovery reaches Running or a terminal
@@ -219,7 +233,7 @@ final class EngineConversationSource: ConversationSource {
         guard unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        durableTurns.clear()
+        durableTurns?.clear()
         let turnIdToCancel = inFlightTurnForSessionSwitch()
         model.sessionRestoreRecovery = nil
         model.sessionTransitionFailure = nil
@@ -936,6 +950,59 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    func makeSideChat(requestID: String) async throws -> EngineConversationSource {
+        let sharedHandle = try await ensureHandle()
+        let child = EngineConversationSource(config: config, memoryOnly: true)
+        child.model.providerConfigured = model.providerConfigured
+        child.handle = sharedHandle
+        let listener = EngineListener(source: child)
+        let sink = EnginePermissionSink(listener: listener)
+        child.listener = listener
+        child.permissionSink = sink
+        let info = try await createIosSideChat(
+            engine: sharedHandle, requestId: requestID, initialInput: nil, listener: listener, permissions: sink)
+        child.sideID = info.sideId
+        await listener.waitUntilIdle()
+        try? await child.submitCommand(.listModels)
+        try? await child.submitCommand(.getConversationControls)
+        try? await child.submitCommand(.refreshListings(which: [.slashCommands]))
+        return child
+    }
+
+    func endSideChat() async throws {
+        guard let sideID, let handle else { return }
+        sideClosing = true
+        try await handle.endSideChat(sideId: sideID)
+        clearEndedSideChat()
+    }
+
+    func clearEndedSideChat() {
+        sideEnded = true
+        invalidateTurnContext()
+        model.streaming = false
+        model.isCancelling = false
+        model.pendingPermissions.removeAll()
+        model.pendingQuestions.removeAll()
+        model.messages.removeAll()
+        model.items.removeAll()
+        model.messageDetails.removeAll()
+        model.expandedToolCalls.removeAll()
+        model.clearAgentState()
+        model.planTasks.removeAll()
+        model.error = nil
+        model.notice = nil
+        model.statusLine = nil
+        model.controlsError = nil
+        model.fastModeError = nil
+        model.compactionStatus = nil
+        model.turnCompletion = nil
+        model.visualizationChip = nil
+        model.visualizationFollowup = nil
+        pendingSideInput = nil
+        failedSideInput = nil
+        onSideSubmissionFailure = nil
+    }
+
     private func submitCommand(_ command: ClientCommand) async throws {
         if let testCommandSubmitter {
             try await testCommandSubmitter(command)
@@ -943,18 +1010,28 @@ final class EngineConversationSource: ConversationSource {
         }
         let handle = try await ensureHandle()
         do {
-            try await handle.submit(command: command)
+            if let sideID {
+                guard !sideEnded else { throw CancellationError() }
+                try await handle.submitSideChat(sideId: sideID, command: command)
+            } else {
+                try await handle.submit(command: command)
+            }
         } catch {
-            let errorDescription = String(describing: error)
-            Self.turnLog.error(
-                "submit command failed command=\(String(describing: command), privacy: .public) error=\(errorDescription, privacy: .public)"
-            )
-            print("[LingxiCode] submitCommand failed command=\(command) error=\(errorDescription)")
+            if isSideChat {
+                Self.turnLog.error("side command submission failed")
+            } else {
+                let errorDescription = String(describing: error)
+                Self.turnLog.error(
+                    "submit command failed command=\(String(describing: command), privacy: .public) error=\(errorDescription, privacy: .public)"
+                )
+                print("[LingxiCode] submitCommand failed command=\(command) error=\(errorDescription)")
+            }
             throw error
         }
     }
 
     private func confirmBypassPermissionsForCurrentSession() async throws {
+        if isSideChat { return }
         if let testBypassPermissionsConfirmer {
             try await testBypassPermissionsConfirmer()
             return
@@ -1016,7 +1093,7 @@ final class EngineConversationSource: ConversationSource {
         }
 
         if stillOwnsVisibleTurn {
-            durableTurns.clear(turnID: operation.turnId)
+            durableTurns?.clear(turnID: operation.turnId)
             if unresolvedRecoveryTurnID == operation.turnId {
                 unresolvedRecoveryTurnID = nil
                 needsDurableForegroundRecoveryTurnID = nil
@@ -1080,7 +1157,7 @@ final class EngineConversationSource: ConversationSource {
             sessionEpoch: sessionEpoch
         )
         model.activeTurnToken = token
-        durableTurns.begin(sessionID: model.activeSessionId, turnID: prompt.turnId)
+        durableTurns?.begin(sessionID: model.activeSessionId, turnID: prompt.turnId)
         Self.turnLog.debug(
             "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
         )
@@ -1161,6 +1238,8 @@ final class EngineConversationSource: ConversationSource {
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
         guard
+            !sideEnded,
+            !sideClosing,
             !model.isCancelling,
             !model.slashCommandPending,
             !model.sessionTransitionPending,
@@ -1170,6 +1249,10 @@ final class EngineConversationSource: ConversationSource {
         else { return nil }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isSideChat && SideChatCommand.input(trimmed) != nil {
+            model.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_nested_rejected"))
+            return nil
+        }
         // The engine command catalog is authoritative. Until it arrives we
         // cannot distinguish a valid local slash command from prompt text,
         // so keep the draft untouched instead of accidentally sending it
@@ -1181,6 +1264,8 @@ final class EngineConversationSource: ConversationSource {
                 in: trimmed,
                 catalog: model.slashCommands
             ) != nil
+        guard !isSideChat || !model.streaming else { return nil }
+        if isSideChat { pendingSideInput = (text, images) }
         if model.streaming {
             guard !exactSlash, let token = activeConversationTurnToken else { return nil }
             model.isNew = false
@@ -1222,6 +1307,16 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func cancelAndWait() async throws {
+        if isSideChat {
+            // Atomic creation may return before its first TurnStarted reaches
+            // Swift. A side-scoped Cancel(nil) still stops that admitted work.
+            guard currentTurnId != nil || sideID != nil else { return }
+            model.isCancelling = true
+            defer { model.isCancelling = false }
+            try await submitCommand(.cancel(turnId: currentTurnId))
+            await listener?.waitUntilIdle()
+            return
+        }
         let operation: CancellationOperation
         if let currentOperation = cancellationOperation {
             operation = currentOperation
@@ -1266,6 +1361,7 @@ final class EngineConversationSource: ConversationSource {
     func dismissError() { model.error = nil }
 
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {
+        guard !isSideChat else { return }
         Task { try? await submitCommand(.updatePromptSuggestionContext(
             sessionId: sessionId, focus: focus, inputEmpty: inputEmpty,
             pendingPermission: pendingPermission, elicitationActive: false)) }
@@ -1280,6 +1376,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws {
+        guard !isSideChat else { return }
         guard let token, activeConversationTurnToken == token else { return }
         guard model.streaming || pauseAcknowledgements[token] != nil else { return }
 
@@ -1346,6 +1443,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func handleForeground() {
+        guard !isSideChat else { return }
         refreshBackgroundTasks()
         listSessionAgents()
         // A warm source keeps the durable checkpoint and listener alive,
@@ -1355,7 +1453,7 @@ final class EngineConversationSource: ConversationSource {
         // from SessionResumed below.
         guard let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
               unresolvedRecoveryTurnID == recoveryTurnID,
-              let record = durableTurns.load(),
+              let record = durableTurns?.load(),
               record.turnID == recoveryTurnID,
               record.sessionID == model.activeSessionId
         else { return }
@@ -1537,6 +1635,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func setSettingsActive(_ active: Bool) {
+        guard !isSideChat else { return }
         audioSourceActive = active
         if active {
             IOSAudioProviderService.shared.claimSessionContext(ownerID: audioContextOwnerID)
@@ -1582,6 +1681,7 @@ final class EngineConversationSource: ConversationSource {
     /// Query the already connected engine. Opening audio settings never builds
     /// an engine merely to discover a cloud route.
     private func refreshAudioSessionContext() {
+        guard !isSideChat else { return }
         guard audioSourceActive, hasConfirmedSessionState, !model.sessionTransitionPending,
               let handle, !model.activeSessionId.isEmpty else { return }
         audioContextGeneration &+= 1
@@ -1770,6 +1870,7 @@ final class EngineConversationSource: ConversationSource {
     /// created since the handle was built. A build/submit failure surfaces as
     /// a host error banner.
     func listSessions() {
+        guard !isSideChat else { return }
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -1789,6 +1890,7 @@ final class EngineConversationSource: ConversationSource {
     /// command submitter to keep this path covered by hermetic tests.
     /// Neither route triggers an engine build.
     func refreshBackgroundTasks() {
+        guard !isSideChat else { return }
         guard handle != nil || testCommandSubmitter != nil else { return }
         Task { [weak self] in
             guard let self else { return }
@@ -2144,6 +2246,7 @@ final class EngineConversationSource: ConversationSource {
     /// Pull the engine's real MCP server listing (out-of-band, like
     /// `listSessions`). The `McpServers` reply lands on `apply` → `model.mcpServers`.
     func refreshMcpServers() {
+        guard !isSideChat else { return }
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -2161,6 +2264,7 @@ final class EngineConversationSource: ConversationSource {
     /// deliberately separate from the main turn stream so opening the
     /// picker never starts or interrupts a turn.
     func listSessionAgents() {
+        guard !isSideChat else { return }
         guard !model.activeSessionId.isEmpty else { return }
         let requestSessionID = model.activeSessionId
         Task { [weak self] in
@@ -2575,6 +2679,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func refreshSessionAgentsAfterTransition() {
+        guard !isSideChat else { return }
         guard let handle else { return }
         Task { [handle] in
             try? await handle.submit(command: .listSessionAgents)
@@ -2817,6 +2922,18 @@ final class EngineConversationSource: ConversationSource {
 
     /// Map one inbound `ClientEvent` onto the published state.
     func apply(_ event: ClientEvent) {
+        guard !sideEnded else { return }
+        if case let .sideChatEnded(sideID) = event {
+            sideChats.removeEnded(sideID)
+            return
+        }
+        if isSideChat, currentTurnId == nil, case let .turnStarted(reportedTurnID) = event {
+            let turnID = reportedTurnID ?? nextTurnId
+            currentTurnId = turnID
+            activeTurnEpoch = sessionEpoch
+            model.activeTurnToken = ConversationTurnToken(clientTurnId: turnID, sessionEpoch: sessionEpoch)
+            nextTurnId = turnID == UInt64.max ? 1 : turnID + 1
+        }
         if Self.settingsOwner === self {
             DesktopSettingsRepository.shared.consume(event)
         }
@@ -2852,6 +2969,8 @@ final class EngineConversationSource: ConversationSource {
                   turnId == nil || turnId == token.clientTurnId
             else { return }
             let raw = pendingSlashRaw ?? "/"
+            if isError { restoreFailedSideSubmission() }
+            else { pendingSideInput = nil }
             if Self.isCompactSlash(raw) {
                 if case .completed = model.compactionStatus {
                     // The authoritative CompactionCompleted metrics arrived first.
@@ -3430,12 +3549,13 @@ final class EngineConversationSource: ConversationSource {
                 "turn ended turn=\(self.currentTurnId ?? 0, privacy: .public) outcome=\(String(describing: outcome), privacy: .public) accepted=\(accepted, privacy: .public)"
             )
             guard accepted else { return }
+            pendingSideInput = nil
             let awaitingCancellationTerminal = cancellationOperation.map {
                 $0.turnId == currentTurnId
             } ?? false
             if let currentTurnId {
                 if !awaitingCancellationTerminal {
-                    durableTurns.clear(turnID: currentTurnId)
+                    durableTurns?.clear(turnID: currentTurnId)
                     if unresolvedRecoveryTurnID == currentTurnId {
                         unresolvedRecoveryTurnID = nil
                         needsDurableForegroundRecoveryTurnID = nil
@@ -3622,7 +3742,7 @@ final class EngineConversationSource: ConversationSource {
                     model.hasUnresolvedTurnRecovery = false
                 }
                 model.streaming = false
-                durableTurns.clear(turnID: snapshot.turnId)
+                durableTurns?.clear(turnID: snapshot.turnId)
                 reattachedTurnIDs.remove(snapshot.turnId)
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
@@ -3651,7 +3771,7 @@ final class EngineConversationSource: ConversationSource {
                     model.hasUnresolvedTurnRecovery = false
                 }
                 model.streaming = false
-                durableTurns.clear(turnID: snapshot.turnId)
+                durableTurns?.clear(turnID: snapshot.turnId)
                 reattachedTurnIDs.remove(snapshot.turnId)
                 model.error = ConversationError(
                     kind: .host,
@@ -3689,7 +3809,7 @@ final class EngineConversationSource: ConversationSource {
                     finishActiveRun(.cancelled)
                     publishActiveTurnCompletion(.cancelled)
                 }
-                durableTurns.clear(turnID: snapshot.turnId)
+                durableTurns?.clear(turnID: snapshot.turnId)
                 reattachedTurnIDs.remove(snapshot.turnId)
                 if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
                     clearTurnPointers(keepEpoch: false)
@@ -3709,17 +3829,21 @@ final class EngineConversationSource: ConversationSource {
                replayProjectionState.map({ !Self.isTerminalRecoveryState($0) }) ?? true {
                 applyRetainedTurnEvent(eventJson, turnID: turnId)
             }
-            durableTurns.updateSequence(turnID: turnId, sequence: sequence)
+            durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
 
         case let .error(kind, message):
             let accepted = acceptTurnEvent(event)
-            Self.turnLog.error(
+            if isSideChat {
+                Self.turnLog.error("side turn failed accepted=\(accepted, privacy: .public)")
+            } else {
+                Self.turnLog.error(
                 "turn error turn=\(self.currentTurnId ?? 0, privacy: .public) kind=\(String(describing: kind), privacy: .public) accepted=\(accepted, privacy: .public) message=\(message, privacy: .private(mask: .hash))"
             )
             Self.turnLog.error(
                 "turn error details kind=\(String(describing: kind), privacy: .public) message=\(message, privacy: .public)"
             )
             print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(message)")
+            }
             guard accepted else { return }
             if model.compactionStatus?.isActive == true,
                message.lowercased().hasPrefix("force_compact failed:") {
@@ -3841,6 +3965,11 @@ final class EngineConversationSource: ConversationSource {
             )
 
         case let .sessionStarted(sessionId, mode):
+            if isSideChat {
+                model.activeSessionId = sessionId
+                hasConfirmedSessionState = true
+                return
+            }
             model.promptSuggestion = nil
             model.promptSuggestionUuid = nil
             guard SessionMode(dto: mode) == sessionMode else { return }
@@ -4030,7 +4159,9 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func applySlashCommandCatalog(_ commands: [SlashCommandDto]) {
-        model.slashCommands = commands.map { command in
+        model.slashCommands = commands.filter { command in
+            !isSideChat || (command.name != "side" && (command.source != "builtin" || ["help", "model", "compact"].contains(command.name)))
+        }.map { command in
             ConversationSlashCommand(
                 name: command.name,
                 description: command.description,
@@ -4040,6 +4171,9 @@ final class EngineConversationSource: ConversationSource {
                 source: command.source,
                 hidden: command.hidden
             )
+        }
+        if !isSideChat && !model.slashCommands.contains(where: { $0.name == "side" }) {
+            model.slashCommands.append(ConversationSlashCommand(name: "side", description: String(localized: "side_chat_start_description"), aliases: [], argumentHint: "[input]", menuDescription: nil, source: "builtin", hidden: false))
         }
         model.slashCommandsLoaded = true
 
@@ -4083,15 +4217,15 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func beginDurableTurnForTesting(turnId: UInt64, sessionId: String) {
-        durableTurns.begin(sessionID: sessionId, turnID: turnId)
+        durableTurns?.begin(sessionID: sessionId, turnID: turnId)
     }
 
     func recordDurableSequenceForTesting(turnId: UInt64, sequence: UInt64) {
-        durableTurns.updateSequence(turnID: turnId, sequence: sequence)
+        durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
     }
 
     func durableAttachCursorForTesting() -> UInt64? {
-        durableTurns.load()?.lastSequence
+        durableTurns?.load()?.lastSequence
     }
 
     func cancelForTesting() {
@@ -4915,6 +5049,7 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func fail(_ kind: ConversationError.Kind, _ message: String) {
+        restoreFailedSideSubmission()
         if let cancellationOperation,
            cancellationOperation.turnId == currentTurnId {
             // An engine error racing Cancel is not terminal ownership
@@ -4930,7 +5065,7 @@ final class EngineConversationSource: ConversationSource {
         }
         let settledTurn = currentTurnId != nil
         if let currentTurnId {
-            durableTurns.clear(turnID: currentTurnId)
+            durableTurns?.clear(turnID: currentTurnId)
             if unresolvedRecoveryTurnID == currentTurnId {
                 unresolvedRecoveryTurnID = nil
                 needsDurableForegroundRecoveryTurnID = nil
@@ -4952,6 +5087,19 @@ final class EngineConversationSource: ConversationSource {
         if settledTurn {
             requestSessionCatalogRefreshAfterSettledTurn()
         }
+    }
+
+    private func restoreFailedSideSubmission() {
+        guard isSideChat, let pendingSideInput else { return }
+        self.pendingSideInput = nil
+        failedSideInput = pendingSideInput
+        deliverFailedSideSubmission()
+    }
+
+    private func deliverFailedSideSubmission() {
+        guard let failedSideInput, let onSideSubmissionFailure else { return }
+        self.failedSideInput = nil
+        onSideSubmissionFailure(failedSideInput.0, failedSideInput.1)
     }
 
     // MARK: model selection (SHIP-BLOCKER #2)
@@ -5015,7 +5163,7 @@ final class EngineConversationSource: ConversationSource {
             do {
                 try await self.confirmBypassPermissionsForCurrentSession()
                 try await self.submitCommand(.setPermissionMode(mode: "bypassPermissions"))
-                if suppressWarning {
+                if suppressWarning && !self.isSideChat {
                     self.permissionModeRepository.setBypassWarningSuppressed(true)
                     self.model.bypassPermissionsWarningSuppressed = true
                 }
@@ -5050,8 +5198,7 @@ final class EngineConversationSource: ConversationSource {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let handle = try await self.ensureHandle()
-                try await handle.submit(command: .setReasoningSelection(
+                try await self.submitCommand(.setReasoningSelection(
                     selection: Self.reasoningSelectionDto(selection)
                 ))
             } catch {
@@ -5081,6 +5228,7 @@ final class EngineConversationSource: ConversationSource {
     /// retaining the old transcript and correlator until the host confirms
     /// release. Only then is the transcript reset for the selected session.
     func openSession(_ session: SessionRef) {
+        guard !isSideChat else { return }
         guard unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
@@ -5110,12 +5258,13 @@ final class EngineConversationSource: ConversationSource {
     /// overlay). Process restoration still re-requests the active id when the
     /// model has no committed transcript to display.
     func resumeSession(_ uuid: String, emptySessionTitle: String?) {
+        guard !isSideChat else { return }
         guard !uuid.isEmpty,
               unresolvedRecoveryTurnID == nil,
               pauseAcknowledgements.isEmpty
         else { return }
-        if let record = durableTurns.load(), record.sessionID != uuid {
-            durableTurns.clear()
+        if let record = durableTurns?.load(), record.sessionID != uuid {
+            durableTurns?.clear()
         }
         if uuid == model.activeSessionId,
            pendingSessionTransition == nil,
@@ -5147,7 +5296,7 @@ final class EngineConversationSource: ConversationSource {
     private func reattachDurableTurnIfNeeded(sessionID: String) {
         guard
             durableRecoveryTask == nil,
-            let record = durableTurns.load(),
+            let record = durableTurns?.load(),
             record.sessionID == sessionID,
             reattachedTurnIDs.insert(record.turnID).inserted
         else { return }
@@ -5298,10 +5447,10 @@ final class EngineConversationSource: ConversationSource {
         // the checkpoint the replay is reading from:
         //   - `.turnStarted` sets `executorOwnedTurnID` and
         //     `model.streaming = true`, which shows Stop for a parked turn.
-        //   - `.turnEnded` calls `durableTurns.clear(turnID:)` plus
+        //   - `.turnEnded` calls `durableTurns?.clear(turnID:)` plus
         //     `clearTurnPointers`.
         //   - `.error` reaches `fail(...)`, which likewise calls
-        //     `durableTurns.clear(turnID:)`, drops `hasUnresolvedTurnRecovery`
+        //     `durableTurns?.clear(turnID:)`, drops `hasUnresolvedTurnRecovery`
         //     and nils `currentTurnId` via `clearTurnPointers(keepEpoch:false)`.
         // Once the checkpoint is gone, `applyRetainedTurnEvent`'s
         // `currentTurnId == turnID` guard silently rejects every REMAINING
@@ -5330,6 +5479,7 @@ final class EngineConversationSource: ConversationSource {
     /// ask after the main conversation turn has ended, so main-turn streaming
     /// and cancellation state must not decide whether the request is retained.
     func enqueuePermission(_ request: PermissionRequest) {
+        guard !sideEnded else { return }
         guard !model.pendingPermissions.contains(where: { $0.requestId == request.requestId })
         else { return }
         model.pendingPermissions.append(PendingPermission(request: request))

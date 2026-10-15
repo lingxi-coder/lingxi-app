@@ -53,7 +53,15 @@ struct ChatView: View {
     @Binding var draft: String
     // The captured-photo attachment, hoisted like the draft: the composer's
     // camera affordance drives an on-device capture and surfaces the JPEG here.
-    @State private var attachment: ComposerAttachment? = nil
+    @State private var localAttachment: ComposerAttachment? = nil
+    private var attachmentBinding: Binding<ComposerAttachment?>?
+    private var attachment: ComposerAttachment? {
+        get { attachmentBinding?.wrappedValue ?? localAttachment }
+        nonmutating set {
+            if let attachmentBinding { attachmentBinding.wrappedValue = newValue }
+            else { localAttachment = newValue }
+        }
+    }
     // A transient affordance status line (permission denied / capture failed).
     @State private var captureStatus: String? = nil
 
@@ -72,6 +80,7 @@ struct ChatView: View {
     /// present one another, so a row picks a follow-up that runs on dismiss).
     @State private var sessionPanelOpen = false
     @State private var sessionPanelFollowUp: SessionPanelAction?
+    @State private var sideChatSheetOpen = false
     @State private var modelPickerOpen = false
     @State private var permissionSheetOpen = false
 
@@ -91,6 +100,7 @@ struct ChatView: View {
          draft: Binding<String>,
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
+         attachmentBinding: Binding<ComposerAttachment?>? = nil,
          projectName: String? = nil,
          sessionMode: SessionMode = .code,
          workspaceName: String = "",
@@ -122,6 +132,7 @@ struct ChatView: View {
         self._draft = draft
         self.voiceInteraction = voiceInteraction
         self.source = source
+        self.attachmentBinding = attachmentBinding
         self.onOpenVoiceSettings = onOpenVoiceSettings
         self.onOpenSessionDetails = onOpenSessionDetails
         self.onOpenShellTask = onOpenShellTask
@@ -187,7 +198,7 @@ struct ChatView: View {
                              // also fires on every ModelList/ModelChanged (boot,
                              // resume, reconnect), and recording those would fill
                              // the list with models the user never chose.
-                             modelRecents.record(reference)
+                             if !source.isTemporaryConversation { modelRecents.record(reference) }
                              recentModels = modelRecents.resolved(against: visibleAvailableModels)
                          },
                          reasoningModelId: convo.controls?.qualifiedModel,
@@ -203,6 +214,7 @@ struct ChatView: View {
                          fastModePending: convo.fastModePending || convo.sessionTransitionPending,
                          fastModeError: convo.fastModeError,
                          onSetFastMode: { source.setFastMode($0) },
+                         showsFastMode: !source.isTemporaryConversation,
                          controlsPending: convo.controlsPending,
                          controlsError: convo.controlsError,
                          bypassWarningSuppressed: convo.bypassPermissionsWarningSuppressed,
@@ -241,11 +253,13 @@ struct ChatView: View {
                          onMicHoldCancel: cancelVoiceHold,
                          onMicTap: toggleVoiceCapture,
                          onFlowModeTap: enterFlowMode,
+                         showsFlowMode: !source.isTemporaryConversation,
                          voiceCapturePhase: voiceInteraction.capturePhase,
                          voiceInteractionMode: voiceInteraction.mode,
                          modelOpen: $modelPickerOpen,
                          controlsOpen: $permissionSheetOpen,
                          showsPermissionChip: sessionMode == .code)
+                    .preserveConversationDraft()
                 }
             }
 
@@ -422,10 +436,27 @@ struct ChatView: View {
         // advertises the back-swipe. Nothing here may hide that bar.
         .navigationTitle(sessionTitle)
         .navigationBarTitleDisplayMode(.inline)
+        #if canImport(harness_runtimeFFI)
+        .sheet(isPresented: $sideChatSheetOpen) {
+            if let engine = source as? EngineConversationSource {
+                SideChatSheet(collection: engine.sideChats)
+            }
+        }
+        #endif
         .toolbar {
+            #if canImport(harness_runtimeFFI)
+            if let engine = source as? EngineConversationSource, !engine.isSideChat {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { sideChatSheetOpen = true } label: {
+                        Label(String(localized: "side_chats_title"), systemImage: "bubble.left.and.bubble.right")
+                    }
+                    .accessibilityIdentifier("conversation.side-chats")
+                }
+            }
+            #endif
             ToolbarItem(placement: .principal) {
                 // Tap the title to open everything about this session.
-                Button { sessionPanelOpen = true } label: {
+                Button { if !source.isTemporaryConversation { sessionPanelOpen = true } } label: {
                     VStack(spacing: 1) {
                         Text(sessionTitle)
                             .font(.system(size: 13, weight: .semibold))
@@ -445,6 +476,7 @@ struct ChatView: View {
                 .accessibilityIdentifier("conversation.project-context")
             }
             ToolbarItem(placement: .topBarTrailing) {
+                if !source.isTemporaryConversation {
                 Button(action: newChat) {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 16, weight: .medium))
@@ -454,9 +486,10 @@ struct ChatView: View {
                 }
                 .accessibilityLabel(String(localized: "chat_new_chat"))
                 .accessibilityIdentifier("conversation.new-chat")
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                summaryMenu
+                if !source.isTemporaryConversation { summaryMenu }
             }
         }
     }
@@ -953,8 +986,27 @@ struct ChatView: View {
     }
 
     private func send(_ txt: String) {
+        #if canImport(harness_runtimeFFI)
+        if let engine = source as? EngineConversationSource,
+           !engine.isSideChat,
+           let input = SideChatCommand.input(txt) {
+            guard attachment == nil else {
+                convo.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_creation_text_only"))
+                return
+            }
+            let submittedDraft = draft
+            engine.sideChats.create(input: input.isEmpty ? nil : input) { success in
+                if success {
+                    if draft == submittedDraft { draft = "" }
+                    sideChatSheetOpen = true
+                }
+            }
+            return
+        }
+        #endif
         let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
         guard let token = source.send(txt, images: images) else { return }
+        draft = ""
         // The source owns the durable transcript now; remove only after it has
         // accepted the turn so a failed send leaves the attachment retryable.
         attachment = nil
@@ -998,6 +1050,7 @@ struct ChatView: View {
     }
 
     private func enterFlowMode() {
+        guard !source.isTemporaryConversation else { return }
         guard !convo.sessionTransitionPending else { return }
         cancelVoiceHold()
         composerFocused = false

@@ -389,6 +389,7 @@ fun RootScreen(
     }
     val state by chatViewModel.state.collectAsState()
     val pendingPermission by chatViewModel.pendingPermission.collectAsState()
+    val sideChats by chatViewModel.sideChats.chats.collectAsState()
     val hasActiveEngineWork = state.blocksEngineReconnect(hasPendingPermission = pendingPermission != null)
     LaunchedEffect(hasActiveEngineWork) { onConversationBusyChanged(hasActiveEngineWork) }
     val scopeStore = remember(appContext) { ScopeStateStore(appContext) }
@@ -604,8 +605,12 @@ fun RootScreen(
     DisposableEffect(lifecycleOwner, flowVoiceController) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> {
+                    appInForeground = true
+                    chatViewModel.sideChats.resumeForeground()
+                }
                 Lifecycle.Event.ON_STOP -> {
+                    chatViewModel.sideChats.cancelCurrentTurns()
                     appInForeground = false
                     flowVoiceController.pause()
                     cancelActiveHeldVoiceSession()
@@ -734,6 +739,11 @@ fun RootScreen(
     // `(workspace, mode)` draft; the legacy SavedStateHandle value is consulted
     // only once for a Code-mode process restore.
     var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
+    LaunchedEffect(chatViewModel) {
+        chatViewModel.sideChats.failedDraft.collect { failed ->
+            if (failed != null && draft.isEmpty()) draft = failed
+        }
+    }
     val conversationSource by chatViewModel.engineSource.collectAsState()
     val visualizationHost = conversationSource.visualizationHost
     var voiceDraftBase by remember { mutableStateOf("") }
@@ -1772,6 +1782,7 @@ fun RootScreen(
                             )
                         }
                     },
+                    onSendPreflight = { text, attachment -> chatViewModel.admitComposerSend(text, attachment != null) },
                     onSendWithAttachment = { text, attachment ->
                         voiceSpeechPlayer.stop()
                         runConversationAction {
@@ -1794,6 +1805,7 @@ fun RootScreen(
                     sessionMode = activeSessionMode,
                     workspaceName = currentWorkspaceName,
                     onOpenSessionPanel = { sessionPanelOpen = true },
+                    onOpenSideChats = if (sideChats.isEmpty()) null else { { chatViewModel.sideChats.visible.value = true } },
                     onSelectNewChatMode = { mode ->
                         if (mode != activeSessionMode) {
                             startNewSessionIn(newChatScope, mode, carryDraft = true)
@@ -1927,6 +1939,8 @@ fun RootScreen(
 
         // Immersive voice overlay (full-screen, above everything else).
         VoiceFlowOverlay(visible = voiceActive)
+
+        com.lingxi.code.conversation.SideChatSheet(chatViewModel.sideChats, isDark)
 
         // Permission prompt (above everything): renders the head parked request
         // and resolves it by submitting Approve/DenyPermission through the source,

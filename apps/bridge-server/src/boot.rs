@@ -810,6 +810,7 @@ pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
 /// is held so its background tasks (cost-persist drain, etc.) stay alive for the
 /// process lifetime.
 pub struct BoundServer {
+    side_chats: Arc<harness_runtime::side_chat::SideChatManager>,
     /// The fully-bound connection (driver + router attached).
     pub connection: BridgeConnection,
     /// The desktop runtime — held (not read) so its handles and the spawned
@@ -831,6 +832,9 @@ pub struct BoundServer {
 }
 
 impl BoundServer {
+    pub fn side_chats(&self) -> Arc<harness_runtime::side_chat::SideChatManager> {
+        self.side_chats.clone()
+    }
     /// The names of the tools the assembled engine registered.
     ///
     /// Delegates to [`DesktopRuntime::registered_tool_names`]; the runtime
@@ -1684,6 +1688,11 @@ pub async fn assemble_with_credentials(
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
     let dispatcher: Arc<dyn SlashCommandDispatcher> =
         Arc::new(RegistrySlashDispatcherClone::wrap(&runtime));
+    let side_chats = harness_runtime::side_chat::SideChatManager::new(
+        runtime.orchestrator.clone(),
+        runtime.side_chat_factory.clone(),
+        connection.unscoped_event_sink(),
+    );
     let mut router = EngineCommandRouter::new(
         handle,
         runtime.auth.clone(),
@@ -1692,6 +1701,7 @@ pub async fn assemble_with_credentials(
         Some(dispatcher),
         Some(runtime.shared_command_registry.clone()),
     )
+    .with_side_chats(side_chats.clone())
     .with_cron_firer(cron_firer)
     .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
     .with_credentials(runtime.credentials.clone())
@@ -1733,6 +1743,7 @@ pub async fn assemble_with_credentials(
         .with_task_notification_registry(runtime.task_registry.clone())
         .with_queue_wakeup();
     Ok(BoundServer {
+        side_chats,
         connection,
         runtime,
         audio: audio_bridge,

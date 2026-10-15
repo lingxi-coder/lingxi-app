@@ -7,6 +7,11 @@ import type {
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
+  side_chat_create: 'exposed',
+  side_chat_list: 'exposed',
+  side_chat_get: 'exposed',
+  side_chat_end: 'exposed',
+  side_chat_submit: 'exposed',
   cron_manage: 'exposed',
   ui_render: 'not_applicable',
   ui_client_module: 'not_applicable',
@@ -100,6 +105,14 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 } as const satisfies Record<ListingKindDto['type'], DesktopDisposition>;
 
 export const CLIENT_EVENT_DISPOSITIONS = {
+  side_chat_permission: 'exposed',
+  side_chat_submitted: 'exposed',
+  side_chat_created: 'exposed',
+  side_chat_list: 'exposed',
+  side_chat_snapshot: 'exposed',
+  side_chat_event: 'exposed',
+  side_chat_ended: 'exposed',
+  side_chat_error: 'exposed',
   cron_result: 'exposed',
   ui_control_result: 'host_private',
   ui_client_frame: 'host_private',
@@ -214,6 +227,11 @@ export const CLIENT_EVENT_DISPOSITIONS = {
  * stay out.
  */
 export const ALLOWED_CLIENT_COMMAND_TYPES = [
+  'side_chat_create',
+  'side_chat_list',
+  'side_chat_get',
+  'side_chat_end',
+  'side_chat_submit',
   'cron_manage',
   'set_model',
   'list_models',

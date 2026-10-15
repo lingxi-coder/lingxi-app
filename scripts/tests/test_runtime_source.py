@@ -4,10 +4,11 @@
 import copy
 from pathlib import Path
 import unittest
+import tempfile
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from runtime_source import inspect_metadata
+from runtime_source import inspect_metadata, declared_development_root
 
 
 class RuntimeSourceTests(unittest.TestCase):
@@ -28,6 +29,20 @@ class RuntimeSourceTests(unittest.TestCase):
 
     def inspect(self):
         return inspect_metadata(self.metadata, self.dependency, self.inventory)
+
+    def test_local_cargo_config_resolves_explicit_development_patch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / ".cargo").mkdir()
+            config = f'[patch."{self.repository}"]\nharness-runtime = {{ path = "../harness/crates/runtime" }}\n'
+            (workspace / ".cargo" / "config.toml").write_text(config)
+            root = declared_development_root(workspace, {}, self.repository)
+            self.assertEqual(root, (workspace / "../harness").resolve())
+
+    def test_development_patch_rejects_wrong_runtime_layout(self):
+        manifest = {"patch": {self.repository: {"harness-runtime": {"path": "../harness/crates/other"}}}}
+        with self.assertRaisesRegex(ValueError, "unexpected declared"):
+            declared_development_root(Path("/tmp/product"), manifest, self.repository)
 
     def test_accepts_one_pinned_source(self):
         result = self.inspect()

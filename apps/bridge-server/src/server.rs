@@ -1936,7 +1936,7 @@ impl BridgeConnection {
 
     /// Sink reserved for command output that is not part of a turn lifecycle.
     /// Keeping it private prevents orchestrator events from bypassing ownership.
-    fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
+    pub(crate) fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
         Arc::new(UnscopedFrameEventSink {
             out: self.out.clone(),
         })
@@ -2620,6 +2620,15 @@ impl BridgeConnection {
             command @ ClientCommand::SetModel { .. } => {
                 if let Some(router) = &self.router {
                     router.stop_realtime_audio().await;
+                    router.route(command, self.unscoped_event_sink()).await;
+                }
+            }
+            command @ (ClientCommand::SideChatCreate { .. }
+            | ClientCommand::SideChatList {}
+            | ClientCommand::SideChatGet { .. }
+            | ClientCommand::SideChatEnd { .. }
+            | ClientCommand::SideChatSubmit { .. }) => {
+                if let Some(router) = &self.router {
                     router.route(command, self.unscoped_event_sink()).await;
                 }
             }

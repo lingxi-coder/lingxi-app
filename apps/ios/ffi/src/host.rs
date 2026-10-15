@@ -32,6 +32,19 @@ use lingxi_core::host::Platform;
 use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 
+/// Create a RAM-only side using the same typed callbacks as the main chat.
+#[cfg(feature = "uniffi")]
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn create_ios_side_chat(
+    engine: Arc<MobileEngineHandle>, request_id: String, initial_input: Option<String>,
+    listener: Box<dyn IosEventListener>, permissions: Box<dyn IosPermissionSink>,
+) -> Result<harness_runtime::mobile::SideChatInfoDto, MobileEngineError> {
+    engine.create_side_chat(request_id, initial_input,
+        Arc::new(IosListenerBridge { inner: listener }),
+        Arc::new(super::callbacks::IosPermissionSinkBridge { inner: permissions }),
+    ).await
+}
+
 /// The foreign (Swift) capability objects + config the engine needs to build an
 /// `IosPlatform`. `UniFFI` marshals each `Arc<dyn …>` as a callback-interface
 /// reference; `app_sandbox_root` is the app container path.

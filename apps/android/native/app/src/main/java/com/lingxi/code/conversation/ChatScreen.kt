@@ -103,6 +103,7 @@ fun ChatScreen(
     state: ChatState,
     onSend: (String) -> Unit,
     onSendWithAttachment: (String, ComposerAttachment?) -> Unit = { text, _ -> onSend(text) },
+    onSendPreflight: (String, ComposerAttachment?) -> Boolean = { _, _ -> true },
     onNewChat: () -> Unit,
     onSelectModel: (ModelOption) -> Unit,
     isDark: Boolean,
@@ -111,6 +112,7 @@ fun ChatScreen(
     sessionMode: SessionMode = SessionMode.Code,
     workspaceName: String = "",
     onOpenSessionPanel: (() -> Unit)? = null,
+    onOpenSideChats: (() -> Unit)? = null,
     /** New-chat mode bar: start a fresh conversation in this mode. */
     onSelectNewChatMode: (SessionMode) -> Unit = {},
     /** New-chat workspace capsule: choose where the conversation runs. */
@@ -282,6 +284,7 @@ fun ChatScreen(
                 onOpenDrawer = onOpenDrawer,
                 onTitleClick = onOpenSessionPanel?.takeIf { !isNewChat && state.session.id != "new" },
                 onNewChat = onNewChat,
+                onOpenSideChats = onOpenSideChats,
             )
             Box(modifier = Modifier.weight(1f)) {
                 val currentOnVisualizationFollowup by rememberUpdatedState(onVisualizationFollowup)
@@ -374,13 +377,13 @@ fun ChatScreen(
                     if (modelSetupRequired) {
                         onOpenModelSettings()
                     } else if (state.sessionReady && !state.sessionTransitioning) {
-                        onSendWithAttachment(draft, attachment)
-                        onDraftChange("")
-                        onRemoveAttachment()
-                        // Sending is an explicit re-engagement: a reader who
-                        // scrolled up to re-read something must not have their
-                        // own prompt land off screen.
-                        rearmTail()
+                        sendComposerIfAdmitted(
+                            admitted = onSendPreflight(draft, attachment),
+                            send = { onSendWithAttachment(draft, attachment) },
+                            clearDraft = { onDraftChange("") },
+                            removeAttachment = onRemoveAttachment,
+                            followTail = rearmTail,
+                        )
                     }
                 },
                 onMicClick = onMicClick,
@@ -395,9 +398,9 @@ fun ChatScreen(
                 onRemoveAttachment = onRemoveAttachment,
                 visualizationChip = state.visualizationChip,
                 onRemoveVisualizationChip = onRemoveVisualizationChip,
-                isStreaming = state.isStreaming,
+                isStreaming = state.isStreaming && sideChatInput(draft) == null,
                 showDiscardRecovery = state.durableRecoveryBlocked,
-                enabled = !state.durableRecoveryBlocked &&
+                enabled = (sideChatInput(draft) != null || !state.durableRecoveryBlocked) &&
                     (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
                 modelSetupRequired = modelSetupRequired,
                 onOpenModelSettings = onOpenModelSettings,
@@ -482,6 +485,7 @@ private fun TopBar(
     onOpenDrawer: () -> Unit,
     onTitleClick: (() -> Unit)?,
     onNewChat: () -> Unit,
+    onOpenSideChats: (() -> Unit)?,
 ) {
     val t = LingXiTheme.palette
     Row(
@@ -538,6 +542,9 @@ private fun TopBar(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+        onOpenSideChats?.let { open ->
+            androidx.compose.material3.TextButton(onClick = open) { Text(stringResource(R.string.side_chat_title)) }
         }
         IconButton(
             name = LXIconName.Edit,
@@ -1121,4 +1128,19 @@ private fun StreamingRow() {
             }
         }
     }
+}
+
+/** A rejection must not clear either half of the editable composer. */
+internal fun sendComposerIfAdmitted(
+    admitted: Boolean,
+    send: () -> Unit,
+    clearDraft: () -> Unit,
+    removeAttachment: () -> Unit,
+    followTail: () -> Unit,
+) {
+    if (!admitted) return
+    send()
+    clearDraft()
+    removeAttachment()
+    followTail()
 }

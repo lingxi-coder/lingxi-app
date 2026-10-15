@@ -29,6 +29,7 @@ import type {
 } from '@lingxi/bridge-client';
 
 import type { UseBridge } from '../bridge/bridgeTypes.js';
+import { sideCreationInput } from '../bridge/sideChatState';
 import { isSideQuestionCommand } from '../bridge/sideQuestion';
 import type { ContextSummarySnapshot } from '../bridge/conversation';
 import { matchesComposerSubmission, type ComposerSubmissionSnapshot } from '../bridge/composerSubmission';
@@ -1303,7 +1304,10 @@ export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
   </section>;
 }
 
-export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal }: {
+export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
+  sideChatOpen?: boolean;
+  sideChatAvailable?: boolean;
+  onToggleSideChat?(): void;
   terminalOpen?: boolean;
   terminalAvailable?: boolean;
   onToggleTerminal?(): void;
@@ -1345,6 +1349,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         style={topbarActionTokens}
       ><Icon name="topbar-summary" size={20} stroke={1.75} /></button>
       <button type="button" className="no-drag desktop-topbar-action" aria-label="Toggle terminal" title="Toggle terminal (Ctrl+`)" aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><Icon name="topbar-terminal" size={20} stroke={1.75} /></button>
+      {sideChatAvailable ? <button className="no-drag desktop-topbar-action" type="button" title="Reopen Side Chat" aria-label="Reopen Side Chat" aria-expanded={sideChatOpen} aria-pressed={sideChatOpen} onClick={onToggleSideChat} style={topbarActionTokens}><Icon name="chat" size={19} /></button> : null}
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"
@@ -1637,9 +1642,10 @@ function createFileMention(path: string, color: string): HTMLElement {
   return token;
 }
 
-export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage, onSetTheme, onOpenProviderSettings }: {
+export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage, onSetTheme, onOpenProviderSettings, onCreateSide }: {
   bridge: UseBridge;
   ready: boolean;
+  onCreateSide?(input?: string): Promise<unknown>;
   onOpenSettings(): void;
   onOpenSettingsPage(pageId: string): void;
   onSetTheme(theme: 'dark' | 'light'): void;
@@ -2590,6 +2596,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     slashDismissed.current = false;
   };
 
+  const sideCreationPending = useRef(false);
   const submit = async () => {
     const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
     const value = promptWithFileMentions(snapshot.text, snapshot.files);
@@ -2599,6 +2606,21 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
+    const sideInput = sideCreationInput(snapshot.text, snapshot.files);
+    if (onCreateSide && sideInput !== null) {
+      if (sideCreationPending.current) return;
+      if (imageAttachments.length) { setImageNotice('Send images from the Side Chat after opening it.'); return; }
+      sideCreationPending.current = true;
+      const originalHtml = input.current?.innerHTML;
+      const submittedSessionId = draftSessionId.current;
+      const submittedRevision = composerDraftRevision.current;
+      try {
+        await onCreateSide(sideInput);
+        if (draftSessionId.current === submittedSessionId && composerDraftRevision.current === submittedRevision && input.current?.innerHTML === originalHtml) clearComposer();
+      } catch (error) { setImageNotice(error instanceof Error ? error.message : String(error)); }
+      finally { sideCreationPending.current = false; }
+      return;
+    }
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
       setImageNotice('当前任务完成后才能运行 / 命令。');

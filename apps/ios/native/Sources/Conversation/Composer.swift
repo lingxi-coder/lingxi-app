@@ -34,6 +34,7 @@ struct Composer: View {
     var fastModePending: Bool = false
     var fastModeError: String? = nil
     var onSetFastMode: (Bool) -> Void = { _ in }
+    var showsFastMode = true
     var controlsPending: Bool = false
     var controlsError: String? = nil
     var bypassWarningSuppressed: Bool = false
@@ -49,6 +50,7 @@ struct Composer: View {
     /// `onTranscript` → draft). The caller owns it (see ChatView).
     @Binding var draft: String
     let onSend: (String) -> Void
+    var clearsDraftOnSend = true
     var promptSuggestion: String? = nil
     var promptSuggestionNotice: String? = nil
     var suggestionTurnKey: String = ""
@@ -96,6 +98,7 @@ struct Composer: View {
     // single mic tap toggles recording; the neighboring waveform opens Flow.
     var onMicTap: () -> Void = {}
     var onFlowModeTap: () -> Void = {}
+    var showsFlowMode = true
     var voiceCapturePhase: VoiceCapturePhase = .idle
     var voiceInteractionMode: VoiceInteractionMode? = nil
 
@@ -130,6 +133,7 @@ struct Composer: View {
         fastModePending: Bool = false,
         fastModeError: String? = nil,
         onSetFastMode: @escaping (Bool) -> Void = { _ in },
+        showsFastMode: Bool = true,
         controlsPending: Bool = false,
         controlsError: String? = nil,
         bypassWarningSuppressed: Bool = false,
@@ -162,6 +166,7 @@ struct Composer: View {
         onMicHoldCancel: @escaping () -> Void = {},
         onMicTap: @escaping () -> Void = {},
         onFlowModeTap: @escaping () -> Void = {},
+        showsFlowMode: Bool = true,
         voiceCapturePhase: VoiceCapturePhase = .idle,
         voiceInteractionMode: VoiceInteractionMode? = nil,
         modelOpen: Binding<Bool>,
@@ -190,6 +195,7 @@ struct Composer: View {
         self.fastModePending = fastModePending
         self.fastModeError = fastModeError
         self.onSetFastMode = onSetFastMode
+        self.showsFastMode = showsFastMode
         self.controlsPending = controlsPending
         self.controlsError = controlsError
         self.bypassWarningSuppressed = bypassWarningSuppressed
@@ -222,6 +228,7 @@ struct Composer: View {
         self.onMicHoldCancel = onMicHoldCancel
         self.onMicTap = onMicTap
         self.onFlowModeTap = onFlowModeTap
+        self.showsFlowMode = showsFlowMode
         self.voiceCapturePhase = voiceCapturePhase
         self.voiceInteractionMode = voiceInteractionMode
     }
@@ -384,7 +391,8 @@ struct Composer: View {
                 fastModeEnabled: fastModeEnabled,
                 fastModePending: fastModePending,
                 fastModeError: fastModeError,
-                onSetFastMode: onSetFastMode)
+                onSetFastMode: onSetFastMode,
+                showsFastMode: showsFastMode)
 
         }
         .sheet(isPresented: $controlsOpen) {
@@ -617,7 +625,7 @@ struct Composer: View {
                 .accessibilityLabel(showDiscardRecovery ? "composer_discard_recovery" : "composer_stop")
                 .accessibilityIdentifier(showDiscardRecovery ? "composer.discard-recovery" : "composer.stop")
                 .disabled(showDiscardRecovery && !sendEnabled)
-            } else {
+            } else if showsFlowMode {
                 flowModeButton
             }
         }
@@ -735,6 +743,7 @@ struct Composer: View {
         sendEnabled
             && !isWaitingForSlashCatalog
             && !(streaming
+                && SideChatCommand.input(draft) == nil
                 && slashCommandsLoaded
                 && SlashCommandMatcher.exactCommand(
                     in: draft.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -789,7 +798,8 @@ struct Composer: View {
             acceptSlashCommand(suggestion.command)
             return
         }
-        onSend(draft); draft = ""
+        onSend(draft)
+        if clearsDraftOnSend { draft = "" }
         dismissedSlashDraft = nil
     }
 }
@@ -875,5 +885,13 @@ private struct AttachmentThumb: View {
             Spacer()
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
+    }
+}
+
+ extension Composer {
+    func preserveConversationDraft() -> Composer {
+        var copy = self
+        copy.clearsDraftOnSend = false
+        return copy
     }
 }

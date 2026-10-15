@@ -1059,9 +1059,7 @@ final class ProviderRepository {
             let nextLaunchSnapshot = makeLaunchSnapshot()
             let requiresReconnect = applyDraftRequiresReconnect(
                 from: previousLaunchSnapshot,
-                to: nextLaunchSnapshot,
-                previousState: previousState,
-                currentState: currentState
+                to: nextLaunchSnapshot
             )
             if requiresReconnect, let applyReconnectHandler {
                 try await applyReconnectHandler(nextLaunchSnapshot)
@@ -1657,6 +1655,7 @@ final class ProviderRepository {
               let provider = oauthProvider(for: profiles[index].profile.presetID),
               let oauthLoginHandler
         else { return }
+        let previousLaunchSnapshot = makeLaunchSnapshot()
         profiles[index].operationInFlight = true
         profiles[index].connectionState = .testing
         profiles[index].detailMessage = nil
@@ -1668,7 +1667,7 @@ final class ProviderRepository {
             profiles[currentIndex].operationInFlight = false
             profiles[currentIndex].connectionState = .idle
             persistProfiles()
-            try await applyReconnectHandler?(makeLaunchSnapshot())
+            _ = try await reconnectIfLaunchConfigurationChanged(from: previousLaunchSnapshot)
             // Every `await` in this @MainActor class is a reentrancy point: a
             // `removeProfile` that lands while the reconnect is in flight shifts
             // — or deletes — the row `currentIndex` was resolved against, so
@@ -1695,6 +1694,7 @@ final class ProviderRepository {
               let provider = oauthProvider(for: profiles[index].profile.presetID),
               let oauthLogoutHandler
         else { return }
+        let previousLaunchSnapshot = makeLaunchSnapshot()
         profiles[index].operationInFlight = true
         do {
             try await oauthLogoutHandler(provider)
@@ -1703,7 +1703,7 @@ final class ProviderRepository {
             profiles[currentIndex].operationInFlight = false
             profiles[currentIndex].connectionState = .idle
             persistProfiles()
-            try await applyReconnectHandler?(makeLaunchSnapshot())
+            _ = try await reconnectIfLaunchConfigurationChanged(from: previousLaunchSnapshot)
             // Re-resolve after the await: the row may have been removed or
             // reordered while the reconnect was in flight (see `loginOAuth`).
             guard let reconnectedIndex = indexOfProfile(id: id) else {
@@ -1754,6 +1754,7 @@ final class ProviderRepository {
 
     func applyChanges(_ id: String) async {
         guard let index = indexOfProfile(id: id) else { return }
+        let previousLaunchSnapshot = makeLaunchSnapshot()
         do {
             let isClearingCredential = profiles[index].clearCredentialOnApply
             let launchProfile = try validateAndBuildLaunchProfile(for: profiles[index], allowDisabledWithoutCredential: true)
@@ -1781,8 +1782,7 @@ final class ProviderRepository {
                 )
             }
 
-            if let applyReconnectHandler {
-                try await applyReconnectHandler(makeLaunchSnapshot())
+            if try await reconnectIfLaunchConfigurationChanged(from: previousLaunchSnapshot) {
                 if let currentIndex = indexOfProfile(id: id) {
                     profiles[currentIndex].detailMessage = String(localized: "settings_provider_applied_reconnect")
                 }
@@ -2015,16 +2015,20 @@ final class ProviderRepository {
     private func applyDraftRequiresReconnect(
         from previousLaunchSnapshot: ProviderLaunchSnapshot,
         to nextLaunchSnapshot: ProviderLaunchSnapshot,
-        previousState: ProviderProfileState?,
-        currentState: ProviderProfileState
     ) -> Bool {
-        if previousLaunchSnapshot != nextLaunchSnapshot {
-            return true
-        }
-        if currentState.clearCredentialOnApply || effectiveSecret(for: currentState) != nil {
-            return true
-        }
-        return previousState?.oauthState != currentState.oauthState
+        // API keys and OAuth tokens live in the engine's credential store and
+        // are read per request, so only a change to what the engine was
+        // launched with needs a rebuild.
+        previousLaunchSnapshot != nextLaunchSnapshot
+    }
+
+    /// Rebuild the engine only when the launch configuration (or an unapplied
+    /// routing edit) differs from `previous`. Credential changes alone are live.
+    private func reconnectIfLaunchConfigurationChanged(from previous: ProviderLaunchSnapshot) async throws -> Bool {
+        let next = makeLaunchSnapshot()
+        guard let applyReconnectHandler, next != previous || routingDirty else { return false }
+        try await applyReconnectHandler(next)
+        return true
     }
 
     /// Restore only the profile touched by a failed draft operation. The

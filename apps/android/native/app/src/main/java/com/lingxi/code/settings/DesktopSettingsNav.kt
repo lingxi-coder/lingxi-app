@@ -43,11 +43,14 @@ fun DesktopSettingsNavigation(onNavigate: (String) -> Unit, selected: String? = 
         entries.groupBy { it.group }.forEach { (group, pages) ->
             SettingsSection(label = settingsLabel(group)) {
                 pages.forEach { page ->
-                    TextButton(onClick = { onNavigate(page.route) }, modifier = Modifier.fillMaxWidth()) {
-                        SettingsNavigationIcon(page.route)
-                        Spacer(Modifier.width(10.dp))
-                        Text(settingsLabel(page.title), color = LingXiTheme.palette.text, modifier = Modifier.weight(1f))
-                        if (selected == page.route) Text(settingsLabel("•"))
+                    Surface(onClick = { onNavigate(page.route) }, color = androidx.compose.ui.graphics.Color.Transparent) {
+                        ListItem(
+                            headlineContent = { Text(settingsLabel(page.title)) },
+                            leadingContent = { SettingsNavigationIcon(page.route) },
+                            trailingContent = { if (selected == page.route) com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.Check) },
+                            colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             }

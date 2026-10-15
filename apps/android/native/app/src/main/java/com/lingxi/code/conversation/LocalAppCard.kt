@@ -98,7 +98,7 @@ internal fun LocalAppCard(app: PublishedLocalApp, modifier: Modifier = Modifier)
             Text(
                 text = app.name,
                 color = t.text,
-                fontSize = 15.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -110,7 +110,7 @@ internal fun LocalAppCard(app: PublishedLocalApp, modifier: Modifier = Modifier)
                     "${stringResource(R.string.chat_local_app_kind)} · ${stringResource(R.string.apps_version_fmt, app.revision)}"
                 },
                 color = t.text3,
-                fontSize = 12.5f.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 maxLines = 1,
             )
         }
@@ -118,7 +118,7 @@ internal fun LocalAppCard(app: PublishedLocalApp, modifier: Modifier = Modifier)
             Text(
                 text = stringResource(R.string.common_open),
                 color = t.accent,
-                fontSize = 14.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))

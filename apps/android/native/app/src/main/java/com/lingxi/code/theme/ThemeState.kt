@@ -29,7 +29,7 @@ enum class ThemeMode(val raw: String) {
     System("system");
 
     companion object {
-        fun from(raw: String?): ThemeMode = entries.firstOrNull { it.raw == raw } ?: Dark
+        fun from(raw: String?): ThemeMode = entries.firstOrNull { it.raw == raw } ?: System
     }
 }
 
@@ -46,7 +46,7 @@ enum class Density(val raw: String) {
 
 /** A snapshot of the persisted appearance preferences. */
 data class AppearancePrefs(
-    val themeMode: ThemeMode = ThemeMode.Dark,
+    val themeMode: ThemeMode = ThemeMode.System,
     val accentId: String = Accents.DEFAULT_ID,
     val density: Density = Density.Comfortable,
     val fontSize: Float = 15f,
@@ -92,7 +92,7 @@ private object PrefKeys {
  */
 class AppearanceStore(private val context: Context) {
 
-    /** Live preferences, defaulting to the brand dark + 靛紫 accent. */
+    /** Live preferences, defaulting to system appearance and the selected accent. */
     val prefs: Flow<AppearancePrefs> = context.appearanceDataStore.data.map { p ->
         AppearancePrefs(
             themeMode = ThemeMode.from(p[PrefKeys.THEME]),

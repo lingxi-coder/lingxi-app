@@ -134,7 +134,7 @@ fun ProviderListPage(
                 Text(
                     stringResource(R.string.provider_no_providers_added),
                     color = t.text4,
-                    fontSize = 13.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
@@ -242,14 +242,14 @@ private fun ProviderRow(
                 .clickable(onClick = onTap)
                 .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
-            PresetTile(preset = preset, kind = kind, size = 28.dp, fontSize = 13.sp)
+            PresetTile(preset = preset, kind = kind, size = 28.dp, fontSize = 12.sp)
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        provider.name, color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                        provider.name, color = t.text, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     if (provider.isDefault) Badge(stringResource(R.string.settings_badge_default), t.accent, strong = true)
@@ -259,7 +259,7 @@ private fun ProviderRow(
                     Box(Modifier.size(6.dp).clip(CircleShape).background(provider.status.dot(t)))
                     Text(
                         "${provider.status.localizedLabel()} · ${provider.model.ifEmpty { "—" }}",
-                        color = t.text4, fontSize = 11.5f.sp, fontFamily = LXFont.mono,
+                        color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontFamily = LXFont.mono,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -292,7 +292,7 @@ fun ProviderPickerPage(
                 Text(
                     stringResource(R.string.settings_provider_catalog_loading),
                     color = t.text4,
-                    fontSize = 13.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
@@ -307,7 +307,7 @@ fun ProviderPickerPage(
                 Text(
                     stringResource(R.string.settings_provider_preset_not_in_catalog),
                     color = t.text4,
-                    fontSize = 13.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
@@ -358,7 +358,7 @@ fun ProviderPickerPage(
                     ) {
                         PresetTile(preset = p, kind = kind, size = 32.dp, fontSize = 14.sp)
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(p.localizedName(kind), color = t.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(p.localizedName(kind), color = t.text, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                             val profileId = when (p.id) {
                                 "google" -> "gemini"
                                 else -> p.id
@@ -374,7 +374,7 @@ fun ProviderPickerPage(
                             }
                             Text(
                                 p.localizedSub(kind) + if (modelCount == 0) "" else stringResource(R.string.settings_provider_models_count_fmt, modelCount),
-                                color = t.text4, fontSize = 11.5f.sp,
+                                color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                             )
                         }
                         LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.text4, stroke = 2f)
@@ -571,7 +571,7 @@ fun ProviderEditPage(
                         },
                     ),
                     color = t.text4,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 6.dp, bottom = 10.dp),
@@ -677,7 +677,7 @@ fun ProviderEditPage(
                                         Text(
                                             modelDetails.displayName,
                                             color = t.text,
-                                            fontSize = 12.5f.sp,
+                                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                                             fontWeight = FontWeight.Medium,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -685,7 +685,7 @@ fun ProviderEditPage(
                                         Text(
                                             modelDetails.modelId,
                                             color = t.text4,
-                                            fontSize = 11.sp,
+                                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                                             fontFamily = LXFont.mono,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -704,7 +704,7 @@ fun ProviderEditPage(
                     Text(
                         stringResource(R.string.settings_provider_picker_hidden_empty),
                         color = t.statusTesting,
-                        fontSize = 11.5f.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     )
                 }
             }
@@ -771,7 +771,7 @@ fun ProviderEditPage(
                         Text(
                             stringResource(R.string.voice_save_button),
                             color = if (builtInSupported) t.accent else t.text4,
-                            fontSize = 12.sp,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
@@ -803,7 +803,7 @@ fun ProviderEditPage(
                         Text(
                             stringResource(R.string.settings_provider_clear_key),
                             color = if (editing.credentialConfigured && builtInSupported) t.danger else t.text4,
-                            fontSize = 12.sp,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
@@ -851,7 +851,7 @@ fun ProviderEditPage(
                     if (editing.isDefault) {
                         LXIcon(name = LXIconName.Check, size = 16.dp, color = t.accent, stroke = 2.2f)
                     } else {
-                        Text(stringResource(R.string.settings_status_not_enabled), color = t.text4, fontSize = 12.sp)
+                        Text(stringResource(R.string.settings_status_not_enabled), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                     }
                 },
             )
@@ -885,7 +885,7 @@ fun ProviderEditPage(
             Text(
                 if (removing) stringResource(R.string.settings_provider_removing_credential) else stringResource(R.string.settings_provider_remove),
                 color = if (removing) t.text4 else t.danger,
-                fontSize = 13.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -893,7 +893,7 @@ fun ProviderEditPage(
             Text(
                 removalMessage.orEmpty(),
                 color = t.danger,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp),
             )
         }
@@ -977,7 +977,7 @@ private fun Badge(text: String, color: Color, strong: Boolean = false) {
     Text(
         text = text,
         color = color,
-        fontSize = 10.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
         fontWeight = if (strong) FontWeight.SemiBold else FontWeight.Medium,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
@@ -1017,14 +1017,14 @@ private fun StatusBanner(
             Text(
                 status.localizedLabel(),
                 color = t.text2,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
             )
             if (!message.isNullOrBlank()) {
                 Text(
                     message,
                     color = if (status == ConnStatus.Error) t.danger else t.text3,
-                    fontSize = 10.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     lineHeight = 14.sp,
                     modifier = Modifier.padding(top = 2.dp),
                 )
@@ -1033,7 +1033,7 @@ private fun StatusBanner(
         Text(
             if (testing) stringResource(R.string.settings_provider_testing) else actionLabel,
             color = if (enabled && !testing) t.text2 else t.text4,
-            fontSize = 12.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .clip(RoundedCornerShape(7.dp))
@@ -1146,7 +1146,7 @@ private fun ProviderConnectionProblemHint(provider: GenericProvider) {
     Text(
         message,
         color = LingXiTheme.palette.danger,
-        fontSize = 11.5.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
         modifier = Modifier.padding(bottom = 8.dp),
     )
 }
@@ -1161,7 +1161,7 @@ private fun ProviderTextAction(
     Text(
         label,
         color = if (enabled) t.accent else t.text4,
-        fontSize = 12.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
         fontWeight = FontWeight.Medium,
         modifier = Modifier
             .clip(RoundedCornerShape(6.dp))
@@ -1225,7 +1225,7 @@ private fun KeyField(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                val style = TextStyle(color = t.text, fontSize = 13.5f.sp, fontFamily = LXFont.mono)
+                val style = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(color = t.text, fontFamily = LXFont.mono)
                 if (value.isEmpty() && placeholder.isNotEmpty()) {
                     Text(placeholder, style = style.copy(color = t.text4), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -1241,7 +1241,7 @@ private fun KeyField(
             }
             Text(
                 if (show) stringResource(R.string.settings_provider_hide_key) else stringResource(R.string.settings_provider_show_key),
-                color = t.text3, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium,
                 modifier = Modifier
                     .clip(RoundedCornerShape(6.dp))
                     .clickable(onClick = onToggleShow)
@@ -1303,7 +1303,7 @@ private fun ModelPicker(
                             Text(
                                 m.displayName,
                                 color = t.text,
-                                fontSize = 13.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1311,7 +1311,7 @@ private fun ModelPicker(
                             Text(
                                 m.modelId,
                                 color = t.text3,
-                                fontSize = 11.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                                 fontFamily = LXFont.mono,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1323,7 +1323,7 @@ private fun ModelPicker(
                                     Text(
                                         summary,
                                         color = t.text4,
-                                        fontSize = 10.5f.sp,
+                                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )

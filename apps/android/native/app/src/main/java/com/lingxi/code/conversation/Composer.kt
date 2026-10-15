@@ -160,7 +160,7 @@ fun Composer(
         slashArgumentHint(text, fieldValue.selection.end, slashCommands)
     }
     val textMeasurer = rememberTextMeasurer()
-    val composerTextStyle = LocalTextStyle.current.merge(TextStyle(color = t.text, fontSize = 15.5f.sp))
+    val composerTextStyle = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(color = t.text)
     var suggestionShown by remember(suggestionTurnKey) { mutableStateOf(false) }
     var suggestionRejected by remember(suggestionTurnKey) { mutableStateOf(false) }
     val visibleSuggestion = promptSuggestion?.takeIf {
@@ -226,7 +226,7 @@ fun Composer(
                     Text(
                         text = stringResource(R.string.composer_placeholder),
                         color = t.text4,
-                        fontSize = 15.5f.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     )
                 }
                 BasicTextField(
@@ -261,14 +261,14 @@ fun Composer(
                     },
                 )
                 if (visibleSuggestion != null) {
-                    Text(visibleSuggestion, color = t.text4, fontSize = 15.5f.sp,
+                    Text(visibleSuggestion, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "Use suggestion", onClick = acceptSuggestion)
                             .testTag("composer.prompt-suggestion"))
                 }
             }
 
             if (promptSuggestionNotice != null) {
-                Text(promptSuggestionNotice, color = t.text4, fontSize = 11.sp)
+                Text(promptSuggestionNotice, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -338,7 +338,7 @@ fun Composer(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(48.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(t.accent)
                                 .clickable(onClick = onStop)
@@ -349,14 +349,14 @@ fun Composer(
                                 modifier = Modifier
                                     .size(12.dp)
                                     .clip(RoundedCornerShape(3.dp))
-                                    .background(Color.White)
+                                    .background(androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
                                     .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
                             )
                         }
                         if (hasText) {
                             Box(
                                 modifier = Modifier
-                                    .size(34.dp)
+                                    .size(48.dp)
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(t.accent)
                                     .clickable(enabled = enabled) {
@@ -368,7 +368,7 @@ fun Composer(
                                 LXIcon(
                                     name = LXIconName.ArrowUp,
                                     size = 16.dp,
-                                    color = Color.White,
+                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
                                     contentDescription = sendDescription,
                                 )
                             }
@@ -380,7 +380,7 @@ fun Composer(
                     // the correlated discard and wait for terminal confirmation.
                     showDiscardRecovery -> Box(
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(48.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(t.accent)
                             .clickable(onClick = onDiscardRecovery)
@@ -391,7 +391,7 @@ fun Composer(
                             modifier = Modifier
                                 .size(12.dp)
                                 .clip(RoundedCornerShape(3.dp))
-                                .background(Color.White)
+                                .background(androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
                                 .clearAndSetSemantics {
                                     contentDescription = discardRecoveryDescription
                                 },
@@ -400,7 +400,7 @@ fun Composer(
                     // Idle with text: the accent Send button.
                     hasText -> Box(
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(48.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(t.accent)
                             .clickable(enabled = enabled) {
@@ -409,7 +409,7 @@ fun Composer(
                             .testTag(UiTags.COMPOSER_SEND),
                         contentAlignment = Alignment.Center,
                     ) {
-                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White, contentDescription = sendDescription)
+                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, contentDescription = sendDescription)
                     }
                     // Idle, empty: separate ordinary recording and Flow Mode.
                     else -> Row(
@@ -418,7 +418,7 @@ fun Composer(
                     ) {
                         if (voiceInputSupported) Box(
                             modifier = Modifier
-                                .size(34.dp)
+                                .size(48.dp)
                                 .voiceHold(
                                     onTap = { if (enabled) onMicClick() },
                                     onStart = { if (enabled) onMicHoldStart() },
@@ -437,7 +437,7 @@ fun Composer(
                         }
                         if (voiceConversationSupported) Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(48.dp)
                                 .clip(CircleShape)
                                 .background(if (flowModeActive) t.accent else t.text)
                                 .clickable(enabled = enabled, onClick = onFlowModeClick)
@@ -453,7 +453,7 @@ fun Composer(
                             LXIcon(
                                 name = LXIconName.AudioWave,
                                 size = 18.dp,
-                                color = if (flowModeActive) Color.White else t.windowBg,
+                                color = if (flowModeActive) androidx.compose.material3.MaterialTheme.colorScheme.onPrimary else t.windowBg,
                                 stroke = 1.65f,
                             )
                         }
@@ -505,7 +505,7 @@ private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit
         Text(
             text = "${attachment.width}×${attachment.height}",
             color = t.text3,
-            fontSize = 12.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
         )
         Spacer(Modifier.weight(1f))
         Box(
@@ -526,7 +526,7 @@ private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit
     }
 }
 
-/** 34×34 tappable icon slot (the iOS `Button { … }.frame(34,34)` idiom). */
+/** A Material-sized action slot with standard press feedback. */
 @Composable
 private fun IconHit(
     onClick: () -> Unit,
@@ -534,7 +534,7 @@ private fun IconHit(
     content: @Composable () -> Unit,
 ) {
     Box(
-        modifier = modifier.size(34.dp).clickable(onClick = onClick),
+        modifier = modifier.size(48.dp).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { content() }
 }
@@ -611,7 +611,7 @@ private fun ModelChip(
             Text(
                 text = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName,
                 color = if (modelSetupRequired) t.accent else t.text2,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
             )
             LXIcon(
@@ -641,7 +641,7 @@ private fun ModelChip(
                 Text(
                     text = stringResource(R.string.composer_recent_models),
                     color = t.text3,
-                    fontSize = 11.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .padding(start = 15.dp, end = 15.dp, top = 8.dp, bottom = 4.dp)
@@ -685,7 +685,7 @@ private fun ModelChip(
                     Text(
                         text = group.name,
                         color = t.text3,
-                        fontSize = 11.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
                     )
@@ -694,7 +694,7 @@ private fun ModelChip(
                     Text(
                         text = providerLabel,
                         color = providerColor,
-                        fontSize = 10.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Medium,
                     )
                 }
@@ -725,7 +725,7 @@ private fun ModelChip(
                         stringResource(R.string.composer_no_matching_models)
                     },
                     color = t.text3,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
                 )
             }
@@ -772,13 +772,13 @@ private fun ModelPickerRow(
             Text(
                 text = model.name,
                 color = if (canSelect) t.text else t.text2,
-                fontSize = 13.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
             )
             Text(
                 text = model.desc,
                 color = t.text3,
-                fontSize = 10.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -786,7 +786,7 @@ private fun ModelPickerRow(
                 Text(
                     text = model.metadata.summaryItems.joinToString(" · "),
                     color = t.text3,
-                    fontSize = 9.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     lineHeight = 13.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -794,14 +794,14 @@ private fun ModelPickerRow(
             }
         }
         model.details?.let { details ->
-            ModelDetailsInfoButton(onClick = { onShowDetails(details) }, modifier = Modifier.size(32.dp))
+            ModelDetailsInfoButton(onClick = { onShowDetails(details) })
         }
         when {
             !canSelect -> Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text(stringResource(R.string.composer_configure_button), color = t.accent, fontSize = 10.sp)
+                Text(stringResource(R.string.composer_configure_button), color = t.accent, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
                 LXIcon(
                     name = LXIconName.ChevronR,
                     size = 10.dp,
@@ -849,14 +849,14 @@ private fun ModelSearchField(
         )
         Box(Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text(stringResource(R.string.composer_search_models_placeholder), color = t.text4, fontSize = 12.sp)
+                Text(stringResource(R.string.composer_search_models_placeholder), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
             }
             BasicTextField(
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
                 textStyle = LocalTextStyle.current.merge(
-                    TextStyle(color = t.text, fontSize = 12.sp),
+                    androidx.compose.material3.MaterialTheme.typography.bodySmall.copy(color = t.text),
                 ),
                 cursorBrush = SolidColor(t.accent),
                 modifier = Modifier

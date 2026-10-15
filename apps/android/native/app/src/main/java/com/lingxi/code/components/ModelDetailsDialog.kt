@@ -124,7 +124,7 @@ fun ModelDetailsDialog(
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
                                 "Pricing tiers",
-                                fontSize = 12.sp,
+                                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -170,7 +170,7 @@ private fun DetailRow(label: String, value: String?) {
         Text(
             label,
             modifier = Modifier.weight(0.35f),
-            fontSize = 12.sp,
+            fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

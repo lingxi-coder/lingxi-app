@@ -13,18 +13,12 @@ import androidx.compose.ui.unit.dp
  */
 object LXRadius {
     val pill = RoundedCornerShape(6.dp)        // chips / pills
-    val iconTile = RoundedCornerShape(7.dp)    // settings-row leading icon tiles
-    val field = RoundedCornerShape(10.dp)      // text fields
-    val card = RoundedCornerShape(12.dp)       // grouped setting cards
+    val iconTile = RoundedCornerShape(12.dp)    // settings-row leading icon tiles
+    val field = RoundedCornerShape(4.dp)      // text fields
+    val card = RoundedCornerShape(16.dp)       // grouped setting cards
     val bubble = RoundedCornerShape(16.dp)     // chat message bubbles
     val full = RoundedCornerShape(percent = 50) // switches / fully-rounded
 }
 
-/** Material 3 shape scale mapped to the brand radii. */
-val LXShapes: Shapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(12.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(22.dp),
-)
+/** Material's shape scale is shared by native controls and surfaces. */
+val LXShapes: Shapes = Shapes()

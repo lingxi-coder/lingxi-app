@@ -210,18 +210,11 @@ private fun AppActionPill(action: AppAction, onClick: () -> Unit) {
             CircularProgressIndicator(modifier = Modifier.size(22.dp), color = t.text3, strokeWidth = 2.dp)
         AppAction.Unavailable -> Unit
         AppAction.Get, AppAction.Open, is AppAction.Update -> {
-            val filled = action != AppAction.Open
-            Text(
-                text = actionLabel(action),
-                color = if (filled) Color.White else t.accent,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .background(if (filled) t.accent else t.accent.copy(alpha = 0.14f))
-                    .clickable(onClick = onClick)
-                    .padding(horizontal = 16.dp, vertical = 7.dp),
-            )
+            if (action == AppAction.Open) {
+                androidx.compose.material3.FilledTonalButton(onClick = onClick) { Text(actionLabel(action)) }
+            } else {
+                androidx.compose.material3.Button(onClick = onClick) { Text(actionLabel(action)) }
+            }
         }
     }
 }
@@ -272,13 +265,13 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, modifier
         LXIcon(name = LXIconName.Search, size = 16.dp, color = t.text4, stroke = 2f)
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text(stringResource(R.string.apps_search_hint), color = t.text4, fontSize = 14.sp, maxLines = 1)
+                Text(stringResource(R.string.apps_search_hint), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, maxLines = 1)
             }
             BasicTextField(
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
-                textStyle = TextStyle(color = t.text, fontSize = 14.sp),
+                textStyle = androidx.compose.material3.MaterialTheme.typography.bodyMedium.copy(color = t.text),
                 cursorBrush = SolidColor(t.accent),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -412,32 +405,11 @@ fun AppsPage(
 
 @Composable
 private fun TabSwitch(selected: AppsTab, onSelect: (AppsTab) -> Unit) {
-    val t = LingXiTheme.palette
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-    ) {
+    androidx.compose.material3.PrimaryTabRow(selectedTabIndex = AppsTab.entries.indexOf(selected)) {
         AppsTab.entries.forEach { option ->
-            val active = option == selected
-            val shape = RoundedCornerShape(50)
-            Text(
-                text = stringResource(
-                    when (option) {
-                        AppsTab.Mine -> R.string.apps_tab_mine
-                        AppsTab.Market -> R.string.apps_tab_market
-                    },
-                ),
-                color = if (active) t.text else t.text3,
-                fontSize = 13.sp,
-                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-                modifier = Modifier
-                    .clip(shape)
-                    .background(if (active) t.text.copy(alpha = 0.10f) else t.surface)
-                    .border(0.5.dp, if (active) t.text.copy(alpha = 0.3f) else t.border, shape)
-                    .testTag(UiTags.appsTab(option.name))
-                    .clickable { onSelect(option) }
-                    .padding(horizontal = 16.dp, vertical = 7.dp),
-            )
+            androidx.compose.material3.Tab(selected = option == selected,
+                onClick = { onSelect(option) }, modifier = Modifier.testTag(UiTags.appsTab(option.name)),
+                text = { Text(stringResource(if (option == AppsTab.Mine) R.string.apps_tab_mine else R.string.apps_tab_market)) })
         }
     }
 }
@@ -465,7 +437,7 @@ private fun MineTab(
             Text(
                 text = stringResource(R.string.apps_webview_unsupported, runtimeError),
                 color = t.statusError,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 12.dp)
@@ -478,13 +450,13 @@ private fun MineTab(
             Text(
                 text = stringResource(R.string.apps_mine_empty),
                 color = t.text3,
-                fontSize = 14.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 24.dp, bottom = 12.dp),
             )
             Text(
                 text = stringResource(R.string.apps_browse_market),
-                color = Color.White,
-                fontSize = 14.sp,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(RoundedCornerShape(12.dp))
@@ -498,14 +470,14 @@ private fun MineTab(
             Text(
                 text = "${stringResource(R.string.drawer_filter_all)} · ${apps.size}",
                 color = t.text3,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 text = stringResource(R.string.apps_check_updates),
                 color = t.accent,
-                fontSize = 12.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
@@ -588,7 +560,7 @@ private fun AppTile(
             Text(
                 text = app.name,
                 color = t.text2,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
@@ -680,12 +652,12 @@ private fun MarketTab(
                             Text(
                                 text = stringResource(R.string.apps_market_error_fmt, market.error),
                                 color = t.text3,
-                                fontSize = 13.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                             )
                             Text(
                                 text = stringResource(R.string.common_retry),
                                 color = t.accent,
-                                fontSize = 13.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier
                                     .padding(top = 8.dp)
@@ -700,7 +672,7 @@ private fun MarketTab(
                             CircularProgressIndicator(modifier = Modifier.size(22.dp), color = t.text3, strokeWidth = 2.dp)
                         }
                         searched && market.apps.isEmpty() ->
-                            Text(stringResource(R.string.apps_market_empty), color = t.text4, fontSize = 13.sp)
+                            Text(stringResource(R.string.apps_market_empty), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -725,15 +697,15 @@ private fun MarketAppRow(app: MarketApp, action: AppAction, onClick: () -> Unit,
             Text(
                 app.name,
                 color = t.text,
-                fontSize = 15.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             if (app.summary.isNotBlank()) {
-                Text(app.summary, color = t.text3, fontSize = 12.5f.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(app.summary, color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            Text(categoryLabel(app.category), color = t.text4, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
+            Text(categoryLabel(app.category), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 2.dp))
         }
         AppActionPill(action = action, onClick = { onAction(action) })
     }
@@ -805,20 +777,20 @@ fun MarketAppPage(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 AppCover(name, category, 72.dp)
                 Column(Modifier.weight(1f)) {
-                    Text(name, color = t.text, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(name, color = t.text, style = androidx.compose.material3.MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(
                         text = listOfNotNull(
                             categoryLabel(category),
                             installed?.let { stringResource(R.string.apps_installed) },
                         ).joinToString(" · "),
                         color = t.text4,
-                        fontSize = 12.5f.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(top = 3.dp),
                     )
                 }
             }
             if (summary.isNotBlank()) {
-                Text(summary, color = t.text2, fontSize = 14.sp, modifier = Modifier.padding(top = 14.dp))
+                Text(summary, color = t.text2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 14.dp))
             }
 
             Spacer(Modifier.height(18.dp))
@@ -838,7 +810,7 @@ fun MarketAppPage(
                 Text(
                     text = stringResource(R.string.apps_operation_failed_fmt, code),
                     color = t.statusError,
-                    fontSize = 12.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -852,13 +824,13 @@ fun MarketAppPage(
                     Text(
                         text = stringResource(R.string.apps_market_error_fmt, code),
                         color = t.text3,
-                        fontSize = 13.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
                         text = stringResource(R.string.common_retry),
                         color = t.accent,
-                        fontSize = 13.sp,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -942,8 +914,8 @@ private fun MainActionButton(action: AppAction, onClick: () -> Unit) {
                 .padding(horizontal = 14.dp, vertical = 12.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.apps_status_downloading), color = t.text2, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                Text(stringResource(R.string.common_cancel), color = t.accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.apps_status_downloading), color = t.text2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.common_cancel), color = t.accent, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
             }
             val fraction = action.fraction
             if (fraction != null) {
@@ -975,8 +947,8 @@ private fun MainActionButton(action: AppAction, onClick: () -> Unit) {
                 }
                 Text(
                     text = actionLabel(action),
-                    color = if (enabled) Color.White else t.text3,
-                    fontSize = 14.sp,
+                    color = if (enabled) androidx.compose.material3.MaterialTheme.colorScheme.onPrimary else t.text3,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
             }

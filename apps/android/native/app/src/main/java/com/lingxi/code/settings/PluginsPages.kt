@@ -152,7 +152,7 @@ private fun Pill(text: String, enabled: Boolean, onClick: () -> Unit) {
     Text(
         text = text,
         color = if (enabled) t.accent else t.text4,
-        fontSize = 13.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .clip(RoundedCornerShape(50))
@@ -164,7 +164,7 @@ private fun Pill(text: String, enabled: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun NoteRow(text: String) {
-    Text(text, color = LingXiTheme.palette.text3, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp))
+    Text(text, color = LingXiTheme.palette.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp))
 }
 
 /**
@@ -227,7 +227,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
             Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { Busy() }
             return@Column
         }
-        error?.let { Text(String.format(failedFmt, it), color = t.danger, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp)) }
+        error?.let { Text(String.format(failedFmt, it), color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp)) }
 
         SettingsSection(label = stringResource(R.string.plugins_section_installed)) {
             if (catalog.installed.isEmpty()) NoteRow(stringResource(R.string.plugins_installed_empty))
@@ -297,7 +297,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
                             Text(
                                 "⋯",
                                 color = if (busy == null) t.text2 else t.text4,
-                                fontSize = 18.sp,
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
                                     .then(if (busy == null) Modifier.clickable { menuFor = marketplace.name } else Modifier)
@@ -368,7 +368,7 @@ private fun AddMarketplaceDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit)
         title = { Text(stringResource(R.string.plugins_marketplace_add)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(stringResource(R.string.plugins_marketplace_add_body), color = t.text3, fontSize = 13.sp)
+                Text(stringResource(R.string.plugins_marketplace_add_body), color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = source,
                     onValueChange = { source = it },
@@ -455,15 +455,15 @@ internal fun PluginDetailPage(
         ) {
             PluginIconTile(plugin.id, 56)
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(plugin.displayName, color = t.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text(pluginSubtitle(details.vendor, plugin.version), color = t.text3, fontSize = 13.sp)
+                Text(plugin.displayName, color = t.text, style = androidx.compose.material3.MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(pluginSubtitle(details.vendor, plugin.version), color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
             }
         }
         if (plugin.description.isNotBlank()) {
-            Text(plugin.description, color = t.text2, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.padding(bottom = 16.dp))
+            Text(plugin.description, color = t.text2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, lineHeight = 20.sp, modifier = Modifier.padding(bottom = 16.dp))
         }
-        error?.let { Text(String.format(failedFmt, it), color = t.danger, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp)) }
-        notice?.let { Text(it, color = t.text3, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp)) }
+        error?.let { Text(String.format(failedFmt, it), color = t.danger, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp)) }
+        notice?.let { Text(it, color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 12.dp)) }
 
         SettingsSection {
             SettingsRow(

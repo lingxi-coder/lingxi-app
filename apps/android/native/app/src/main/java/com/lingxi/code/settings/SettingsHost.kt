@@ -1,6 +1,7 @@
 package com.lingxi.code.settings
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -57,6 +58,7 @@ import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 /** Native settings navigation shares device repositories and the active engine connection. */
 @Composable
@@ -119,6 +121,9 @@ fun SettingsHost(
 
     LaunchedEffect(navController, initialRoute) {
         if (initialRoute != SettingsRoutes.MAIN) {
+            // The adaptive host composes its NavHost after measuring the
+            // available width. Await the graph before handling a deep link.
+            navController.currentBackStackEntryFlow.first()
             navController.navigate(initialRoute) {
                 launchSingleTop = true
                 if (standalone) popUpTo(SettingsRoutes.MAIN) { inclusive = true }
@@ -306,7 +311,10 @@ fun SettingsHost(
                         },
                     )
                 }
-                page(SettingsRoutes.OPEN_SOURCE) { OpenSourceLicensesPage() }
+                // This page owns a LazyColumn and must receive bounded height.
+                composable(SettingsRoutes.OPEN_SOURCE) {
+                    OpenSourceLicensesPage(Modifier.fillMaxSize().padding(top = 16.dp))
+                }
 
                 // Providers and voice
                 page(SettingsRoutes.VOICE) {
@@ -504,89 +512,27 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
  * Brand settings top bar — chevron-back (or close 'x' at the root) on the left,
  * centered title, and a 完成 action that resets to the root when nested.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsTopBar(
-    title: String,
-    atRoot: Boolean,
-    onBack: () -> Unit,
-    onClose: () -> Unit,
-    onReset: () -> Unit,
+    title: String, atRoot: Boolean, onBack: () -> Unit,
+    onClose: () -> Unit, onReset: () -> Unit,
 ) {
-    val t = LingXiTheme.palette
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .drawBehind {
-                drawLine(
-                    color = t.border,
-                    start = Offset(0f, size.height),
-                    end = Offset(size.width, size.height),
-                    strokeWidth = 0.5.dp.toPx(),
-                )
+    androidx.compose.material3.TopAppBar(
+        title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        navigationIcon = {
+            androidx.compose.material3.IconButton(onClick = { if (atRoot) onClose() else onBack() }) {
+                if (atRoot) LXIcon(LXIconName.X, contentDescription = stringResource(R.string.settings_close_accessibility))
+                else androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.onboarding_back))
             }
-            .padding(horizontal = 8.dp)
-            .padding(top = 6.dp, bottom = 12.dp),
-    ) {
-        // Leading: back chevron + "关闭" at the root, or chevron only when nested.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            modifier = Modifier
-                .widthIn(max = 120.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { if (atRoot) onClose() else onBack() }
-                .padding(horizontal = 4.dp, vertical = 6.dp),
-        ) {
-            LXIcon(
-                name = LXIconName.ChevronR,
-                size = 17.dp,
-                color = t.text2,
-                stroke = 2.2f,
-                modifier = Modifier.rotate(180f),
-                contentDescription = if (atRoot) {
-                    stringResource(R.string.settings_close_accessibility)
-                } else {
-                    stringResource(R.string.onboarding_back)
-                },
-            )
-            if (atRoot) {
-                Text(stringResource(R.string.common_close), color = t.text2, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        },
+        actions = {
+            if (!atRoot) androidx.compose.material3.TextButton(onClick = onReset) {
+                Text(stringResource(R.string.settings_done))
             }
-        }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            Text(
-                text = title,
-                color = t.text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-            )
-        }
-        // Trailing: 完成 (reset to root) when nested, otherwise a close 'x'.
-        if (!atRoot) {
-            Text(
-                stringResource(R.string.settings_done),
-                color = t.accent,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onReset)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            )
-        } else {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onClose),
-            ) {
-                LXIcon(name = LXIconName.X, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = stringResource(R.string.settings_close_accessibility))
-            }
-        }
-    }
+        },
+        windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+    )
 }

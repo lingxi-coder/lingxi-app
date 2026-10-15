@@ -53,15 +53,15 @@ class AccentsTest {
 
     @Test
     fun colorLookup_resolvesById() {
-        assertEquals(Accents.all[2].color, Accents.color("oklch(72% 0.16 195)"))
-        assertEquals(Accents.all[5].color, Accents.color("oklch(70% 0.20 30)"))
+        assertEquals(Color(0xFF80D5D9), Accents.color("oklch(72% 0.16 195)"))
+        assertEquals(Color(0xFFFFB4AB), Accents.color("oklch(70% 0.20 30)"))
     }
 
     @Test
     fun colorLookup_fallsBackToFirst_forUnknownId() {
         // Color is a value class, so identical colors are equal-by-value (not
         // the same reference) — assert value equality.
-        assertEquals(Accents.all[0].color, Accents.color("oklch(does-not-exist)"))
-        assertEquals(Accents.all[0].color, Accents.color(""))
+        assertEquals(Accents.color(Accents.DEFAULT_ID), Accents.color("oklch(does-not-exist)"))
+        assertEquals(Accents.color(Accents.DEFAULT_ID), Accents.color(""))
     }
 }

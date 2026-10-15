@@ -322,11 +322,11 @@ private fun DrawerHeader(onClose: () -> Unit) {
             .padding(horizontal = 18.dp)
             .padding(top = 8.dp, bottom = 12.dp),
     ) {
-        Text(stringResource(R.string.app_name), color = t.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.app_name), color = t.text, style = androidx.compose.material3.MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.weight(1f))
         Box(
             modifier = Modifier
-                .size(36.dp)
+                .size(48.dp)
                 .clip(CircleShape)
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
@@ -369,13 +369,13 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
         LXIcon(name = LXIconName.Search, size = 16.dp, color = t.text4, stroke = 2f)
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
-                Text(stringResource(R.string.drawer_search_all_placeholder), color = t.text4, fontSize = 14.sp, maxLines = 1)
+                Text(stringResource(R.string.drawer_search_all_placeholder), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, maxLines = 1)
             }
             BasicTextField(
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
-                textStyle = TextStyle(color = t.text, fontSize = 14.sp),
+                textStyle = androidx.compose.material3.MaterialTheme.typography.bodyMedium.copy(color = t.text),
                 cursorBrush = SolidColor(t.accent),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -385,7 +385,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
         if (query.isNotEmpty()) {
             Box(
                 modifier = Modifier
-                    .size(20.dp)
+                    .size(48.dp)
                     .clip(CircleShape)
                     .clickable { onQueryChange("") },
                 contentAlignment = Alignment.Center,
@@ -422,14 +422,14 @@ private fun EntryRow(
             .padding(horizontal = 10.dp, vertical = 11.dp),
     ) {
         LXIcon(name = icon, size = 18.dp, color = t.text2, stroke = 1.7f)
-        Text(label, color = t.text, fontSize = 15.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        Text(label, color = t.text, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         if (trailing != null) {
             trailing()
         } else if (badge != null) {
             Text(
                 badge,
                 color = t.accent,
-                fontSize = 11.5f.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
@@ -437,7 +437,7 @@ private fun EntryRow(
                     .padding(horizontal = 8.dp, vertical = 2.dp),
             )
         } else if (count != null) {
-            Text(count.toString(), color = t.text4, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text(count.toString(), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -485,7 +485,7 @@ private fun FilterChip(
     Text(
         text = label,
         color = if (active) tint else t.text3,
-        fontSize = 13.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
         fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
         modifier = modifier
             .clip(shape)
@@ -528,7 +528,7 @@ private fun RecentList(
                 else -> stringResource(R.string.drawer_no_sessions)
             },
             color = t.text4,
-            fontSize = 12.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp, vertical = 12.dp),
@@ -556,7 +556,7 @@ private fun SectionHeader(title: String) {
     Text(
         text = title,
         color = t.text4,
-        fontSize = 11.5f.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 4.dp),
     )
@@ -601,7 +601,7 @@ private fun RecentRow(
                 Text(
                     text = session.title,
                     color = if (active) t.text else t.text2,
-                    fontSize = 14.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -611,7 +611,7 @@ private fun RecentRow(
                         .filter(String::isNotBlank)
                         .joinToString(" · "),
                     color = t.text4,
-                    fontSize = 11.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -677,7 +677,7 @@ private fun StatusPill(label: String, color: Color) {
     Text(
         text = label,
         color = color,
-        fontSize = 10.5f.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
         modifier = Modifier
@@ -709,7 +709,7 @@ private fun SearchResults(
         Text(
             text = stringResource(R.string.drawer_no_match),
             color = t.text4,
-            fontSize = 12.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp, vertical = 12.dp),
@@ -778,9 +778,9 @@ private fun ResultRow(icon: LXIconName, title: String, subtitle: String, onClick
     ) {
         LXIcon(name = icon, size = 15.dp, color = t.text3, stroke = 1.7f)
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = t.text2, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = t.text2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotBlank()) {
-                Text(subtitle, color = t.text4, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -819,21 +819,21 @@ private fun BottomBar(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(t.accent, t.accent2))),
+                    .background(androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
                 val initial = account?.displayName?.trim()?.firstOrNull()?.uppercase()
                 if (initial != null) {
-                    Text(initial, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(initial, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                 } else {
-                    LXIcon(name = LXIconName.Sparkle, size = 16.dp, color = Color.White, stroke = 1.8f)
+                    LXIcon(name = LXIconName.Sparkle, size = 16.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer, stroke = 1.8f)
                 }
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = account?.displayName ?: stringResource(R.string.drawer_account_signed_out_title),
                     color = t.text,
-                    fontSize = 14.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -841,7 +841,7 @@ private fun BottomBar(
                 Text(
                     text = account?.email ?: stringResource(R.string.drawer_account_signed_out_subtitle),
                     color = t.text4,
-                    fontSize = 11.5f.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -867,7 +867,7 @@ private fun BottomIconButton(icon: LXIconName, description: String, tag: String,
     val t = LingXiTheme.palette
     Box(
         modifier = Modifier
-            .size(44.dp)
+            .size(48.dp)
             .clip(CircleShape)
             .testTag(tag)
             .clickable(onClick = onClick),

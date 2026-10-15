@@ -117,7 +117,7 @@ fun SkillsPage(
                 .padding(13.dp),
         ) {
             LXIcon(name = LXIconName.Edit, size = 14.dp, color = t.text2, stroke = 1.8f)
-            Text(stringResource(R.string.skills_create_custom), color = t.text2, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.skills_create_custom), color = t.text2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -161,14 +161,14 @@ fun SkillDetailPage(
             Text(
                 s.name,
                 color = t.text,
-                fontSize = 18.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 12.dp),
             )
             Text(
                 "${authorLabel(s.author)} · v1.2.0",
                 color = t.text4,
-                fontSize = 12.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
@@ -177,7 +177,7 @@ fun SkillDetailPage(
         Text(
             s.desc,
             color = t.text2,
-            fontSize = 13.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             lineHeight = 18.sp,
             modifier = Modifier
                 .fillMaxWidth()

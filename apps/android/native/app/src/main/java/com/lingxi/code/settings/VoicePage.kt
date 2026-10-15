@@ -275,7 +275,7 @@ fun VoicePage(
             Text(
                 saveError,
                 color = t.danger,
-                fontSize = 12.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
             )
         }
@@ -483,7 +483,7 @@ private fun OfflineModelRow(
             Text(
                 actionLabel,
                 color = actionColor,
-                fontSize = 14.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier
                     .clickable {

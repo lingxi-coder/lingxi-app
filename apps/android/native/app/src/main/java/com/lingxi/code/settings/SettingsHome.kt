@@ -94,7 +94,7 @@ private fun SettingsSearchResults(
         Text(
             text = stringResource(R.string.settings_home_no_results),
             color = LingXiTheme.palette.text4,
-            fontSize = 13.sp,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
         )
         return
@@ -170,21 +170,21 @@ private fun SettingsAccountCard(onOpen: () -> Unit, model: AccountViewModel = vi
             modifier = Modifier
                 .size(44.dp)
                 .clip(CircleShape)
-                .background(Brush.linearGradient(listOf(t.accent, t.accent2))),
+                .background(androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center,
         ) {
             val initial = user?.let { (it.name ?: it.email)?.trim()?.firstOrNull()?.uppercase() }
             if (initial != null) {
-                Text(initial, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Text(initial, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer, style = androidx.compose.material3.MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             } else {
-                LXIcon(name = LXIconName.Sparkle, size = 18.dp, color = Color.White, stroke = 1.8f)
+                LXIcon(name = LXIconName.Sparkle, size = 18.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer, stroke = 1.8f)
             }
         }
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 text = title,
                 color = t.text,
-                fontSize = 15.sp,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -193,7 +193,7 @@ private fun SettingsAccountCard(onOpen: () -> Unit, model: AccountViewModel = vi
                 Text(
                     text = subtitle,
                     color = t.text4,
-                    fontSize = 12.sp,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

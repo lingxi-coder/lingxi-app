@@ -130,7 +130,7 @@ internal fun ToolCallView(
                 Text(
                     text = title,
                     color = t.text,
-                    fontSize = 13.5f.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
                     fontWeight = FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -139,7 +139,7 @@ internal fun ToolCallView(
                     Text(
                         text = "${sub.prefix} ${sub.text}",
                         color = t.text3,
-                        fontSize = 12.5f.sp,
+                        fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                         fontFamily = FontFamily.Monospace,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
@@ -152,7 +152,7 @@ internal fun ToolCallView(
                         Text(
                             text = it,
                             color = t.text3,
-                            fontSize = 12.5f.sp,
+                            fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                             fontFamily = FontFamily.Monospace,
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
@@ -165,7 +165,7 @@ internal fun ToolCallView(
                 Text(
                     text = it,
                     color = toolCallStatusColor(call.status),
-                    fontSize = 11.5f.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 )
             }
         }
@@ -176,14 +176,14 @@ internal fun ToolCallView(
                 Text(
                     text = "⎿",
                     color = t.text4,
-                    fontSize = 12.5f.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.width(16.dp),
                 )
                 Text(
                     text = headline,
                     color = if (call.status == AgentToolStatus.Failed) t.danger else t.text2,
-                    fontSize = 12.5f.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -199,9 +199,9 @@ internal fun ToolCallView(
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(title, modifier = Modifier.weight(1f), color = t.text, fontSize = 16.sp,
+                        Text(title, modifier = Modifier.weight(1f), color = t.text, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
                             fontWeight = FontWeight.SemiBold)
-                        Box(Modifier.size(44.dp).clickable(onClick = onToggleExpanded),
+                        Box(Modifier.size(48.dp).clickable(onClick = onToggleExpanded),
                             contentAlignment = Alignment.Center) {
                             com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.X,
                                 color = t.text3, contentDescription = stringResource(R.string.chat_tool_show_less))
@@ -226,7 +226,7 @@ internal fun ToolCallView(
                     stringResource(R.string.chat_tool_show_more_label, hiddenLines)
                 },
                 color = t.accent,
-                fontSize = 12.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 modifier = Modifier
                     .padding(start = 16.dp)
                     .clip(RoundedCornerShape(6.dp))
@@ -429,7 +429,7 @@ internal fun ToolResultContent(call: ToolCallUi) {
             Text(
                 text = body,
                 color = t.text2,
-                fontSize = 12.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 lineHeight = 17.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier
@@ -443,7 +443,7 @@ internal fun ToolResultContent(call: ToolCallUi) {
             Text(
                 text = stringResource(R.string.chat_tool_body_truncated),
                 color = t.text4,
-                fontSize = 11.5f.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
             )
         }
     }

@@ -87,7 +87,7 @@ internal fun SessionPanel(
             Text(
                 text = model.title,
                 color = t.text,
-                fontSize = 17.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.titleLarge.fontSize,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -95,7 +95,7 @@ internal fun SessionPanel(
             Text(
                 text = "${sessionModeLabel(model.mode)} · ${model.workspaceName}",
                 color = t.modeColor(model.mode),
-                fontSize = 12.5f.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 modifier = Modifier.padding(top = 3.dp, bottom = 14.dp),
             )
 
@@ -219,7 +219,7 @@ internal fun WorkspacePickerSheet(
             Text(
                 text = stringResource(R.string.new_chat_pick_workspace_title),
                 color = t.text,
-                fontSize = 17.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.titleLarge.fontSize,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(bottom = 14.dp),
             )

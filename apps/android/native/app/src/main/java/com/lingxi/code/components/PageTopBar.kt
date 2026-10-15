@@ -1,5 +1,6 @@
 package com.lingxi.code.components
 
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -26,15 +27,8 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.theme.LingXiTheme
 
-/** The smallest comfortable thumb target; Material's own minimum is 48dp. */
-private val TouchTarget = 44.dp
-
-/**
- * The top bar of a full-screen page pushed over the conversation (projects,
- * a project): back chevron on the left, centered title, optional trailing
- * action. Same look as the settings top bar, with thumb-sized targets at both
- * ends.
- */
+/** Android app bar; parent surfaces already own system-bar insets. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun PageTopBar(
     title: String,
@@ -42,54 +36,19 @@ fun PageTopBar(
     modifier: Modifier = Modifier,
     trailing: (@Composable () -> Unit)? = null,
 ) {
-    val t = LingXiTheme.palette
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = modifier
-            .fillMaxWidth()
-            .drawBehind {
-                drawLine(
-                    color = t.border,
-                    start = Offset(0f, size.height),
-                    end = Offset(size.width, size.height),
-                    strokeWidth = 0.5.dp.toPx(),
-                )
+    androidx.compose.material3.TopAppBar(
+        title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        navigationIcon = {
+            androidx.compose.material3.IconButton(onClick = onBack) {
+                androidx.compose.material3.Icon(
+                    androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.onboarding_back))
             }
-            .padding(horizontal = 4.dp)
-            .padding(top = 2.dp, bottom = 6.dp),
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(TouchTarget)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = onBack),
-        ) {
-            LXIcon(
-                name = LXIconName.ChevronR,
-                size = 17.dp,
-                color = t.text2,
-                stroke = 2.2f,
-                modifier = Modifier.rotate(180f),
-                contentDescription = stringResource(R.string.onboarding_back),
-            )
-        }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            Text(
-                text = title,
-                color = t.text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-            )
-        }
-        // Always as wide as the back target, so the title stays centered.
-        Box(Modifier.widthIn(min = TouchTarget), contentAlignment = Alignment.Center) {
-            trailing?.invoke() ?: Box(Modifier.size(TouchTarget))
-        }
-    }
+        },
+        actions = { trailing?.invoke() },
+        windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+        modifier = modifier,
+    )
 }
 
 /**

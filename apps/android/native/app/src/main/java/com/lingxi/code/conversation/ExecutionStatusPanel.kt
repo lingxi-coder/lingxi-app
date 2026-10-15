@@ -95,14 +95,14 @@ internal fun ExecutionStatusPanel(
             Text(
                 text = stringResource(R.string.chat_execution_status),
                 color = palette.text,
-                fontSize = 12.5f.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(start = 7.dp),
             )
             Text(
                 text = "${agents.size} · ${tasks.size + workflows.count { it.taskId !in taskIds }} · ${planTasks.size}",
                 color = palette.text3,
-                fontSize = 11.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 modifier = Modifier.padding(start = 6.dp),
             )
             Spacer(Modifier.weight(1f))
@@ -166,14 +166,14 @@ private fun WorkflowOnlyRow(workflow: WorkflowRunUi) {
             Text(
                 workflow.currentPhaseTitle ?: workflow.taskId,
                 color = palette.text2,
-                fontSize = 11.5f.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 workflow.latestLog ?: "Workflow ${workflow.runId}",
                 color = palette.text4,
-                fontSize = 10.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -183,7 +183,7 @@ private fun WorkflowOnlyRow(workflow: WorkflowRunUi) {
 
 @Composable
 private fun SectionLabel(text: String) {
-    Text(text, fontSize = 10.5f.sp, fontWeight = FontWeight.SemiBold, color = LingXiTheme.palette.text3)
+    Text(text, fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize, fontWeight = FontWeight.SemiBold, color = LingXiTheme.palette.text3)
 }
 
 @Composable
@@ -203,11 +203,11 @@ private fun AgentSummaryRow(agent: SessionAgentUi) {
         com.lingxi.code.theme.AgentAvatar(agentId = agent.agentId, modifier = Modifier.size(28.dp))
         BoxStatusDot(agent.status)
         Column(Modifier.padding(start = 7.dp).weight(1f)) {
-            Text(agent.name.ifBlank { agent.agentId }, color = palette.text2, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(agent.name.ifBlank { agent.agentId }, color = palette.text2, fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 listOfNotNull(agent.agentType.takeIf(String::isNotBlank), agent.model, agent.latestActivity).joinToString(" · "),
                 color = palette.text4,
-                fontSize = 10.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -242,8 +242,8 @@ private fun TaskSummaryRow(
     }, verticalAlignment = Alignment.CenterVertically) {
         BoxStatusDot(task.status.name)
         Column(Modifier.padding(start = 7.dp).weight(1f)) {
-            Text(task.description.ifBlank { workflow?.currentPhaseTitle ?: task.taskId }, color = palette.text2, fontSize = 11.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(workflow?.latestLog ?: taskStatusText(task.status), color = palette.text4, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(task.description.ifBlank { workflow?.currentPhaseTitle ?: task.taskId }, color = palette.text2, fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(workflow?.latestLog ?: taskStatusText(task.status), color = palette.text4, fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize, maxLines = 2, overflow = TextOverflow.Ellipsis)
             // The engine's terminal failure reason (`TaskRowDto.error` /
             // `TaskStatusChanged.error`, carried on `BackgroundTaskUi.error`).
             // This is the ONLY surface a user who was in another session when
@@ -258,7 +258,7 @@ private fun TaskSummaryRow(
                 Text(
                     failureReason,
                     color = palette.danger,
-                    fontSize = 10.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp).testTag(TASK_FAILURE_REASON_TAG),
@@ -317,14 +317,14 @@ private fun RuntimeDetails(title: String, body: String, onClose: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, Modifier.weight(1f), color = palette.text, fontSize = 18.sp,
+                Text(title, Modifier.weight(1f), color = palette.text, fontSize = androidx.compose.material3.MaterialTheme.typography.titleLarge.fontSize,
                     fontWeight = FontWeight.SemiBold)
                 IconButton(onClick = onClose) {
                     com.lingxi.code.components.LXIcon(com.lingxi.code.components.LXIconName.X,
                         color = palette.text3, contentDescription = stringResource(R.string.chat_run_collapse))
                 }
             }
-            Text(body, color = palette.text2, fontSize = 15.sp, lineHeight = 24.sp)
+            Text(body, color = palette.text2, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize, lineHeight = 24.sp)
         }
     }
 }

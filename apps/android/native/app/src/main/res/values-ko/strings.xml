@@ -771,9 +771,9 @@
     <string name="settings_app_open_terminal_detail">단축어와 lingxi://open_terminal 딥링크를 지원합니다</string>
     <string name="settings_appearance">외관</string>
     <string name="settings_appearance_dark">다크</string>
-    <string name="settings_appearance_dark_sub">미드나잇 퍼플 + 낮은 채도</string>
+    <string name="settings_appearance_dark_sub">어두운 환경에 적합한 어두운 테마</string>
     <string name="settings_appearance_light">라이트</string>
-    <string name="settings_appearance_light_sub">따뜻한 화이트 종이 질감 + 반투명 카드</string>
+    <string name="settings_appearance_light_sub">밝은 환경에 적합한 밝은 테마</string>
     <string name="settings_auto">자동</string>
     <string name="settings_auto_recall">자동 검색</string>
     <string name="settings_auto_recall_sub">질문할 때마다 관련 내용을 자동으로 불러옵니다</string>
@@ -1926,4 +1926,7 @@
     <string name="settings_group_models_hub_summary">공급자, 라우팅, 검색, 가져오기</string>
     <string name="settings_group_voice">음성</string>
     <string name="settings_group_voice_summary">인식, 읽기, 오프라인 모델</string>
+    <string name="settings_appearance_system">시스템 설정</string>
+    <string name="settings_appearance_system_sub">기기의 밝은 테마 또는 어두운 테마를 따릅니다。</string>
+    <string name="settings_keyboard_system_description">키보드, 입력 언어 및 입력 방식은 Android 시스템 설정에서 관리합니다.</string>
 </resources>

@@ -771,9 +771,9 @@
     <string name="settings_app_open_terminal_detail">Supports Shortcuts and the lingxi://open_terminal deep link</string>
     <string name="settings_appearance">Appearance</string>
     <string name="settings_appearance_dark">Dark</string>
-    <string name="settings_appearance_dark_sub">Midnight purple, low saturation</string>
+    <string name="settings_appearance_dark_sub">A dark appearance for low-light environments</string>
     <string name="settings_appearance_light">Light</string>
-    <string name="settings_appearance_light_sub">Warm paper white, translucent cards</string>
+    <string name="settings_appearance_light_sub">A light appearance for bright environments</string>
     <string name="settings_auto">Auto</string>
     <string name="settings_auto_recall">Auto Recall</string>
     <string name="settings_auto_recall_sub">Automatically recalls relevant snippets for every question</string>
@@ -1926,4 +1926,7 @@
     <string name="settings_group_models_hub_summary">Providers, routing, search, fetch</string>
     <string name="settings_group_voice">Voice</string>
     <string name="settings_group_voice_summary">Recognition, speech, offline models</string>
+    <string name="settings_appearance_system">System default</string>
+    <string name="settings_appearance_system_sub">Follow the device’s light or dark appearance.</string>
+    <string name="settings_keyboard_system_description">Android manages keyboards, input languages and input method preferences.</string>
 </resources>

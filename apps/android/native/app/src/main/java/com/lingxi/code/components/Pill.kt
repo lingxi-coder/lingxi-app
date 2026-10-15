@@ -26,14 +26,14 @@ fun Pill(
 ) {
     val t = LingXiTheme.palette
     val fg = color ?: t.text3
-    val shape = RoundedCornerShape(6.dp)
+    val shape = RoundedCornerShape(8.dp)
     val bg = if (color != null) color.tint(0.16f) else t.surface
     val borderColor = if (color != null) color.tint(0.30f) else t.border
 
     Text(
         text = text,
         color = fg,
-        fontSize = 11.5f.sp,
+        style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.Medium,
         modifier = modifier
             .background(bg, shape)

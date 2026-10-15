@@ -88,7 +88,7 @@ internal fun NewChatBar(
                 Text(
                     text = sessionModeLabel(option),
                     color = if (active) tint else t.text2,
-                    fontSize = 13.5f.sp,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
                 )
             }
@@ -110,7 +110,7 @@ internal fun NewChatBar(
             Text(
                 text = workspaceName,
                 color = t.text2,
-                fontSize = 13.sp,
+                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

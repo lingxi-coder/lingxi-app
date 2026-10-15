@@ -10,6 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -60,7 +62,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.runtime.withFrameNanos
+import androidx.compose.animation.core.withInfiniteAnimationFrameNanos
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -287,9 +289,17 @@ private fun LaunchedFrameLoop(onFrame: (now: Long, dt: Float) -> Unit) {
     androidx.compose.runtime.LaunchedEffect(Unit) {
         var last = 0L
         while (true) {
-            withFrameNanos { now ->
+            val motionScale = kotlinx.coroutines.currentCoroutineContext()[androidx.compose.ui.MotionDurationScale]?.scaleFactor ?: 1f
+            if (motionScale == 0f) {
+                // Match Android's Remove animations setting without spinning
+                // a decorative render loop while the orb is static.
+                kotlinx.coroutines.delay(200)
+                last = 0L
+                continue
+            }
+            withInfiniteAnimationFrameNanos { now ->
                 if (last == 0L) last = now
-                val dt = ((now - last) / 1_000_000_000.0).coerceAtMost(0.05).toFloat()
+                val dt = ((now - last) / 1_000_000_000.0 / motionScale).coerceAtMost(0.05).toFloat()
                 last = now
                 cb.value(now, dt)
             }
@@ -390,14 +400,12 @@ private fun FlowModeContent(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(220.dp)
+            .height((220 * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtMost(1.4f)).dp)
             .padding(horizontal = 14.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(20.dp))
-            .border(0.5.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+            .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp))
             .background(
-                Brush.radialGradient(
-                    colors = listOf(oklch(0.20f, 0.07f, 270f), Color(0xFF05050A)),
-                ),
+                SolidColor(MaterialTheme.colorScheme.surfaceContainerLow),
             ),
     ) {
         // Tapping while listening waits for recognition to finish on its normal silence path.
@@ -434,7 +442,7 @@ private fun FlowModeContent(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     stringResource(R.string.voice_flow_mode_label),
-                    color = Color.White.copy(alpha = 0.88f),
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 12.5.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -463,14 +471,14 @@ private fun FlowModeContent(
                 }
                 Canvas(Modifier.size(7.dp)) { drawCircle(dot) }
                 Spacer(Modifier.width(8.dp))
-                Text(label, color = oklch(0.92f, 0.02f, 270f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(6.dp))
             Box(modifier = Modifier.heightIn(min = 22.dp).widthIn(max = 320.dp), contentAlignment = Alignment.Center) {
                 if (caption.isEmpty()) {
                     Text(
                         if (inputDialog) stringResource(R.string.voice_flow_hint_with_input, sub) else sub,
-                        color = oklch(0.60f, 0.03f, 270f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                         textAlign = TextAlign.Center,
                         maxLines = 1,
@@ -479,7 +487,7 @@ private fun FlowModeContent(
                     val shown = if (isAi) caption else "“$caption”"
                     Text(
                         shown,
-                        color = if (isAi) oklch(0.96f, 0.02f, 290f) else oklch(0.80f, 0.03f, 270f),
+                        color = if (isAi) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = if (isAi) 14.sp else 13.sp,
                         fontWeight = if (isAi) FontWeight.Medium else FontWeight.Normal,
                         lineHeight = 18.sp,
@@ -496,101 +504,36 @@ private fun FlowModeContent(
 private fun CircleGlassButton(icon: LXIconName, label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(32.dp)
-            .background(Color.White.copy(alpha = 0.06f), CircleShape)
-            .border(0.5.dp, Color.White.copy(alpha = 0.12f), CircleShape)
+            .size(48.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape)
+            .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        LXIcon(name = icon, size = 19.dp, color = oklch(0.90f, 0.01f, 270f), stroke = 2f, contentDescription = label)
+        LXIcon(name = icon, size = 19.dp, color = MaterialTheme.colorScheme.onSurface, stroke = 2f, contentDescription = label)
     }
 }
 
 @Composable
 private fun FlowTextInput(
-    name: String,
-    value: String,
-    onValueChange: (String) -> Unit,
-    onCancel: () -> Unit,
-    onSend: () -> Unit,
+    name: String, value: String, onValueChange: (String) -> Unit,
+    onCancel: () -> Unit, onSend: () -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.55f))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-            ) { onCancel() },
-        contentAlignment = Alignment.BottomCenter,
-    ) {
-        val canSend = value.isNotBlank()
-        Column(
-            modifier = Modifier
-                .windowInsetsPadding(WindowInsets.systemBars)
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 40.dp)
-                .fillMaxWidth()
-                .background(oklch(0.22f, 0.02f, 275f), RoundedCornerShape(22.dp))
-                .border(0.5.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
-                // Swallow taps so the scrim's dismiss doesn't fire on the card.
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
-                .padding(14.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)) {
-                LXIcon(LXIconName.Message, size = 14.dp, color = oklch(0.78f, 0.12f, 288f), stroke = 2f)
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    stringResource(R.string.voice_flow_text_input_label, name),
-                    color = oklch(0.78f, 0.05f, 285f),
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(R.string.voice_flow_text_input_label, name)) },
+        text = {
+            androidx.compose.material3.OutlinedTextField(value, onValueChange,
+                modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 6,
+                placeholder = { Text(stringResource(R.string.voice_flow_text_input_placeholder)) })
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onSend, enabled = value.isNotBlank()) {
+                Text(stringResource(R.string.composer_send))
             }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                textStyle = TextStyle(color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, lineHeight = 23.sp),
-                cursorBrush = SolidColor(oklch(0.85f, 0.15f, 290f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 56.dp)
-                    .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(14.dp))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(14.dp))
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                decorationBox = { inner ->
-                    if (value.isEmpty()) {
-                        Text(stringResource(R.string.voice_flow_text_input_placeholder), color = oklch(0.55f, 0.03f, 280f), fontSize = 15.5.sp)
-                    }
-                    inner()
-                },
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(stringResource(R.string.common_cancel), color = oklch(0.68f, 0.03f, 280f), fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.clickable(onClick = onCancel).padding(horizontal = 16.dp, vertical = 8.dp))
-                Spacer(Modifier.width(10.dp))
-                Row(
-                    modifier = Modifier
-                        .height(38.dp)
-                        .background(
-                            if (canSend) Brush.linearGradient(listOf(oklch(0.70f, 0.19f, 270f), oklch(0.66f, 0.20f, 305f)))
-                            else SolidColor(Color.White.copy(alpha = 0.08f)),
-                            RoundedCornerShape(11.dp),
-                        )
-                        .clickable(enabled = canSend, onClick = onSend)
-                        .padding(horizontal = 18.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    val fg = if (canSend) Color.White else oklch(0.58f, 0.02f, 280f)
-                    Text(stringResource(R.string.composer_send), color = fg, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.width(6.dp))
-                    LXIcon(LXIconName.ArrowUp, size = 15.dp, color = fg)
-                }
-            }
-        }
-    }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onCancel) { Text(stringResource(R.string.common_cancel)) }
+        },
+    )
 }

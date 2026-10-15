@@ -52,14 +52,14 @@
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/bridge-server/src/server.rs) — 已提交源码 (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/packages/bridge-client/src/client.ts) — 已提交源码 (01e935700283059b63ed0ceeda2a804dc7fb05b3)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/bridge-server/src/server.rs) — 已提交源码 (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/packages/bridge-client/src/client.ts) — 已提交源码 (135250505a5277d520f03aa2d1a411f03ff6949b)
 - [harness-runtime/crates/session/src/jsonl/recovery.rs](https://github.com/lingxi-coder/harness-runtime/blob/d5e4990edbfbae00753f32f259a7a49658eecaf2/crates/session/src/jsonl/recovery.rs) — 已提交源码 (d5e4990edbfbae00753f32f259a7a49658eecaf2)
 - [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/d5e4990edbfbae00753f32f259a7a49658eecaf2/crates/runtime/src/api.rs) — 已提交源码 (d5e4990edbfbae00753f32f259a7a49658eecaf2)
 - [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/executor.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
 - [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/b65f8856d773d27ebf73b0cade907884d3080704/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (b65f8856d773d27ebf73b0cade907884d3080704)
 
-- lingxi-app: HEAD 01e935700283059b63ed0ceeda2a804dc7fb05b3; 所据文件指纹 sha256:bf57bb48458123046de4b527671f3df43dbce4d12b2278ca25c42ec093d01773
+- lingxi-app: HEAD 135250505a5277d520f03aa2d1a411f03ff6949b; 所据文件指纹 sha256:ac73bd146078949f2a1c8f7801b199c918f6beef6e2ce215544e06d08ef33fb3
 - harness-runtime: HEAD d5e4990edbfbae00753f32f259a7a49658eecaf2; 所据文件指纹 sha256:87cee15ec392d0bc954fbf98a046813bbe7d38d0c257d335f4a74e606d22bd92; 产品固定版本 d5e4990edbfbae00753f32f259a7a49658eecaf2
 - llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; 所据文件指纹 sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; 产品固定版本 7333dbc3795b6bad893cb7287088d80931538630
 - mobile-linux-runtime: HEAD b65f8856d773d27ebf73b0cade907884d3080704; 所据文件指纹 sha256:de6f69b8671150c8682b938faea726c0360978b776acaa4c077b257b13792174; 产品固定版本 b65f8856d773d27ebf73b0cade907884d3080704

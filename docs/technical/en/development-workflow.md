@@ -66,14 +66,14 @@ Current-worktree examples require local checkouts and an explicit complete depen
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — Uncommitted source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/rust-toolchain.toml) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/setup.sh) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/scripts/lib/runtime_source.py) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/Cargo.toml) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/rust-toolchain.toml) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/setup.sh) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/scripts/lib/runtime_source.py) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
 - [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/d5e4990edbfbae00753f32f259a7a49658eecaf2/Cargo.toml) — Committed source (d5e4990edbfbae00753f32f259a7a49658eecaf2)
 - [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/Cargo.toml) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
 
-- lingxi-app: HEAD 01e935700283059b63ed0ceeda2a804dc7fb05b3; Referenced input fingerprint sha256:bf57bb48458123046de4b527671f3df43dbce4d12b2278ca25c42ec093d01773
+- lingxi-app: HEAD 135250505a5277d520f03aa2d1a411f03ff6949b; Referenced input fingerprint sha256:ac73bd146078949f2a1c8f7801b199c918f6beef6e2ce215544e06d08ef33fb3
 - harness-runtime: HEAD d5e4990edbfbae00753f32f259a7a49658eecaf2; Referenced input fingerprint sha256:87cee15ec392d0bc954fbf98a046813bbe7d38d0c257d335f4a74e606d22bd92; Product pin d5e4990edbfbae00753f32f259a7a49658eecaf2
 - llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; Referenced input fingerprint sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; Product pin 7333dbc3795b6bad893cb7287088d80931538630
 

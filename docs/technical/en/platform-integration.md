@@ -176,20 +176,20 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/apps)
 
-- lingxi-app/apps/ios/ffi/src/host.rs — Uncommitted source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- lingxi-app/apps/android/ffi/src/host.rs — Uncommitted source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/ios/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/ios/ffi/src/callbacks.rs) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/android/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/android/ffi/src/callbacks.rs) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/ios/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/ios/ffi/src/configuration.rs) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/android/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/android/ffi/src/configuration.rs) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/ios/native/scripts/build-xcframework.sh) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/android/native/scripts/build-jni.sh) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- [lingxi-app/apps/ios/native/Sources/Conversation/EngineConversationSource.swift](https://github.com/lingxi-coder/lingxi-app/blob/01e935700283059b63ed0ceeda2a804dc7fb05b3/apps/ios/native/Sources/Conversation/EngineConversationSource.swift) — Committed source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
-- lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt — Uncommitted source (01e935700283059b63ed0ceeda2a804dc7fb05b3)
+- [lingxi-app/apps/ios/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/ios/ffi/src/host.rs) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/android/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/android/ffi/src/host.rs) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/ios/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/ios/ffi/src/callbacks.rs) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/android/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/android/ffi/src/callbacks.rs) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/ios/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/ios/ffi/src/configuration.rs) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/android/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/android/ffi/src/configuration.rs) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/ios/native/scripts/build-xcframework.sh) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/android/native/scripts/build-jni.sh) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/ios/native/Sources/Conversation/EngineConversationSource.swift](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/ios/native/Sources/Conversation/EngineConversationSource.swift) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
+- [lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt](https://github.com/lingxi-coder/lingxi-app/blob/135250505a5277d520f03aa2d1a411f03ff6949b/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt) — Committed source (135250505a5277d520f03aa2d1a411f03ff6949b)
 - [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/d5e4990edbfbae00753f32f259a7a49658eecaf2/crates/runtime/src/mobile/host.rs) — Committed source (d5e4990edbfbae00753f32f259a7a49658eecaf2)
 - [harness-runtime/crates/client/src/protocol/audio.rs](https://github.com/lingxi-coder/harness-runtime/blob/d5e4990edbfbae00753f32f259a7a49658eecaf2/crates/client/src/protocol/audio.rs) — Committed source (d5e4990edbfbae00753f32f259a7a49658eecaf2)
 
-- lingxi-app: HEAD 01e935700283059b63ed0ceeda2a804dc7fb05b3; Referenced input fingerprint sha256:bf57bb48458123046de4b527671f3df43dbce4d12b2278ca25c42ec093d01773
+- lingxi-app: HEAD 135250505a5277d520f03aa2d1a411f03ff6949b; Referenced input fingerprint sha256:ac73bd146078949f2a1c8f7801b199c918f6beef6e2ce215544e06d08ef33fb3
 - harness-runtime: HEAD d5e4990edbfbae00753f32f259a7a49658eecaf2; Referenced input fingerprint sha256:87cee15ec392d0bc954fbf98a046813bbe7d38d0c257d335f4a74e606d22bd92; Product pin d5e4990edbfbae00753f32f259a7a49658eecaf2
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

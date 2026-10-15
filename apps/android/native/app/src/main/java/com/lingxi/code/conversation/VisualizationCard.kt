@@ -117,8 +117,11 @@ fun VisualizationCard(
             status == VisualizationSlotStatus.Pending ->
                 VisualizationNote(stringResource(R.string.visualization_preparing), busy = true)
             status == VisualizationSlotStatus.Ready && reference != null && context?.host != null &&
+                (context.sessionId.isBlank() || context.sessionId == "new") ->
+                VisualizationNote(stringResource(R.string.visualization_loading), busy = true)
+            status == VisualizationSlotStatus.Ready && reference != null && context?.host != null &&
                 context.sessionId.isNotEmpty() && webMessagingSupported() ->
-                key(context.sessionId, reference) {
+                key(context.host, context.sessionId, reference) {
                     VisualizationLiveCard(context, reference)
                 }
             else -> VisualizationNote(stringResource(R.string.visualization_unavailable), busy = false)
@@ -136,11 +139,12 @@ private class WidgetSession(
     val host: VisualizationHost,
     val sessionId: String,
     val reference: VisualizationRef,
-    val scope: CoroutineScope,
 ) {
     var webView: WebView? = null
     var reply: JavaScriptReplyProxy? = null
     var mount: VisualizationMountDto? = null
+    var lifecycle: Long = 0
+        private set
 
     fun post(message: JSONObject) {
         reply?.postMessage(message.toString())
@@ -148,9 +152,15 @@ private class WidgetSession(
 
     /** Retire the current mount; its late replies and writes are refused. */
     fun retire() {
+        lifecycle++
         val token = mount?.token ?: return
         mount = null
-        scope.launch(Dispatchers.IO) { runCatching { host.unmount(token) } }
+        release(token)
+    }
+
+    fun release(token: String) {
+        // Cleanup must survive cancellation of the composition's scope.
+        CoroutineScope(Dispatchers.IO).launch { runCatching { host.unmount(token) } }
     }
 
     fun destroy() {
@@ -169,7 +179,7 @@ private class WidgetSession(
 @Composable
 private fun VisualizationLiveCard(context: VisualizationScreenContext, reference: VisualizationRef) {
     val scope = rememberCoroutineScope()
-    val session = remember { WidgetSession(context.host!!, context.sessionId, reference, scope) }
+    val session = remember { WidgetSession(context.host!!, context.sessionId, reference) }
     var phase by remember { mutableStateOf(WidgetPhase.Loading) }
     var heightDp by remember { mutableIntStateOf(160) }
     var title by remember { mutableStateOf("") }
@@ -182,35 +192,46 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
 
     fun mountWidget() {
         session.retire()
+        val lifecycle = session.lifecycle
         phase = WidgetPhase.Loading
         scope.launch {
-            val ticket = withContext(Dispatchers.IO) {
-                runCatching {
-                    session.host.mount(
-                        sessionId = session.sessionId,
-                        id = reference.id,
-                        revision = reference.revision,
-                        themeDto = VisualizationThemeDto(dark = dark, tokens = emptyMap()),
-                        locale = locale,
-                        expanded = false,
-                    )
-                }.getOrNull()
+            var pendingTicket: VisualizationMountDto? = null
+            try {
+                withContext(Dispatchers.IO) {
+                    pendingTicket = runCatching {
+                        session.host.mount(
+                            sessionId = session.sessionId,
+                            id = reference.id,
+                            revision = reference.revision,
+                            themeDto = VisualizationThemeDto(dark = dark, tokens = emptyMap()),
+                            locale = locale,
+                            expanded = false,
+                        )
+                    }.getOrNull()
+                }
+                if (session.lifecycle != lifecycle || session.webView == null) return@launch
+                val ticket = pendingTicket
+                if (ticket == null) {
+                    phase = WidgetPhase.Unavailable
+                    return@launch
+                }
+                session.mount = ticket
+                pendingTicket = null
+                title = ticket.title
+                session.post(
+                    JSONObject()
+                        .put("type", "mount")
+                        .put("generation", ticket.generation.toLong())
+                        .put("docUrl", ticket.docUrl)
+                        .put("title", ticket.title)
+                        .put("maxHeight", MAX_INLINE_HEIGHT_DP)
+                        .put("expanded", false),
+                )
+            } finally {
+                // withContext can discard its result on cancellation after the
+                // blocking FFI call completes. Keep ownership until installed.
+                pendingTicket?.let { session.release(it.token) }
             }
-            if (ticket == null) {
-                phase = WidgetPhase.Unavailable
-                return@launch
-            }
-            session.mount = ticket
-            title = ticket.title
-            session.post(
-                JSONObject()
-                    .put("type", "mount")
-                    .put("generation", ticket.generation.toLong())
-                    .put("docUrl", ticket.docUrl)
-                    .put("title", ticket.title)
-                    .put("maxHeight", MAX_INLINE_HEIGHT_DP)
-                    .put("expanded", false),
-            )
         }
     }
 
@@ -311,6 +332,10 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
                             isHorizontalScrollBarEnabled = false
                             overScrollMode = WebView.OVER_SCROLL_NEVER
                             settings.javaScriptEnabled = true
+                            // Honor the shell/content viewport so CSS pixels and
+                            // the host's dp height use the same mobile scale.
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = false
                             settings.domStorageEnabled = false
                             settings.databaseEnabled = false
                             settings.allowFileAccess = false

@@ -44,6 +44,7 @@ class VisualizationTest {
     private class FollowupSource : ConversationSource {
         val contexts = mutableListOf<VisualizationRef?>()
         private val never = MutableSharedFlow<ReplyEvent>()
+        suspend fun emit(event: ReplyEvent) { never.emit(event) }
         override fun submit(text: String): Flow<ReplyEvent> = never.asSharedFlow()
         override fun submit(
             text: String,
@@ -54,6 +55,50 @@ class VisualizationTest {
             contexts += visualizationContext
             return never.asSharedFlow()
         }
+    }
+
+    @Test fun initialSessionAnnouncementPreservesLiveWidgetAndItsReplyCollector() = runTest(dispatcher) {
+        val source = FollowupSource()
+        val vm = ChatViewModel(source)
+        vm.send("Draw a bicycle")
+        runCurrent()
+        source.emit(ReplyEvent.Visualization(VisualizationBlockStatus.Ready, chart))
+        runCurrent()
+        val before = vm.state.value
+
+        vm.applyActivatedSession(ActivatedSession("first-session", emptyList(), SessionActivationKind.Started))
+
+        assertEquals("first-session", vm.state.value.session.id)
+        assertEquals(before.messages, vm.state.value.messages)
+        assertEquals(before.streamingMessage, vm.state.value.streamingMessage)
+        assertTrue(vm.state.value.streaming)
+        source.emit(ReplyEvent.Delta("After the bicycle"))
+        runCurrent()
+        assertEquals("After the bicycle", vm.state.value.streamingMessage?.text)
+        assertEquals(chart, buildChatRenderItems(vm.state.value).filterIsInstance<ChatRenderItem.Visualization>().single().reference)
+        source.emit(ReplyEvent.End)
+        runCurrent()
+    }
+
+    @Test fun repeatedOrForeignBootstrapCannotInvalidateTheLiveWidget() = runTest(dispatcher) {
+        val source = FollowupSource()
+        val vm = ChatViewModel(source)
+        vm.applyActivatedSession(ActivatedSession("active", emptyList(), SessionActivationKind.Started))
+        vm.send("Draw a bicycle")
+        runCurrent()
+        source.emit(ReplyEvent.Visualization(VisualizationBlockStatus.Ready, chart))
+        runCurrent()
+        val before = vm.state.value
+
+        for (id in listOf("active", "delayed-bootstrap")) {
+            vm.applyActivatedSession(ActivatedSession(id, emptyList(), SessionActivationKind.Started))
+            assertEquals(before, vm.state.value)
+        }
+        source.emit(ReplyEvent.Delta("Still streaming"))
+        runCurrent()
+        assertEquals("Still streaming", vm.state.value.streamingMessage?.text)
+        source.emit(ReplyEvent.End)
+        runCurrent()
     }
 
     @Test fun aPendingSlotSettlesInPlaceAndProseContinuesAfterIt() {

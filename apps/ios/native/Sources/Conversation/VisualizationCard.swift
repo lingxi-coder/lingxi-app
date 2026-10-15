@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import OSLog
 
 /// Inline visualizations on iOS.
 ///
@@ -13,6 +14,7 @@ import WebKit
 /// reach the network even if a CSP were bypassed.
 @MainActor
 final class VisualizationWebHost {
+    nonisolated static let log = Logger(subsystem: "com.lingxi.code", category: "visualization")
     static let shared = VisualizationWebHost()
     static let scheme = "lingxi-viz"
     static let origin = "lingxi-viz://visualization"
@@ -47,7 +49,10 @@ final class VisualizationWebHost {
         WKContentRuleListStore.default().compileContentRuleList(
             forIdentifier: "lingxi-visualization-v1",
             encodedContentRuleList: rules
-        ) { [weak self] list, _ in
+        ) { [weak self] list, error in
+            if let error {
+                Self.log.error("Content rules failed: \(error.localizedDescription, privacy: .public)")
+            }
             Task { @MainActor in
                 guard let self else { return }
                 self.ruleList = list
@@ -141,7 +146,10 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
     var dark: Bool
     var onFollowup: ((VisualizationFollowup) -> Void)?
     private(set) var webView: WKWebView?
+    /// Keep serving, mounting and state writes on the same engine instance.
+    private var host: VisualizationHost?
     private var mount: VisualizationMountDto?
+    private var lifecycle: UInt64 = 0
     private static let maxMessageCharacters = 64 * 1024
 
     init(sessionId: String, id: String, revision: UInt32, dark: Bool) {
@@ -154,17 +162,21 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
 
     func makeWebView(_ completion: @escaping (WKWebView?) -> Void) {
         if let webView { return completion(webView) }
+        let lifecycle = self.lifecycle
         guard let host = VisualizationWebHost.shared.host else {
+            VisualizationWebHost.log.error("Cannot create widget: visualization host is not attached")
             phase = .unavailable
             return completion(nil)
         }
         VisualizationWebHost.shared.withRuleList { [weak self] rules in
             guard let self else { return completion(nil) }
+            guard self.lifecycle == lifecycle else { return completion(nil) }
             // Without the network block the widget does not load at all.
             guard let rules else {
                 self.phase = .unavailable
                 return completion(nil)
             }
+            self.host = host
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = .nonPersistent()
             configuration.setURLSchemeHandler(
@@ -199,20 +211,23 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
     /// Retire the mount and drop the web view (scrolled far away, or gone).
     func suspend() {
         retire()
+        webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView?.configuration.userContentController.removeScriptMessageHandler(
             forName: VisualizationWebHost.messageHandler, contentWorld: .page
         )
         webView?.removeFromSuperview()
         webView = nil
+        host = nil
         phase = .loading
     }
 
     private func retire() {
+        lifecycle &+= 1
         guard let mount else { return }
         self.mount = nil
         let token = mount.token
-        let host = VisualizationWebHost.shared.host
+        let host = self.host
         VisualizationWebHost.shared.queue.async { host?.unmount(token: token) }
     }
 
@@ -230,7 +245,8 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
     // MARK: shell → host
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.frameInfo.isMainFrame,
+        guard message.webView === webView,
+              message.frameInfo.isMainFrame,
               message.frameInfo.securityOrigin.protocol == VisualizationWebHost.scheme,
               message.frameInfo.securityOrigin.host == "visualization",
               let raw = message.body as? String,
@@ -271,11 +287,12 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
     private func mountWidget() {
         retire()
         phase = .loading
-        guard let host = VisualizationWebHost.shared.host else {
+        guard let host = self.host else {
             phase = .unavailable
             return
         }
         let (sessionId, id, revision, dark) = (self.sessionId, self.id, self.revision, self.dark)
+        let lifecycle = self.lifecycle
         let locale = Locale.preferredLanguages.first ?? "en"
         VisualizationWebHost.shared.queue.async {
             let ticket = host.mount(
@@ -286,8 +303,17 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
                 locale: locale,
                 expanded: false
             )
+            if ticket == nil {
+                let stored = host.list(sessionId: sessionId).count
+                VisualizationWebHost.log.error("Mount unavailable: session=\(sessionId, privacy: .public) id=\(id, privacy: .public) revision=\(revision) storedRevisions=\(stored)")
+            }
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, self.lifecycle == lifecycle, self.webView != nil else {
+                    if let ticket {
+                        VisualizationWebHost.shared.queue.async { host.unmount(token: ticket.token) }
+                    }
+                    return
+                }
                 guard let ticket else {
                     self.phase = .unavailable
                     return
@@ -311,7 +337,7 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
               let baseVersion = (body["baseVersion"] as? NSNumber)?.uint64Value,
               let modelContent = body["modelContent"] as? String,
               let privateContent = body["privateContent"] as? String,
-              let host = VisualizationWebHost.shared.host
+              let host = self.host
         else { return }
         VisualizationWebHost.shared.queue.async {
             let result = host.writeState(
@@ -382,6 +408,8 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
 private struct VisualizationWebViewRepresentable: UIViewRepresentable {
     let controller: VisualizationWidgetController
 
+    func makeCoordinator() -> VisualizationWidgetController { controller }
+
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
         container.backgroundColor = .clear
@@ -401,7 +429,8 @@ private struct VisualizationWebViewRepresentable: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {}
 
-    static func dismantleUIView(_ uiView: UIView, coordinator: ()) {
+    static func dismantleUIView(_ uiView: UIView, coordinator: VisualizationWidgetController) {
+        coordinator.suspend()
         uiView.subviews.forEach { $0.removeFromSuperview() }
     }
 }
@@ -462,7 +491,6 @@ private struct VisualizationLiveCard: View {
             controller.onFollowup = onFollowup
         }
         .onChange(of: colorScheme) { _, scheme in controller.setDark(scheme == .dark) }
-        .onDisappear { controller.suspend() }
     }
 }
 

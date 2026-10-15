@@ -1581,9 +1581,9 @@ class ChatViewModel(
      * Apply a live session activation the engine confirmed (`SessionStarted` or
      * `SessionResumed`): adopt the real session id and, for resumed sessions,
      * replace the transcript with the rehydrated oldest-first scrollback so the
-     * next turn continues from real persisted history. Any in-flight turn is
-     * abandoned first (the orphaned-turn guard, so a late event from the
-     * pre-activation turn can't mutate the updated transcript).
+     * next turn continues from real persisted history. Session switches abandon
+     * the prior turn so its late events cannot mutate the replacement transcript;
+     * the initial bootstrap announcement only binds the current turn's owner.
      *
      * The title is preserved from the drawer's optimistic local select when the
      * id matches (`resumeSession` set it before submitting `ResumeSession`), else
@@ -1592,7 +1592,8 @@ class ChatViewModel(
      * so the rehydration is exercised directly in unit tests with a fake source.
      */
     internal fun applyActivatedSession(restored: ActivatedSession) {
-        if (_state.value.sessionTransitioning) {
+        val current = _state.value
+        if (current.sessionTransitioning) {
             val matchesPendingResume =
                 pendingResumeId != null &&
                     restored.kind == SessionActivationKind.Resumed &&
@@ -1600,6 +1601,24 @@ class ChatViewModel(
             val matchesPendingNew =
                 pendingNewSession && restored.kind == SessionActivationKind.Started
             if (!matchesPendingResume && !matchesPendingNew) return
+        }
+        if (restored.kind == SessionActivationKind.Started && !current.sessionTransitioning) {
+            // The first prompt can already be streaming when engine bootstrap
+            // announces its owner. Bind that identity without abandoning the
+            // collector or clearing the optimistic prompt and widget slots.
+            if (current.session.id == "new") {
+                _state.update {
+                    it.copy(session = it.session.copy(id = restored.sessionId), sessionReady = true)
+                }
+                reportBackgroundTurnState()
+                return
+            }
+            // Repeated/bootstrap announcements cannot replace a transcript
+            // already owned by a confirmed session. Explicit NewSession still
+            // follows the transition path above.
+            if (canonicalSessionId(current.session.id) == canonicalSessionId(restored.sessionId) ||
+                current.messages.isNotEmpty() || current.streamingMessage != null
+            ) return
         }
         abandonLocalTurn()
         pendingResumeId = null

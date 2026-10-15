@@ -102,6 +102,8 @@ class ChatViewModel(
     private val backgroundExecution: ConversationBackgroundExecution =
         ConversationBackgroundExecution.None,
 ) : ViewModel() {
+    internal val sideChats = SideChatManager(viewModelScope)
+
     /** Provider reconnect token is independent from workspace-source swaps. */
     private var reconnectGeneration: Int = sourceGeneration
 
@@ -1280,6 +1282,11 @@ class ChatViewModel(
         createSource: () -> ConversationSource,
     ) {
         if (generation <= reconnectGeneration) return
+        if (sideChats.hasLiveChats) {
+            reportHostError(strings.resolve(R.string.side_chat_end_before_reconnect, "请先结束旁聊，再重新连接引擎。"))
+            sideChats.whenVacant = { ensureSource(generation, createSource) }
+            return
+        }
 
         val replacement = createSource()
         if (replacement is UnavailableConversationSource) {
@@ -1317,6 +1324,7 @@ class ChatViewModel(
         sessionTransitionJob = null
         sourceBindingJob?.cancel()
 
+        sideChats.release()
         source = replacement
         _engineSource.value = replacement
         _sessions.value = EngineSessionState.loading()
@@ -1381,9 +1389,13 @@ class ChatViewModel(
         rollbackSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
     ): Boolean = workspaceSwitchMutex.withLock {
+        if (sideChats.hasLiveChats) {
+            reportHostError(strings.resolve(R.string.side_chat_end_before_workspace, "请先结束旁聊，再切换工作区。"))
+            return@withLock false
+        }
         if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return@withLock false
         val previous = source
-        fun replacementIsBlocked(): Boolean = source !== previous ||
+        fun replacementIsBlocked(): Boolean = sideChats.hasLiveChats || source !== previous ||
             _state.value.blocksWorkspaceReplacement(
                 hasPendingPermission = _pendingPermission.value != null,
                 replacePendingTransition = replacePendingTransition,
@@ -1491,6 +1503,7 @@ class ChatViewModel(
 
         sourceGeneration++
         sourceBindingJob?.cancel()
+        sideChats.release()
         source = replacement
         _engineSource.value = replacement
         _sourceProjectId.value = projectId
@@ -2004,6 +2017,16 @@ class ChatViewModel(
      * pending-message queue. The existing collector remains the sole owner of
      * reply events for the whole turn loop.
      */
+    /** Synchronous composer admission keeps rejected side commands editable. */
+    fun admitComposerSend(text: String, hasImages: Boolean): Boolean {
+        val rejection = sideChatSendRejection(text, hasImages, source is SideChatSource) ?: return true
+        reportHostError(when (rejection) {
+            SideChatSendRejection.Attachment -> strings.resolve(R.string.side_chat_attachment_rejected, "创建旁聊时请先移除图片附件。")
+            SideChatSendRejection.Nested -> strings.resolve(R.string.side_chat_nested_unavailable, "旁聊中无法创建新的旁聊")
+        })
+        return false
+    }
+
     fun send(
         text: String,
         images: List<ImageRefDto> = emptyList(),
@@ -2014,6 +2037,19 @@ class ChatViewModel(
         val isBashInput = text.startsWith("!")
         val submittedText = if (isBashInput) text.substring(1) else trimmed
         val promptMode = if (isBashInput) PromptModeDto.BASH else null
+        if (!admitComposerSend(trimmed, images.isNotEmpty())) return
+        sideChatInput(trimmed)?.let { input ->
+            val parent = source as? EngineConversationSource
+            if (parent == null) {
+                reportHostError(strings.resolve(R.string.side_chat_nested_unavailable, "旁聊中无法创建新的旁聊"))
+                return
+            }
+            sideChats.create(parent, input) {
+                onDraftChanged(text)
+                reportHostError(sideChats.error.value ?: "Unable to create side chat")
+            }
+            return
+        }
         if (refuseWhileDurableTurnParked()) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
@@ -2732,6 +2768,7 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        sideChats.release()
         val retained = currentBackgroundSnapshot()
             .takeIf { _state.value.requiresBackgroundExecution }
             ?.let { snapshot ->

@@ -1579,7 +1579,6 @@ export interface CostDto {
 }
 
 /**
-/**
  * Outbound events the engine streams to a client (events.rs `ClientEvent`).
  * Internally tagged on `type`, `snake_case`.
  *

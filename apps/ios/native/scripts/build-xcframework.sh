@@ -45,8 +45,12 @@ STATICLIB="lib${LIB_STEM}.a"
 HOST_DYLIB="lib${LIB_STEM}.dylib"
 
 # Cargo build profile for the device/sim staticlibs.
-PROFILE="release"
-PROFILE_DIR="release"               # `--release` → target/<triple>/release
+PROFILE="${LINGXI_FFI_PROFILE:-release}"
+case "${PROFILE}" in
+  release) PROFILE_DIR="release"; PROFILE_ARGS=(--release) ;;
+  debug) PROFILE_DIR="debug"; PROFILE_ARGS=(--profile dev) ;;
+  *) echo "ERROR: LINGXI_FFI_PROFILE must be release or debug" >&2; exit 1 ;;
+esac
 
 # Keep Rust's linker target and every vendored C/C++ dependency on the same
 # minimum OS as the XcodeGen project. Without this, current Xcode compiles C
@@ -98,7 +102,23 @@ done
 # remains the only Rust/UniFFI implementation in the application.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
 if [[ "${LINGXI_FFI_BINDINGS_ONLY:-0}" != "1" ]]; then
-if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
+if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" && "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
+  SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
+  SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
+  python3 "${SDK_ROOT}/scripts/checks/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
+  diff -qr "${SDK_OUTPUT}/MobileLinuxNativeSupport.xcframework" "${FRAMEWORKS_DIR}/MobileLinuxNativeSupport.xcframework"
+  python3 - "${REPO_ROOT}" "${SDK_OUTPUT}" <<'CHECK_SIM_SUPPORT'
+import json, pathlib, subprocess, sys
+repo, output = map(pathlib.Path, sys.argv[1:])
+resolved = json.loads(subprocess.check_output([sys.executable, str(repo / "scripts/lib/mobile_linux_source.py"), "--json"], text=True))
+recorded = json.loads((output / "sdk-source.json").read_text())
+if any(recorded[key] != resolved[key] for key in ("source", "revision")):
+    raise SystemExit("native support SDK revision differs from Cargo.lock; rebuild it")
+manifest = json.loads((output / "native-support-manifest.json").read_text())
+if "iphonesimulator-arm64" not in manifest.get("slices", []):
+    raise SystemExit("staged native support is missing the arm64 simulator slice")
+CHECK_SIM_SUPPORT
+elif [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
   "${LINUX_RUNTIME_BUILD}" --simulator-only
 elif [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
   "${SCRIPT_DIR}/verify-linux-runtime.sh"
@@ -429,21 +449,18 @@ for t in "${BUILD_TARGETS[@]}"; do
     # headers to bindgen without changing Rust's target or the resulting slice.
     simulator_bindgen_args="--target=arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
     BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
-      cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
-        --target "${t}" --"${PROFILE}"
+      cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
+        --target "${t}" "${PROFILE_ARGS[@]}"
   elif [[ "${t}" == "x86_64-apple-ios" ]]; then
     simulator_bindgen_args="--target=x86_64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
     BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
-      cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
-        --target "${t}" --"${PROFILE}"
+      cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
+        --target "${t}" "${PROFILE_ARGS[@]}"
   else
-    # The package also declares a cdylib for host-side UniFFI introspection.
-    # On device that incidental dylib sees the Objective-C iSH bridge only at
-    # the final Xcode app link, so permit those symbols to remain unresolved;
-    # the staticlib packaged below is unaffected and Xcode resolves them.
-    RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-undefined,dynamic_lookup" \
-      cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
-        --target "${t}" --"${PROFILE}"
+    # Target integration needs only this archive. Host-side UniFFI
+    # introspection still builds its cdylib in step 1.
+    cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi --lib --crate-type staticlib \
+        --target "${t}" "${PROFILE_ARGS[@]}"
   fi
   arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"
   [[ -f "${arch_lib}" ]] || { echo "ERROR: staticlib not produced: ${arch_lib}" >&2; exit 1; }
@@ -525,7 +542,13 @@ if [[ "${LINGXI_DEVICE_ONLY:-0}" != "1" ]]; then
     sim_inputs+=("${BUILD_DIR}/${t}/${STATICLIB}")
   done
   log "lipo-ing simulator slices → ${FAT_SIM_LIB}"
-  "${LIPO[@]}" -create "${sim_inputs[@]}" -output "${FAT_SIM_LIB}"
+  if [[ ${#sim_inputs[@]} == 1 ]]; then
+    # There is no architecture merge for one slice. APFS cloning avoids
+    # a second physical archive during local simulator validation.
+    cp -c "${sim_inputs[0]}" "${FAT_SIM_LIB}"
+  else
+    "${LIPO[@]}" -create "${sim_inputs[@]}" -output "${FAT_SIM_LIB}"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

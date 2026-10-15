@@ -86,6 +86,8 @@ class EngineConversationSource private constructor(
     override val recoverySpec: ConversationRecoverySpec,
 ) : ConversationSource, BackgroundRetainableConversationSource {
 
+    internal fun newSideChatSource() = SideChatSource(handle)
+
     private val durableAttachMutex = Mutex()
     private val durableAttachCoordinator = DurableAttachCoordinator()
 

@@ -8,7 +8,6 @@ import {
   validateUiClientOperationResponseJson,
   validateUiControlMetadataJson,
 } from '@lingxi/bridge-client';
-import { CLIENT_EVENT_DISPOSITIONS } from '../shared/clientCommands.js';
 import type {
   AskUserQuestionRequestDto,
   AudioOperationRequestDto,
@@ -650,7 +649,7 @@ export class SessionRuntime {
   }
 
   get hasActiveWork(): boolean {
-    return this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private readonly gitActivity = new GitActivityTracker();
@@ -808,11 +807,9 @@ export class SessionRuntime {
   }
 
   private broadcastClientEvent(event: ClientEvent): void {
-    // SideChat events are consumed only by the host-side SideChat request
-    // owner. Keep their child transcript and permission payloads out of the
-    // renderer event channel and its replay buffer until a UI is explicitly
-    // added. Other host-private event families keep their existing routing.
-    if (event.type.startsWith('side_chat_') && CLIENT_EVENT_DISPOSITIONS[event.type] === 'host_private') return;
+    // SideChat events use the sequenced renderer channel. On reconnect the
+    // renderer reconciles child state through side_chat_list / side_chat_get;
+    // useBridge filters these events before parent conversation reducers.
     const envelope = this.eventEnvelope(event, true);
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);
@@ -1040,6 +1037,13 @@ export class SessionRuntime {
     try { client.close(); } catch { /* a disconnected transport may already be closed */ }
   }
 
+  private readonly liveSideChats = new Set<string>();
+  private readonly pendingSideCreates = new Set<string>();
+
+  private assertNoLiveSideChats(): void {
+    if (this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0) throw new Error('End all Side Chats before stopping or restarting this chat.');
+  }
+
   restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
     if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
@@ -1047,7 +1051,9 @@ export class SessionRuntime {
       // This runs after any earlier queued lifecycle work and immediately
       // before stopping the child. Callers can re-check ownership/work here
       // to close the queueing race between IPC validation and restart.
+      this.assertNoLiveSideChats();
       await beforeRestart?.();
+      this.assertNoLiveSideChats();
       this.setState({ status: 'restarting' });
       try {
         await this.stopBridge();
@@ -1064,6 +1070,7 @@ export class SessionRuntime {
     if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
+      this.assertNoLiveSideChats();
       await this.stopBridge();
       this.setState({ status: 'idle' });
     });
@@ -1287,6 +1294,7 @@ export class SessionRuntime {
       });
     }
     if (generation !== this.generation || this.disposed) return;
+    if (this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0) this.requireClient().sendCommand({ type: 'side_chat_list' });
     if (publishConnected) this.setState({ status: 'connected' });
     this.startupDiagnostic('bridge_connect_completed', {
       durationMs: Date.now() - startedAt,
@@ -1557,6 +1565,15 @@ export class SessionRuntime {
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
+      if (event.type === 'side_chat_created') { this.pendingSideCreates.delete(event.request_id); this.liveSideChats.add(event.side_id); }
+      if (event.type === 'side_chat_error' && event.request_id) this.pendingSideCreates.delete(event.request_id);
+      if (event.type === 'side_chat_list') { this.pendingSideCreates.clear(); this.liveSideChats.clear(); for (const id of event.side_ids) this.liveSideChats.add(id); }
+      if (event.type === 'side_chat_ended') this.liveSideChats.delete(event.side_id);
+      if (event.type.startsWith('side_chat_')) {
+        this.broadcastClientEvent(event);
+        this.notifyActivityChanged();
+        return;
+      }
       if (event.type === 'ui_control_result') {
         this.pendingModUiRequests.resolve(this.sessionId, event.request_id, event);
         return;
@@ -2377,6 +2394,16 @@ export class SessionRuntime {
   async dispatchCommand(command: unknown): Promise<void> {
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
+    if (validated.type.startsWith('side_chat_')) {
+      const client = this.requireClient();
+      if (validated.type === 'side_chat_create') this.pendingSideCreates.add(validated.request_id);
+      try { client.sendCommand(validated); } catch (error) {
+        if (validated.type === 'side_chat_create') this.pendingSideCreates.delete(validated.request_id);
+        throw error;
+      }
+      this.notifyActivityChanged();
+      return;
+    }
     if (validated.type === 'cron_manage') {
       await this.sendCronCommand(validated);
       return;
@@ -2907,6 +2934,8 @@ export class SessionRuntime {
     await this.teardownAudioGeneration(stoppingGeneration);
     await this.oauthPersistence;
     this.servedCodexToken = undefined;
+    this.liveSideChats.clear();
+    this.pendingSideCreates.clear();
     this.connectionLockfilePath = null;
     this.clearPendingConnectionOperations();
     this.activeWorkspace = undefined;

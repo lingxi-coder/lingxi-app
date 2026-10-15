@@ -2851,7 +2851,7 @@ impl BridgeConnection {
 
     /// Sink reserved for command output that is not part of a turn lifecycle.
     /// Keeping it private prevents orchestrator events from bypassing ownership.
-    fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
+    pub(crate) fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
         Arc::new(UnscopedFrameEventSink {
             out: self.out.clone(),
         })

@@ -273,6 +273,32 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
   if (typeof type !== 'string' || !ALLOWED_COMMANDS.has(type)) throw new Error('command is not allowed');
 
   switch (type) {
+    case 'side_chat_create': {
+      exactKeys(input, ['type', 'request_id', 'initial_input']);
+      const request_id = string(input['request_id'], 'side create request id', 128);
+      const initial_input = input['initial_input'] === undefined ? undefined : string(input['initial_input'], 'side input', 100_000);
+      return { type, request_id, ...(initial_input === undefined ? {} : { initial_input }) };
+    }
+    case 'side_chat_list':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'side_chat_get':
+    case 'side_chat_end':
+      exactKeys(input, ['type', 'side_id']);
+      return { type, side_id: string(input['side_id'], 'side id', 128) };
+    case 'side_chat_submit': {
+      exactKeys(input, ['type', 'side_id', 'request_id', 'command_json']);
+      const request_id = string(input['request_id'], 'side submit request id', 128);
+      const side_id = string(input['side_id'], 'side id', 128);
+      const command_json = string(input['command_json'], 'side command', 8_000_000);
+      const child = object(JSON.parse(command_json));
+      const childType = child['type'];
+      if (typeof childType !== 'string' || !SIDE_CHAT_COMMAND_TYPES.has(childType)) throw new Error('command is not allowed in Side Chat');
+      if (childType === 'run_slash_command' && !/^\/(?:help|model|compact)(?:\s|$)/.test(String(child['raw']))) throw new Error('slash command is not allowed in Side Chat');
+      if (childType === 'send_prompt' && /^\s*\/side(?:\s|$)/i.test(String(child['text']))) throw new Error('nested Side Chat is not allowed');
+      // The runtime validates the full ordinary command DTO and owns the child permission broker.
+      return { type, side_id, request_id, command_json };
+    }
     case 'cron_manage': {
       exactKeys(input, ['type', 'request_id', 'request']);
       const request_id = string(input['request_id'], 'cron request id', 128);
@@ -645,3 +671,5 @@ export function isAllowedIpcSender(
     return false;
   }
 }
+
+const SIDE_CHAT_COMMAND_TYPES = new Set(['send_prompt', 'cancel', 'approve_permission', 'deny_permission', 'answer_ask_user_question', 'cancel_ask_user_question', 'set_model', 'list_models', 'get_conversation_controls', 'set_reasoning_selection', 'set_fast_mode', 'set_permission_mode', 'run_slash_command', 'force_compact']);

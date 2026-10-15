@@ -445,7 +445,7 @@ test('session runtime replay resets at resume and reconstructs later transcript 
   assert.equal((runtime.replaySnapshot()[2]!.event as { text: string }).text, 'hello');
 });
 
-test('SideChat events stay out of renderer delivery and transcript replay', () => {
+test('SideChat events reach renderer without entering the parent transcript replay', () => {
   const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
   client.sendCommand = () => { throw new Error('unexpected command'); };
@@ -484,27 +484,44 @@ test('SideChat events stay out of renderer delivery and transcript replay', () =
   ];
   for (const event of sideChatEvents) client.emit('event', event);
 
-  assert.equal(
-    sent.filter(({ channel }) => channel === CH_EVENT).length,
-    deliveredBeforeSideChat,
-    'SideChat child transcript, snapshot, and permission events must not reach renderer subscribers',
+  const beforeParentContinuation = sent
+    .filter(({ channel }) => channel === CH_EVENT)
+    .map(({ payload }) => payload as { sequence: number; event: ClientEvent });
+  assert.equal(beforeParentContinuation.length, deliveredBeforeSideChat + sideChatEvents.length);
+  assert.deepEqual(
+    beforeParentContinuation.slice(deliveredBeforeSideChat).map(({ event }) => event),
+    sideChatEvents,
+    'the renderer SideChat controller receives child snapshots, events, and permission requests',
   );
   assert.deepEqual(
     runtime.replaySnapshot().map(({ event }) => event.type),
     ['session_resumed', 'text_delta'],
-    'private SideChat events must not enter replay available to a reloaded renderer',
+    'the SideChat controller receives live events; parent transcript replay remains session-only',
   );
+  assert.equal(runtime.turnActive, false, 'child lifecycle events do not start or end the parent turn');
 
   client.emit('event', { type: 'text_delta', text: 'public event after SideChat' });
   const envelopes = sent
     .filter(({ channel }) => channel === CH_EVENT)
     .map(({ payload }) => payload as { sequence: number; event: { type: string } });
   assert.deepEqual(envelopes.map(({ event }) => event.type), [
-    'session_resumed', 'text_delta', 'text_delta',
-  ], 'ordinary transcript events remain renderer-visible');
-  assert.deepEqual(envelopes.map(({ sequence }) => sequence), [1, 2, 3],
-    'private SideChat events do not consume renderer replay sequence numbers');
-  assert.deepEqual(runtime.replaySnapshot().map(({ sequence }) => sequence), [1, 2, 3]);
+    'session_resumed', 'text_delta', ...sideChatEvents.map((event) => event.type), 'text_delta',
+  ], 'parent transcript and SideChat controller events share the renderer bridge');
+  assert.deepEqual(envelopes.map(({ sequence }) => sequence),
+    Array.from({ length: envelopes.length }, (_, index) => index + 1));
+  assert.deepEqual(runtime.replaySnapshot().map(({ sequence }) => sequence),
+    [1, 2, envelopes.at(-1)!.sequence],
+    'SideChat event sequences do not enter the parent transcript replay buffer');
+
+  const parent = runtime.replaySnapshot().reduce(
+    (state, { event }) => reduceEvent(state, event),
+    emptyConversation(),
+  );
+  assert.equal(
+    parent.items.find((item) => item.type === 'narration' && item.role === 'assistant')?.text,
+    'public transcript eventpublic event after SideChat',
+    'opaque child transcript payloads and permission requests never alter the parent conversation',
+  );
 });
 
 test('resumed usage and cumulative status reach the renderer and survive replay without an active turn', () => {
@@ -3358,4 +3375,37 @@ test('Mod UI requests beyond the outstanding window wait in order for earlier re
   assert.ok(settled.every((result) => result.status === 'rejected' && /Mod UI request interrupted/.test(String(result.reason))),
     'an interrupted connection fails outstanding and waiting requests alike');
   assert.equal(commands.length, 17, 'nothing waiting is sent after the interruption');
+});
+
+test('live and pending Side Chats prevent implicit stop, restart and archive', async () => {
+  const runtime = new SessionRuntime({ registerIpc: false, launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  let stopped = 0;
+  (runtime as any).stopBridge = async () => { stopped++; };
+  (runtime as any).pendingSideCreates.add('create-1');
+  assert.equal(runtime.hasActiveWork, true);
+  await assert.rejects(runtime.stop(), /End all Side Chats/);
+  await assert.rejects(runtime.restart(), /End all Side Chats/);
+  (runtime as any).pendingSideCreates.clear();
+  (runtime as any).liveSideChats.add('side-1');
+  assert.throws(() => runtime.beginArchive(), /active work/);
+  await assert.rejects(runtime.stop(), /End all Side Chats/);
+  assert.equal(stopped, 0);
+  (runtime as any).liveSideChats.clear();
+  await runtime.stop();
+  assert.equal(stopped, 1);
+});
+
+test('Side Chat envelopes bypass parent turn state and retain independent identity', () => {
+  const runtime = new SessionRuntime({ registerIpc: false, launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const client = new EventEmitter();
+  const events: unknown[] = [];
+  (runtime as any).broadcastClientEvent = (event: unknown) => events.push(event);
+  (runtime as any).wireClient(client, (runtime as any).generation);
+  client.emit('event', { type: 'side_chat_created', request_id: 'create-1', side_id: 'side-1' });
+  client.emit('event', { type: 'side_chat_event', side_id: 'side-1', event_json: JSON.stringify({ type: 'turn_ended' }) });
+  assert.equal(runtime.turnActive, false);
+  assert.equal(runtime.hasActiveWork, true);
+  assert.equal(events.length, 2);
+  client.emit('event', { type: 'side_chat_ended', side_id: 'side-1' });
+  assert.equal(runtime.hasActiveWork, false);
 });

@@ -85,6 +85,25 @@ def inspect_metadata(metadata, dependency, package_list, *, anchor="harness-runt
     }
 
 
+def declared_development_root(workspace, manifest, repository):
+    """Resolve the explicit Harness patch from the manifest or local Cargo config."""
+    workspace = Path(workspace)
+    patch = manifest.get("patch", {}).get(repository, {}).get("harness-runtime", {})
+    config_path = workspace / ".cargo" / "config.toml"
+    if config_path.is_file():
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        configured = config.get("patch", {}).get(repository, {}).get("harness-runtime")
+        if configured is not None:
+            patch = configured
+    if "path" not in patch:
+        return None
+    patched_manifest = (workspace / patch["path"] / "Cargo.toml").resolve()
+    root = patched_manifest.parents[2]
+    if patched_manifest.relative_to(root).as_posix() != "crates/runtime/Cargo.toml":
+        raise ValueError("unexpected declared Harness development patch layout")
+    return root
+
+
 def resolve_runtime(workspace=WORKSPACE):
     workspace = Path(workspace)
     manifest = tomllib.loads((workspace / "Cargo.toml").read_text(encoding="utf-8"))
@@ -95,13 +114,7 @@ def resolve_runtime(workspace=WORKSPACE):
         "--manifest-path", str(workspace / "Cargo.toml"),
     ]
     result = subprocess.run(command, cwd=workspace, check=True, capture_output=True, text=True, encoding="utf-8")
-    patch = manifest.get("patch", {}).get(package_list["repository"], {}).get("harness-runtime", {})
-    development_root = None
-    if "path" in patch:
-        patched_manifest = (workspace / patch["path"] / "Cargo.toml").resolve()
-        development_root = patched_manifest.parents[2]
-        if patched_manifest.relative_to(development_root).as_posix() != "crates/runtime/Cargo.toml":
-            raise ValueError("unexpected declared Harness development patch layout")
+    development_root = declared_development_root(workspace, manifest, package_list["repository"])
     resolved = inspect_metadata(json.loads(result.stdout), dependency, package_list, development_root=development_root)
     if not (Path(resolved["root"]) / "Cargo.toml").is_file():
         raise ValueError("resolved Harness checkout has no workspace manifest")

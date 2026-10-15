@@ -658,3 +658,41 @@ too — its key never touched the keychain, so only the delete-side \
 notification can lower the entry: {published:?}"
     );
 }
+
+#[tokio::test]
+async fn side_chat_errors_are_correlated_and_do_not_touch_parent_controls() {
+    let router = EngineCommandRouter::new(
+        Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry::default()),
+        None,
+        None,
+    );
+    let sink = Arc::new(TaskMessageSink::default());
+    router
+        .route(
+            ClientCommand::SideChatCreate {
+                request_id: "create-1".into(),
+                initial_input: Some("hello".into()),
+            },
+            sink.clone(),
+        )
+        .await;
+    router
+        .route(
+            ClientCommand::SideChatSubmit {
+                side_id: "missing".into(),
+                request_id: "send-1".into(),
+                command_json: "{}".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.0.lock().unwrap();
+    assert!(
+        matches!(&events[0], ClientEvent::SideChatError { request_id: Some(id), side_id: None, .. } if id == "create-1")
+    );
+    assert!(
+        matches!(&events[1], ClientEvent::SideChatError { request_id: Some(id), side_id: Some(side), .. } if id == "send-1" && side == "missing")
+    );
+}

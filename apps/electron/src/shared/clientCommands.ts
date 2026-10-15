@@ -7,6 +7,11 @@ import type {
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
 
 export const CLIENT_COMMAND_DISPOSITIONS = {
+  side_chat_create: 'exposed',
+  side_chat_list: 'exposed',
+  side_chat_get: 'exposed',
+  side_chat_end: 'exposed',
+  side_chat_submit: 'exposed',
   cron_manage: 'exposed',
   scheduled_run_turn: 'host_private',
   cron_run_completed: 'host_private',
@@ -84,11 +89,6 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   stop_realtime_audio: 'host_private',
   get_audio_session_context: 'host_private',
   update_audio_capabilities: 'host_private',
-  side_chat_create: 'host_private',
-  side_chat_list: 'host_private',
-  side_chat_get: 'host_private',
-  side_chat_end: 'host_private',
-  side_chat_submit: 'host_private',
 } as const satisfies Record<ClientCommand['type'], DesktopDisposition>;
 
 export const REFRESH_LISTING_DISPOSITIONS = {
@@ -108,6 +108,14 @@ export const REFRESH_LISTING_DISPOSITIONS = {
 } as const satisfies Record<ListingKindDto['type'], DesktopDisposition>;
 
 export const CLIENT_EVENT_DISPOSITIONS = {
+  side_chat_permission: 'exposed',
+  side_chat_submitted: 'exposed',
+  side_chat_created: 'exposed',
+  side_chat_list: 'exposed',
+  side_chat_snapshot: 'exposed',
+  side_chat_event: 'exposed',
+  side_chat_ended: 'exposed',
+  side_chat_error: 'exposed',
   cron_result: 'exposed',
   ui_control_result: 'host_private',
   ui_client_frame: 'host_private',
@@ -208,14 +216,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   realtime_audio_event: 'host_private',
   audio_session_context: 'host_private',
   audio_capabilities_changed: 'host_private',
-  side_chat_created: 'host_private',
-  side_chat_list: 'host_private',
-  side_chat_snapshot: 'host_private',
-  side_chat_event: 'host_private',
-  side_chat_permission: 'host_private',
-  side_chat_submitted: 'host_private',
-  side_chat_ended: 'host_private',
-  side_chat_error: 'host_private',
 } as const satisfies Record<ClientEvent['type'], DesktopDisposition>;
 
 /**
@@ -234,6 +234,11 @@ export const CLIENT_EVENT_DISPOSITIONS = {
  * stay out.
  */
 export const ALLOWED_CLIENT_COMMAND_TYPES = [
+  'side_chat_create',
+  'side_chat_list',
+  'side_chat_get',
+  'side_chat_end',
+  'side_chat_submit',
   'cron_manage',
   'set_model',
   'list_models',

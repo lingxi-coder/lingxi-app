@@ -567,9 +567,11 @@ final class VoiceInteractionController {
     private var pendingInterruptionTranscript: String?
     private var resumeAfterConfiguration = false
     private var generation: UInt64 = 0
+    private let controlsRealtimeSession: Bool
     private var activeAudioConfigurationSnapshot: AudioConfigurationSnapshot?
 
     init() {
+        controlsRealtimeSession = true
         voiceCapture = VoiceCapture()
         let capability = VoiceCapabilityModel()
         self.capability = capability
@@ -586,6 +588,7 @@ final class VoiceInteractionController {
         capability: VoiceCapabilityModel,
         speechPlayer: any VoiceSpeechPlaying,
         bargeInRecognizer: (any VoiceBargeInRecognizing)? = nil,
+        controlsRealtimeSession: Bool = true,
         readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
         permissionRequester: (@MainActor () async -> Void)? = nil,
         loopDelay: Duration = .milliseconds(350),
@@ -595,6 +598,7 @@ final class VoiceInteractionController {
         self.capability = capability
         self.speechPlayer = speechPlayer
         self.bargeInRecognizer = bargeInRecognizer
+        self.controlsRealtimeSession = controlsRealtimeSession
         self.readinessOverride = readinessOverride
         self.permissionRequester = permissionRequester ?? {
             await capability.requestPermissions()
@@ -684,6 +688,7 @@ final class VoiceInteractionController {
     }
 
     func startFlow(source: any ConversationSource) {
+        guard controlsRealtimeSession, !source.isTemporaryConversation else { return }
         guard mode != .flow else { return }
         guard mode != .dictation || voiceCapture.phase == .idle else { return }
         beginOperation(mode: .flow)
@@ -882,7 +887,7 @@ final class VoiceInteractionController {
     }
 
     func handleBackground() {
-        Task { await IOSRealtimeAudioService.shared.stop(abort: true) }
+        if controlsRealtimeSession { Task { await IOSRealtimeAudioService.shared.stop(abort: true) } }
         automaticPlaybackToken = nil
         if mode == nil {
             invalidateTasks(keepingMode: true, cancelOwnedTurn: false)
@@ -917,7 +922,7 @@ final class VoiceInteractionController {
     }
 
     func close() {
-        Task { await IOSRealtimeAudioService.shared.stop(abort: true) }
+        if controlsRealtimeSession { Task { await IOSRealtimeAudioService.shared.stop(abort: true) } }
         let ownedSource = activeFlowToken == nil ? nil : source
         let context = flowContext
         invalidateTasks(keepingMode: false, cancelOwnedTurn: false)

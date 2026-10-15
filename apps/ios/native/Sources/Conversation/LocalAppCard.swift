@@ -38,20 +38,20 @@ private struct LocalAppCardContent: View {
                 AppCover(name: app.name, category: "", size: 44)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(app.name)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(t.text)
                         .lineLimit(1)
                     Text(exists == false
                         ? String(localized: "chat_local_app_deleted")
                         : "\(String(localized: "chat_local_app_kind")) · \(String(localized: "apps_version \(app.revision)"))")
-                        .font(.system(size: 12.5))
+                        .font(.footnote)
                         .foregroundStyle(t.text3)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 if openable {
                     Text("common_open")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(t.accent)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)

@@ -382,7 +382,7 @@ import UIKit
                 VStack(spacing: 0) {
                     HStack(spacing: 10) {
                         Image(systemName: Self.isElevatedRisk(pending) ? "shield.lefthalf.filled" : "hand.raised.fill")
-                            .font(.system(size: 17, weight: .medium))
+                            .font(.body.weight(.medium))
                             .foregroundStyle(Self.isElevatedRisk(pending) ? t.danger : t.text2)
                             .frame(width: 34, height: 34)
                             .background(t.surfaceActive, in: Circle())
@@ -395,7 +395,7 @@ import UIKit
                             onDeny(pending.requestId)
                         } label: {
                             Image(systemName: "xmark")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.subheadline.weight(.medium))
                                 .foregroundStyle(t.text3)
                                 .frame(width: 36, height: 36)
                                 .contentShape(Circle())

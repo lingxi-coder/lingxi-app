@@ -57,13 +57,18 @@ final class DesktopSettingsUITests: XCTestCase {
             app.buttons["settings.close"].tap()
             let transcript = app.scrollViews["conversation.message-list"]
             XCTAssertTrue(transcript.waitForExistence(timeout: 5), app.debugDescription)
-            let details = app.buttons["conversation.session-details"]
+            app.buttons["conversation.project-context"].tap()
+            let details = app.buttons["session-panel.details"]
+            if !details.isHittable { app.collectionViews.allElementsBoundByIndex.last!.swipeUp() }
             XCTAssertTrue(details.waitForExistence(timeout: 5), app.debugDescription)
             details.tap()
             let inspector = app.descendants(matching: .any)["session-details.root"]
             XCTAssertTrue(inspector.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(transcript.isHittable, app.debugDescription)
             XCTAssertGreaterThan(inspector.frame.minX, transcript.frame.minX)
+            let userBubble = app.otherElements["conversation.message.user"].firstMatch
+            XCTAssertTrue(userBubble.exists)
+            XCTAssertLessThanOrEqual(userBubble.frame.maxX, inspector.frame.minX + 1)
             attach("Tablet-Chat-Inspector-\(theme)")
             app.buttons["session-inspector-close"].tap()
             XCTAssertFalse(inspector.exists)

@@ -20,7 +20,7 @@ struct NewChatBar: View {
                     HStack(spacing: 5) {
                         candidate.glyph(t, size: 13)
                         Text(candidate.title)
-                            .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                            .font(.footnote.weight(selected ? .semibold : .medium))
                     }
                     .foregroundStyle(selected ? t.text : t.text3)
                     .padding(.horizontal, 12)
@@ -38,7 +38,7 @@ struct NewChatBar: View {
                 HStack(spacing: 5) {
                     LXIcon(name: .folder, size: 13, color: t.text3, stroke: 1.8)
                     Text(workspaceName)
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(t.text2)
                         .lineLimit(1)
                         .frame(maxWidth: 140, alignment: .leading)
@@ -102,7 +102,7 @@ struct WorkspacePickerSheet: View {
                     Text(title).foregroundStyle(t.text)
                     if let subtitle {
                         Text(subtitle)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(t.text4)
                             .lineLimit(1)
                     }

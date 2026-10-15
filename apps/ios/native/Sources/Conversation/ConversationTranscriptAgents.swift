@@ -35,7 +35,7 @@ struct ConversationTranscriptAgents: View {
                         HStack(spacing: 6) {
                             AgentAvatar(agentID: agent.id, size: 18)
                             Text(agent.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? agent.agentType : agent.name)
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(.caption.weight(.medium))
                                 .foregroundStyle(isFocused || isExpanded ? t.text : t.text2)
                                 .lineLimit(1)
                                 .runtimeTextSweep(
@@ -43,18 +43,18 @@ struct ConversationTranscriptAgents: View {
                                     highlightColor: t.text
                                 )
                             Text(statusText(agent.status))
-                                .font(.system(size: 10.5))
+                                .font(.caption)
                                 .foregroundStyle(statusColor(agent.status))
                                 .lineLimit(1)
                             if let activity = agent.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines), !activity.isEmpty {
                                 Text(activity)
-                                    .font(.system(size: 10.5))
+                                    .font(.caption)
                                     .foregroundStyle(t.text3)
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(t.accent)
                                 .opacity(isFocused || isExpanded ? 1 : 0)
                         }

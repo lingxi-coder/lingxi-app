@@ -115,7 +115,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                     scrollToLatest(animated: true, requiresFollow: false)
                 } label: {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.footnote.weight(.semibold))
                         .frame(width: 32, height: 32)
                         .background(.regularMaterial, in: Circle())
                         .overlay(Circle().strokeBorder(Color.primary.opacity(0.08)))

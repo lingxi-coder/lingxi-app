@@ -98,7 +98,7 @@ struct ToolCallView: View {
                    color: trace.status == .failed ? t.danger : t.text3, stroke: 1.8)
                 .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
             Text(compactSummary)
-                .font(.system(size: 13, weight: .medium))
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(trace.status == .failed ? t.danger : t.text3)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -106,7 +106,7 @@ struct ToolCallView: View {
             Spacer(minLength: 0)
             if isCollapsible {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(t.text3)
                     .timelineChevron(
                         isHighlighted: isFocused,
@@ -150,7 +150,7 @@ struct ToolCallView: View {
             Spacer(minLength: 4)
             if !compact || trace.status == .failed || trace.status == .cancelled {
                 Text(trace.status.label)
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(statusColor)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -160,7 +160,7 @@ struct ToolCallView: View {
             }
             if let elapsed = ConversationExecutionParsing.formatDuration(trace.elapsedMs) {
                 Text(elapsed)
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .foregroundColor(t.text4)
             }
         }
@@ -171,29 +171,29 @@ struct ToolCallView: View {
         if let header = trace.header {
             HStack(spacing: 0) {
                 Text(ToolDisplayText.verbLabel(header))
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundColor(t.text)
                     .layoutPriority(2)
                 if let primary = header.primary, !primary.isEmpty {
                     Text("(")
-                        .font(.system(size: 12.5))
+                        .font(.footnote)
                         .foregroundColor(t.text4)
                         .layoutPriority(2)
                     Text(primary)
-                        .font(.system(size: 12.5))
+                        .font(.footnote)
                         .foregroundColor(t.text2)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .layoutPriority(0)
                     Text(")")
-                        .font(.system(size: 12.5))
+                        .font(.footnote)
                         .foregroundColor(t.text4)
                         .layoutPriority(2)
                 }
                 if let qualifier = header.qualifier, !qualifier.isEmpty {
                     // The engine's qualifier carries its own leading space.
                     Text(qualifier)
-                        .font(.system(size: 12))
+                        .font(.caption)
                         .foregroundColor(t.text3)
                         .lineLimit(1)
                         .layoutPriority(1)
@@ -202,7 +202,7 @@ struct ToolCallView: View {
         } else {
             // Older engine: no header on the wire. Fall back to the raw name.
             Text(trace.tool)
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(.footnote.weight(.semibold))
                 .foregroundColor(t.text)
         }
     }
@@ -210,10 +210,10 @@ struct ToolCallView: View {
     private func subLineRow(_ sub: ConversationToolSubLine) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Text(sub.prefix)
-                .font(.system(size: 11.5, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .foregroundColor(t.text4)
             Text(sub.text)
-                .font(.system(size: 11.5, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .foregroundColor(t.text2)
                 .lineLimit(2)
                 .textSelection(.enabled)
@@ -229,12 +229,12 @@ struct ToolCallView: View {
         if let display = trace.display {
             HStack(alignment: .top, spacing: 6) {
                 Text("⎿")
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundColor(t.text4)
                 VStack(alignment: .leading, spacing: 5) {
                     if let headline = ToolDisplayText.headline(display) {
                         Text(headline)
-                            .font(.system(size: 12))
+                            .font(.caption)
                             .foregroundColor(trace.status == .failed ? t.danger : t.text3)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -244,14 +244,14 @@ struct ToolCallView: View {
                         }
                         if let body = display.body, !body.isEmpty {
                             Text(body)
-                                .font(.system(size: 11.5, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced))
                                 .foregroundColor(t.text2)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
                         }
                         if display.bodyTruncated {
                             Text("chat_tool_body_truncated")
-                                .font(.system(size: 11))
+                                .font(.caption)
                                 .foregroundColor(t.text4)
                         }
                     }
@@ -271,7 +271,7 @@ struct ToolCallView: View {
                 Text(isExpanded
                     ? String(localized: "chat_tool_show_less")
                     : String(localized: "chat_tool_show_more \(Int(display.bodyLines))"))
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.caption.weight(.medium))
                     .foregroundColor(t.accent)
             }
             .contentShape(Rectangle())
@@ -309,13 +309,13 @@ struct ToolCallView: View {
     private var legacyFallback: some View {
         if trace.header == nil, let input = trace.inputSummary, !input.isEmpty {
             Text(input)
-                .font(.system(size: 12.5))
+                .font(.footnote)
                 .foregroundColor(t.text2)
                 .lineLimit(3)
         }
         if trace.display == nil, let output = trace.outputSummary, !output.isEmpty {
             Text(output)
-                .font(.system(size: 12))
+                .font(.caption)
                 .foregroundColor(t.text3)
                 .lineLimit(4)
         }

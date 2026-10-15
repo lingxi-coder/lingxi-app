@@ -27,7 +27,7 @@ struct ComposerTextInput: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.parent = self
         coordinator.updating = true
-        let font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .systemFont(ofSize: 15.5))
+        let font = UIFont.preferredFont(forTextStyle: .body)
         view.updateAppearance(font: font, textColor: UIColor(textColor), hintColor: UIColor(hintColor))
         view.placeholderLabel.text = placeholder
         view.textView.acceptSuggestion = onAcceptSuggestion
@@ -130,6 +130,16 @@ final class ComposerInputView: UIView {
         textView.adjustsFontForContentSizeCategory = true
         textView.accessibilityIdentifier = "composer.input"
         textView.onLayout = { [weak self] in self?.layoutHint() }
+        // This editor is UIKit-backed, so attach keyboard controls directly to
+        // its responder rather than relying on SwiftUI's keyboard toolbar.
+        let keyboardToolbar = UIToolbar(frame: CGRect(x: 0, y: 0, width: 0, height: 44))
+        let dismissKeyboard = UIBarButtonItem(
+            image: UIImage(systemName: "keyboard.chevron.compact.down"),
+            style: .plain, target: textView, action: #selector(UIResponder.resignFirstResponder))
+        dismissKeyboard.accessibilityLabel = String(localized: "composer_done")
+        dismissKeyboard.accessibilityIdentifier = "composer.keyboard.dismiss"
+        keyboardToolbar.items = [.flexibleSpace(), dismissKeyboard]
+        textView.inputAccessoryView = keyboardToolbar
         placeholderLabel.isUserInteractionEnabled = false
         placeholderLabel.adjustsFontForContentSizeCategory = true
         placeholderLabel.isAccessibilityElement = false

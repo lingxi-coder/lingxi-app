@@ -43,6 +43,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["drawer.entry.cron"].tap()
         let create = app.buttons["cron.add"]
         XCTAssertTrue(create.waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertEqual(app.navigationBars.matching(identifier: "Scheduled").count, 1, app.debugDescription)
         XCTAssertTrue(app.buttons["All"].exists, app.debugDescription)
         XCTAssertTrue(app.buttons["Active"].exists, app.debugDescription)
         XCTAssertTrue(app.buttons["Paused"].exists, app.debugDescription)
@@ -103,7 +104,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-read.icon.bookOpen"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search.icon.search"].exists)
-        app.buttons["conversation.tool-call.ui-read.icon.bookOpen"].tap()
+        app.descendants(matching: .any)["conversation.tool-call.ui-read.icon.bookOpen"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["Read completed"].waitForExistence(timeout: 5), app.debugDescription)
 
         // A normal completed turn has no persistent runtime footer.
@@ -226,7 +227,7 @@ final class LingxiCodeUITests: XCTestCase {
         let advanced = app.buttons["高级设置与权限"]
         XCTAssertTrue(scrollUntilHittable(advanced, in: app.collectionViews.firstMatch), app.debugDescription)
         if !app.staticTexts["麦克风"].exists { advanced.tap() }
-        XCTAssertTrue(app.staticTexts["麦克风"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(scrollUntilHittable(app.staticTexts["麦克风"], in: app.collectionViews.firstMatch), app.debugDescription)
 
         let settingsAccessScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         settingsAccessScreenshot.name = "Voice-Settings-Access"
@@ -385,50 +386,31 @@ final class LingxiCodeUITests: XCTestCase {
         )
     }
 
-    func testVoiceModesShareInlinePanelAndConfigurationDeepLink() {
+    func testVoiceConfigurationGuidanceKeepsComposerAndSettingsReachable() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_VOICE_CONFIGURATION_REQUIRED"] = "1"
         app.launch()
 
-        let messageList = app.scrollViews["conversation.message-list"]
-        let composerInput = app.textViews["composer.input"]
-        let flowButton = app.buttons["composer.flow"]
-        XCTAssertTrue(flowButton.waitForExistence(timeout: 8), app.debugDescription)
-        flowButton.tap()
-
-        let panel = app.descendants(matching: .any)["conversation.voice-panel"]
-        XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["心流模式"].exists)
-        XCTAssertTrue(
-            app.descendants(matching: .any)["voice.configuration-required"].exists,
-            app.debugDescription
-        )
-        XCTAssertTrue(messageList.exists)
-        XCTAssertTrue(composerInput.exists)
-        // XCUI reports a ScrollView's content extent rather than its clipped
-        // viewport, so its frame can overlap later VStack siblings even when
-        // the rendered transcript does not. The load-bearing layout boundary
-        // is the panel-to-composer edge below.
-        XCTAssertTrue(waitUntilVerticallyStacked(panel, above: composerInput, timeout: 3))
-        let panelScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        panelScreenshot.name = "iOS-内联心流配置面板"
-        panelScreenshot.lifetime = .keepAlways
-        add(panelScreenshot)
-
-        app.buttons["voice.close"].tap()
-        XCTAssertTrue(waitUntilGone(panel, timeout: 5))
+        let input = app.textViews["composer.input"]
+        let guidance = app.buttons["conversation.audio-setup.configure"]
+        XCTAssertTrue(app.buttons["composer.flow"].waitForExistence(timeout: 8))
+        app.buttons["composer.flow"].tap()
+        XCTAssertTrue(guidance.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(input.exists)
+        XCTAssertTrue(app.scrollViews["conversation.message-list"].exists)
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.name = "Voice-configuration-guidance"
+        image.lifetime = .keepAlways
+        add(image)
+        app.buttons["conversation.audio-setup.dismiss"].tap()
+        XCTAssertTrue(waitUntilGone(guidance, timeout: 5))
+        XCTAssertTrue(app.buttons["composer.voice"].isEnabled)
         app.buttons["composer.voice"].tap()
-        XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["语音输入"].exists)
-
-        let configure = app.descendants(matching: .any)["voice.configure"].firstMatch
-        XCTAssertTrue(configure.waitForExistence(timeout: 5), app.debugDescription)
-        configure.tap()
-        XCTAssertTrue(app.navigationBars["语音 TTS"].waitForExistence(timeout: 5), app.debugDescription)
-        // Voice preferences persist directly from their controls; the former
-        // explicit Save button no longer exists.
-        XCTAssertTrue(app.staticTexts["听 · 语音识别"].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["说 · 语音合成"].exists, app.debugDescription)
+        XCTAssertTrue(guidance.waitForExistence(timeout: 5), app.debugDescription)
+        guidance.tap()
+        XCTAssertTrue(app.navigationBars["语音"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["语音输入"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["朗读"].exists, app.debugDescription)
     }
 
     func testCancelledRunClosesEveryRunningRow() {
@@ -569,6 +551,11 @@ final class LingxiCodeUITests: XCTestCase {
         // …and collapsing returns it.
         toggle.tap()
         XCTAssertEqual(toggle.label, "展开", app.debugDescription)
+        let collapsed = NSPredicate { _, _ in
+            abs(bubble.frame.height - collapsedHeight) <= 1
+        }
+        expectation(for: collapsed, evaluatedWith: bubble)
+        waitForExpectations(timeout: 5)
         XCTAssertEqual(bubble.frame.height, collapsedHeight, accuracy: 1.0)
     }
 
@@ -772,7 +759,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.keyboards.buttons["return"].tap()
         // The editor is pushed inside the add modal: back to the preset list,
         // then cancel the modal.
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.navigationBars["DeepSeek"].buttons["添加 LLM"].tap()
         let cancelAdd = app.buttons["provider.cancel"]
         XCTAssertTrue(cancelAdd.waitForExistence(timeout: 5), app.debugDescription)
         cancelAdd.tap()
@@ -872,6 +859,7 @@ final class LingxiCodeUITests: XCTestCase {
             app.debugDescription
         )
         let details = app.buttons["session-panel.details"]
+        if !details.isHittable { app.collectionViews.allElementsBoundByIndex.last!.swipeUp() }
         XCTAssertTrue(details.waitForExistence(timeout: 5), app.debugDescription)
         details.tap()
 
@@ -1195,6 +1183,7 @@ final class StartupResponsivenessUITests: XCTestCase {
     func testOnboardingRemainsInteractiveDuringEngineBootstrap() {
         continueAfterFailure = false
         let app = XCUIApplication()
+        app.launchEnvironment["LINGXI_FORCE_ONBOARDING"] = "1"
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)"]
 
         let launchStarted = Date()

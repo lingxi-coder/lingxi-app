@@ -41,7 +41,7 @@ struct SessionPanelSheet: View {
                 Section {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(title)
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.body.weight(.semibold))
                             .foregroundStyle(t.text)
                             .lineLimit(2)
                         Text("\(mode.title) · \(workspaceName) · \(messageCount)")

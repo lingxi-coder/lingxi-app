@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -210,6 +212,16 @@ class MainActivity : ComponentActivity() {
                 ThemeMode.Dark -> true
                 ThemeMode.Light -> false
                 ThemeMode.System -> isSystemInDarkTheme()
+            }
+            // The app's theme can differ from the system's; the bar icons
+            // follow the app, or a dark app on a light phone hides the clock.
+            LaunchedEffect(darkTheme) {
+                val style = if (darkTheme) {
+                    SystemBarStyle.dark(Color.TRANSPARENT)
+                } else {
+                    SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                }
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             }
             // Settings is a full-surface overlay that slides up over the
             // conversation (the Android analog of the iOS settings sheet); the

@@ -2042,5 +2042,8 @@
   "NSCameraUsageDescription": "灵犀はモデルによる解析のため、カメラで写真を撮影します。",
   "NSMicrophoneUsageDescription": "灵犀は音声心流（フローモード）入力のためにマイクを使用します。",
   "NSPhotoLibraryUsageDescription": "灵犀はモデルによる解析のため、写真ライブラリから画像を選択します。",
-  "NSSpeechRecognitionUsageDescription": "灵犀は音声認識を使用して、あなたの発話をテキストに変換します。"
+  "NSSpeechRecognitionUsageDescription": "灵犀は音声認識を使用して、あなたの発話をテキストに変換します。",
+  "settings_provider_add_row": "プロバイダを追加",
+  "settings_provider_vision_delegation": "ビジョン委任",
+  "settings_provider_vision_delegation_hint": "画像に対応していないモデルが、内部の委任先を通じて画像をまとめて分析できるようにします。"
 }

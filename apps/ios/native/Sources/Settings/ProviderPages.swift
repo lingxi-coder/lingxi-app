@@ -1,101 +1,147 @@
 import SwiftUI
 
-// MARK: - Unified LLM provider management
+// MARK: - Models hub
 
-/// The LLM settings screen owns the provider workflow. Rows render the
-/// repository snapshot; edits live in a value draft until the user applies.
-struct ProviderListPage: View {
+/// The whole LLM workflow on one native inset-grouped page: the default model,
+/// the providers (tap one to edit it), adding a provider, routing and the other
+/// model services. It replaces the old group → credentials list → editor sheet
+/// chain, so a provider is now two taps from the settings home.
+struct ModelsSettingsPage: View {
     @Environment(\.theme) private var t
     @State private var repository = ProviderRepository.shared
-    @State private var editingDraft: ProviderEditorDraft?
-    @State private var showingRouting = false
+    @State private var desktop = DesktopSettingsRepository.shared
+    @State private var addingProvider = false
+    @State private var removeError: String?
     @State private var retryMaxAttemptsText = ""
     @State private var retryBackoffMsText = ""
     @Bindable var store: SettingsStore
     let host: SettingsHost
-    let kind: ProviderKind
 
     var body: some View {
-        if kind != .llm {
-            unsupportedProviderNotice
-        } else {
-            llmContent
-                .sheet(item: $editingDraft) { draft in
-                    ProviderEditorSheet(draft: draft) { editingDraft = nil }
-                        .presentationDragIndicator(.visible)
+        List {
+            if showsApplyBanner {
+                Section {
+                    SettingsApplyChangesBanner(reconnect: host.onReconnectAfterSecretChange)
                 }
-                .task {
-                    retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
-                    retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
-                    store.llmProviders = repository.legacyProviders()
-                    await repository.refreshCatalog()
-                    await repository.refreshCredentialStatus()
-                }
-        }
-    }
-
-    private var llmContent: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(String(localized: "provider_llm_blurb"))
-                .font(.system(size: 11.5)).foregroundColor(t.text3).lineSpacing(4).padding(.bottom, 14)
-            summaryCard
-            SettingsSection(label: String(localized: "settings_provider_section_added_count \(repository.settingsSummary.totalCount)")) {
-                if repository.profiles.isEmpty {
-                    Text(String(localized: "provider_no_providers_added"))
-                        .font(.system(size: 13)).foregroundColor(t.text4).frame(maxWidth: .infinity).padding(.vertical, 24)
-                }
-                ForEach(Array(repository.profiles.enumerated()), id: \.element.id) { index, state in
-                    providerRow(state, isLast: index == repository.profiles.count - 1)
-                }
+                .listRowBackground(t.surface)
             }
-            Text(String(localized: "settings_provider_picker_intro"))
-                .font(.system(size: 12))
-                .foregroundStyle(t.text3)
-                .lineSpacing(4)
-                .padding(.horizontal, 4)
-                .padding(.bottom, 10)
-            SettingsSection(label: String(localized: "settings_title_add_llm")) {
-                ForEach(Array(repository.catalogPresets.enumerated()), id: \.element.id) { index, preset in
-                    presetRow(preset, isLast: index == repository.catalogPresets.count - 1)
-                }
-            }
+            defaultModelSection
+            providersSection
             routingSection
+            fallbackSection
+            servicesSection
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(t.windowBg)
+        .sheet(isPresented: $addingProvider) {
+            ProviderAddSheet { addingProvider = false }
+                .presentationDragIndicator(.visible)
+        }
+        .alert(
+            String(localized: "settings_provider_remove_failed"),
+            isPresented: Binding(get: { removeError != nil }, set: { if !$0 { removeError = nil } })
+        ) {
+            Button(String(localized: "settings_done")) { removeError = nil }
+        } message: {
+            Text(removeError ?? "")
+        }
+        .task {
+            retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
+            retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
+            store.llmProviders = repository.legacyProviders()
+            await repository.refreshCatalog()
+            await repository.refreshCredentialStatus()
         }
         .onChange(of: repository.syncRevision) { _, _ in
             store.llmProviders = repository.legacyProviders()
         }
     }
 
-    private var summaryCard: some View {
-        let summary = repository.settingsSummary
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                Circle().fill(summary.defaultProfile == nil ? t.text4 : t.accent).frame(width: 10, height: 10).padding(.top, 4)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(summary.defaultProfile.map { String(localized: "settings_provider_default \($0.name)") } ?? String(localized: "settings_provider_unconfigured"))
-                        .font(.system(size: 15, weight: .semibold)).foregroundColor(t.text)
-                    Text(summary.defaultModelID ?? "—").font(.system(size: 11.5, design: .monospaced)).foregroundColor(t.text4)
-                }
-                Spacer()
-                Text(String(localized: "settings_providers_enabled_count \(summary.enabledCount)"))
-                    .font(.system(size: 11.5, weight: .medium)).foregroundColor(t.text3)
-            }
-            if let active = summary.runtime.activeModelID, !summary.runtimeMatchesDefault, !active.isEmpty {
-                Divider().overlay(t.border)
-                HStack(spacing: 6) {
-                    LXIcon(name: .warning, size: 13, color: t.text3, stroke: 1.8)
-                    Text(String(localized: "settings_provider_runtime_active \(active)")).font(.system(size: 11.5)).foregroundColor(t.text3).lineLimit(2)
-                }
-            }
-            if let error = summary.runtime.lastError, !error.isEmpty {
-                Text(error).font(.system(size: 11.5)).foregroundColor(t.danger).lineLimit(3)
-            }
-        }
-        .padding(14).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(t.border, lineWidth: 0.5)).padding(.bottom, 20)
+    /// The banner renders nothing visible without a reconnect callback or a
+    /// pending change; keep the empty row out of the list in that case.
+    private var showsApplyBanner: Bool {
+        desktop.connected
+            && (host.onReconnectAfterSecretChange != nil
+                || desktop.needsReconnect
+                || PluginSecretRepository.shared.needsReconnect)
     }
 
-    private func providerRow(_ state: ProviderProfileState, isLast: Bool) -> some View {
+    // MARK: Default model
+
+    private var defaultModelSection: some View {
+        let summary = repository.settingsSummary
+        return Section {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(summary.defaultProfile == nil ? t.text4 : t.accent)
+                    .frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.defaultProfile?.name ?? String(localized: "settings_provider_unconfigured"))
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(t.text)
+                    Text(summary.defaultModelID.flatMap { $0.isEmpty ? nil : $0 } ?? "—")
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(t.text4)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text(String(localized: "settings_providers_enabled_count \(summary.enabledCount)"))
+                    .font(.footnote)
+                    .foregroundStyle(t.text3)
+            }
+            .padding(.vertical, 2)
+        } header: {
+            Text(String(localized: "settings_provider_default_model"))
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                if let active = summary.runtime.activeModelID, !summary.runtimeMatchesDefault, !active.isEmpty {
+                    Text(String(localized: "settings_provider_runtime_active \(active)"))
+                }
+                if let error = summary.runtime.lastError, !error.isEmpty {
+                    Text(error).foregroundStyle(t.danger)
+                }
+            }
+        }
+        .listRowBackground(t.surface)
+    }
+
+    // MARK: Providers
+
+    private var providersSection: some View {
+        Section {
+            if repository.profiles.isEmpty {
+                Text(String(localized: "provider_no_providers_added"))
+                    .font(.subheadline)
+                    .foregroundStyle(t.text4)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            ForEach(repository.profiles, id: \.id) { state in
+                providerRow(state)
+            }
+            Button { addingProvider = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(t.accent)
+                    Text(String(localized: "settings_provider_add_row"))
+                        .foregroundStyle(t.accent)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("provider.add")
+        } header: {
+            Text(String(localized: "settings_provider_section_added_count \(repository.settingsSummary.totalCount)"))
+        } footer: {
+            Text(String(localized: "provider_llm_blurb"))
+        }
+        .listRowBackground(t.surface)
+    }
+
+    private func providerRow(_ state: ProviderProfileState) -> some View {
         let preset = repository.preset(for: state.profile.presetID)
         return SettingsRow(
             labelView: AnyView(HStack(spacing: 6) {
@@ -109,121 +155,208 @@ struct ProviderListPage: View {
                 Text("\(state.statusLabel) · \(state.profile.modelID.isEmpty ? "—" : state.profile.modelID)")
                     .font(.system(size: 11.5, design: .monospaced)).foregroundColor(t.text4).lineLimit(1)
             }),
-            chevron: true, isLast: isLast,
-            onTap: { editingDraft = repository.makeDraft(for: state.id) }
-        ) {
-            Text(String(state.profile.name.prefix(1))).font(.system(size: 13, weight: .bold)).foregroundColor(preset.color)
-                .frame(width: 28, height: 28).background(preset.color.mix(with: t.surface, amount: 0.18))
-                .clipShape(RoundedRectangle(cornerRadius: 7)).overlay(RoundedRectangle(cornerRadius: 7).stroke(preset.color.tint(0.28), lineWidth: 0.5))
-        }
-    }
-
-    private func presetRow(_ preset: ProviderPreset, isLast: Bool) -> some View {
-        SettingsRow(
-            label: preset.name,
-            sub: preset.sub,
             chevron: true,
-            isLast: isLast,
-            onTap: { editingDraft = repository.makeNewDraft(presetID: preset.id) }
+            isLast: true,
+            onTap: { host.push(.providerEdit(.init(.llm), state.id)) }
         ) {
-            Text(String(preset.name.prefix(1)))
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(preset.color)
-                .frame(width: 28, height: 28)
-                .background(preset.color.mix(with: t.surface, amount: 0.18))
-                .clipShape(.rect(cornerRadius: 7))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 7)
-                        .stroke(preset.color.tint(0.28), lineWidth: 0.5)
-                }
+            ProviderTile(preset: preset, name: state.profile.name)
         }
-        .accessibilityIdentifier("provider.preset.\(preset.id)")
-    }
-
-    private var routingSection: some View {
-        DisclosureGroup(isExpanded: $showingRouting) {
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle(isOn: Binding(
-                    get: { repository.visionDelegationEnabled },
-                    set: { repository.setVisionDelegationEnabled($0) }
-                )) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Vision Delegation")
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundColor(t.text2)
-                        Text("Allow non-vision models to batch-analyze images through an internal delegate.")
-                            .font(.system(size: 11.5))
-                            .foregroundColor(t.text4)
-                            .lineSpacing(3)
+        .listRowInsets(EdgeInsets())
+        .accessibilityIdentifier("provider.row.\(state.id)")
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                Task {
+                    if await !repository.removeProfile(state.id) {
+                        removeError = repository.lastRepositoryError
+                            ?? String(localized: "settings_provider_remove_failed")
                     }
                 }
-                .toggleStyle(.switch)
-                routeField(label: String(localized: "settings_provider_default_model"), text: .constant(repository.makeLaunchSnapshot().defaultModelID ?? String(localized: "settings_provider_unconfigured")), editable: false)
-                routeField(label: String(localized: "settings_provider_max_retries"), text: $retryMaxAttemptsText)
-                routeField(label: String(localized: "settings_provider_backoff_ms"), text: $retryBackoffMsText)
-                fallbackList
-                if let message = repository.routingMessage { Text(message).font(.system(size: 11.5)).foregroundColor(t.text3) }
+            } label: {
+                Text(String(localized: "common_removed"))
+            }
+        }
+    }
+
+    private func badge(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 10, weight: .medium)).foregroundColor(color)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(color.tint(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    // MARK: Routing
+
+    private var routingSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { repository.visionDelegationEnabled },
+                set: { repository.setVisionDelegationEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "settings_provider_vision_delegation"))
+                        .foregroundStyle(t.text)
+                    Text(String(localized: "settings_provider_vision_delegation_hint"))
+                        .font(.footnote)
+                        .foregroundStyle(t.text4)
+                }
+            }
+            .tint(t.accent)
+            numberRow(String(localized: "settings_provider_max_retries"), text: $retryMaxAttemptsText)
+            numberRow(String(localized: "settings_provider_backoff_ms"), text: $retryBackoffMsText)
+            if hasPendingRoutingChanges {
                 Button {
                     Task {
-                        let applied = await repository.applyRoutingChanges(retryMaxAttemptsText: retryMaxAttemptsText, retryBackoffMsText: retryBackoffMsText)
+                        let applied = await repository.applyRoutingChanges(
+                            retryMaxAttemptsText: retryMaxAttemptsText,
+                            retryBackoffMsText: retryBackoffMsText
+                        )
                         if applied {
                             retryMaxAttemptsText = String(repository.routingSettings.retryMaxAttempts)
                             retryBackoffMsText = String(repository.routingSettings.retryBackoffMs)
                         }
                     }
                 } label: {
-                    Text(String(localized: "settings_provider_apply_routing")).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        .frame(maxWidth: .infinity).padding(.vertical, 10).background(hasPendingRoutingChanges ? t.accent : t.text4).clipShape(RoundedRectangle(cornerRadius: 10))
+                    Text(String(localized: "settings_provider_apply_routing"))
+                        .fontWeight(.semibold)
+                        .foregroundStyle(t.accent)
+                        .frame(maxWidth: .infinity)
                 }
-                .disabled(!hasPendingRoutingChanges).buttonStyle(.plain)
+                .buttonStyle(.plain)
             }
-            .padding(.top, 12)
-        } label: {
-            Text(String(localized: "settings_provider_section_routing")).font(.system(size: 13, weight: .semibold)).foregroundColor(t.text2)
+        } header: {
+            Text(String(localized: "settings_provider_section_routing"))
+        } footer: {
+            if let message = repository.routingMessage { Text(message) }
         }
-        .tint(t.text3).padding(.horizontal, 14).padding(.vertical, 12).background(t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(t.border, lineWidth: 0.5))
+        .listRowBackground(t.surface)
     }
 
-    private var fallbackList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(String(localized: "settings_provider_fallback_order")).font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
-            let candidates = repository.fallbackCandidates()
+    private var fallbackSection: some View {
+        let candidates = repository.fallbackCandidates()
+        return Section {
             if candidates.isEmpty {
-                Text(String(localized: "settings_provider_fallback_hint")).font(.system(size: 11.5)).foregroundColor(t.text4)
+                Text(String(localized: "settings_provider_fallback_hint"))
+                    .font(.footnote)
+                    .foregroundStyle(t.text4)
             } else {
                 ForEach(candidates) { candidate in
-                    HStack(spacing: 8) {
-                        Button { repository.toggleFallbackProfile(candidate.profileID) } label: {
-                            Circle().strokeBorder(candidate.selected ? t.accent : t.border, lineWidth: 1.5).frame(width: 18, height: 18)
-                                .overlay(candidate.selected ? Circle().fill(t.accent).frame(width: 9, height: 9) : nil)
-                        }.buttonStyle(.plain)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(candidate.name).font(.system(size: 13, weight: .medium)).foregroundColor(t.text)
-                            Text(candidate.modelID).font(.system(size: 11.5, design: .monospaced)).foregroundColor(t.text4)
+                    Button { repository.toggleFallbackProfile(candidate.profileID) } label: {
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(candidate.name).foregroundStyle(t.text)
+                                Text(candidate.modelID)
+                                    .font(.footnote.monospaced())
+                                    .foregroundStyle(t.text4)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            if candidate.selected {
+                                Image(systemName: "checkmark")
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(t.accent)
+                            }
                         }
-                        Spacer()
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 10).padding(.vertical, 8).background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 9))
+                    .buttonStyle(.plain)
                 }
             }
+        } header: {
+            Text(String(localized: "settings_provider_fallback_order"))
         }
+        .listRowBackground(t.surface)
     }
 
     private var hasPendingRoutingChanges: Bool {
-        repository.routingDirty || retryMaxAttemptsText.trimmingCharacters(in: .whitespacesAndNewlines) != String(repository.routingSettings.retryMaxAttempts) || retryBackoffMsText.trimmingCharacters(in: .whitespacesAndNewlines) != String(repository.routingSettings.retryBackoffMs)
+        repository.routingDirty
+            || retryMaxAttemptsText.trimmingCharacters(in: .whitespacesAndNewlines) != String(repository.routingSettings.retryMaxAttempts)
+            || retryBackoffMsText.trimmingCharacters(in: .whitespacesAndNewlines) != String(repository.routingSettings.retryBackoffMs)
     }
 
-    @ViewBuilder private func routeField(label: String, text: Binding<String>, editable: Bool = true) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            FieldLabel(text: label)
-            if editable { SettingsField(text: text) }
-            else { Text(text.wrappedValue).font(.system(size: 12.5, design: .monospaced)).foregroundColor(t.text4).frame(maxWidth: .infinity, alignment: .leading).padding(11).background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 10)) }
+    private func numberRow(_ label: String, text: Binding<String>) -> some View {
+        LabeledContent {
+            TextField("", text: text)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .foregroundStyle(t.text3)
+        } label: {
+            Text(label).foregroundStyle(t.text)
         }
     }
 
-    private func badge(_ text: String, _ color: Color) -> some View {
-        Text(text).font(.system(size: 10, weight: .medium)).foregroundColor(color).padding(.horizontal, 6).padding(.vertical, 1).background(color.tint(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
+    // MARK: Other model services
+
+    private var servicesSection: some View {
+        let entries = DesktopSettingsEntry.all.filter {
+            $0.availableOnMobile && $0.mobileGroup == .models && $0.id != "provider-credentials"
+        }
+        return Section {
+            ForEach(entries) { entry in
+                SettingsRow(icon: entry.icon, label: entry.title, isLast: true, onTap: { host.push(entry.page) })
+                    .listRowInsets(EdgeInsets())
+                    .accessibilityIdentifier(entry.accessibilityID)
+            }
+            NavigationLink {
+                EngineCredentialsPage()
+            } label: {
+                SettingsRow(icon: .pin, label: String(localized: "settings_parity_credentials"), chevron: false, isLast: true)
+            }
+            .listRowInsets(EdgeInsets())
+        }
+        .listRowBackground(t.surface)
+    }
+}
+
+/// The colored initial used for a provider throughout the model settings.
+private struct ProviderTile: View {
+    @Environment(\.theme) private var t
+    let preset: ProviderPreset
+    let name: String
+
+    var body: some View {
+        Text(String(name.prefix(1)))
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(preset.color)
+            .frame(width: 28, height: 28)
+            .background(preset.color.mix(with: t.surface, amount: 0.18))
+            .clipShape(.rect(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(preset.color.tint(0.28), lineWidth: 0.5)
+            }
+    }
+}
+
+/// Engine-profile credentials are an advanced, desktop-parity editor; it lives
+/// one level below the hub instead of at the bottom of the provider list.
+private struct EngineCredentialsPage: View {
+    @Environment(\.theme) private var t
+
+    var body: some View {
+        ScrollView {
+            EngineProfileCredentialsEditor().padding(16)
+        }
+        .background(t.windowBg)
+        .navigationTitle(String(localized: "settings_parity_credentials"))
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Non-LLM provider kinds
+
+/// Search and fetch providers are not wired to a real store on iOS yet; they
+/// keep the explanatory empty state. The LLM kind is the models hub.
+struct ProviderListPage: View {
+    @Environment(\.theme) private var t
+    @Bindable var store: SettingsStore
+    let host: SettingsHost
+    let kind: ProviderKind
+
+    var body: some View {
+        if kind == .llm {
+            ModelsSettingsPage(store: store, host: host)
+        } else {
+            unsupportedProviderNotice
+        }
     }
 
     private var unsupportedProviderNotice: some View {
@@ -235,153 +368,283 @@ struct ProviderListPage: View {
     }
 }
 
-// MARK: - Draft editor sheet
+// MARK: - Add flow
 
-struct ProviderEditorSheet: View {
+/// "Add provider": pick a preset, then fill in the editor. Both steps live in
+/// one modal so the settings stack underneath does not grow.
+struct ProviderAddSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var t
     @State private var repository = ProviderRepository.shared
-    @State private var draft: ProviderEditorDraft
-    @State private var showKey = false
-    @State private var editingStoredCredential = false
-    @State private var selectedModelDetails: ModelRuntimeDetails?
-    @State private var saving = false
-    @State private var removing = false
-    @State private var actionError: String?
+    @State private var path: [String] = []
+    let onDone: () -> Void
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            List {
+                Section {
+                    ForEach(repository.catalogPresets) { preset in
+                        Button { path.append(preset.id) } label: {
+                            HStack(spacing: 12) {
+                                ProviderTile(preset: preset, name: preset.name)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(preset.name).foregroundStyle(t.text)
+                                    Text(preset.sub).font(.footnote).foregroundStyle(t.text4)
+                                }
+                                Spacer(minLength: 8)
+                                Image(systemName: "chevron.right")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(t.text4.opacity(0.7))
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("provider.preset.\(preset.id)")
+                    }
+                } footer: {
+                    Text(String(localized: "settings_provider_picker_intro"))
+                }
+                .listRowBackground(t.surface)
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(t.windowBg)
+            .navigationTitle(String(localized: "settings_title_add_llm"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "common_cancel")) { dismiss() }
+                        .accessibilityIdentifier("provider.cancel")
+                }
+            }
+            .navigationDestination(for: String.self) { presetID in
+                ProviderEditorForm(draft: repository.makeNewDraft(presetID: presetID)) {
+                    dismiss()
+                    onDone()
+                }
+            }
+        }
+        .task {
+            await repository.refreshCatalog()
+        }
+    }
+}
+
+// MARK: - Editor
+
+/// A modal editor for one draft (onboarding, or any place without a settings
+/// stack of its own). Inside the settings stack the editor is pushed directly
+/// as `ProviderEditorForm`.
+struct ProviderEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let draft: ProviderEditorDraft
     let onSaved: () -> Void
 
     init(draft: ProviderEditorDraft, onSaved: @escaping () -> Void) {
-        _draft = State(initialValue: draft); self.onSaved = onSaved
+        self.draft = draft
+        self.onSaved = onSaved
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    statusBanner
-                    FieldLabel(text: String(localized: "settings_display_name"))
-                    SettingsField(text: textBinding(\.name), mono: false).padding(.bottom, 14)
-                    if repository.isOfficialEndpoint(for: draft.profile) {
-                        officialEndpoint
-                    } else {
-                        FieldLabel(text: String(localized: "settings_api_url"))
-                        SettingsField(text: textBinding(\.baseURL), placeholder: repository.preset(for: draft.profile.presetID).defaultUrl)
-                        FieldHint(String(localized: "settings_provider_custom_url_hint"))
-                    }
-                    credentialSection
-                    connectionsSection
-                    modelSection
-                    SettingsSection {
-                        SettingsRow(label: String(localized: "settings_provider_enable"), chevron: false) { LXToggle(isOn: boolBinding(\.enabled)) }
-                        SettingsRow(label: String(localized: "settings_provider_set_default"), chevron: false, isLast: true, onTap: { draft.profile.isDefault = true; draft.profile.enabled = true }) {
-                            if draft.profile.isDefault { LXIcon(name: .check, size: 16, color: t.accent, stroke: 2.2) }
-                        }
-                    }
-                }.padding(16)
+            ProviderEditorForm(draft: draft) {
+                dismiss()
+                onSaved()
             }
-            .disabled(saving || removing || draft.operationInFlight || draft.connectionState == .testing)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                bottomActions
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "common_cancel")) { dismiss() }
+                        .accessibilityIdentifier("provider.cancel")
+                }
             }
-            .navigationTitle(draft.profile.name).navigationBarTitleDisplayMode(.inline)
-            .sheet(item: $selectedModelDetails) { details in
-                ModelDetailsSheet(
-                    details: details,
-                    accent: Accents.color(for: draft.profile.presetID)
+        }
+    }
+}
+
+/// The provider editor as a native grouped form. It owns the draft; whoever
+/// presents it decides what "done" means through `onSaved`, which is called
+/// after a successful save or removal.
+struct ProviderEditorForm: View {
+    @Environment(\.theme) private var t
+    @State private var repository = ProviderRepository.shared
+    @State private var draft: ProviderEditorDraft
+    @State private var title: String
+    @State private var showKey = false
+    @State private var editingStoredCredential = false
+    @State private var saving = false
+    @State private var removing = false
+    @State private var confirmingRemove = false
+    @State private var actionError: String?
+    let onSaved: () -> Void
+
+    init(draft: ProviderEditorDraft, onSaved: @escaping () -> Void) {
+        _draft = State(initialValue: draft)
+        _title = State(initialValue: draft.profile.name)
+        self.onSaved = onSaved
+    }
+
+    private var busy: Bool {
+        saving || removing || draft.operationInFlight || draft.connectionState == .testing
+    }
+
+    var body: some View {
+        Form {
+            statusSection
+            identitySection
+            apiKeySection
+            oauthSection
+            modelSection
+            stateSection
+            connectionsSection
+            removeSection
+        }
+        .scrollContentBackground(.hidden)
+        .background(t.windowBg)
+        .disabled(busy)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                if saving {
+                    ProgressView()
+                } else {
+                    Button(String(localized: "settings_save")) { save() }
+                        .fontWeight(.semibold)
+                        .disabled(busy)
+                        .accessibilityIdentifier("provider.save")
+                }
+            }
+        }
+        .confirmationDialog(
+            String(localized: "settings_provider_remove"),
+            isPresented: $confirmingRemove,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "common_removed"), role: .destructive) { remove() }
+            Button(String(localized: "common_cancel"), role: .cancel) {}
+        }
+    }
+
+    // MARK: Status
+
+    private var statusSection: some View {
+        Section {
+            HStack(spacing: 10) {
+                Circle().fill(statusColor).frame(width: 8, height: 8)
+                Text(statusLabel).foregroundStyle(t.text)
+                Spacer(minLength: 8)
+                if draft.connectionState == .testing {
+                    ProgressView()
+                } else {
+                    Button(String(localized: "settings_provider_test_connection")) { testConnection() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(t.accent)
+                        .disabled(draft.operationInFlight)
+                }
+            }
+        } footer: {
+            if let detail = draft.validationMessage ?? draft.detailMessage ?? actionError {
+                Text(detail)
+                    .foregroundStyle(draft.connectionState == .failed || draft.validationMessage != nil || actionError != nil ? t.danger : t.text3)
+            }
+        }
+        .listRowBackground(t.surface)
+    }
+
+    // MARK: Name and endpoint
+
+    private var identitySection: some View {
+        Section {
+            LabeledContent {
+                TextField("", text: textBinding(\.name))
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(t.text3)
+            } label: {
+                Text(String(localized: "settings_display_name")).foregroundStyle(t.text)
+            }
+            if repository.isOfficialEndpoint(for: draft.profile) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(String(localized: "settings_api_url")).font(.footnote).foregroundStyle(t.text3)
+                    Text(draft.profile.baseURL)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(t.text4)
+                        .textSelection(.enabled)
+                }
+            } else {
+                fieldRow(
+                    String(localized: "settings_api_url"),
+                    text: textBinding(\.baseURL),
+                    placeholder: repository.preset(for: draft.profile.presetID).defaultUrl
                 )
             }
+        } footer: {
+            if repository.isOfficialEndpoint(for: draft.profile) {
+                Text(String(localized: "settings_provider_official_url_hint \(draft.profile.baseURL)"))
+            } else {
+                Text(String(localized: "settings_provider_custom_url_hint"))
+            }
+        }
+        .listRowBackground(t.surface)
+    }
+
+    /// A caption over a full-width field: URLs and ids are too long for a
+    /// trailing value.
+    private func fieldRow(_ label: String, text: Binding<String>, placeholder: String = "") -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.footnote).foregroundStyle(t.text3)
+            TextField(placeholder, text: text)
+                .font(.callout.monospaced())
+                .foregroundStyle(t.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
         }
     }
 
-    private var bottomActions: some View {
-        HStack(spacing: 9) {
-            Button(String(localized: "common_cancel")) { dismiss() }
-                .font(.system(size: 13.5, weight: .medium))
-                .foregroundColor(t.text2)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(t.windowBg)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .accessibilityIdentifier("provider.cancel")
-            if !draft.isNew {
-                Button {
-                    removing = true
-                    Task {
-                        let removed = await repository.removeProfile(draft.id)
-                        removing = false
-                        if removed {
-                            dismiss()
-                            onSaved()
-                        } else {
-                            let message = repository.lastRepositoryError
-                                ?? String(localized: "settings_provider_remove_failed")
-                            actionError = message
-                            draft.connectionState = .failed
-                            draft.detailMessage = message
-                        }
-                    }
-                } label: {
-                    Text(String(localized: "settings_provider_remove"))
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundColor(t.danger)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
+    // MARK: Credentials
+
+    private var isOAuthOnly: Bool {
+        draft.profile.presetID == "openai-chatgpt"
+    }
+
+    /// Render the OAuth block when this preset can sign in, OR when a session
+    /// already exists for a preset whose login is withheld — otherwise a
+    /// previously-signed-in account would keep a credential the UI can no
+    /// longer show or revoke.
+    private var showsOAuth: Bool {
+        repository.oauthProvider(for: draft.profile.presetID) != nil
+            && (repository.oauthLoginAvailable(for: draft.profile.presetID) || draft.oauthState?.signedIn == true)
+    }
+
+    private var storedKeyCollapsed: Bool {
+        draft.hasStoredAPIKey && !editingStoredCredential && draft.pendingSecret.isEmpty && !draft.clearCredentialOnApply
+    }
+
+    @ViewBuilder private var apiKeySection: some View {
+        if isOAuthOnly {
+            if !showsOAuth {
+                Section {
+                    Text(String(localized: "settings_provider_oauth_only"))
+                        .font(.footnote)
+                        .foregroundStyle(t.text3)
                 }
-                .background(t.windowBg)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .listRowBackground(t.surface)
             }
-            Button(String(localized: "settings_provider_save_and_apply")) { save() }
-                .font(.system(size: 13.5, weight: .semibold))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
-                .background(saving || removing || draft.operationInFlight || draft.connectionState == .testing ? t.text4 : t.accent)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .accessibilityIdentifier("provider.save")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 0.5) }
-        .disabled(saving || removing || draft.operationInFlight || draft.connectionState == .testing)
-    }
-
-    private var statusBanner: some View {
-        HStack(spacing: 8) {
-            Circle().fill(statusColor).frame(width: 8, height: 8)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(statusLabel).font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
-                if let detail = draft.validationMessage ?? draft.detailMessage ?? actionError { Text(detail).font(.system(size: 11.5)).foregroundColor(t.text4).lineLimit(3) }
-            }
-            Spacer()
-            Button(String(localized: "settings_provider_test_connection")) { testConnection() }
-                .font(.system(size: 12, weight: .medium)).foregroundColor(t.text2).padding(.horizontal, 9).padding(.vertical, 6).background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 7)).disabled(draft.operationInFlight || draft.connectionState == .testing)
-        }
-        .padding(12).background(statusColor.tint(0.08)).clipShape(RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).stroke(statusColor.tint(0.24), lineWidth: 0.5)).padding(.bottom, 18)
-    }
-
-    private var officialEndpoint: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            FieldLabel(text: String(localized: "settings_api_url"))
-            Text(draft.profile.baseURL).font(.system(size: 12.5, design: .monospaced)).foregroundColor(t.text4).frame(maxWidth: .infinity, alignment: .leading).padding(11).background(t.windowBg).clipShape(RoundedRectangle(cornerRadius: 10))
-            FieldHint(String(localized: "settings_provider_official_url_hint \(draft.profile.baseURL)"))
-        }
-    }
-
-    private var credentialSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !isOAuthOnly {
-                FieldLabel(text: String(localized: "settings_provider_api_key"))
-                if draft.hasStoredAPIKey && !editingStoredCredential && draft.pendingSecret.isEmpty && !draft.clearCredentialOnApply {
-                    HStack {
-                        Text("••••••••••••").font(.system(size: 13.5, design: .monospaced)).foregroundColor(t.text); Spacer()
-                        Button(String(localized: "settings_provider_replace_key")) {
-                            editingStoredCredential = true
-                            draft.clearCredentialOnApply = false
-                        }.font(.system(size: 11, weight: .medium)).foregroundColor(t.text3)
-                    }.padding(12).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+        } else {
+            Section {
+                if storedKeyCollapsed {
+                    LabeledContent {
+                        Text("••••••••••••").font(.callout.monospaced()).foregroundStyle(t.text3)
+                    } label: {
+                        Text(String(localized: "settings_provider_api_key")).foregroundStyle(t.text)
+                    }
+                    Button(String(localized: "settings_provider_replace_key")) {
+                        editingStoredCredential = true
+                        draft.clearCredentialOnApply = false
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(t.accent)
                 } else {
-                    HStack(spacing: 0) {
+                    HStack(spacing: 8) {
                         Group {
                             if showKey {
                                 TextField(String(localized: "settings_provider_api_key_placeholder"), text: $draft.pendingSecret)
@@ -389,108 +652,167 @@ struct ProviderEditorSheet: View {
                                 SecureField(String(localized: "settings_provider_api_key_placeholder"), text: $draft.pendingSecret)
                             }
                         }
-                            .font(.system(size: 13.5, design: .monospaced)).textInputAutocapitalization(.never).autocorrectionDisabled().padding(.vertical, 11).padding(.leading, 12)
-                            .accessibilityIdentifier("provider.api-key")
-                        Button(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key")) { showKey.toggle() }
-                            .font(.system(size: 11, weight: .medium)).foregroundColor(t.text3).padding(.horizontal, 10)
-                            .accessibilityIdentifier("provider.api-key.visibility")
-                    }.background(t.surface).clipShape(RoundedRectangle(cornerRadius: 10)).overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+                        .font(.callout.monospaced())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("provider.api-key")
+                        Button(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key")) {
+                            showKey.toggle()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.subheadline)
+                        .foregroundStyle(t.accent)
+                        .accessibilityIdentifier("provider.api-key.visibility")
+                    }
                 }
                 if draft.hasStoredAPIKey || draft.clearCredentialOnApply {
-                    Button(draft.clearCredentialOnApply ? String(localized: "settings_provider_keep_key") : String(localized: "settings_provider_clear_key")) {
+                    Button(role: draft.clearCredentialOnApply ? nil : .destructive) {
                         draft.clearCredentialOnApply.toggle()
-                        if draft.clearCredentialOnApply {
-                            draft.pendingSecret = ""
-                            editingStoredCredential = false
-                        } else {
-                            editingStoredCredential = false
-                        }
+                        if draft.clearCredentialOnApply { draft.pendingSecret = "" }
+                        editingStoredCredential = false
+                    } label: {
+                        Text(draft.clearCredentialOnApply
+                            ? String(localized: "settings_provider_keep_key")
+                            : String(localized: "settings_provider_clear_key"))
                     }
-                    .font(.system(size: 11.5, weight: .medium)).foregroundColor(draft.clearCredentialOnApply ? t.text3 : t.danger)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(draft.clearCredentialOnApply ? t.accent : t.danger)
                     .accessibilityIdentifier("provider.api-key.clear")
                 }
-            } else {
-                FieldHint(String(localized: "settings_provider_oauth_only"))
+            } header: {
+                Text(String(localized: "settings_provider_api_key"))
             }
-            // Render the OAuth block when this preset can sign in, OR when a
-            // session already exists for a preset whose login is withheld —
-            // otherwise a previously-signed-in account would keep a credential
-            // the UI can no longer show or revoke.
-            if repository.oauthProvider(for: draft.profile.presetID) != nil,
-               repository.oauthLoginAvailable(for: draft.profile.presetID)
-                   || draft.oauthState?.signedIn == true {
-                oauthControls
-            }
-        }.padding(.bottom, 14)
+            .listRowBackground(t.surface)
+        }
     }
 
-    private var isOAuthOnly: Bool {
-        draft.profile.presetID == "openai-chatgpt"
-    }
-
-    private var oauthControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(String(localized: "settings_provider_oauth")).font(.system(size: 12.5, weight: .medium)).foregroundColor(t.text2)
-            if let oauth = draft.oauthState, oauth.signedIn {
-                Text(oauth.accountLabel ?? String(localized: "settings_provider_status_configured")).font(.system(size: 11.5)).foregroundColor(t.ok)
-                HStack(spacing: 12) {
+    @ViewBuilder private var oauthSection: some View {
+        if showsOAuth {
+            Section {
+                if let oauth = draft.oauthState, oauth.signedIn {
+                    LabeledContent {
+                        Text(oauth.accountLabel ?? String(localized: "settings_provider_status_configured"))
+                            .foregroundStyle(t.ok)
+                    } label: {
+                        Text(String(localized: "settings_provider_oauth")).foregroundStyle(t.text)
+                    }
                     Button(String(localized: "settings_provider_test_connection")) { testConnection() }
-                    Button(String(localized: "settings_provider_logout")) { logoutOAuth() }.foregroundColor(t.danger)
-                }.font(.system(size: 12, weight: .medium))
-            } else if repository.oauthLoginAvailable(for: draft.profile.presetID) {
-                Button(String(localized: "settings_provider_login")) { loginOAuth() }.font(.system(size: 13, weight: .semibold)).foregroundColor(t.accent)
-                    .accessibilityIdentifier("provider.oauth.login")
+                        .buttonStyle(.plain)
+                        .foregroundStyle(t.accent)
+                    Button(String(localized: "settings_provider_logout"), role: .destructive) { logoutOAuth() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(t.danger)
+                } else if repository.oauthLoginAvailable(for: draft.profile.presetID) {
+                    Button(String(localized: "settings_provider_login")) { loginOAuth() }
+                        .buttonStyle(.plain)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(t.accent)
+                        .accessibilityIdentifier("provider.oauth.login")
+                }
+            } header: {
+                Text(String(localized: "settings_provider_oauth"))
+            } footer: {
+                if isOAuthOnly { Text(String(localized: "settings_provider_oauth_only")) }
             }
-        }.padding(.top, 4)
+            .listRowBackground(t.surface)
+        }
     }
 
-    private var connectionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            FieldLabel(text: String(localized: "settings_provider_connections"))
-            FieldHint(String(localized: "settings_provider_connections_hint"))
-            if draft.profile.connections.isEmpty {
-                FieldHint(String(localized: "settings_provider_connections_single"))
-            } else {
-                // Identified by position: ids start empty and stay editable, so
-                // an id-keyed ForEach would collapse every new row onto one.
-                ForEach(draft.profile.connections.indices, id: \.self) { index in
-                    connectionRow(index: index)
+    // MARK: Model
+
+    private var modelSection: some View {
+        Section {
+            NavigationLink {
+                ProviderModelsPage(draft: $draft)
+            } label: {
+                LabeledContent {
+                    Text(draft.profile.modelID.isEmpty ? "—" : draft.profile.modelID)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(t.text3)
+                        .lineLimit(1)
+                } label: {
+                    Text(String(localized: "settings_provider_model_id")).foregroundStyle(t.text)
                 }
             }
+            .accessibilityIdentifier("provider.model")
+        }
+        .listRowBackground(t.surface)
+    }
+
+    // MARK: Enable / default
+
+    private var stateSection: some View {
+        Section {
+            Toggle(String(localized: "settings_provider_enable"), isOn: boolBinding(\.enabled))
+                .tint(t.accent)
+            Button {
+                draft.profile.isDefault = true
+                draft.profile.enabled = true
+            } label: {
+                HStack {
+                    Text(String(localized: "settings_provider_set_default")).foregroundStyle(t.text)
+                    Spacer(minLength: 8)
+                    if draft.profile.isDefault {
+                        Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(t.accent)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .listRowBackground(t.surface)
+    }
+
+    // MARK: Extra connections
+
+    @ViewBuilder private var connectionsSection: some View {
+        Section {
             Button(String(localized: "settings_provider_connection_add")) {
                 draft.profile.addConnection()
             }
-            .font(.system(size: 12.5, weight: .medium))
-            .foregroundColor(t.accent)
+            .buttonStyle(.plain)
+            .foregroundStyle(t.accent)
+        } header: {
+            Text(String(localized: "settings_provider_connections"))
+        } footer: {
+            Text(draft.profile.connections.isEmpty
+                ? String(localized: "settings_provider_connections_single")
+                : String(localized: "settings_provider_connections_hint"))
         }
-        .padding(.bottom, 14)
+        .listRowBackground(t.surface)
+        // Identified by position: ids start empty and stay editable, so an
+        // id-keyed ForEach would collapse every new row onto one.
+        ForEach(draft.profile.connections.indices, id: \.self) { index in
+            connectionSection(index: index)
+        }
     }
 
-    private func connectionRow(index: Int) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                FieldLabel(text: String(localized: "settings_provider_connection_id"))
-                Spacer()
-                Button(String(localized: "common_removed")) {
-                    draft.profile.removeConnection(at: index)
-                }
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundColor(t.danger)
-            }
-            SettingsField(text: connectionBinding(index: index, keyPath: \.id), placeholder: "cn")
-            FieldHint(String(localized: "settings_provider_connection_id_hint"))
-            FieldLabel(text: String(localized: "settings_api_url"))
-            SettingsField(
+    private func connectionSection(index: Int) -> some View {
+        Section {
+            fieldRow(
+                String(localized: "settings_provider_connection_id"),
+                text: connectionBinding(index: index, keyPath: \.id),
+                placeholder: "cn"
+            )
+            fieldRow(
+                String(localized: "settings_api_url"),
                 text: connectionBinding(index: index, keyPath: \.baseURL),
                 placeholder: repository.preset(for: draft.profile.presetID).defaultUrl
             )
-            FieldLabel(text: String(localized: "settings_provider_connection_models"))
-            SettingsField(text: connectionModelsBinding(index: index), placeholder: draft.profile.modelID)
-            FieldHint(String(localized: "settings_provider_connection_models_hint"))
+            fieldRow(
+                String(localized: "settings_provider_connection_models"),
+                text: connectionModelsBinding(index: index),
+                placeholder: draft.profile.modelID
+            )
+            Button(String(localized: "common_removed"), role: .destructive) {
+                draft.profile.removeConnection(at: index)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(t.danger)
+        } footer: {
+            Text(String(localized: "settings_provider_connection_id_hint"))
         }
-        .padding(11)
-        .background(t.windowBg)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .listRowBackground(t.surface)
     }
 
     /// Removing a row shortens the array while SwiftUI still holds bindings for
@@ -528,153 +850,23 @@ struct ProviderEditorSheet: View {
         )
     }
 
-    private var modelSection: some View {
-        let modelCatalog = repository.editorModelCatalog(
-            for: draft.profile,
-            runtimeModelReferences: repository.runtimeSnapshot.models
-        )
-        let models: [String]
-        let detailByModelID: [String: ModelRuntimeDetails]
-        let modelPlaceholder: String
-        let visibilitySummary: String
-        switch modelCatalog {
-        case .ready(let readyModels, let readyDetails):
-            models = readyModels
-            detailByModelID = readyDetails
-            modelPlaceholder = readyModels.first ?? String(localized: "settings_provider_model_placeholder")
-            visibilitySummary = "\(repository.visibleModelCount(for: draft.profile, from: readyModels)) / \(readyModels.count)"
-        case .loading, .unavailable:
-            models = []
-            detailByModelID = [:]
-            modelPlaceholder = draft.profile.modelID.isEmpty
-                ? String(localized: "settings_provider_model_placeholder")
-                : draft.profile.modelID
-            switch modelCatalog {
-            case .loading:
-                visibilitySummary = String(localized: "settings_provider_model_catalog_loading")
-            case .unavailable:
-                visibilitySummary = String(localized: "settings_provider_model_catalog_unavailable")
-            case .ready:
-                visibilitySummary = ""
+    // MARK: Remove
+
+    @ViewBuilder private var removeSection: some View {
+        if !draft.isNew {
+            Section {
+                Button(role: .destructive) { confirmingRemove = true } label: {
+                    Text(String(localized: "settings_provider_remove"))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(t.danger)
             }
-        }
-        let selectedModels = repository.visibleModelIDs(for: draft.profile, from: models)
-        return VStack(alignment: .leading, spacing: 8) {
-            FieldLabel(text: String(localized: "settings_provider_model_id"))
-            switch modelCatalog {
-            case .ready:
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        ForEach(models, id: \.self) { model in
-                            let details = detailByModelID[model]
-                            HStack(spacing: 8) {
-                                Button { draft.profile.modelID = model } label: {
-                                    HStack(spacing: 8) {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
-                                                .font(.system(size: 12.5, weight: .medium))
-                                                .foregroundColor(draft.profile.modelID == model ? .white : t.text2)
-                                            Text(model)
-                                                .font(.system(size: 11, design: .monospaced))
-                                                .foregroundColor(draft.profile.modelID == model ? .white.opacity(0.82) : t.text4)
-                                                .lineLimit(1)
-                                            if let details, !details.summaryItems.isEmpty {
-                                                Text(details.summaryItems.joined(separator: " · "))
-                                                    .font(.system(size: 10.5))
-                                                    .foregroundColor(draft.profile.modelID == model ? .white.opacity(0.82) : t.text4)
-                                                    .lineLimit(2)
-                                            }
-                                        }
-                                        Spacer(minLength: 8)
-                                        if draft.profile.modelID == model {
-                                            LXIcon(name: .check, size: 14, color: .white, stroke: 2.2)
-                                        }
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(draft.profile.modelID == model ? t.accent : t.windowBg)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                                }
-                                .buttonStyle(.plain)
-                                if let details {
-                                    Button {
-                                        selectedModelDetails = details
-                                    } label: {
-                                        Image(systemName: "info.circle")
-                                            .foregroundStyle(t.text3)
-                                            .frame(width: 28, height: 28)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityIdentifier("provider.model.info.\(model)")
-                                }
-                            }
-                        }
-                    }
-                }
-            case .loading:
-                FieldHint(String(localized: "settings_provider_model_catalog_loading"))
-            case .unavailable:
-                FieldHint(String(localized: "settings_provider_model_catalog_unavailable"))
-            }
-            SettingsField(text: textBinding(\.modelID), placeholder: modelPlaceholder)
-            FieldHint(String(localized: "settings_provider_custom_model_hint"))
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle(isOn: Binding(
-                    get: { draft.profile.showInModelPicker },
-                    set: { draft.profile.showInModelPicker = $0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(String(localized: "settings_provider_show_in_picker"))
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundColor(t.text2)
-                        Text(visibilitySummary)
-                            .font(.system(size: 11.5))
-                            .foregroundColor(t.text4)
-                    }
-                }
-                .toggleStyle(.switch)
-                if case .ready = modelCatalog, !models.isEmpty {
-                    VStack(spacing: 6) {
-                        ForEach(models, id: \.self) { model in
-                            let selected = selectedModels.contains(model)
-                            Button {
-                                toggleVisibleModel(model, from: models)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: selected ? "checkmark.square.fill" : "square")
-                                        .foregroundStyle(selected ? t.accent : t.text4)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(detailByModelID[model]?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
-                                            .font(.system(size: 12.5, weight: .medium))
-                                            .foregroundColor(t.text2)
-                                        Text(model)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundColor(t.text4)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(t.windowBg)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                if case .ready = modelCatalog,
-                   draft.profile.showInModelPicker && selectedModels.isEmpty {
-                    Text(String(localized: "settings_provider_picker_hidden_empty"))
-                        .font(.system(size: 11.5))
-                        .foregroundColor(t.statusTesting)
-                }
-            }
-            .padding(.top, 6)
+            .listRowBackground(t.surface)
         }
     }
+
+    // MARK: State helpers
 
     private var statusLabel: String {
         switch draft.connectionState {
@@ -704,15 +896,7 @@ struct ProviderEditorSheet: View {
         Binding(get: { draft.profile[keyPath: keyPath] }, set: { draft.profile[keyPath: keyPath] = $0 })
     }
 
-    private func toggleVisibleModel(_ modelID: String, from candidates: [String]) {
-        var allowlist = draft.profile.visibleModelIDs ?? candidates
-        if allowlist.contains(modelID) {
-            allowlist.removeAll { $0 == modelID }
-        } else {
-            allowlist.append(modelID)
-        }
-        draft.profile.visibleModelIDs = Array(NSOrderedSet(array: allowlist)).compactMap { $0 as? String }
-    }
+    // MARK: Actions
 
     private func testConnection() {
         guard !draft.operationInFlight else { return }
@@ -747,15 +931,222 @@ struct ProviderEditorSheet: View {
     }
 
     private func save() {
-        guard !saving, !removing, !draft.operationInFlight else { return }
+        guard !busy else { return }
         actionError = nil
         saving = true
         Task {
             let applied = await repository.applyDraft(draft)
             saving = false
-            if applied { dismiss(); onSaved() }
+            if applied { onSaved() }
             else { draft.validationMessage = repository.lastRepositoryError; draft.connectionState = .failed }
         }
+    }
+
+    private func remove() {
+        guard !busy else { return }
+        removing = true
+        Task {
+            let removed = await repository.removeProfile(draft.id)
+            removing = false
+            if removed {
+                onSaved()
+            } else {
+                let message = repository.lastRepositoryError
+                    ?? String(localized: "settings_provider_remove_failed")
+                actionError = message
+                draft.connectionState = .failed
+                draft.detailMessage = message
+            }
+        }
+    }
+}
+
+// MARK: - Model selection
+
+/// Which model a provider uses by default and which of its models appear in
+/// the chat model picker. It is a drill-in of the editor, like iOS pickers.
+private struct ProviderModelsPage: View {
+    @Environment(\.theme) private var t
+    @State private var repository = ProviderRepository.shared
+    @State private var selectedModelDetails: ModelRuntimeDetails?
+    @Binding var draft: ProviderEditorDraft
+
+    private struct Catalog {
+        var models: [String] = []
+        var details: [String: ModelRuntimeDetails] = [:]
+        var placeholder: String
+        var summary: String
+        var isReady = false
+        var isLoading = false
+    }
+
+    private var catalog: Catalog {
+        let fallbackPlaceholder = draft.profile.modelID.isEmpty
+            ? String(localized: "settings_provider_model_placeholder")
+            : draft.profile.modelID
+        switch repository.editorModelCatalog(
+            for: draft.profile,
+            runtimeModelReferences: repository.runtimeSnapshot.models
+        ) {
+        case .ready(let models, let details):
+            return Catalog(
+                models: models,
+                details: details,
+                placeholder: models.first ?? String(localized: "settings_provider_model_placeholder"),
+                summary: "\(repository.visibleModelCount(for: draft.profile, from: models)) / \(models.count)",
+                isReady: true
+            )
+        case .loading:
+            return Catalog(
+                placeholder: fallbackPlaceholder,
+                summary: String(localized: "settings_provider_model_catalog_loading"),
+                isLoading: true
+            )
+        case .unavailable:
+            return Catalog(
+                placeholder: fallbackPlaceholder,
+                summary: String(localized: "settings_provider_model_catalog_unavailable")
+            )
+        }
+    }
+
+    var body: some View {
+        let catalog = catalog
+        let visible = repository.visibleModelIDs(for: draft.profile, from: catalog.models)
+        List {
+            if catalog.isReady {
+                modelListSection(catalog)
+            } else {
+                Section {
+                    HStack(spacing: 10) {
+                        if catalog.isLoading { ProgressView() }
+                        Text(catalog.summary).font(.footnote).foregroundStyle(t.text3)
+                    }
+                }
+                .listRowBackground(t.surface)
+            }
+            customModelSection(catalog)
+            pickerSection(catalog, visible: visible)
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(t.windowBg)
+        .navigationTitle(String(localized: "settings_provider_model_id"))
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $selectedModelDetails) { details in
+            ModelDetailsSheet(details: details, accent: Accents.color(for: draft.profile.presetID))
+        }
+    }
+
+    private func modelListSection(_ catalog: Catalog) -> some View {
+        Section {
+            ForEach(catalog.models, id: \.self) { model in
+                let details = catalog.details[model]
+                HStack(spacing: 8) {
+                    Button { draft.profile.modelID = model } label: {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
+                                    .foregroundStyle(t.text)
+                                Text(model)
+                                    .font(.footnote.monospaced())
+                                    .foregroundStyle(t.text4)
+                                    .lineLimit(1)
+                                if let details, !details.summaryItems.isEmpty {
+                                    Text(details.summaryItems.joined(separator: " · "))
+                                        .font(.caption)
+                                        .foregroundStyle(t.text4)
+                                        .lineLimit(2)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            if draft.profile.modelID == model {
+                                Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(t.accent)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if let details {
+                        Button { selectedModelDetails = details } label: {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(t.accent)
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("provider.model.info.\(model)")
+                    }
+                }
+            }
+        }
+        .listRowBackground(t.surface)
+    }
+
+    private func customModelSection(_ catalog: Catalog) -> some View {
+        Section {
+            TextField(catalog.placeholder, text: Binding(
+                get: { draft.profile.modelID },
+                set: { draft.profile.modelID = $0 }
+            ))
+            .font(.callout.monospaced())
+            .foregroundStyle(t.text)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        } header: {
+            Text(String(localized: "settings_provider_custom_model_id"))
+        } footer: {
+            Text(String(localized: "settings_provider_custom_model_hint"))
+        }
+        .listRowBackground(t.surface)
+    }
+
+    @ViewBuilder
+    private func pickerSection(_ catalog: Catalog, visible: [String]) -> some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { draft.profile.showInModelPicker },
+                set: { draft.profile.showInModelPicker = $0 }
+            )) {
+                Text(String(localized: "settings_provider_show_in_picker")).foregroundStyle(t.text)
+            }
+            .tint(t.accent)
+            if catalog.isReady, draft.profile.showInModelPicker {
+                ForEach(catalog.models, id: \.self) { model in
+                    Toggle(isOn: Binding(
+                        get: { visible.contains(model) },
+                        set: { _ in toggleVisibleModel(model, from: catalog.models) }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(catalog.details[model]?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
+                                .foregroundStyle(t.text)
+                            Text(model)
+                                .font(.footnote.monospaced())
+                                .foregroundStyle(t.text4)
+                                .lineLimit(1)
+                        }
+                    }
+                    .tint(t.accent)
+                }
+            }
+        } footer: {
+            if catalog.isReady, draft.profile.showInModelPicker, visible.isEmpty {
+                Text(String(localized: "settings_provider_picker_hidden_empty"))
+                    .foregroundStyle(t.statusTesting)
+            } else {
+                Text(catalog.summary)
+            }
+        }
+        .listRowBackground(t.surface)
+    }
+
+    private func toggleVisibleModel(_ modelID: String, from candidates: [String]) {
+        var allowlist = draft.profile.visibleModelIDs ?? candidates
+        if allowlist.contains(modelID) {
+            allowlist.removeAll { $0 == modelID }
+        } else {
+            allowlist.append(modelID)
+        }
+        draft.profile.visibleModelIDs = Array(NSOrderedSet(array: allowlist)).compactMap { $0 as? String }
     }
 }
 
@@ -775,7 +1166,7 @@ struct ProviderEditPage: View {
     @State private var repository = ProviderRepository.shared
     var body: some View {
         if kind == .llm, let draft = repository.makeDraft(for: providerId) {
-            ProviderEditorSheet(draft: draft) { host.pop() }
+            ProviderEditorForm(draft: draft) { host.pop() }
         } else {
             Text(String(localized: "settings_provider_edit_unavailable"))
         }

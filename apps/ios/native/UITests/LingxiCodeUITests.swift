@@ -728,24 +728,30 @@ final class LingxiCodeUITests: XCTestCase {
         let modelsGroup = app.buttons["settings.group.models"]
         XCTAssertTrue(modelsGroup.waitForExistence(timeout: 5))
         modelsGroup.tap()
-        let llmProvider = app.buttons["settings.provider.llm"]
-        XCTAssertTrue(llmProvider.waitForExistence(timeout: 5))
-        XCTAssertTrue(waitUntilHittable(llmProvider, timeout: 5))
-        llmProvider.tap()
+        // The models page is the provider list: no intermediate credentials page.
         let providerBlurb = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "密钥仅本机加密")
         ).firstMatch
         XCTAssertTrue(providerBlurb.waitForExistence(timeout: 5), app.debugDescription)
-        // Provider presets live on this page now. Selecting one opens its
-        // configuration sheet directly instead of requiring a separate + flow.
+        let hubShot = XCTAttachment(screenshot: app.screenshot())
+        hubShot.name = "模型设置-首页"
+        hubShot.lifetime = .keepAlways
+        add(hubShot)
+        // Adding a provider is a modal: pick a preset, then fill in the editor.
+        let addProvider = app.buttons["provider.add"]
+        XCTAssertTrue(scrollUntilHittable(addProvider, in: app.collectionViews.firstMatch), app.debugDescription)
+        addProvider.tap()
         XCTAssertTrue(app.staticTexts["Anthropic"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["OpenAI"].exists)
         XCTAssertTrue(app.staticTexts["Kimi"].exists)
+        let presetShot = XCTAttachment(screenshot: app.screenshot())
+        presetShot.name = "模型设置-选择提供商"
+        presetShot.lifetime = .keepAlways
+        add(presetShot)
 
         let deepSeekPreset = app.buttons["provider.preset.deepseek"]
         XCTAssertTrue(deepSeekPreset.waitForExistence(timeout: 5), app.debugDescription)
-        let providerPage = app.scrollViews.firstMatch
-        XCTAssertTrue(scrollUntilHittable(deepSeekPreset, in: providerPage), app.debugDescription)
+        XCTAssertTrue(scrollUntilHittable(deepSeekPreset, in: app.collectionViews.firstMatch), app.debugDescription)
         deepSeekPreset.tap()
 
         let keyField = app.secureTextFields["provider.api-key"]
@@ -754,6 +760,10 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(keyField.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(visibility.exists)
         XCTAssertFalse(clear.exists)
+        let editorShot = XCTAttachment(screenshot: app.screenshot())
+        editorShot.name = "模型设置-编辑提供商"
+        editorShot.lifetime = .keepAlways
+        add(editorShot)
 
         keyField.tap()
         keyField.typeText("sk-ui-draft")
@@ -762,7 +772,12 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertFalse(clear.exists)
 
         app.keyboards.buttons["return"].tap()
-        app.buttons["provider.cancel"].tap()
+        // The editor is pushed inside the add modal: back to the preset list,
+        // then cancel the modal.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let cancelAdd = app.buttons["provider.cancel"]
+        XCTAssertTrue(cancelAdd.waitForExistence(timeout: 5), app.debugDescription)
+        cancelAdd.tap()
         XCTAssertTrue(waitUntilGone(keyField, timeout: 5), app.debugDescription)
         let passwordAlert = app.alerts["Save Password?"]
         let passwordSheet = app.sheets["Save Password?"]
@@ -773,7 +788,7 @@ final class LingxiCodeUITests: XCTestCase {
             notNow.tap()
             XCTAssertTrue(waitUntilGone(savePasswordPrompt, timeout: 5), app.debugDescription)
         }
-        let settingsBack = app.navigationBars["LLM 提供商"].buttons["设置"]
+        let settingsBack = app.navigationBars["模型与语音"].buttons["设置"]
         XCTAssertTrue(settingsBack.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(settingsBack, timeout: 5), app.debugDescription)
         settingsBack.tap()

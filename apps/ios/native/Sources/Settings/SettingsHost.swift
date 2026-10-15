@@ -16,6 +16,18 @@ enum SettingsPage: Hashable {
     case dream
 }
 
+extension SettingsPage {
+    /// Pages built on a native `List`/`Form` scroll themselves; the host's
+    /// ScrollView-and-padding wrapper would collapse them to zero height.
+    var ownsScrolling: Bool {
+        switch self {
+        case .group(let group): group == .models
+        case .providerList(let box), .providerPicker(let box), .providerEdit(let box, _): box.kind == .llm
+        default: false
+        }
+    }
+}
+
 /// Equatable/Hashable wrapper so ProviderKind can live inside the enum.
 struct ProviderKindBox: Equatable, Hashable {
     let kind: ProviderKind
@@ -233,7 +245,18 @@ struct SettingsHost: View {
         store.mcpListingLoaded = convo.mcpServersLoaded
     }
 
+    @ViewBuilder
     private func pageContent(for page: SettingsPage) -> some View {
+        if page.ownsScrolling {
+            SettingsPages(store: store, host: self, page: page)
+                .id(pageKey(for: page))
+                .transition(.opacity)
+        } else {
+            scrollingPageContent(for: page)
+        }
+    }
+
+    private func scrollingPageContent(for page: SettingsPage) -> some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 16) {
                 if showsEngineApplyAction(page) {

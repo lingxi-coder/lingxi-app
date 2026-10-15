@@ -1919,4 +1919,7 @@
     <string name="NSMicrophoneUsageDescription">灵犀使用麦克风进行语音心流输入。</string>
     <string name="NSPhotoLibraryUsageDescription">灵犀访问相册以选择图片供模型分析。</string>
     <string name="NSSpeechRecognitionUsageDescription">灵犀使用语音识别将你的语音转写为文本。</string>
+    <string name="settings_provider_add_row">添加提供商</string>
+    <string name="settings_provider_vision_delegation">视觉委托</string>
+    <string name="settings_provider_vision_delegation_hint">允许不支持图片的模型通过内部委托批量分析图片。</string>
 </resources>

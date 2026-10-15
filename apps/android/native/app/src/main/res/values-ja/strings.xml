@@ -1919,4 +1919,7 @@
     <string name="NSMicrophoneUsageDescription">灵犀は音声心流（フローモード）入力のためにマイクを使用します。</string>
     <string name="NSPhotoLibraryUsageDescription">灵犀はモデルによる解析のため、写真ライブラリから画像を選択します。</string>
     <string name="NSSpeechRecognitionUsageDescription">灵犀は音声認識を使用して、あなたの発話をテキストに変換します。</string>
+    <string name="settings_provider_add_row">プロバイダを追加</string>
+    <string name="settings_provider_vision_delegation">ビジョン委任</string>
+    <string name="settings_provider_vision_delegation_hint">画像に対応していないモデルが、内部の委任先を通じて画像をまとめて分析できるようにします。</string>
 </resources>

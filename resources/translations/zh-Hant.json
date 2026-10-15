@@ -2042,5 +2042,8 @@
   "NSCameraUsageDescription": "靈犀使用相機拍攝照片供模型分析。",
   "NSMicrophoneUsageDescription": "靈犀使用麥克風進行語音心流輸入。",
   "NSPhotoLibraryUsageDescription": "靈犀存取相簿以選擇圖片供模型分析。",
-  "NSSpeechRecognitionUsageDescription": "靈犀使用語音識別將你的語音轉寫為文字。"
+  "NSSpeechRecognitionUsageDescription": "靈犀使用語音識別將你的語音轉寫為文字。",
+  "settings_provider_add_row": "新增提供商",
+  "settings_provider_vision_delegation": "視覺委派",
+  "settings_provider_vision_delegation_hint": "允許不支援圖片的模型透過內部委派批次分析圖片。"
 }

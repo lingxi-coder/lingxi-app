@@ -172,6 +172,8 @@ pub use host::build_android_cron_store;
 #[cfg(feature = "uniffi")]
 pub use host::build_android_engine;
 #[cfg(feature = "uniffi")]
+pub use host::create_android_side_chat;
+#[cfg(feature = "uniffi")]
 #[cfg(feature = "uniffi")]
 pub use host::build_mobile_engine;
 pub use host::PlatformImpls;

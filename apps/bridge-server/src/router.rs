@@ -272,6 +272,7 @@ fn provider_model_catalog_from_listings(
 /// The production [`CommandRouter`]: wraps the real engine handles and lowers
 /// each reply with the pure `client::adapter::lowering` parity fns.
 pub struct EngineCommandRouter {
+    side_chats: Option<Arc<harness_runtime::side_chat::SideChatManager>>,
     session_cron: Option<Arc<cron::CronScheduler>>,
     cron_firer: Option<Arc<crate::cron_host::HostCronFirer>>,
     handle: Arc<dyn OrchestratorHandle>,
@@ -463,6 +464,7 @@ impl EngineCommandRouter {
         slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
     ) -> Self {
         Self {
+            side_chats: None,
             cron_firer: None,
             session_cron: None,
             handle,
@@ -489,6 +491,14 @@ impl EngineCommandRouter {
             file_changed_watcher: None,
             turn_active: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_side_chats(
+        mut self,
+        manager: Arc<harness_runtime::side_chat::SideChatManager>,
+    ) -> Self {
+        self.side_chats = Some(manager);
+        self
     }
 
     /// Attach the runtime's shared credential manager so Desktop credential
@@ -764,6 +774,13 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            command @ (ClientCommand::SideChatCreate { .. }
+            | ClientCommand::SideChatList {}
+            | ClientCommand::SideChatGet { .. }
+            | ClientCommand::SideChatEnd { .. }
+            | ClientCommand::SideChatSubmit { .. }) => {
+                self.route_side_chat(command, sink).await;
+            }
             ClientCommand::StartRealtimeAudio { request_json } => {
                 if let Some(controller) = &self.realtime_audio {
                     controller.start(request_json, sink).await;
@@ -2126,3 +2143,72 @@ pub use tasks::TaskPoll;
 
 #[cfg(test)]
 use configuration::parse_mcp_config_json;
+
+impl EngineCommandRouter {
+    async fn route_side_chat(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
+        let (request_id, side_id) = match &command {
+            ClientCommand::SideChatCreate { request_id, .. } => (Some(request_id.clone()), None),
+            ClientCommand::SideChatSubmit {
+                side_id,
+                request_id,
+                ..
+            } => (Some(request_id.clone()), Some(side_id.clone())),
+            ClientCommand::SideChatGet { side_id } | ClientCommand::SideChatEnd { side_id } => {
+                (None, Some(side_id.clone()))
+            }
+            _ => (None, None),
+        };
+        let result: Result<Option<ClientEvent>, String> = async {
+            let manager = self
+                .side_chats
+                .as_ref()
+                .ok_or_else(|| "Side Chat is unavailable".to_owned())?;
+            match command {
+                ClientCommand::SideChatCreate {
+                    request_id,
+                    initial_input,
+                } => {
+                    manager
+                        .create(request_id, initial_input, None, None)
+                        .await?;
+                    Ok(None)
+                }
+                ClientCommand::SideChatList {} => Ok(Some(ClientEvent::SideChatList {
+                    side_ids: manager.list().await,
+                })),
+                ClientCommand::SideChatGet { side_id } => {
+                    manager.emit_snapshot(&side_id).await?;
+                    Ok(None)
+                }
+                ClientCommand::SideChatEnd { side_id } => {
+                    manager.end(&side_id).await?;
+                    Ok(Some(ClientEvent::SideChatEnded { side_id }))
+                }
+                ClientCommand::SideChatSubmit {
+                    side_id,
+                    request_id,
+                    command_json,
+                } => {
+                    let child = serde_json::from_str(&command_json)
+                        .map_err(|e| format!("Invalid Side Chat command: {e}"))?;
+                    manager.submit(&side_id, request_id.clone(), child).await?;
+                    Ok(None)
+                }
+                _ => Err("Invalid Side Chat command".to_owned()),
+            }
+        }
+        .await;
+        match result {
+            Ok(Some(event)) => sink.emit(event).await,
+            Ok(None) => {}
+            Err(message) => {
+                sink.emit(ClientEvent::SideChatError {
+                    request_id,
+                    side_id,
+                    message,
+                })
+                .await
+            }
+        }
+    }
+}

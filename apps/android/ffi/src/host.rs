@@ -33,6 +33,19 @@ use lingxi_core::host::Platform;
 use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 
+/// Create a RAM-only side using the same typed callbacks as the main chat.
+#[cfg(feature = "uniffi")]
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn create_android_side_chat(
+    engine: Arc<MobileEngineHandle>, request_id: String, initial_input: Option<String>,
+    listener: Box<dyn AndroidEventListener>, permissions: Box<dyn AndroidPermissionSink>,
+) -> Result<harness_runtime::mobile::SideChatInfoDto, MobileEngineError> {
+    engine.create_side_chat(request_id, initial_input,
+        Arc::new(AndroidListenerBridge { inner: listener }),
+        Arc::new(super::callbacks::AndroidPermissionSinkBridge { inner: permissions }),
+    ).await
+}
+
 /// The foreign (Kotlin) capability objects + config needed to build an
 /// `AndroidPlatform`. `UniFFI` marshals each `Arc<dyn …>` as a callback-interface
 /// reference; `app_files_root` is the app's private files-dir.

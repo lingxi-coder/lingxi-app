@@ -261,7 +261,7 @@ struct ConversationPendingAgentMessage: Equatable {
 @MainActor
 final class ConversationModel: ObservableObject {
     static let mainAgentID = "main"
-    private let disclosureStore: ConversationDisclosureStore
+    private let disclosureStore: ConversationDisclosureStore?
 
     /// The full visible transcript (user + assistant turns).
     @Published var messages: [Message] {
@@ -616,8 +616,9 @@ final class ConversationModel: ObservableObject {
 
     init(messages: [Message] = [],
          model: ModelOption = MockData.models[0],
-         disclosureDefaults: UserDefaults = .standard) {
-        self.disclosureStore = ConversationDisclosureStore(defaults: disclosureDefaults)
+         disclosureDefaults: UserDefaults = .standard,
+         persistDisclosures: Bool = true) {
+        self.disclosureStore = persistDisclosures ? ConversationDisclosureStore(defaults: disclosureDefaults) : nil
         self.messages = messages
         self.items = messages.map(ConversationRenderItem.message)
         self.model = model
@@ -638,11 +639,11 @@ final class ConversationModel: ObservableObject {
     func toggleTranscriptDisclosure(_ id: String) {
         if expandedToolCalls.contains(id) { expandedToolCalls.remove(id) }
         else { expandedToolCalls.insert(id) }
-        disclosureStore.save(expandedToolCalls, sessionID: activeSessionId)
+        disclosureStore?.save(expandedToolCalls, sessionID: activeSessionId)
     }
 
     func restoreTranscriptDisclosures() {
-        expandedToolCalls = disclosureStore.load(sessionID: activeSessionId)
+        expandedToolCalls = disclosureStore?.load(sessionID: activeSessionId) ?? []
     }
 
     var hasLiveTranscriptOwner: Bool {

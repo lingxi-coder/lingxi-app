@@ -29,6 +29,8 @@ import Foundation
 protocol ConversationSource: AnyObject {
     /// The state ChatView observes.
     var model: ConversationModel { get }
+    var isTemporaryConversation: Bool { get }
+    var hasLiveSideChats: Bool { get }
     /// Capability profile for this source instance.
     var sessionMode: SessionMode { get }
     /// Begin a fresh, empty conversation (the "edit / new chat" affordance).
@@ -174,6 +176,8 @@ extension ConversationSource {
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {}
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {}
     var sessionMode: SessionMode { .code }
+    var isTemporaryConversation: Bool { false }
+    var hasLiveSideChats: Bool { false }
 
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {

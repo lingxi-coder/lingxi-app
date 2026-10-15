@@ -36,6 +36,11 @@ import type {
 } from './protocol.js';
 
 export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
+  side_chat_create: true,
+  side_chat_list: true,
+  side_chat_get: true,
+  side_chat_end: true,
+  side_chat_submit: true,
   cron_manage: true,
   cron_run_completed: true,
   cron_run_started: true,
@@ -114,6 +119,14 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
+  side_chat_permission: true,
+  side_chat_submitted: true,
+  side_chat_created: true,
+  side_chat_list: true,
+  side_chat_snapshot: true,
+  side_chat_event: true,
+  side_chat_ended: true,
+  side_chat_error: true,
   cron_result: true,
   ui_control_result: true,
   ui_client_frame: true,

@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '21.0.0';
+export const CLIENT_PROTOCOL_VERSION = '22.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -588,6 +588,11 @@ export interface UiInvalidateEventDto {
 }
 
 export type ClientCommand =
+  | { type: 'side_chat_create'; request_id: string; initial_input?: string }
+  | { type: 'side_chat_list' }
+  | { type: 'side_chat_get'; side_id: string }
+  | { type: 'side_chat_end'; side_id: string }
+  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string }
   | { type: 'cron_run_started'; run_id: string; session_id: string }
   | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }
   | { type: 'cron_run_completed'; run_id: string; session_id?: string | null; summary?: string | null; error?: string | null }
@@ -1566,6 +1571,14 @@ export type RefusalContinuationJoinDto = 'exact';
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
  */
 export type ClientEvent =
+  | { type: 'side_chat_permission'; side_id: string; request: PermissionRequest }
+  | { type: 'side_chat_submitted'; side_id: string; request_id: string }
+  | { type: 'side_chat_created'; request_id: string; side_id: string }
+  | { type: 'side_chat_list'; side_ids: string[] }
+  | { type: 'side_chat_snapshot'; side_id: string; events_json: string[] }
+  | { type: 'side_chat_event'; side_id: string; event_json: string }
+  | { type: 'side_chat_ended'; side_id: string }
+  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string }
   | { type: 'scheduled_run_finished'; run_id: string; summary?: string | null; error?: string | null }
   | { type: 'cron_run_bound'; run_id: string; error?: string | null }
   | { type: 'cron_run_requested'; run_id: string; task: CronJobDto }

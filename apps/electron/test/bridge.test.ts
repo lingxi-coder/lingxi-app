@@ -3275,3 +3275,36 @@ test('Mod UI requests beyond the outstanding window wait in order for earlier re
     'an interrupted connection fails outstanding and waiting requests alike');
   assert.equal(commands.length, 17, 'nothing waiting is sent after the interruption');
 });
+
+test('live and pending Side Chats prevent implicit stop, restart and archive', async () => {
+  const runtime = new SessionRuntime({ registerIpc: false, launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  let stopped = 0;
+  (runtime as any).stopBridge = async () => { stopped++; };
+  (runtime as any).pendingSideCreates.add('create-1');
+  assert.equal(runtime.hasActiveWork, true);
+  await assert.rejects(runtime.stop(), /End all Side Chats/);
+  await assert.rejects(runtime.restart(), /End all Side Chats/);
+  (runtime as any).pendingSideCreates.clear();
+  (runtime as any).liveSideChats.add('side-1');
+  assert.throws(() => runtime.beginArchive(), /active work/);
+  await assert.rejects(runtime.stop(), /End all Side Chats/);
+  assert.equal(stopped, 0);
+  (runtime as any).liveSideChats.clear();
+  await runtime.stop();
+  assert.equal(stopped, 1);
+});
+
+test('Side Chat envelopes bypass parent turn state and retain independent identity', () => {
+  const runtime = new SessionRuntime({ registerIpc: false, launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const client = new EventEmitter();
+  const events: unknown[] = [];
+  (runtime as any).broadcastClientEvent = (event: unknown) => events.push(event);
+  (runtime as any).wireClient(client, (runtime as any).generation);
+  client.emit('event', { type: 'side_chat_created', request_id: 'create-1', side_id: 'side-1' });
+  client.emit('event', { type: 'side_chat_event', side_id: 'side-1', event_json: JSON.stringify({ type: 'turn_ended' }) });
+  assert.equal(runtime.turnActive, false);
+  assert.equal(runtime.hasActiveWork, true);
+  assert.equal(events.length, 2);
+  client.emit('event', { type: 'side_chat_ended', side_id: 'side-1' });
+  assert.equal(runtime.hasActiveWork, false);
+});

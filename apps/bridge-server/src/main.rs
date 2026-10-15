@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
     // Capture the ordered runtime lifecycle before moving the connection into
     // the endpoint. It outlives the pump and drains all accepted work before
     // the session claim and discovery record are released.
+    let side_chats = bound.side_chats();
     let session_lifecycle = bound.session_lifecycle();
     let requested_exit = bound.wait_for_exit_requested();
 
@@ -138,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
         match McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection)).await {
             Ok(endpoint) => endpoint,
             Err(error) => {
-                drain_session_lifecycle(&session_lifecycle).await;
+                drain_session_lifecycle(&session_lifecycle, &side_chats).await;
                 return Err(anyhow::anyhow!("failed to bind loopback endpoint: {error}"));
             }
         };
@@ -156,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
             Some(home) => home.join("bridge"),
             None => {
                 endpoint.shutdown().await;
-                drain_session_lifecycle(&session_lifecycle).await;
+                drain_session_lifecycle(&session_lifecycle, &side_chats).await;
                 return Err(anyhow::anyhow!(
                     "no home directory to root the bridge lockfile"
                 ));
@@ -165,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     };
     if !bridge_dir.is_absolute() {
         endpoint.shutdown().await;
-        drain_session_lifecycle(&session_lifecycle).await;
+        drain_session_lifecycle(&session_lifecycle, &side_chats).await;
         return Err(anyhow::anyhow!(
             "bridge lockfile directory must be absolute"
         ));
@@ -181,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
         Err(error) => {
             let (error, endpoint) = error.into_parts();
             endpoint.shutdown().await;
-            drain_session_lifecycle(&session_lifecycle).await;
+            drain_session_lifecycle(&session_lifecycle, &side_chats).await;
             return Err(anyhow::anyhow!(
                 "failed to publish bridge lockfile: {error}"
             ));
@@ -206,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(signal) => signal,
         Err(error) => {
             endpoint.shutdown().await;
-            drain_session_lifecycle(&session_lifecycle).await;
+            drain_session_lifecycle(&session_lifecycle, &side_chats).await;
             drop(lock_guard);
             return Err(error);
         }
@@ -216,12 +217,18 @@ async fn main() -> anyhow::Result<()> {
     // Explicit teardown: stop accepting, then `lock_guard` drops at end of scope
     // (removing the discovery file).
     endpoint.shutdown().await;
-    drain_session_lifecycle(&session_lifecycle).await;
+    drain_session_lifecycle(&session_lifecycle, &side_chats).await;
     drop(lock_guard);
     Ok(())
 }
 
-async fn drain_session_lifecycle(lifecycle: &harness_runtime::desktop::DesktopSessionLifecycle) {
+async fn drain_session_lifecycle(
+    lifecycle: &harness_runtime::desktop::DesktopSessionLifecycle,
+    side_chats: &Arc<harness_runtime::side_chat::SideChatManager>,
+) {
+    if let Err(error) = side_chats.shutdown().await {
+        tracing::error!(%error, "Side Chat cleanup failed");
+    }
     let report = lifecycle.shutdown_and_drain().await;
     for error in report.errors {
         tracing::warn!(%error, "bridge-server session shutdown was not fully durable");

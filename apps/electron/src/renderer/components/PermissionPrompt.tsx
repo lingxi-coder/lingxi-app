@@ -143,13 +143,14 @@ function requestIcon(request: PermissionRequest): string {
 export interface PermissionPromptProps {
   /** The head request to render, or `null` to render nothing. */
   request: PermissionRequest | null;
+  allowPersistentRules?: boolean;
   /** Approve the request (defaults to allow-once in the hook). */
   onApprove(requestId: number, response: { type: 'allow_once' | 'allow_always' | 'allow_auto' }): void;
   /** Deny the request. */
   onDeny(requestId: number): void;
 }
 
-export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromptProps) {
+export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRules = true }: PermissionPromptProps) {
   const t = useT();
   if (!request) return null;
 
@@ -251,7 +252,7 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
           <DesktopDialogButton variant="cancel" onClick={() => onDeny(request.request_id)}>
             Deny
           </DesktopDialogButton>
-          {showPersistentRule && (
+          {allowPersistentRules && showPersistentRule && (
             <DesktopDialogButton variant="secondary" onClick={() => onApprove(request.request_id, { type: 'allow_always' })}>
               Allow matching actions
             </DesktopDialogButton>

@@ -682,6 +682,38 @@ function validateCommand(name: string, v: unknown): void {
   const c = v as ClientCommand;
   const o = rec(c);
   switch (o['type']) {
+    case 'update_prompt_suggestion_context':
+      exactObjectKeys(o, ['type', 'session_id', 'focus', 'input_empty', 'pending_permission', 'elicitation_active']);
+      assert.ok(isString(o['session_id']));
+      assert.ok(['focused', 'blurred', 'unknown'].includes(o['focus'] as string));
+      for (const key of ['input_empty', 'pending_permission', 'elicitation_active']) assert.equal(typeof o[key], 'boolean');
+      break;
+    case 'prompt_suggestion_feedback':
+      exactObjectKeys(o, ['type', 'session_id', 'uuid', 'action']);
+      assert.ok(isString(o['session_id']) && isString(o['uuid']));
+      assert.ok(['shown', 'accepted', 'dismissed'].includes(o['action'] as string));
+      break;
+    case 'record_prompt_suggestion_submission':
+      exactObjectKeys(o, ['type', 'text']);
+      assert.ok(isString(o['text']));
+      break;
+    case 'side_chat_create':
+      exactObjectKeys(o, ['type', 'request_id'], ['initial_input']);
+      assert.ok(isString(o['request_id']));
+      if (o['initial_input'] !== undefined) assert.ok(isString(o['initial_input']));
+      break;
+    case 'side_chat_list':
+      exactObjectKeys(o, ['type']);
+      break;
+    case 'side_chat_get':
+    case 'side_chat_end':
+      exactObjectKeys(o, ['type', 'side_id']);
+      assert.ok(isString(o['side_id']));
+      break;
+    case 'side_chat_submit':
+      exactObjectKeys(o, ['type', 'side_id', 'request_id', 'command_json']);
+      assert.ok(isString(o['side_id']) && isString(o['request_id']) && isString(o['command_json']));
+      break;
     case 'ui_attach':
       assert.ok(['desktop', 'mobile', 'vscode'].includes(o['surface'] as string));
       assert.ok(isString(o['client_id']));
@@ -959,6 +991,16 @@ function validateEvent(name: string, v: unknown): void {
   const e = v as ClientEvent;
   const o = rec(e);
   switch (o['type']) {
+    case 'side_chat_created':
+    case 'side_chat_submitted':
+    case 'side_chat_list':
+    case 'side_chat_snapshot':
+    case 'side_chat_permission':
+    case 'side_chat_event':
+    case 'side_chat_ended':
+    case 'side_chat_error':
+      validateClientEvent(v);
+      break;
     case 'query_model_change':
     case 'visualization_block':
     case 'assistant_block_start':

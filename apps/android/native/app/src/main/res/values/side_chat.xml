@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="side_chat_title">旁聊</string>
+    <string name="side_chat_number">旁聊 %1$d</string>
+    <string name="side_chat_end">结束</string>
+    <string name="side_chat_retry_end">重试结束</string>
+    <string name="side_chat_controls">控制</string>
+    <string name="side_chat_nested_unavailable">旁聊中无法创建新的旁聊</string>
+    <string name="side_chat_end_before_reconnect">请先结束旁聊，再重新连接引擎。</string>
+    <string name="side_chat_end_before_workspace">请先结束旁聊，再切换工作区。</string>
+    <string name="side_chat_attachment_rejected">创建旁聊时请先移除图片附件。</string>
+</resources>

@@ -21,9 +21,10 @@ test('side control cannot start authentication, persistence, nested sides or for
   assert.throws(() => validateClientCommand({ ...submit({ type: 'cancel' }), request_id: undefined }), /request id/);
 });
 
-test('child event envelope keeps side identity without entering parent event type', () => {
+test('child event envelope preserves a valid side identity and rejects an empty side id', () => {
   const event = { type: 'side_chat_event', side_id: 'side-1', event_json: JSON.stringify({ type: 'error', message: 'side failure' }) };
   assert.deepEqual(validateClientEvent(event), event);
   assert.deepEqual(validateClientEvent({ type: 'side_chat_submitted', side_id: 'side-1', request_id: 'send-1' }), { type: 'side_chat_submitted', side_id: 'side-1', request_id: 'send-1' });
-  assert.throws(() => validateClientEvent({ ...event, side_id: '' }), /side id/);
+  assert.throws(() => validateClientEvent({ ...event, side_id: '' }), { message: 'invalid side chat id' });
+  assert.throws(() => validateClientEvent({ ...event, side_id: 7 }), { message: 'invalid side chat id' });
 });

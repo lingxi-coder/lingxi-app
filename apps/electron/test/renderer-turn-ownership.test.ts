@@ -9,6 +9,7 @@ import { matchesComposerSubmission } from '../src/renderer/bridge/composerSubmis
 import { VoiceFlowController } from '../src/renderer/audio/flow/controller';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 import { emptyConversation, appendPendingUserPrompt, reduceEvent } from '../src/renderer/bridge/conversation';
+import { sideCreationInput } from '../src/renderer/bridge/sideChatState';
 
 function source(path: string) {
   return ts.createSourceFile(path, readFileSync(resolve(path), 'utf8'), ts.ScriptTarget.Latest, true,
@@ -140,6 +141,7 @@ function composerHarness() {
   const context: any = { ready: true, flowModeRef: { current: false }, voiceState: 'idle', text: 'First prompt', selectedFiles: [], imageAttachments: images,
     draftSessionId: { current: 'A' }, draftsBySession: { current: new Map() }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageAttachmentsRef: { current: images },
     input: { current: editor }, richPromptSnapshot: () => ({ text: editor.innerHTML, files: [] }), promptWithFileMentions: (text: string) => text,
+    sideCreationInput, onCreateSide: undefined,
     bridge: { running: false, desktop: { slashCommands: [] }, sendTrackedPrompt: () => ({ token: { sessionId: 'A', clientTurnId: 'A:1' }, queued: queued.promise }) },
     autoplayOwner: { current: null }, autoplaySubscription: { current: null },
     voicePrefs: { autoPlayReplies: false }, audio: undefined, URL: { revokeObjectURL: (url: string) => revoked.push(url) }, slashDismissed: { current: false },

@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import androidx.compose.foundation.background
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -298,7 +299,7 @@ class MainActivity : ComponentActivity() {
             }
 
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
-                Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg)) {
                     RootScreen(
                         isDark = darkTheme,
                         onOpenPermissionSettings = {

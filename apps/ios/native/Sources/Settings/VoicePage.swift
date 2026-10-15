@@ -183,8 +183,34 @@ struct VoicePage: View {
                     Text(capability.speed.formatted(.number.precision(.fractionLength(1))) + "×")
                         .foregroundStyle(t.text3)
                 }
-                Slider(value: Binding(get: { capability.speed }, set: capability.setSpeed), in: 0.5...2, step: 0.1)
-                    .tint(t.accent)
+                HStack(spacing: 8) {
+                    Button {
+                        capability.setSpeed(((capability.speed - 0.1) * 10).rounded() / 10)
+                    } label: {
+                        Label(String(localized: "voice_rate_decrease"), systemImage: "minus")
+                            .labelStyle(.iconOnly)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(capability.speed <= 0.5)
+                    .accessibilityIdentifier("voice.rate.decrease")
+
+                    Slider(value: Binding(get: { capability.speed }, set: capability.setSpeed), in: 0.5...2, step: 0.1)
+                        .tint(t.accent)
+                        .accessibilityLabel(Text("voice_speech_rate"))
+
+                    Button {
+                        capability.setSpeed(((capability.speed + 0.1) * 10).rounded() / 10)
+                    } label: {
+                        Label(String(localized: "voice_rate_increase"), systemImage: "plus")
+                            .labelStyle(.iconOnly)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(capability.speed >= 2)
+                    .accessibilityIdentifier("voice.rate.increase")
+                }
+                .tint(t.accent)
             }
         }
     }

@@ -131,7 +131,7 @@ async function main() {
     await wait(`Boolean(${selector('gamma')})`);
     await focusForInput('alpha hover, focus, and click');
     await delay(150);
-    const alpha = await point('alpha');
+    let alpha = await point('alpha');
     await input('mouseMove', { x: 600, y: 600 });
     await input('mouseMove', alpha);
     const actionsVisibleExpression = id => `(() => {
@@ -172,8 +172,20 @@ async function main() {
     await input('mouseMove', { x: 600, y: 600 });
     await up(beta);
     await wait(`!document.querySelector('[role="menu"]')`);
+    await run(`${selector('gamma')}.scrollIntoView({ block: 'center', inline: 'nearest' })`);
+    const visibleHitTargetExpression = id => `(() => {
+      const button = ${selector(id)};
+      if (!button) return false;
+      const rect = button.getBoundingClientRect();
+      if (rect.top < 0 || rect.bottom > window.innerHeight) return false;
+      const hit = document.elementFromPoint(Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2));
+      return hit?.closest('[data-session-id]') === button;
+    })()`;
+    await wait(visibleHitTargetExpression('gamma'));
+    alpha = await point('alpha');
     const gamma = await point('gamma');
     await input('mouseMove', gamma);
+    await wait(hitTargetExpression('gamma'));
     await down(gamma);
     await input('mouseMove', { x: gamma.x + 12, y: gamma.y }, { button: 'left', modifiers: ['leftButtonDown'] });
     await wait(`${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragging === 'true'`);

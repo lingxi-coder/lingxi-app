@@ -20,6 +20,7 @@ let restartCalls = 0;
 let closeCalls = 0;
 let activeSessionId = 'session-a';
 let activeWork = false;
+let connectionTestCalls = 0;
 
 const bridge = {
   activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
@@ -39,7 +40,15 @@ const bridge = {
   connection: { status: 'connected' as const },
   running: false,
   sessionLoading: false,
-  settingsSnapshotEvent: null,
+  settingsSnapshotEvent: {
+    effective_json: '{}',
+    active_json: '{}',
+    provenance_json: '{}',
+    files_json: '[]',
+    layers_json: '{"user":{}}',
+    locked: [],
+    merged_keys: [],
+  },
   refreshSettingsSnapshot: async () => undefined,
   refreshDiagnostics: async () => [],
   setProviderCredential: async () => {
@@ -49,7 +58,10 @@ const bridge = {
   restartBridge: async () => { restartCalls += 1; },
   setModel: async () => undefined,
   clearProviderCredential: async () => ({ providerId: 'anthropic', configured: false, encryptionAvailable: true }),
-  testProviderConnection: async () => { throw new Error('test credential rejected'); },
+  testProviderConnection: async () => {
+    connectionTestCalls += 1;
+    throw new Error('test credential rejected');
+  },
   refreshProviderCredential: async () => undefined,
   setApiBaseUrl: async () => undefined,
   copyDiagnostics: async () => undefined,
@@ -58,6 +70,7 @@ const bridge = {
 
 function Fixture() {
   const [open, setOpen] = useState(true);
+  const [fixtureSessionId, setFixtureSessionId] = useState(activeSessionId);
 
   useEffect(() => {
     window.__settingsTransactionTest = {
@@ -77,11 +90,26 @@ function Fixture() {
       switchSessionAndStartWork: () => {
         activeSessionId = 'session-b';
         activeWork = true;
+        const activeSession = { projectPath: '/test/project', sessionId: activeSessionId };
+        bridge.activeSession = activeSession;
+        bridge.bootstrap.activeSession = activeSession;
+        setFixtureSessionId(activeSessionId);
       },
       startConnectionTest: () => {
-        const test = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '测试连接');
-        test?.click();
+        const test = document.querySelector<HTMLButtonElement>('[data-testid="provider-connection-test"]');
+        if (!test) throw new Error('Anthropic provider connection test button is not mounted');
+        if (test.disabled) throw new Error('Anthropic provider connection test button is disabled');
+        test.click();
       },
+      connectionTestButtonState: () => {
+        const button = document.querySelector<HTMLButtonElement>('[data-testid="provider-connection-test"]');
+        return {
+          exists: Boolean(button),
+          disabled: button?.disabled ?? true,
+          providerCredentialField: Boolean(document.querySelector('input[aria-label="Anthropic API key"]')),
+        };
+      },
+      connectionTestCalls: () => connectionTestCalls,
       clearStoredCredential: () => {
         const remove = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === '删除 API Key');
         remove?.click();
@@ -94,15 +122,18 @@ function Fixture() {
 
   return (
     <Theme.Provider value={tokens('light')}>
-      {open && (
-        <SettingsScreen
-          bridge={bridge as never}
-          theme="light"
-          onTheme={() => {}}
-          initialProviderId="anthropic"
-          onClose={() => { closeCalls += 1; setOpen(false); }}
-        />
-      )}
+      <div data-testid="settings-transaction-owner" data-session-id={fixtureSessionId}>
+        {open && (
+          <SettingsScreen
+            bridge={bridge as never}
+            theme="light"
+            onTheme={() => {}}
+            initialPageId="provider-credentials"
+            initialProviderId="anthropic"
+            onClose={() => { closeCalls += 1; setOpen(false); }}
+          />
+        )}
+      </div>
     </Theme.Provider>
   );
 }
@@ -114,6 +145,8 @@ declare global {
       resolvePersistence(): void;
       switchSessionAndStartWork(): void;
       startConnectionTest(): void;
+      connectionTestButtonState(): { exists: boolean; disabled: boolean; providerCredentialField: boolean };
+      connectionTestCalls(): number;
       clearStoredCredential(): void;
       connectionTestErrorVisible(): boolean;
       state(): { persistencePending: boolean; restartCalls: number; closeCalls: number; activeSessionId: string; activeWork: boolean };

@@ -132,6 +132,7 @@ async function main() {
       return;
     }
 
+    await waitFor(webContents, `Boolean(document.querySelector('[aria-label="开启心流模式"]'))`);
     const flowBounds = await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').getBoundingClientRect().toJSON()`);
     assert.equal(await webContents.executeJavaScript(`getComputedStyle(document.querySelector('.composer-submit-actions')).display`), 'none');
     await webContents.insertText('Hello');

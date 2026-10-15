@@ -19,8 +19,15 @@ async function waitFor(webContents, expression, timeout = 8000) {
 }
 
 async function runCloseScenario(webContents) {
+  await waitFor(webContents, `Boolean(document.querySelector('[data-testid="provider-connection-test"]'))`);
+  const connectionTestButtonState = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestButtonState()');
+  if (!connectionTestButtonState.exists || connectionTestButtonState.disabled || !connectionTestButtonState.providerCredentialField) {
+    throw new Error(`Anthropic connection-test prerequisites are not ready: ${JSON.stringify(connectionTestButtonState)}`);
+  }
   await webContents.executeJavaScript('window.__settingsTransactionTest.startConnectionTest()');
   await waitFor(webContents, 'window.__settingsTransactionTest.connectionTestErrorVisible()');
+  const connectionTestCalls = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestCalls()');
+  if (connectionTestCalls !== 1) throw new Error(`expected one rejected Anthropic connection test, observed ${connectionTestCalls}`);
   const connectionTestErrorBeforeDelete = await webContents.executeJavaScript('window.__settingsTransactionTest.connectionTestErrorVisible()');
   await webContents.executeJavaScript('window.__settingsTransactionTest.clearStoredCredential()');
   await waitFor(webContents, '!window.__settingsTransactionTest.connectionTestErrorVisible()');
@@ -36,6 +43,7 @@ async function runCloseScenario(webContents) {
   await waitFor(webContents, '!document.querySelector(\'[role="dialog"]\')');
   const afterClose = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
   await webContents.executeJavaScript('window.__settingsTransactionTest.switchSessionAndStartWork()');
+  await waitFor(webContents, 'document.querySelector("[data-testid=\\"settings-transaction-owner\\"]")?.dataset.sessionId === "session-b"');
   await webContents.executeJavaScript('window.__settingsTransactionTest.resolvePersistence()');
   await waitFor(webContents, '!window.__settingsTransactionTest.state().persistencePending');
   const afterLateResult = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');

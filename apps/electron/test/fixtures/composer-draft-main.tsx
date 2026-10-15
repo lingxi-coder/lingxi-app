@@ -145,7 +145,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
     loading: false,
     connected: connected && !sessionLoading,
     sessionLoading,
-    audioSnapshot: defaultNativeAudioSnapshot(),
+    audioSnapshot: supportedAudioSnapshot(),
     audioRealtimeState: { phase: 'idle' },
     audioRealtimeCommand: async () => undefined,
     audioExecute: executeAudioOperation,

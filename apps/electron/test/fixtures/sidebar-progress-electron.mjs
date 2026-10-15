@@ -26,7 +26,8 @@ async function main() {
           centerOffset: rect.y + rect.height / 2 - row.y - row.height / 2,
           animation: getComputedStyle(bar.firstElementChild).animationName };
       }),
-      pendingCount: document.querySelectorAll('[aria-label="Waiting for input"]').length,
+      pendingCount: [...document.querySelectorAll('[role="status"]')]
+        .filter(status => status.textContent?.trim() === 'Needs input').length,
       errorCount: document.querySelectorAll('[aria-label="Session error"]').length,
     })`);
     writeFileSync('/tmp/sidebar-progress.png', (await window.webContents.capturePage()).toPNG());

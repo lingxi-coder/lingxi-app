@@ -1922,4 +1922,8 @@
     <string name="settings_provider_add_row">Add Provider</string>
     <string name="settings_provider_vision_delegation">Vision Delegation</string>
     <string name="settings_provider_vision_delegation_hint">Allow non-vision models to batch-analyze images through an internal delegate.</string>
+    <string name="settings_group_models_hub">Models</string>
+    <string name="settings_group_models_hub_summary">Providers, routing, search, fetch</string>
+    <string name="settings_group_voice">Voice</string>
+    <string name="settings_group_voice_summary">Recognition, speech, offline models</string>
 </resources>

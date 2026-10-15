@@ -2045,5 +2045,10 @@
   "NSSpeechRecognitionUsageDescription": "靈犀使用語音識別將你的語音轉寫為文字。",
   "settings_provider_add_row": "新增提供商",
   "settings_provider_vision_delegation": "視覺委派",
-  "settings_provider_vision_delegation_hint": "允許不支援圖片的模型透過內部委派批次分析圖片。"
+  "settings_provider_vision_delegation_hint": "允許不支援圖片的模型透過內部委派批次分析圖片。",
+  "settings_group_models_hub": "模型",
+  "settings_group_models_hub_summary": "提供商、路由、搜尋與擷取",
+  "settings_group_voice": "語音",
+  "settings_group_voice_summary": "辨識、朗讀、離線模型",
+  "voice_offline_models_installed_count %lld": "%lld 個已安裝"
 }

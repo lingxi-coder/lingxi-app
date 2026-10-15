@@ -21,7 +21,8 @@ extension SettingsPage {
     /// ScrollView-and-padding wrapper would collapse them to zero height.
     var ownsScrolling: Bool {
         switch self {
-        case .group(let group): group == .models
+        case .voice: true
+        case .group(let group): group == .models || group == .voice
         case .providerList(let box), .providerPicker(let box), .providerEdit(let box, _): box.kind == .llm
         default: false
         }
@@ -425,7 +426,7 @@ struct SettingsHost: View {
                 return providerRepository.state(for: id)?.profile.name ?? String(localized: "settings_title_edit")
             }
             return store.providers(b.kind).first(where: { $0.id == id })?.name ?? String(localized: "settings_title_edit")
-        case .voice: return String(localized: "settings_voice_tts")
+        case .voice: return String(localized: "settings_group_voice")
         case .linuxRuntime: return String(localized: "settings_linux_runtime")
         case .knowledge: return String(localized: "settings_knowledge")
         case .memory: return String(localized: "settings_memory")

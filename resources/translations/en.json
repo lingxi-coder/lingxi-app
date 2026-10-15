@@ -2050,5 +2050,10 @@
   "NSSpeechRecognitionUsageDescription": "灵犀使用语音识别将你的语音转写为文本。",
   "settings_provider_add_row": "Add Provider",
   "settings_provider_vision_delegation": "Vision Delegation",
-  "settings_provider_vision_delegation_hint": "Allow non-vision models to batch-analyze images through an internal delegate."
+  "settings_provider_vision_delegation_hint": "Allow non-vision models to batch-analyze images through an internal delegate.",
+  "settings_group_models_hub": "Models",
+  "settings_group_models_hub_summary": "Providers, routing, search, fetch",
+  "settings_group_voice": "Voice",
+  "settings_group_voice_summary": "Recognition, speech, offline models",
+  "voice_offline_models_installed_count %lld": "%lld installed"
 }

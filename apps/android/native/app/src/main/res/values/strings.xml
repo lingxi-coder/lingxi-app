@@ -1922,4 +1922,8 @@
     <string name="settings_provider_add_row">添加提供商</string>
     <string name="settings_provider_vision_delegation">视觉委托</string>
     <string name="settings_provider_vision_delegation_hint">允许不支持图片的模型通过内部委托批量分析图片。</string>
+    <string name="settings_group_models_hub">模型</string>
+    <string name="settings_group_models_hub_summary">提供商、路由、搜索与抓取</string>
+    <string name="settings_group_voice">语音</string>
+    <string name="settings_group_voice_summary">识别、朗读、离线模型</string>
 </resources>

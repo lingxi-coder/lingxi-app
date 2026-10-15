@@ -1922,4 +1922,8 @@
     <string name="settings_provider_add_row">プロバイダを追加</string>
     <string name="settings_provider_vision_delegation">ビジョン委任</string>
     <string name="settings_provider_vision_delegation_hint">画像に対応していないモデルが、内部の委任先を通じて画像をまとめて分析できるようにします。</string>
+    <string name="settings_group_models_hub">モデル</string>
+    <string name="settings_group_models_hub_summary">プロバイダ、ルーティング、検索、取得</string>
+    <string name="settings_group_voice">音声</string>
+    <string name="settings_group_voice_summary">認識、読み上げ、オフラインモデル</string>
 </resources>

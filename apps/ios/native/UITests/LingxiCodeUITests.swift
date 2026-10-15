@@ -208,27 +208,25 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["drawer.settings"].tap()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
 
-        // Voice lives in the 模型与语音 group of the grouped settings home.
-        let modelsGroup = app.buttons["settings.group.models"]
-        XCTAssertTrue(modelsGroup.waitForExistence(timeout: 5), app.debugDescription)
-        modelsGroup.tap()
-        let voiceSettings = app.buttons["settings.page.voice"]
-        XCTAssertTrue(voiceSettings.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(waitUntilHittable(voiceSettings, timeout: 5), app.debugDescription)
-        voiceSettings.tap()
+        // Voice has its own row on the grouped settings home.
+        let voiceGroup = app.buttons["settings.group.voice"]
+        XCTAssertTrue(voiceGroup.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(voiceGroup, timeout: 5), app.debugDescription)
+        voiceGroup.tap()
 
-        XCTAssertTrue(app.navigationBars["语音 TTS"].waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.staticTexts["听 · 语音识别"].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["说 · 语音合成"].exists, app.debugDescription)
+        XCTAssertTrue(app.navigationBars["语音"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["语音输入"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["朗读"].exists, app.debugDescription)
 
         let settingsTopScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         settingsTopScreenshot.name = "Voice-Settings-Top"
         settingsTopScreenshot.lifetime = .keepAlways
         add(settingsTopScreenshot)
 
-        app.swipeUp()
-        app.swipeUp()
-        XCTAssertTrue(app.staticTexts["访问与可用性"].waitForExistence(timeout: 5), app.debugDescription)
+        let advanced = app.buttons["高级设置与权限"]
+        XCTAssertTrue(scrollUntilHittable(advanced, in: app.collectionViews.firstMatch), app.debugDescription)
+        if !app.staticTexts["麦克风"].exists { advanced.tap() }
+        XCTAssertTrue(app.staticTexts["麦克风"].waitForExistence(timeout: 5), app.debugDescription)
 
         let settingsAccessScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         settingsAccessScreenshot.name = "Voice-Settings-Access"
@@ -788,7 +786,7 @@ final class LingxiCodeUITests: XCTestCase {
             notNow.tap()
             XCTAssertTrue(waitUntilGone(savePasswordPrompt, timeout: 5), app.debugDescription)
         }
-        let settingsBack = app.navigationBars["模型与语音"].buttons["设置"]
+        let settingsBack = app.navigationBars["模型"].buttons["设置"]
         XCTAssertTrue(settingsBack.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(settingsBack, timeout: 5), app.debugDescription)
         settingsBack.tap()

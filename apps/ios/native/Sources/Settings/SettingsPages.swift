@@ -11,6 +11,7 @@ struct SettingsPages: View {
         case .main:                       MainSettingsPage(store: store, host: host)
         case .account:                    DesktopAccountPage(host: host)
         case .group(.models):             ModelsSettingsPage(store: store, host: host)
+        case .group(.voice):              VoicePage(store: store)
         case .group(let group):           SettingsGroupPage(group: group, host: host)
         case .providerList(let b):        ProviderListPage(store: store, host: host, kind: b.kind)
         case .providerPicker(let b):      ProviderPickerPage(store: store, host: host, kind: b.kind)

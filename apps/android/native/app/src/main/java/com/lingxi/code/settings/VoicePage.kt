@@ -5,6 +5,20 @@ import android.net.Uri
 import android.provider.Settings
 import android.text.format.Formatter
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Remove
+import androidx.compose.material3.*
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -244,23 +258,8 @@ fun VoicePage(
                     )
                 }
             } else {
-                SettingsRow(
-                    label = stringResource(R.string.voice_speech_rate),
-                    value = String.format(Locale.US, "%.1fx", voice.rate),
-                    chevron = false,
-                ) {
-                    Slider(
-                        value = voice.rate.toFloat(),
-                        onValueChange = { v -> onChange { current -> current.copy(rate = snapVoiceSpeed(v).toDouble()) } },
-                        valueRange = 0.5f..2.0f,
-                        steps = 14,
-                        colors = SliderDefaults.colors(
-                            thumbColor = t.accent,
-                            activeTrackColor = t.accent,
-                            inactiveTrackColor = t.surfaceActive,
-                        ),
-                        modifier = Modifier.width(120.dp),
-                    )
+                VoiceRateControl(voice.rate.toFloat()) { rate ->
+                    onChange { current -> current.copy(rate = rate.toDouble()) }
                 }
             }
             SettingsRow(label = stringResource(R.string.voice_auto_play), chevron = false, isLast = true) {
@@ -443,9 +442,74 @@ private fun offlineModelOptions(
         }
 }
 
+/** A full-width continuous-looking track with native discrete adjustment semantics. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun VoiceRateControl(rate: Float, onRateChange: (Float) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val label = stringResource(R.string.voice_speech_rate)
+    val valueLabel = String.format(Locale.US, "%.1f×", rate)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Text(valueLabel, style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { onRateChange(snapVoiceSpeed(rate - 0.1f)) },
+                enabled = rate > 0.5f, modifier = Modifier.testTag("voice.rate.decrease")) {
+                Icon(Icons.Outlined.Remove, contentDescription = stringResource(R.string.voice_rate_decrease))
+            }
+            Slider(
+                value = rate.coerceIn(0.5f, 2f), onValueChange = { onRateChange(snapVoiceSpeed(it)) },
+                valueRange = 0.5f..2f, steps = 14,
+                modifier = Modifier.weight(1f).testTag("voice.rate")
+                    .semantics { contentDescription = label; stateDescription = valueLabel },
+                thumb = {
+                    Box(Modifier.size(24.dp).shadow(2.dp, CircleShape)
+                        .background(colors.surface, CircleShape).border(2.dp, colors.primary, CircleShape))
+                },
+                track = { slider ->
+                    SliderDefaults.Track(sliderState = slider, modifier = Modifier.height(4.dp),
+                        thumbTrackGapSize = 0.dp, drawStopIndicator = null, drawTick = { _, _ -> })
+                },
+            )
+            IconButton(onClick = { onRateChange(snapVoiceSpeed(rate + 0.1f)) },
+                enabled = rate < 2f, modifier = Modifier.testTag("voice.rate.increase")) {
+                Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.voice_rate_increase))
+            }
+        }
+    }
+    HorizontalDivider(color = LingXiTheme.palette.border, modifier = Modifier.padding(horizontal = 16.dp))
+}
+
+/** Progress has its own layout so model metadata can never truncate it. */
+@Composable
+internal fun OfflineModelProgress(state: ModelState, stateText: String) {
+    val context = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp).testTag("voice.model-progress"),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(stateText, style = MaterialTheme.typography.bodySmall,
+            color = if (state is ModelState.Failed) colors.error else colors.onSurfaceVariant)
+        when (state) {
+            is ModelState.Downloading -> {
+                val fraction = if (state.total > 0) (state.bytes.toDouble() / state.total).coerceIn(0.0, 1.0).toFloat() else null
+                if (fraction != null) LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(Formatter.formatShortFileSize(context, state.bytes.coerceAtLeast(0)) +
+                    if (state.total > 0) " / " + Formatter.formatShortFileSize(context, state.total) else "",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+            is ModelState.Queued, ModelState.Verifying, ModelState.Extracting ->
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            else -> Unit
+        }
+    }
+}
+
 /** One offline model: name, kind · size, state, and the one action that fits the state. */
 @Composable
-private fun OfflineModelRow(
+internal fun OfflineModelRow(
     model: GeneratedOfflineModelEntry,
     state: ModelState,
     displayName: String,
@@ -461,7 +525,7 @@ private fun OfflineModelRow(
         is ModelState.Queued -> stringResource(R.string.voice_model_state_queued)
         is ModelState.Downloading ->
             stringResource(R.string.voice_model_state_downloading) +
-                if (state.total > 0) " ${(state.bytes * 100 / state.total).coerceIn(0, 100)}%" else ""
+                if (state.total > 0) " ${(state.bytes.toDouble() / state.total * 100).coerceIn(0.0, 100.0).toInt()}%" else ""
         ModelState.Verifying -> stringResource(R.string.voice_model_state_verifying)
         ModelState.Extracting -> stringResource(R.string.voice_model_state_installing)
         ModelState.Ready -> stringResource(R.string.voice_model_state_ready)
@@ -474,29 +538,22 @@ private fun OfflineModelRow(
         else -> stringResource(R.string.voice_offline_download)
     }
     val actionColor: Color = if (state == ModelState.Ready) t.danger else t.accent
-    SettingsRow(
-        label = displayName,
-        sub = "$kind · $sizeLabel\n$stateText",
-        chevron = false,
-        isLast = isLast,
-        trailing = {
-            Text(
-                actionLabel,
-                color = actionColor,
-                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier
-                    .clickable {
-                        when {
-                            state == ModelState.Ready -> VoiceModelDownloader.remove(model)
-                            state.isBusy -> VoiceModelDownloader.cancel(model)
-                            else -> VoiceModelDownloader.start(model)
-                        }
-                    }
-                    .padding(horizontal = 6.dp, vertical = 6.dp),
-            )
-        },
-    )
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(displayName, style = MaterialTheme.typography.bodyLarge, color = t.text,
+                modifier = Modifier.weight(1f))
+            TextButton(onClick = {
+                when {
+                    state == ModelState.Ready -> VoiceModelDownloader.remove(model)
+                    state.isBusy -> VoiceModelDownloader.cancel(model)
+                    else -> VoiceModelDownloader.start(model)
+                }
+            }) { Text(actionLabel, color = actionColor) }
+        }
+        Text("$kind · $sizeLabel", style = MaterialTheme.typography.bodySmall, color = t.text2)
+        OfflineModelProgress(state, stateText)
+    }
+    if (!isLast) HorizontalDivider(color = t.border, modifier = Modifier.padding(horizontal = 16.dp))
 }
 
 private val ModelState.isBusy: Boolean

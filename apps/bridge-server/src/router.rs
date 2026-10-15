@@ -2479,6 +2479,10 @@ mod scheduled_chat_anchor_tests;
 #[path = "router/tests/runtime_snapshot_tests.rs"]
 mod runtime_snapshot_tests;
 
+#[cfg(test)]
+#[path = "router/tests/side_chat_shutdown_tests.rs"]
+mod side_chat_shutdown_tests;
+
 mod catalog;
 mod configuration;
 mod sessions;

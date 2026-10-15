@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
@@ -59,7 +60,9 @@ import kotlinx.coroutines.sync.withLock
  * build failure and falls back to the mock, mirroring iOS) so this type is only
  * ever instantiated when the engine is actually available. The listener is
  * passed INTO [buildVoiceEngine] so the source is the sole owner of the
- * handle+listener — no second build, no dropped events.
+ * handle+listener — no second build, no dropped events. Ordinary prompts use
+ * `SendPrompt`; main slash commands use `RunSlashCommand` so display results
+ * and prompt-expanding commands retain the host's command lifecycle.
  *
  * NOTE: this type touches the UniFFI bindings + Android `Context`, so it is NOT
  * exercised by JVM unit tests. The pure [clientEventToReply] mapper carries the
@@ -84,7 +87,7 @@ class EngineConversationSource private constructor(
     private val autoAttachDurableTurns: Boolean,
     @Volatile private var resumeOnUiAttach: Boolean,
     override val recoverySpec: ConversationRecoverySpec,
-) : ConversationSource, BackgroundRetainableConversationSource {
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
 
     internal fun newSideChatSource() = SideChatSource(handle)
 
@@ -392,6 +395,7 @@ class EngineConversationSource private constructor(
                     )
                 } catch (t: Throwable) {
                     permissionIngress.endTurn()
+                    durableTurns.clear(turnId)
                     // Inject the build/submit failure into the same stream the
                     // collector is already reading, so the mapper terminates it.
                     emit(
@@ -407,6 +411,34 @@ class EngineConversationSource private constructor(
                 }
             },
             strings,
+        )
+
+    override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> =
+        mapReplyStream(
+            events.onSubscription {
+                try {
+                    permissionIngress.beginTurn()
+                    activeSession.value?.sessionId?.let { sessionId ->
+                        durableTurns.begin(sessionId, turnId)
+                    }
+                    handle.submit(runSlashCommandClientCommand(raw, turnId))
+                } catch (t: Throwable) {
+                    permissionIngress.endTurn()
+                    durableTurns.clear(turnId)
+                    emit(
+                        ClientEvent.Error(
+                            kind = ErrorKindDto.TRANSPORT,
+                            message = strings.resolve(
+                                R.string.chat_error_engine_submit_failed,
+                                "引擎错误：%1\$s",
+                                "${t.message ?: t::class.simpleName}",
+                            ).toClientTextDto(),
+                        ),
+                    )
+                }
+            }.filter { event -> slashCommandEventBelongsToTurn(event, turnId) },
+            strings,
+            acceptSlashCommandResults = true,
         )
 
     override suspend fun cancel() {
@@ -595,6 +627,10 @@ class EngineConversationSource private constructor(
                             turnId = event.snapshot.turnId.toLong(),
                         )
                     }
+                    if (event is ClientEvent.SlashCommandResult) {
+                        clearDurableSlashCommandCheckpoint(durableTurns, event)
+                        permissionIngress.endTurn()
+                    }
                     if (event is ClientEvent.TurnEnded || event is ClientEvent.Error) {
                         permissionIngress.endTurn()
                     }
@@ -687,5 +723,21 @@ class EngineConversationSource private constructor(
             ConversationHeadlessRecovery.register(recoverySpec.scopeKey, source)
             return source
         }
+    }
+}
+
+/** Keep the protocol command construction independently testable on the JVM. */
+internal fun runSlashCommandClientCommand(raw: ClientTextDto, turnId: Long): ClientCommand.RunSlashCommand =
+    ClientCommand.RunSlashCommand(raw = raw, turnId = turnId.toULong())
+
+internal fun slashCommandEventBelongsToTurn(event: ClientEvent, turnId: Long): Boolean =
+    event !is ClientEvent.SlashCommandResult || event.turnId == turnId.toULong()
+
+internal fun clearDurableSlashCommandCheckpoint(
+    durableTurns: DurableConversationTurnClientStore,
+    event: ClientEvent,
+) {
+    if (event is ClientEvent.SlashCommandResult) {
+        event.turnId?.let { durableTurns.clear(it.toLong()) }
     }
 }

@@ -80,6 +80,20 @@ class ClientEventMapperTest {
         assertEquals(ReplyEvent.Thinking, clientEventToReply(ClientEvent.TurnStarted(turnId = null)))
     }
 
+    @Test
+    fun slashCommandResult_preservesDisplayErrorAndTurnIdentity() {
+        val event = ClientEvent.SlashCommandResult(
+            turnId = 17uL,
+            display = "unknown command".toClientTextDto(),
+            isError = true,
+        )
+
+        assertEquals(
+            ReplyEvent.CommandOutput("unknown command", isError = true, turnId = 17uL),
+            clientEventToReply(event),
+        )
+    }
+
     // --- tool activity ----------------------------------------------------
 
     @Test

@@ -387,7 +387,7 @@ async fn endpoint_shutdown_waits_for_live_side_chat_child_to_stop() {
                 break;
             }
             Frame::Event(ClientEvent::SideChatError { message, .. }) => {
-                panic!("side chat creation failed: {}", message.display());
+                panic!("side chat creation failed: {message}");
             }
             _ => {}
         }

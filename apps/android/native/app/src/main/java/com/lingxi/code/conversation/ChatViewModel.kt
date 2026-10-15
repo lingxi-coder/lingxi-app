@@ -890,11 +890,12 @@ class ChatViewModel(
                     reply !is ReplyEvent.End &&
                     reply !is ReplyEvent.Error &&
                     reply !is ReplyEvent.Completed &&
+                    reply !is ReplyEvent.CommandOutput &&
                     durableTurnId != null
                 ) {
                     pendingRecoveredReplayAckTurnId = durableTurnId
                 }
-                if (reply is ReplyEvent.End || reply is ReplyEvent.Error) {
+                if (reply is ReplyEvent.End || reply is ReplyEvent.Error || reply is ReplyEvent.CommandOutput) {
                     recoveredTurnToken = null
                     recoveryReplayTurnId = null
                     pendingRecoveredReplayAckTurnId = null
@@ -2168,8 +2169,18 @@ class ChatViewModel(
         // process has already crossed into the background.
         setBackgroundTurnActive(true)
 
+        val turnSource = source
+        val slashCommandSource = turnSource as? SlashCommandConversationSource
         turnJob = viewModelScope.launch {
-            source.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode).collect { event ->
+            val replyStream = if (
+                !isBashInput && images.isEmpty() && isSlashCommandLine(text) &&
+                slashCommandSource != null
+            ) {
+                slashCommandSource.submitSlashCommand(text.toClientTextDto(), submittedTurnId)
+            } else {
+                turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
+            }
+            replyStream.collect { event ->
                 reduce(event, token)
                 if (
                     event is ReplyEvent.DurableTurnReplayAcknowledged &&
@@ -2465,6 +2476,35 @@ class ChatViewModel(
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
                         .addNotice(AgentRunNotice(event.message, kind)),
                 )
+            }
+
+            is ReplyEvent.CommandOutput -> {
+                if (event.turnId != null && event.turnId != durableTurnId?.toULong()) return
+                turnJob = null
+                emitTurnCompletion(
+                    token = token,
+                    outcome = if (event.isError) {
+                        ConversationTurnOutcome.Failed
+                    } else {
+                        ConversationTurnOutcome.Completed
+                    },
+                    finalAssistantText = event.display,
+                )
+                _state.update { state ->
+                    state.copy(
+                        streaming = false,
+                        messages = state.messages + Message(role = Role.Ai, text = event.display),
+                        streamingMessage = null,
+                        statusLine = null,
+                        error = if (event.isError) {
+                            ChatError(event.display, classifyError(event.display))
+                        } else {
+                            null
+                        },
+                        // Local commands have no model/tool trace to retain.
+                        agentRun = null,
+                    )
+                }
             }
 
             is ReplyEvent.Usage -> _state.update {

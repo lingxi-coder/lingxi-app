@@ -146,7 +146,7 @@ export const runtimeSystemPages: DocPage[] = [
     id: 'extensions-lifecycle', group: 'system', title: t('Tools, skills, hooks, MCP and LSP', '工具、Skills、Hooks、MCP 与 LSP'),
     description: t('Discover extensions through trusted registries and retain authority across activation, refresh, invocation and teardown.', '经可信注册表发现扩展，并在激活、更新、调用和清理过程中保持权限归属。'),
     sourceUrl,
-    sources: sources('crates/tool-api/src/registry.rs', 'crates/skill-api/src/lib.rs', 'crates/runtime/src/desktop/skill_loader.rs', 'crates/hooks/src/events.rs', 'crates/hooks/src/executor.rs', 'crates/hooks/src/ssrf_guard.rs', 'crates/plugin/src/manager.rs', 'crates/mcp/src/registry.rs', 'crates/mcp/src/registry/catalog_refresh.rs', 'crates/lsp/src/registry.rs', 'crates/runtime/src/mobile/mobile_lsp.rs'),
+    sources: sources('crates/tool-api/src/registry.rs', 'crates/skill/src/lib.rs', 'crates/runtime/src/desktop/skill_loader.rs', 'crates/hooks/src/events.rs', 'crates/hooks/src/executor.rs', 'crates/hooks/src/ssrf_guard.rs', 'crates/plugin/src/manager.rs', 'crates/mcp/src/registry.rs', 'crates/mcp/src/registry/catalog_refresh.rs', 'crates/lsp/src/registry.rs', 'crates/runtime/src/mobile/mobile_lsp.rs'),
     sections: [
       {
         id: 'extension-kinds', title: t('Extension responsibilities', '扩展职责'),

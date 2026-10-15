@@ -187,20 +187,20 @@ pub fn estimate_local_tokens_in(&self, profile: &str, request: &ChatRequest) -> 
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/store.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/store.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/resolve.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/configuration/model.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/configuration/model.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/configuration/sync.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/configuration/sync.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/provider.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/frozen_pricing.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/token_count/request.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/data/capability-matrix-protocols.json](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/capability-matrix-protocols.json) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/data/capability-audit.json](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/capability-audit.json) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/data/providers/openai.toml](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/providers/openai.toml) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/data/providers/anthropic.toml](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/providers/anthropic.toml) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/data/providers/qwen.toml](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/providers/qwen.toml) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/regions.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/regions.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/store.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/store.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/resolve.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/configuration/model.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/configuration/model.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/configuration/sync.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/configuration/sync.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/provider.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/frozen_pricing.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/token_count/request.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/data/capability-matrix-protocols.json](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/data/capability-matrix-protocols.json) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/data/capability-audit.json](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/data/capability-audit.json) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/data/providers/openai.toml](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/data/providers/openai.toml) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/data/providers/anthropic.toml](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/data/providers/anthropic.toml) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/data/providers/qwen.toml](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/data/providers/qwen.toml) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/regions.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/regions.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
 
-- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; 所据文件指纹 sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; 产品固定版本 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
+- llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; 所据文件指纹 sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; 产品固定版本 7333dbc3795b6bad893cb7287088d80931538630
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

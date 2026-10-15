@@ -25,6 +25,14 @@ def repository_url(repo: Path) -> str:
     return 'https://github.com/' + match.group(1)
 
 
+def source_revision(repo: Path, paths: list[str]) -> str:
+    head = git(repo, 'rev-parse', 'HEAD').decode().strip()
+    if not paths:
+        return head
+    revision = git(repo, 'log', '-1', '--format=%H', 'HEAD', '--', *paths).decode().strip()
+    return revision or head
+
+
 def product_pins(workspace: Path) -> dict[str, str]:
     manifest = tomllib.loads((workspace / 'lingxi-app/Cargo.toml').read_text())
     result = {}
@@ -72,12 +80,19 @@ def build(workspace: Path, pages: list[dict]) -> dict:
                 committed = git(root, 'show', 'HEAD:' + path)
             except subprocess.CalledProcessError:
                 committed = None
-            ref = {**source, 'revision': metadata[repo]['revision'], 'sourceState': 'committed' if content == committed else 'working-tree'}
-            if content == committed:
-                from urllib.parse import quote
-                ref['url'] = f'{metadata[repo]["sourceUrl"]}/blob/{metadata[repo]["revision"]}/{quote(path, safe="/")}'
+            ref = {**source, 'sourceState': 'committed' if content == committed else 'working-tree'}
             refs.append(ref)
         page_sources[page['id']] = refs
+    product_root = workspace / REPOSITORIES[0]
+    metadata[REPOSITORIES[0]]['revision'] = source_revision(product_root, sorted(inputs[REPOSITORIES[0]]))
+    for refs in page_sources.values():
+        for ref in refs:
+            repo = ref['repo']
+            revision = metadata[repo]['revision']
+            ref['revision'] = revision
+            if ref['sourceState'] == 'committed':
+                from urllib.parse import quote
+                ref['url'] = f'{metadata[repo]["sourceUrl"]}/blob/{revision}/{quote(ref["path"], safe="/")}'
     for repo, files in inputs.items():
         digest = hashlib.sha256()
         dirty = False

@@ -1,5 +1,7 @@
 package com.lingxi.code.conversation
 
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.PromptModeDto
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -70,5 +72,27 @@ class SideChatCommandTest {
         assertNull(sideChatInput("/sideways"))
         assertNull(sideChatInput("mention /side"))
         assertNull(sideChatInput("/Side"))
+    }
+
+    @Test fun sidePromptPreservesRawTextModeTurnAndVisualizationContext() {
+        val rawText = "!echo \uD800"
+        val command = sideChatSendPromptCommand(
+            text = rawText,
+            images = emptyList(),
+            turnId = 42L,
+            visualizationContext = VisualizationRef("widget-a", 3u),
+            promptMode = PromptModeDto.BASH,
+        )
+
+        assertEquals(rawText.map { it.code.toUShort() }, command.text.codeUnits)
+        assertEquals(PromptModeDto.BASH, command.promptMode)
+        assertEquals(42uL, command.turnId)
+        assertEquals("widget-a", command.visualizationContext?.id)
+        assertEquals(3u, command.visualizationContext?.revision)
+    }
+
+    @Test fun sideCancelPreservesOptionalTurnIdentity() {
+        assertEquals(ClientCommand.Cancel(42uL), sideChatCancelCommand(42L))
+        assertEquals(ClientCommand.Cancel(null), sideChatCancelCommand(null))
     }
 }

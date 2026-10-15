@@ -76,18 +76,59 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
         handle.submitSideChat(sideId, command)
     }
     override fun submit(text: String, images: List<ImageRefDto>): Flow<ReplyEvent> =
-        mapReplyStream(relay.events.onSubscription {
-            try {
-                submitClientCommand(ClientCommand.SendPrompt(text, null, images, null, null))
-            } catch (failure: Throwable) {
-                emit(ClientEvent.Error(ErrorKindDto.TRANSPORT, failure.message ?: "Side chat unavailable"))
-            }
-        }, DefaultConversationStrings)
-    override suspend fun cancel() {
-        submitClientCommand(ClientCommand.Cancel(null))
+        submitPrompt(text, images, null, null, null)
+
+    override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
+        submitPrompt(text, images, turnId, null, null)
+
+    override fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+    ): Flow<ReplyEvent> = submitPrompt(text, images, turnId, visualizationContext, null)
+
+    override fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> = submitPrompt(text, images, turnId, visualizationContext, promptMode)
+
+    private fun submitPrompt(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long?,
+        visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> =
+        mapReplyStream(
+            relay.events.onSubscription {
+                try {
+                    submitClientCommand(
+                        sideChatSendPromptCommand(text, images, turnId, visualizationContext, promptMode),
+                    )
+                } catch (failure: Throwable) {
+                    emit(
+                        ClientEvent.Error(
+                            ErrorKindDto.TRANSPORT,
+                            (failure.message ?: "Side chat unavailable").toClientTextDto(),
+                        ),
+                    )
+                }
+            }.filter { event ->
+                event !is ClientEvent.SlashCommandResult || event.turnId == turnId?.toULong()
+            },
+            DefaultConversationStrings,
+            acceptSlashCommandResults = true,
+        )
+    override suspend fun cancel() = cancel(null)
+
+    override suspend fun cancel(turnId: Long?) {
+        submitClientCommand(sideChatCancelCommand(turnId))
         backgroundStopPending = false
     }
-    override suspend fun cancel(turnId: Long?) = cancel()
     override suspend fun setModel(id: String) = submitClientCommand(ClientCommand.SetModel(id))
     override suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) =
         submitClientCommand(ClientCommand.ApprovePermission(requestId, response))
@@ -105,6 +146,23 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
         scope.cancel()
     }
 }
+
+internal fun sideChatSendPromptCommand(
+    text: String,
+    images: List<ImageRefDto>,
+    turnId: Long?,
+    visualizationContext: VisualizationRef?,
+    promptMode: PromptModeDto?,
+): ClientCommand.SendPrompt = ClientCommand.SendPrompt(
+    text = text.toClientTextDto(),
+    promptMode = promptMode,
+    images = images,
+    turnId = turnId?.toULong(),
+    visualizationContext = visualizationContext?.toDto(),
+)
+
+internal fun sideChatCancelCommand(turnId: Long?): ClientCommand =
+    ClientCommand.Cancel(turnId?.toULong())
 
 /** Exact command boundary: /sideways is an ordinary prompt. */
 internal fun sideChatInput(text: String): String? {

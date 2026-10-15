@@ -20,6 +20,8 @@ use super::configuration::{ios_project_cwd, IosEngineLaunchConfigFfi, IosMobileL
 use super::linux_runtime::ios_mobile_linux_runtime;
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::linux_types::MobileLinuxRuntimeModeFfi;
+#[cfg(feature = "uniffi")]
+use client::protocol::text::ClientTextDto;
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use harness_runtime::mobile::MobileConfig;
 #[cfg(feature = "uniffi")]
@@ -36,13 +38,20 @@ use std::sync::Arc;
 #[cfg(feature = "uniffi")]
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn create_ios_side_chat(
-    engine: Arc<MobileEngineHandle>, request_id: String, initial_input: Option<String>,
-    listener: Box<dyn IosEventListener>, permissions: Box<dyn IosPermissionSink>,
+    engine: Arc<MobileEngineHandle>,
+    request_id: String,
+    initial_input: Option<ClientTextDto>,
+    listener: Box<dyn IosEventListener>,
+    permissions: Box<dyn IosPermissionSink>,
 ) -> Result<harness_runtime::mobile::SideChatInfoDto, MobileEngineError> {
-    engine.create_side_chat(request_id, initial_input,
-        Arc::new(IosListenerBridge { inner: listener }),
-        Arc::new(super::callbacks::IosPermissionSinkBridge { inner: permissions }),
-    ).await
+    engine
+        .create_side_chat(
+            request_id,
+            initial_input,
+            Arc::new(IosListenerBridge { inner: listener }),
+            Arc::new(super::callbacks::IosPermissionSinkBridge { inner: permissions }),
+        )
+        .await
 }
 
 /// The foreign (Swift) capability objects + config the engine needs to build an

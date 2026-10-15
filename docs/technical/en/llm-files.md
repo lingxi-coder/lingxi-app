@@ -100,19 +100,19 @@ Implementation evidence: provider_files, provider_file_clients, file_stream_uplo
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/mod.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/mod.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/builder.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/attachments/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/attachments/resolve.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/attachments/prepare.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/attachments/prepare.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/attachments/cache.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/attachments/cache.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/files/service.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/files/service.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/files/policy.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/files/policy.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/files/types.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/files/types.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/providers/file_resources.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/providers/file_resources.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/provider_files.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/provider_files.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/file_stream_upload.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/file_stream_upload.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/file_deadlines.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/file_deadlines.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/mod.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/mod.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/builder.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/attachments/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/attachments/resolve.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/attachments/prepare.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/attachments/prepare.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/attachments/cache.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/attachments/cache.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/files/service.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/files/service.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/files/policy.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/files/policy.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/files/types.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/files/types.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/providers/file_resources.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/providers/file_resources.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/provider_files.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/provider_files.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/file_stream_upload.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/file_stream_upload.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/file_deadlines.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/file_deadlines.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
 
-- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; Referenced input fingerprint sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; Product pin 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
+- llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; Referenced input fingerprint sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; Product pin 7333dbc3795b6bad893cb7287088d80931538630
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

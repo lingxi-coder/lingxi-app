@@ -100,19 +100,19 @@ pub async fn upload_model_file(
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/mod.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/mod.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/builder.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/attachments/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/attachments/resolve.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/attachments/prepare.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/attachments/prepare.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/client/attachments/cache.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/attachments/cache.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/files/service.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/files/service.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/files/policy.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/files/policy.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/files/types.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/files/types.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/src/providers/file_resources.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/providers/file_resources.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/provider_files.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/provider_files.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/file_stream_upload.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/file_stream_upload.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
-- [llm-client/tests/file_deadlines.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/file_deadlines.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/mod.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/mod.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/builder.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/attachments/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/attachments/resolve.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/attachments/prepare.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/attachments/prepare.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/attachments/cache.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/attachments/cache.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/files/service.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/files/service.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/files/policy.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/files/policy.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/files/types.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/files/types.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/providers/file_resources.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/providers/file_resources.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/provider_files.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/provider_files.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/file_stream_upload.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/file_stream_upload.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/tests/file_deadlines.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/file_deadlines.rs) — 已提交源码 (7333dbc3795b6bad893cb7287088d80931538630)
 
-- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; 所据文件指纹 sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; 产品固定版本 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
+- llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; 所据文件指纹 sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; 产品固定版本 7333dbc3795b6bad893cb7287088d80931538630
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

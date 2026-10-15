@@ -3,6 +3,7 @@ package com.lingxi.code.conversation
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
@@ -31,8 +32,9 @@ import kotlinx.coroutines.flow.flow
  *  - [EngineConversationSource] — the real in-process engine over UniFFI: owns
  *    a [MobileEngineHandle] built via [buildVoiceEngine], registers an
  *    `AndroidEventListener` whose `onEvent` pushes each inbound [ClientEvent]
- *    into an internal flow, and drives turns via
- *    `handle.submit(ClientCommand.SendPrompt(...))`.
+ *    into an internal flow, and drives ordinary turns via
+ *    `ClientCommand.SendPrompt` plus main slash commands via
+ *    `ClientCommand.RunSlashCommand`.
  *
  * This mirrors the iOS `ConversationSource` seam (apps/ios/native → ConversationSource.swift):
  * one protocol (`client-protocol`), one transport (UniFFI), one renderer, with a
@@ -253,6 +255,28 @@ interface ConversationSource {
     /** Release native handles and event pumps owned by this source. Idempotent. */
     fun close() {}
 }
+
+/**
+ * Sources whose host requires slash commands as an explicit protocol command.
+ * Side-chat sources intentionally do not implement this: their host recognizes
+ * slash text on the existing SendPrompt path.
+ */
+interface SlashCommandConversationSource {
+    /** Submit the exact UTF-16 command line as a correlated conversation turn. */
+    fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent>
+}
+
+/** Match the host parser's ECMAScript trim-before-slash rule without decoding UTF-16. */
+internal fun isSlashCommandLine(raw: String): Boolean {
+    var index = 0
+    while (index < raw.length && raw[index].isJavascriptWhitespace()) index++
+    return raw.getOrNull(index) == '/'
+}
+
+private fun Char.isJavascriptWhitespace(): Boolean =
+    this == '\u0009' || this == '\u000A' || this == '\u000B' || this == '\u000C' ||
+        this == '\u000D' || this == '\u0020' || this == '\u00A0' || this == '\uFEFF' ||
+        this == '\u2028' || this == '\u2029' || Character.getType(this) == Character.SPACE_SEPARATOR.toInt()
 
 internal interface BackgroundRetainableConversationSource {
     fun engineSourceForBackgroundRetention(): EngineConversationSource?

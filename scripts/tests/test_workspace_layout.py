@@ -22,26 +22,78 @@ class WorkspaceLayoutTests(unittest.TestCase):
             "apps/ios/ffi": "ios-framework",
             "apps/android/ffi": "android-aar",
             "apps/bridge-server": "bridge-server",
+            "apps/audio-provider": "audio-provider",
             "apps/cli/host": "cli",
             "apps/cli/tui-core": "tui-core",
             "apps/cli/tui": "tui",
         }
         self.assertEqual(set(workspace["workspace"]["members"]), set(expected))
+        self.assertNotIn(
+            "apps/audio-provider",
+            workspace["workspace"]["default-members"],
+            "audio-provider is a shared library pulled by its selected product hosts, not a default app target",
+        )
         manifests = {(ROOT / path / "Cargo.toml").resolve() for path in expected}
+        expected_local_dependencies = {
+            "apps/ios/ffi": {"audio-provider": "../../audio-provider"},
+            "apps/android/ffi": {"audio-provider": "../../audio-provider"},
+            "apps/bridge-server": {
+                "audio-provider": "../audio-provider",
+                "cli": "../cli/host",
+                "tui-core": "../cli/tui-core",
+            },
+            "apps/cli/host": {"tui": "../tui", "tui-core": "../tui-core"},
+            "apps/cli/tui": {"tui-core": "../tui-core"},
+        }
         for relative, name in expected.items():
             with self.subTest(member=relative):
                 directory = ROOT / relative
                 manifest = tomllib.loads((directory / "Cargo.toml").read_text())
                 self.assertEqual(manifest["package"]["name"], name)
                 self.assertTrue((directory / "src").is_dir())
+                local_dependencies = {}
                 for section in (manifest, *manifest.get("target", {}).values()):
                     for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
-                        for dependency in section.get(kind, {}).values():
+                        for alias, dependency in section.get(kind, {}).items():
                             if isinstance(dependency, dict) and "path" in dependency:
                                 target = (directory / dependency["path"] / "Cargo.toml").resolve()
                                 self.assertIn(target, manifests, f"local dependency escapes product members: {target}")
                                 if relative.startswith("packages/"):
                                     self.assertFalse(target.is_relative_to(ROOT / "apps"))
+                                local_dependencies[alias] = dependency["path"]
+                self.assertEqual(
+                    local_dependencies,
+                    expected_local_dependencies.get(relative, {}),
+                    f"local dependency edges changed for {relative}",
+                )
+
+        audio_provider = tomllib.loads((ROOT / "apps/audio-provider/Cargo.toml").read_text())
+        workspace_dependencies = workspace["workspace"]["dependencies"]
+        audio_sdk_dependencies = {
+            alias
+            for alias, dependency in audio_provider["dependencies"].items()
+            if isinstance(dependency, dict)
+            and dependency.get("workspace") is True
+            and isinstance(workspace_dependencies.get(alias), dict)
+            and "git" in workspace_dependencies[alias]
+        }
+        self.assertEqual(
+            audio_sdk_dependencies,
+            {
+                "core",
+                "llm-runtime",
+                "provider-config",
+                "http-client",
+                "orchestrator",
+                "lingxi-llm-client",
+            },
+            "audio-provider stays on the complete shared Harness/LLM SDK surface",
+        )
+        self.assertIn(
+            "realtime-websocket",
+            audio_provider["dependencies"]["lingxi-llm-client"]["features"],
+            "the shared audio provider requires the SDK realtime transport feature",
+        )
         # Folder consolidation must not turn independent SDKs into path/submodule dependencies.
         self.assertNotIn("patch", workspace)
         sdk_dependencies = [value for value in workspace["workspace"]["dependencies"].values()

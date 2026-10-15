@@ -171,6 +171,41 @@ class ConversationSourceRecoveryTest {
     }
 
     @Test
+    fun displayOnlySlashResultClearsOnlyItsMatchingDurableCheckpoint() {
+        val store = DurableConversationTurnClientStore(FakeSharedPreferences(), "scope")
+        store.begin(sessionId = "session-a", turnId = 42L)
+
+        clearDurableSlashCommandCheckpoint(
+            store,
+            ClientEvent.SlashCommandResult(
+                turnId = 41uL,
+                display = "stale".toClientTextDto(),
+                isError = true,
+            ),
+        )
+        assertEquals(42L, store.load()?.turnId)
+        clearDurableSlashCommandCheckpoint(
+            store,
+            ClientEvent.SlashCommandResult(
+                turnId = null,
+                display = "uncorrelated".toClientTextDto(),
+                isError = true,
+            ),
+        )
+        assertEquals(42L, store.load()?.turnId)
+
+        clearDurableSlashCommandCheckpoint(
+            store,
+            ClientEvent.SlashCommandResult(
+                turnId = 42uL,
+                display = "handled".toClientTextDto(),
+                isError = false,
+            ),
+        )
+        assertEquals(null, store.load())
+    }
+
+    @Test
     fun attachOwnershipCoalescesSameCursorAndAllowsUiTakeover() {
         val coordinator = DurableAttachCoordinator()
         val request = DurableAttachRequest("session-a", 42L, 0L)

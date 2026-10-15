@@ -88,10 +88,11 @@ class ChatViewModelReducerTest {
      * stream on its own — so the ViewModel stays in the streaming state, letting
      * the overlapping-submit guard and the cancel reset be asserted.
      */
-    private class RecordingSource : ConversationSource {
+    private class RecordingSource : ConversationSource, SlashCommandConversationSource {
         val submitted = mutableListOf<String>()
         val pending = mutableListOf<List<UShort>>()
         val commands = mutableListOf<ClientCommand>()
+        val slashRequests = mutableListOf<Pair<List<UShort>, Long>>()
         val cancelledTurnIds = mutableListOf<Long?>()
         var submittedTurnId: Long? = null
         val submittedPromptModes = mutableListOf<PromptModeDto?>()
@@ -108,6 +109,10 @@ class ChatViewModelReducerTest {
         override suspend fun submitClientCommand(command: ClientCommand) {
             commands += command
             if (command is ClientCommand.SendPrompt) pending += command.text.codeUnits.toList()
+        }
+        override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> {
+            slashRequests += raw.codeUnits.toList() to turnId
+            return never.asSharedFlow()
         }
         override fun submit(
             text: String,
@@ -446,6 +451,57 @@ class ChatViewModelReducerTest {
         assertEquals("  printf !!  ", queued.text.displayText())
         assertEquals(PromptModeDto.BASH, queued.promptMode)
         assertEquals("!  printf !!", vm.state.value.messages.last().text)
+    }
+
+    @Test
+    fun slashCommandOutput_isDisplayedAndSettlesItsTurn() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        vm.send("/help")
+        runCurrent()
+
+        val slashTurnId = source.slashRequests.single().second
+        assertTrue(source.submitted.isEmpty())
+        assertTrue(source.commands.none { it is ClientCommand.SendPrompt })
+        vm.reduce(ReplyEvent.CommandOutput("Available commands", isError = false, turnId = slashTurnId.toULong()))
+
+        assertEquals("Available commands", vm.state.value.messages.last().text)
+        assertFalse(vm.state.value.streaming)
+        assertNull(vm.state.value.error)
+        assertNull(vm.state.value.agentRun)
+    }
+
+    @Test
+    fun slashCommandFailure_displaysItsResultAndErrorState() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        val raw = "\uFEFF/unknown arg \uD800  "
+        vm.send(raw)
+        runCurrent()
+
+        val (rawUnits, slashTurnId) = source.slashRequests.single()
+        assertTrue(isSlashCommandLine(raw))
+        assertFalse(isSlashCommandLine("ordinary prompt /unknown"))
+        assertFalse(isSlashCommandLine("\u001C/unknown"))
+        assertEquals(raw.toClientTextDto().codeUnits, rawUnits)
+        assertTrue(source.submitted.isEmpty())
+        assertTrue(source.commands.none { it is ClientCommand.SendPrompt })
+        vm.reduce(ReplyEvent.CommandOutput("stale result", isError = true, turnId = (slashTurnId + 1).toULong()))
+        assertTrue(vm.state.value.streaming)
+        vm.reduce(ReplyEvent.CommandOutput("Unknown command", isError = true, turnId = slashTurnId.toULong()))
+
+        assertEquals("Unknown command", vm.state.value.messages.last().text)
+        assertEquals("Unknown command", vm.state.value.error?.message)
+        assertFalse(vm.state.value.streaming)
+    }
+
+    @Test
+    fun runSlashCommandClientCommand_preservesUtf16AndTurnIdentity() {
+        val raw = "/custom arg \uD800".toClientTextDto()
+        val command = runSlashCommandClientCommand(raw, 73L)
+
+        assertEquals(raw.codeUnits, command.raw.codeUnits)
+        assertEquals(73uL, command.turnId)
     }
 
     @Test

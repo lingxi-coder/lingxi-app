@@ -3,11 +3,15 @@ package com.lingxi.code.conversation
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.bindings.client.TurnOutcomeDto
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
@@ -151,6 +155,117 @@ class EngineReplyStreamTest {
             replies,
         )
         assertTrue("no events after terminal", replies.none { it == ReplyEvent.Delta("late") })
+    }
+
+    @Test
+    fun localSlashCommandResultTerminatesWithoutTurnEnded() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(
+                    ClientEvent.SlashCommandResult(
+                        turnId = 7uL,
+                        display = "Available commands".toClientTextDto(),
+                        isError = false,
+                    ),
+                )
+                emit(ClientEvent.TextDelta("must not leak".toClientTextDto()))
+            },
+            acceptSlashCommandResults = true,
+        )
+
+        assertEquals(
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.CommandOutput("Available commands", isError = false, turnId = 7uL),
+            ),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun slashCommandReplyFlowDropsOtherTurnResultsBeforeTerminalMapping() = runTest {
+        val matching = ClientEvent.SlashCommandResult(
+            turnId = 7uL,
+            display = "current result".toClientTextDto(),
+            isError = false,
+        )
+        val stream = mapReplyStream(
+            flowOf(
+                ClientEvent.SlashCommandResult(
+                    turnId = 8uL,
+                    display = "stale result".toClientTextDto(),
+                    isError = true,
+                ),
+                matching,
+                ClientEvent.TextDelta("must not leak".toClientTextDto()),
+            ).filter { slashCommandEventBelongsToTurn(it, 7L) },
+            acceptSlashCommandResults = true,
+        )
+
+        assertEquals(
+            listOf(ReplyEvent.Thinking, ReplyEvent.CommandOutput("current result", false, 7uL)),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun promptExpandingSlashCommandContinuesThroughOrdinaryTurnEnd() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(
+                    ClientEvent.TurnRecoveryState(
+                        TurnRecoverySnapshotDto(
+                            sessionId = "session-a",
+                            turnId = 7uL,
+                            state = TurnRecoveryStateDto.RUNNING,
+                            firstSequence = 1uL,
+                            lastSequence = 1uL,
+                            safeToResume = true,
+                            reason = null,
+                        ),
+                    ),
+                )
+                emit(ClientEvent.TurnStarted(turnId = 7uL))
+                emit(ClientEvent.TextDelta("expanded prompt reply".toClientTextDto()))
+                emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
+            },
+            acceptSlashCommandResults = true,
+        )
+
+        assertEquals(
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.Thinking,
+                ReplyEvent.Delta("expanded prompt reply"),
+                ReplyEvent.End,
+            ),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun slashResultDoesNotTerminateAnOrdinaryPromptStream() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(
+                    ClientEvent.SlashCommandResult(
+                        turnId = 99uL,
+                        display = "unrelated command result".toClientTextDto(),
+                        isError = false,
+                    ),
+                )
+                emit(ClientEvent.TextDelta("answer".toClientTextDto()))
+                emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
+            },
+        )
+
+        assertEquals(
+            listOf(ReplyEvent.Thinking, ReplyEvent.Delta("answer"), ReplyEvent.End),
+            stream.toList(),
+        )
     }
 
     /** Live usage appears while out-of-band configuration events stay filtered. */

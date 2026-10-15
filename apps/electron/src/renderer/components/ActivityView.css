@@ -1,0 +1,11 @@
+.activity-view .desktop-stage-feed { padding-top: 28px !important; }
+.activity-view .transcript-run-item { margin-block: 12px; }
+.activity-tool-group { font-size: 13px; line-height: 1.6; }
+.activity-tool-group > summary { display: flex; align-items: center; gap: 9px; min-height: 30px; cursor: pointer; list-style: none; border-radius: 6px; }
+.activity-tool-group > summary::-webkit-details-marker { display: none; }
+.activity-tool-group > summary > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.activity-tool-group > summary > svg { flex-shrink: 0; }
+.activity-tool-group[open] > summary > svg:last-child { transform: rotate(90deg); }
+.activity-tool-group > summary:hover { color: var(--text); }
+.activity-tool-group > summary:focus-visible { outline: 2px solid var(--desktop-accent); outline-offset: 3px; }
+.activity-tool-details { margin: 6px 0 0 8px; padding: 8px 0 4px 14px; border-left: 1px solid currentColor; }

@@ -232,20 +232,20 @@ In production, stop new admissions and await every active run future before shut
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/api.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/desktop/sdk.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/desktop/session_state.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/desktop/session_state.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- harness-runtime/crates/runtime/src/mobile/host.rs — Uncommitted source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- harness-runtime/crates/runtime/src/mobile/host/assembly.rs — Uncommitted source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- harness-runtime/crates/runtime/src/headless/mod.rs — Uncommitted source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- harness-runtime/crates/runtime/src/headless/config.rs — Uncommitted source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/headless/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/headless/host.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/headless/io.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/headless/io.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/headless/session.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/headless/session.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/permission/src/gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/permission/src/gate.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/session/src/storage.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/session/src/storage.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/session/src/resumer.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/session/src/resumer.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/api.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/desktop/sdk.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/desktop/session_state.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/desktop/session_state.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/mobile/host.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/mobile/host/assembly.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/mobile/host/assembly.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/headless/mod.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/headless/config.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/headless/config.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/headless/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/headless/host.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/headless/io.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/headless/io.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/headless/session.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/headless/session.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/permission/src/gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/permission/src/gate.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/session/src/storage.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/session/src/storage.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/session/src/resumer.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/session/src/resumer.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
 
-- harness-runtime: HEAD e18e31ef3fa0b739147f13db3c2c9e61e815a9f5; Referenced input fingerprint sha256:ee5e12368e31aa0021cee361f5c031d077c0371600228a09970bfd11e0bda8ab; Product pin 05f2e97050bcda8e36df4bc533267acb740b8bd9
+- harness-runtime: HEAD 1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d; Referenced input fingerprint sha256:d77506e15375f8653d0ae9198567f3dbeba4e931dce8226b58971350a635ae8a; Product pin 1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

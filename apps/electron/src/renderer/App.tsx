@@ -38,6 +38,7 @@ import './components/TerminalPanel.css';
 import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
 
 export function App() {
+  const [activityView, setActivityView] = useState(false);
   const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
@@ -51,6 +52,23 @@ export function App() {
     const timer = window.setTimeout(() => setVisibleModToast(null), toast.timeoutMs);
     return () => window.clearTimeout(timer);
   }, [bridge.conversation.modToast]);
+  const toggleActivityView = () => {
+    setPage('chat');
+    setActivityView(!activityView);
+    bridge.setRuntimeCenterOverviewOpen(!activityView);
+  };
+  useEffect(() => {
+    const toggle = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.altKey && !event.shiftKey && event.key.toLowerCase() === 'u' && !settingsRoute) {
+        event.preventDefault();
+        setPage('chat');
+        setActivityView(!activityView);
+        bridge.setRuntimeCenterOverviewOpen(!activityView);
+      }
+    };
+    window.addEventListener('keydown', toggle);
+    return () => window.removeEventListener('keydown', toggle);
+  }, [settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen]);
   const workspace = bridge.bootstrap?.workspace;
   const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
   const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
@@ -112,38 +130,44 @@ export function App() {
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
-        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.appBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.appBg, '--nav-panel-border': palette.border } as CSSProperties}
+        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border } as CSSProperties}
       >
-        <div className="drag-region desktop-window-drag-strip" aria-hidden="true" />
         <SettingsBackground active={settingsRoute !== null}>
           <BetaSidebar
             bridge={bridge}
+            activityView={activityView}
+            onToggleActivityView={toggleActivityView}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => setPage('scheduled')}
             onOpenChat={() => setPage('chat')}
             onOpenSettings={() => openSettings()}
-          />
-
+            topbar={
+              <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
+                <BetaTopBar
+                  bridge={bridge}
+                  terminalOpen={terminal.open}
+                  terminalAvailable={Boolean(terminalProject && window.lingxi?.terminal)}
+                  onToggleTerminal={terminal.toggle}
+                  runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
+                  onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
+                />
+              </div>
+            }
+          >
           <div className="desktop-workspace">
+          <div className="desktop-content" style={{ background: palette.stageBg }}>
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
           <ScheduledTasks bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => setPage('chat')} />
           </div>
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
-          <BetaTopBar
-            bridge={bridge}
-            terminalOpen={terminal.open}
-            terminalAvailable={Boolean(terminalProject && window.lingxi?.terminal)}
-            onToggleTerminal={terminal.toggle}
-            runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
-            onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
-          />
           <ErrorBanner bridge={bridge} />
           <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}
                 <Stage
+                  activityView={activityView}
                   onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
                   submittedPlans={bridge.sessionLoading ? [] : planCalls}
                   onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
@@ -243,6 +267,8 @@ export function App() {
           </div>
           <TerminalPanel controller={terminal} />
           </div>
+          </div>
+          </BetaSidebar>
         </SettingsBackground>
 
         {settingsRoute && (

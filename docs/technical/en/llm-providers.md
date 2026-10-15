@@ -187,20 +187,20 @@ The checked-in provider TOML and capability matrices describe current implemente
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- llm-client/src/client/store.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/client/resolve.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/configuration/model.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/configuration/model.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/configuration/sync.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/configuration/sync.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/protocol/provider.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/client/frozen_pricing.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/token_count/request.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/data/capability-matrix-protocols.json — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/data/capability-audit.json — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/data/providers/openai.toml — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/data/providers/anthropic.toml — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/data/providers/qwen.toml — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/tests/regions.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
+- [llm-client/src/client/store.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/store.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/resolve.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/configuration/model.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/configuration/model.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/configuration/sync.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/configuration/sync.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/provider.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/frozen_pricing.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/token_count/request.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/data/capability-matrix-protocols.json](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/capability-matrix-protocols.json) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/data/capability-audit.json](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/capability-audit.json) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/data/providers/openai.toml](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/providers/openai.toml) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/data/providers/anthropic.toml](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/providers/anthropic.toml) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/data/providers/qwen.toml](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/data/providers/qwen.toml) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/regions.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/regions.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
 
-- llm-client: HEAD ce32fd07402c13fbfcfa185942162a87907ea0a1; Referenced input fingerprint sha256:a78ca8575ddb70589a8cc04ff4f043825bd52db40d751181584ea10118bfe2b4; Product pin 87db6e234e32cbc251a128d6b370cdda36c4d0c0
+- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; Referenced input fingerprint sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; Product pin 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

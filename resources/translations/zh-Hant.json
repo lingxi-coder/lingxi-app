@@ -2037,5 +2037,10 @@
   "composer_effort_medium": "中",
   "composer_effort_high": "高",
   "composer_effort_xhigh": "超高",
-  "composer_effort_max": "最大"
+  "composer_effort_max": "最大",
+  "CFBundleDisplayName": "靈犀",
+  "NSCameraUsageDescription": "靈犀使用相機拍攝照片供模型分析。",
+  "NSMicrophoneUsageDescription": "靈犀使用麥克風進行語音心流輸入。",
+  "NSPhotoLibraryUsageDescription": "靈犀存取相簿以選擇圖片供模型分析。",
+  "NSSpeechRecognitionUsageDescription": "靈犀使用語音識別將你的語音轉寫為文字。"
 }

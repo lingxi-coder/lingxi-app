@@ -56,6 +56,7 @@ export interface Tokens {
   appBg: string;
   windowBg: string;
   sidebarBg: string;
+  sidebarPanelBg: string;
   stageBg: string;
   /** Layered background used only by the conversation transcript. */
   transcriptBg: string;
@@ -93,6 +94,7 @@ export const tokens = (dark: boolean): Tokens =>
         appBg: '#1c1c1e',
         windowBg: '#1e1e20',
         sidebarBg: '#272729',
+        sidebarPanelBg: '#2b2b2d',
         stageBg: '#1e1e20',
         transcriptBg: '#1e1e20',
         surface: '#2c2c2e',
@@ -123,6 +125,7 @@ export const tokens = (dark: boolean): Tokens =>
         appBg: '#e5e5e7',
         windowBg: '#ffffff',
         sidebarBg: '#f2f2f4',
+        sidebarPanelBg: '#f8f8fa',
         stageBg: '#ffffff',
         transcriptBg: '#ffffff',
         surface: '#ffffff',

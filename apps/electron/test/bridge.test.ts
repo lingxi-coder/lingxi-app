@@ -2878,12 +2878,13 @@ test('Fusion waits for all configured credentials and reuses cached keys', async
   });
   (runtime as any).activeWorkspace = '/workspace';
   (runtime as any).client = client;
+  (runtime as any).credentialRoutingSettings = {};
   (runtime as any).wireClient(client, 0);
   client.cancel = () => undefined;
   client.sendCommand = (command) => {
     calls.push(command.type);
-    if (command.type === 'refresh_listings') queueMicrotask(() => client.emit('event', {
-      type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
+    if (command.type === 'fusion_admin') queueMicrotask(() => client.emit('event', {
+      type: 'fusion_strategy_resolved', operation_id: command.command.operation_id, selection_json: JSON.stringify({ reference: { scope: 'user', id: 'default' }, name: 'Default', revision: 'aabb', config: {
         enabled: false,
         panelModels: [{ profile: 'kimi', model: 'kimi-k3' }, { profile: 'deepseek', model: 'deepseek-flash' }],
         analystModel: { profile: 'zai', model: 'glm-5.3-flash' },
@@ -2924,7 +2925,9 @@ test('cancel during Fusion credential hydration prevents delayed dispatch', asyn
   client.emit('event', { type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
     panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
   } }) });
+  (runtime as any).resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'default' }, name: 'Default', revision: 'aabb', config: { panelModels: [{ profile: 'kimi', model: 'kimi-k3' }] } });
   const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches' });
+  await new Promise(resolve => setImmediate(resolve));
   runtime.cancelTurn(undefined);
   key.resolve('test-key');
   await assert.rejects(pending, /interrupted/);
@@ -2980,7 +2983,9 @@ test('normal prompts hydrate Fusion providers only while Fusion is enabled', asy
     client.emit('event', { type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
       enabled, panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
     } }) });
+    (runtime as any).resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'default' }, name: 'Default', revision: 'aabb', config: { enabled, panelModels: [{ profile: 'kimi', model: 'kimi-k3' }] } });
     await runtime.sendPrompt('Use Fusion to compare approaches');
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(sent, true);
     assert.deepEqual(loads, enabled ? ['kimi'] : []);
   }
@@ -3005,6 +3010,7 @@ test('optional Fusion credential loading cannot delay or reject a normal prompt'
     client.emit('event', { type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
       enabled: true, panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
     } }) });
+    (runtime as any).resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'default' }, name: 'Default', revision: 'aabb', config: { enabled: true, panelModels: [{ profile: 'kimi', model: 'kimi-k3' }] } });
     const pending = Promise.resolve(runtime.sendPrompt('hello'));
     // Attach a handler before rejecting the delayed broker in the failure case.
     void pending.catch(() => {});

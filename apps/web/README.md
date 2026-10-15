@@ -12,6 +12,20 @@ npm run build
 
 入口为 `/`、`/docs` 和 `/docs/api-reference`。每个 SDK 文档页有独立 `/docs/<page-id>` 路由；部署 `dist/` 时须将页面请求回退到 `index.html`，同时正常提供静态资源与 `api-index.json`。
 
+## 发布到 Cloudflare
+
+`wrangler.jsonc` 将 `dist/` 作为静态资源发布到现有的 `lingxios-site` Worker，使用 `lingxios.net/*` 路由，并为文档路由启用单页应用回退。Cloudflare 管理该域名的 HTTPS 证书。
+
+```sh
+npm run docs:check
+npm run typecheck
+npm test
+npm run build
+npx wrangler@latest deploy
+```
+
+首次发布前需要运行 `npx wrangler@latest login` 登录有权管理该 Worker 的 Cloudflare 账户。若 `docs:check` 提示索引过期，先运行 `npm run docs:sync` 并检查生成的源码提交链接，再重新构建发布。
+
 ## 唯一正文与双语手册
 
 `src/data/docs/` 是人工维护的双语技术手册正文，涵盖整体架构、Harness、模型服务、存储、扩展、安全、后台协作、Mobile Linux、产品协议、多端与运维。官网渲染、搜索、页面复制与仓库 Markdown 使用同一份数据；表格、步骤、图示、代码标签和来源均参与同步。

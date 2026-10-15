@@ -3991,7 +3991,8 @@ async fn described_tui_commands(
                 ) {
                     Vec::new()
                 } else {
-                    command.argument_names
+                    command
+                        .argument_names
                         .iter()
                         .map(command_source_text)
                         .collect()
@@ -5818,7 +5819,8 @@ mod tests {
         }));
         assert!(catalog
             .iter()
-            .find(|entry| entry.name.code_units == "/local-command".encode_utf16().collect::<Vec<_>>())
+            .find(|entry| entry.name.code_units
+                == "/local-command".encode_utf16().collect::<Vec<_>>())
             .unwrap()
             .argument_names
             .is_empty());

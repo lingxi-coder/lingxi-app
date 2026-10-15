@@ -146,7 +146,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         <span dir="ltr">{`${view.label}(`}</span>
         {/* LRM-fenced: `direction: rtl` would otherwise send the leading `/` of
             an absolute path to the far right. */}
-        <span style={TITLE_STYLE}>{ltrAnchored(view.primary)}</span>
+        <span className="tool-row-argument" title={view.primary} style={{ ...TITLE_STYLE, direction: /web|fetch/.test(item.view.verb) ? 'ltr' : 'rtl' }}>{ltrAnchored(view.primary)}</span>
         <span dir="ltr">{`)${view.qualifier ?? ''}`}</span>
       </>
     )
@@ -166,7 +166,12 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     .join(' ');
   const permissionStatusText = headline ?? '';
   const permissionStatusInBody = permissionRequest && expandable && Boolean(permissionStatusText);
-  const summaryResponse = permissionStatusInBody
+  const compactError = item.status === 'error' && expandable && !permissionRequest;
+  const summaryResponse = compactError
+    ? 'Failed'
+    : item.tool === 'WebSearch' && item.status === 'done' && expandable
+    ? `Search completed${truncationNotice ? ' (truncated)' : ''}`
+    : permissionStatusInBody
     ? (truncationNotice ? '(truncated)' : '')
     : response;
   const permissionStatusTone = /denied|rejected|failed|cancel/i.test(permissionStatusText)
@@ -186,7 +191,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       <span
         className={item.status === 'running' ? 'tool-row-title running-sweep' : 'tool-row-title'}
         style={{
-          flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+          display: 'flex', alignItems: 'center', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
           fontSize: permissionRequest ? 14 : 13,
           lineHeight: permissionRequest ? 1.35 : 1.4,
@@ -199,12 +204,13 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
             {' · '}{view.sub_line.prefix}{view.sub_line.text}
           </span>
         )}
-        {summaryResponse && <span>{' · '}{summaryResponse}</span>}
       </span>
+      {summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}>{summaryResponse}</span>}
     </span>
   );
 
   const resultContent = <>
+    {compactError && body === undefined && headline && <div className="tool-result-error">{headline}</div>}
     {diff && (
       <div style={{ marginTop: 6 }}>
         <DiffView diff={diff} />
@@ -219,12 +225,13 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         </div>
       ) : (
         <pre
-          className="mono-code"
+          className={compactError ? 'tool-result-error' : 'mono-code tool-result-text'}
           style={{
             ...BODY_STYLE,
+            fontSize: compactError ? '0.8rem' : BODY_STYLE.fontSize,
             marginLeft: 0,
             background: t.windowBg,
-            color: item.status === 'error' ? t.danger : t.text2,
+            color: t.text2,
             border: `0.5px solid ${t.border}`,
           }}
         >
@@ -261,10 +268,10 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         maxWidth: 760,
         display: 'flex', flexDirection: 'column', gap: 4,
         padding: '2px 0', position: 'relative',
-        '--tool-label-color': item.status === 'error' ? t.danger : permissionRequest ? t.text2 : t.text3,
+        '--tool-label-color': item.status === 'error' || permissionRequest ? t.text2 : t.text3,
         '--tool-hover-background': t.surfaceHover,
-        '--tool-hover-color': item.status === 'error' ? t.danger : t.text,
-        '--tool-focus-color': item.status === 'error' ? t.danger : t.text,
+        '--tool-hover-color': t.text,
+        '--tool-focus-color': t.text,
         '--tool-icon-color': item.status === 'error' ? t.danger : permissionRequest ? t.accent : t.text3,
         '--permission-text': t.text2,
         '--permission-muted': t.text3,
@@ -285,6 +292,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           keepMounted={item.status !== 'running' && Boolean(modUiSessionId)}
           onToggle={() => onSetOpen(item.id, !isOpen)}
           summary={summary}
+          label={`${view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${summaryResponse ? ` · ${summaryResponse}` : ''}`}
           buttonClassName="tool-disclosure-trigger"
           buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: 40, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest

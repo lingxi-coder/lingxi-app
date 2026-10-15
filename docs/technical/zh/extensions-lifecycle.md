@@ -62,18 +62,18 @@ cargo test --locked -p test-harness --test mcp_lifecycle
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/tool-api/src/registry.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/skill-api/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/skill-api/src/lib.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/desktop/skill_loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/desktop/skill_loader.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/hooks/src/events.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/hooks/src/executor.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/hooks/src/executor.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/hooks/src/ssrf_guard.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/hooks/src/ssrf_guard.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/plugin/src/manager.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/plugin/src/manager.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- harness-runtime/crates/mcp/src/registry.rs — 未提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/mcp/src/registry/catalog_refresh.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/mcp/src/registry/catalog_refresh.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/lsp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/lsp/src/registry.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [harness-runtime/crates/runtime/src/mobile/mobile_lsp.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/src/mobile/mobile_lsp.rs) — 已提交源码 (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
+- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/tool-api/src/registry.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/skill-api/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/skill-api/src/lib.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/desktop/skill_loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/desktop/skill_loader.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/hooks/src/events.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/hooks/src/executor.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/hooks/src/executor.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/hooks/src/ssrf_guard.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/hooks/src/ssrf_guard.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/plugin/src/manager.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/plugin/src/manager.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/mcp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/mcp/src/registry.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/mcp/src/registry/catalog_refresh.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/mcp/src/registry/catalog_refresh.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/lsp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/lsp/src/registry.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [harness-runtime/crates/runtime/src/mobile/mobile_lsp.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/src/mobile/mobile_lsp.rs) — 已提交源码 (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
 
-- harness-runtime: HEAD e18e31ef3fa0b739147f13db3c2c9e61e815a9f5; 所据文件指纹 sha256:ee5e12368e31aa0021cee361f5c031d077c0371600228a09970bfd11e0bda8ab; 产品固定版本 05f2e97050bcda8e36df4bc533267acb740b8bd9
+- harness-runtime: HEAD 1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d; 所据文件指纹 sha256:d77506e15375f8653d0ae9198567f3dbeba4e931dce8226b58971350a635ae8a; 产品固定版本 1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -29,9 +29,9 @@ test('only live thinking remains in its original position; it never splits tools
 test('tool group identity survives status updates and additional calls', () => {
   assert.equal(transcriptRows([tool('a', 'running')], true)[0]?.id, transcriptRows([tool('a'), thought, tool('b')], true)[0]?.id);
 });
-function renderGroup(tools: ToolRunItem[], open = false) {
+function renderGroup(tools: ToolRunItem[], open = false, toolExpanded?: boolean) {
   return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) }, React.createElement(ToolGroup, {
-    group: { type: 'tool-group', id: 'group', tools }, open, toolOpen: () => undefined, onSetOpen: () => {},
+    group: { type: 'tool-group', id: 'group', tools }, open, toolOpen: () => toolExpanded, onSetOpen: () => {},
   })));
 }
 test('a lone summary-only tool stays one non-interactive row regardless of group expansion', () => {
@@ -59,8 +59,11 @@ test('multiple summary-only tools retain a disclosure to reveal earlier calls', 
   assert.match(renderGroup(items, true), /Read first/);
 });
 
-test('a lone tool with result details keeps its disclosure', () => {
-  assert.match(renderGroup([tool('details')]), /tool-group-trigger/);
+test('a lone tool with result details has one disclosure without a repeated group heading', () => {
+  const html = renderGroup([tool('details')]);
+  assert.match(html, /tool-disclosure-trigger/);
+  assert.equal((html.match(/<button/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /tool-group-trigger/);
 });
 test('running groups show only active calls, even when disclosure was open', () => {
   const html = renderGroup([tool('finished'), tool('active', 'running')], true);
@@ -76,7 +79,8 @@ test('settled groups collapse to one row, expose failures and expand summaries',
   assert.doesNotMatch(closed, /Summary a|Summary b/);
   const opened = renderGroup(tools, true);
   assert.match(opened, /Summary a/);
-  assert.match(opened, /Summary b/);
+  assert.match(opened, /Failed/);
+  assert.doesNotMatch(opened, /Summary b/);
   assert.doesNotMatch(opened, /Output a|Output b/);
 });
 
@@ -92,10 +96,11 @@ test('a successful final tool keeps the group neutral while counting earlier fai
   }
 });
 
-test('a failed final tool still marks the group as failed', () => {
+test('a failed final tool marks only the failure status in red', () => {
   const html = renderGroup([tool('success'), tool('last', 'error')]);
   const trigger = html.match(/<button\b[^>]*>/)?.[0];
-  assert.ok(trigger?.includes(`color:${tokens(true).danger}`));
+  assert.ok(trigger?.includes(`color:${tokens(true).text3}`));
+  assert.ok(html.includes(`color:${tokens(true).danger}`));
   assert.match(html, /Read last · 1 failed · 2 tools/);
 });
 
@@ -128,4 +133,32 @@ test('summary follows the last call primary argument rather than its fallback ti
   const html = renderGroup([last]);
   assert.match(html, /Run\(npm run typecheck\) in desktop/);
   assert.doesNotMatch(html, /Check TypeScript/);
+});
+
+
+test('a single failed search reveals its full error only in its own disclosure', () => {
+  const error = 'Error: WebSearch is not supported by the selected model/profile.';
+  const item: ToolRunItem = { ...tool('failed-search', 'error'), tool: 'WebSearch', view: { verb: 'web', label: 'Web Search', title: 'Search', primary: '武汉 今日天气' }, result: { headline: error, body: error, body_lines: 1, body_truncated: false } };
+  const closed = renderGroup([item], true, false);
+  assert.equal((closed.match(/<button/g) ?? []).length, 1);
+  assert.doesNotMatch(closed, /not supported|tool-group-trigger/);
+  assert.match(closed, /Failed/);
+  const opened = renderGroup([item], false, true);
+  assert.equal((opened.match(/not supported/g) ?? []).length, 1);
+  assert.match(opened, /tool-result-error/);
+  assert.match(opened, /aria-expanded="true"/);
+});
+
+ test('restored search result payload stays in the body, not the compact headline', () => {
+  const payload = 'Web search results for query: "武汉" Links: [{"title":"Weather","url":"https://example.test"}]';
+  const item: ToolRunItem = { ...tool('restored-search'), tool: 'WebSearch',
+    view: { verb: 'web', label: 'Web Search', title: 'Web Search', primary: '武汉' },
+    result: { headline: payload, body: payload, body_lines: 2, body_truncated: false },
+  };
+  const closed = renderGroup([item]);
+  assert.match(closed, /Search completed/);
+  assert.doesNotMatch(closed, /Links:|example.test/);
+  const opened = renderGroup([item], false, true);
+  assert.match(opened, /Search completed/);
+  assert.match(opened, /example.test/);
 });

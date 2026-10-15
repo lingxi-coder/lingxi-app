@@ -1,3 +1,4 @@
+@import './components/ActivityView.css';
 @import './components/AskUserQuestion.css';
 @import './components/settings/SettingsScreen.css';
 @import "./components/settings/pages/ConfigurationPage.css";
@@ -44,35 +45,57 @@ body {
   --desktop-toolbar-height: 44px;
   isolation: isolate;
 }
-.desktop-window-drag-strip {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  right: 0;
-  left: 116px;
-  height: 38px;
-}
 .desktop-main {
   overflow: hidden;
-  border-radius: 0;
-  box-shadow: -1px 0 0 var(--nav-panel-border);
 }
 .desktop-navigation {
+  --desktop-toolbar-height: 44px;
+  --desktop-shell-gap: 8px;
+  --desktop-rail-width: 52px;
   z-index: 2;
   position: relative;
   height: 100%;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
   background: var(--rail-material);
 }
+.desktop-navigation[data-workspace='true'] { flex: 1; }
+.desktop-window-toolbar { display: flex; flex: 0 0 var(--desktop-toolbar-height); min-width: 0; }
+.desktop-body { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.desktop-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 calc(var(--desktop-rail-width) + var(--desktop-shell-gap) + var(--desktop-sidebar-width));
+  min-width: 0;
+  padding: 0 12px 0 116px;
+  transition: flex-basis 170ms cubic-bezier(.2, 0, 0, 1);
+}
+.desktop-navigation:has(.desktop-sidebar[data-resizing='true']) .desktop-sidebar-brand { transition: none; }
+.desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand { flex-basis: 164px; }
+.desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand > :not(.desktop-rail-toggle) { display: none; }
+.desktop-surface {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin: var(--desktop-shell-gap);
+  overflow: hidden;
+  border-radius: 16px;
+  isolation: isolate;
+  background: var(--desktop-surface);
+  box-shadow: 0 0 0 .5px var(--nav-panel-border);
+}
 .desktop-nav-rail {
-  width: 52px;
-  padding: 46px 6px 12px;
+  width: var(--desktop-rail-width);
+  padding: var(--desktop-shell-gap) 6px 12px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  flex: 0 0 52px;
+  flex: 0 0 var(--desktop-rail-width);
 }
 .desktop-rail-button {
   width: 40px;
@@ -94,12 +117,10 @@ body {
   color: var(--text);
 }
 .desktop-rail-toggle {
-  position: absolute;
-  z-index: 3;
-  top: 12px;
-  left: 78px;
   width: 32px;
   height: 32px;
+  flex: 0 0 32px;
+  border-radius: 8px;
 }
 .desktop-rail-button[data-active='true'] {
   color: var(--desktop-accent);
@@ -175,9 +196,17 @@ body {
   box-shadow: 0 1px 3px rgb(0 0 0 / 4%), inset 0 0 0 1px var(--nav-panel-border);
 }
 .desktop-sidebar-list { scrollbar-gutter: stable; }
-.desktop-workspace { background: var(--rail-material); }
+.desktop-workspace { background: transparent; }
+.desktop-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 @media (prefers-reduced-motion: reduce) {
-  .desktop-sidebar, .desktop-rail-button { transition: none; }
+  .desktop-sidebar, .desktop-sidebar-brand, .desktop-rail-button { transition: none; }
 }
 .desktop-sidebar-brand { font-family: var(--font-sans-default); user-select: none; }
 .desktop-sidebar-brand button { -webkit-app-region: no-drag; }

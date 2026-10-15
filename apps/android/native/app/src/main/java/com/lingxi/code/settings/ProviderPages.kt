@@ -735,8 +735,12 @@ fun ProviderEditPage(
                                         } else {
                                             keyDraft = ""
                                             credentialMessage = resources.getString(R.string.settings_provider_saved_applied)
-                                            onReconnectEngine()
-                                            store.markLlmConfigurationApplied()
+                                            // The engine reads provider keys per request, so a saved key is
+                                            // already live; only a pending launch-config change needs a rebuild.
+                                            if (state.pendingLlmProviderChanges.isNotEmpty()) {
+                                                onReconnectEngine()
+                                                store.markLlmConfigurationApplied()
+                                            }
                                             applying = false
                                         }
                                     }
@@ -778,11 +782,7 @@ fun ProviderEditPage(
                                     store.saveProviderCredential(kind, providerId, keyDraft) { error ->
                                         credentialMessage =
                                             error?.let { resources.getString(R.string.settings_provider_save_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_saved_secure)
-                                        if (error == null) {
-                                            keyDraft = ""
-                                            onReconnectEngine()
-                                            store.markLlmConfigurationApplied()
-                                        }
+                                        if (error == null) keyDraft = ""
                                         credentialBusy = false
                                     }
                                 }
@@ -814,10 +814,6 @@ fun ProviderEditPage(
                                     store.clearProviderCredential(kind, providerId) { error ->
                                         credentialMessage =
                                             error?.let { resources.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_cleared)
-                                        if (error == null) {
-                                            onReconnectEngine()
-                                            store.markLlmConfigurationApplied()
-                                        }
                                         credentialBusy = false
                                     }
                                 }

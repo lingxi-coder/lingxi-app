@@ -1,3 +1,4 @@
+import { ActivityToolGroup } from './ActivityToolGroup';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
@@ -286,6 +287,7 @@ import { visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
+  activityView?: boolean;
   onReviewFiles?(id: string, files: readonly TurnFileChange[], path?: string): void;
   submittedPlans?: readonly SubmittedPlan[];
   onOpenPlan?: (id: string) => void;
@@ -342,7 +344,7 @@ interface StageProps {
  */
 const BOTTOM_SLACK = 24;
 
-export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -597,7 +599,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
   }, [captureAnchor, measureFollow, restoreAnchor, syncTail]);
 
   return (
-    <div ref={stageRef} className="desktop-stage" tabIndex={-1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={() => {
+    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={-1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={() => {
       // Arrives before the scroll it causes, and in either direction: the
       // reader is driving, so no layout change may move the viewport under them
       // until the gesture has settled.
@@ -631,6 +633,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
+        {activityView && <div className="activity-view-heading" style={{ color: t.text3, borderBottom: `1px solid ${t.border}`, paddingBottom: 16, marginBottom: 12, fontSize: 13 }} role="status">{running ? 'Working' : 'Activity'}{agents?.some(agent => agent.agent_id !== 'main' && agent.status === 'running') ? ' · Subagents working' : ''}</div>}
         {rows.length === 0 && !running && !agents?.some((agent) => agent.agent_id !== 'main') && (
           <div
             className="desktop-empty-state-wrap"
@@ -678,6 +681,9 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
           inserted, which is exactly what a streaming transcript does.
         */}
         {rows.map((item) => {
+          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
+            return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
+          }
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
           if (item.type === 'agents') return <TranscriptAgents key={item.id} agents={item.agents} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
           if (item.type === 'narration') {

@@ -2033,6 +2033,18 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun reconnect_handedTheLiveSourceBack_keepsItOpen() = runTest(dispatcher) {
+        val original = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = 1)
+
+        vm.ensureSource(2) { original }
+        runCurrent()
+
+        assertEquals("the live source must not be destroyed as its own replacement", 0, original.closeCount)
+        assertNull(vm.state.value.error)
+    }
+
+    @Test
     fun sourceGeneration_ignoresRestoredOlderToken() = runTest(dispatcher) {
         val original = CloseTrackingSource()
         val vm = ChatViewModel(source = original, sourceGeneration = 7)

@@ -100,21 +100,21 @@ client.embeddings().embed uses an independent configured route with ServiceSetti
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/inference.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/request_controls.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/structured.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/codecs/inference.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/codecs/structured.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/codecs/cache.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/client/decisions.rs — Uncommitted source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/decision.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/embeddings/mod.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/token_count/request.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/providers/openrouter/response_cache.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/structured_output.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/decisions.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/embeddings.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
+- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/inference.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/request_controls.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/structured.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/codecs/inference.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/codecs/structured.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/codecs/cache.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/decisions.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/decision.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/embeddings/mod.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/token_count/request.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/providers/openrouter/response_cache.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/structured_output.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/decisions.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/embeddings.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
 
-- llm-client: HEAD ce32fd07402c13fbfcfa185942162a87907ea0a1; Referenced input fingerprint sha256:a78ca8575ddb70589a8cc04ff4f043825bd52db40d751181584ea10118bfe2b4; Product pin 87db6e234e32cbc251a128d6b370cdda36c4d0c0
+- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; Referenced input fingerprint sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; Product pin 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

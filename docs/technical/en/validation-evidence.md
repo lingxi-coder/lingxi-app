@@ -58,21 +58,21 @@ Native compatibility reports belong to specific versions, distributions, setting
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/.github/workflows/ci.yml](https://github.com/lingxi-coder/lingxi-app/blob/2c1528a557a52d8652f4cee2d9bb3e46f7d569d6/.github/workflows/ci.yml) — Committed source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- [lingxi-app/scripts/check-all.sh](https://github.com/lingxi-coder/lingxi-app/blob/2c1528a557a52d8652f4cee2d9bb3e46f7d569d6/scripts/check-all.sh) — Committed source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- lingxi-app/.github/workflows/documentation.yml — Uncommitted source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- lingxi-app/apps/web/scripts/sync-docs.mjs — Uncommitted source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- lingxi-app/apps/web/scripts/generate-handbook.ts — Uncommitted source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- lingxi-app/apps/web/scripts/generate-doc-baseline.py — Uncommitted source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- lingxi-app/apps/web/scripts/check-doc-examples.py — Uncommitted source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- lingxi-app/apps/web/examples/sdk_tools.py — Uncommitted source (2c1528a557a52d8652f4cee2d9bb3e46f7d569d6)
-- [harness-runtime/crates/runtime/tests/sdk_surface.rs](https://github.com/lingxi-coder/harness-runtime/blob/e18e31ef3fa0b739147f13db3c2c9e61e815a9f5/crates/runtime/tests/sdk_surface.rs) — Committed source (e18e31ef3fa0b739147f13db3c2c9e61e815a9f5)
-- [llm-client/tests/downstream-docs/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/downstream-docs/src/lib.rs) — Committed source (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [mobile-linux-runtime/scripts/check-all.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/eb82dcd73080bc35d0236abc15209a3bbee9f52c/scripts/check-all.sh) — Committed source (eb82dcd73080bc35d0236abc15209a3bbee9f52c)
+- [lingxi-app/.github/workflows/ci.yml](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/.github/workflows/ci.yml) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/scripts/check-all.sh](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/scripts/check-all.sh) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/.github/workflows/documentation.yml](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/.github/workflows/documentation.yml) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/apps/web/scripts/sync-docs.mjs](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/apps/web/scripts/sync-docs.mjs) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/apps/web/scripts/generate-handbook.ts](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/apps/web/scripts/generate-handbook.ts) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/apps/web/scripts/generate-doc-baseline.py](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/apps/web/scripts/generate-doc-baseline.py) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/apps/web/scripts/check-doc-examples.py](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/apps/web/scripts/check-doc-examples.py) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [lingxi-app/apps/web/examples/sdk_tools.py](https://github.com/lingxi-coder/lingxi-app/blob/ed180d70d6dc36d7bed12c654620d0bccb231883/apps/web/examples/sdk_tools.py) — Committed source (ed180d70d6dc36d7bed12c654620d0bccb231883)
+- [harness-runtime/crates/runtime/tests/sdk_surface.rs](https://github.com/lingxi-coder/harness-runtime/blob/1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d/crates/runtime/tests/sdk_surface.rs) — Committed source (1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d)
+- [llm-client/tests/downstream-docs/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/downstream-docs/src/lib.rs) — Committed source (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [mobile-linux-runtime/scripts/check-all.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/a632e878dc597dc41f6a3712c5a5cdebb794c99c/scripts/check-all.sh) — Committed source (a632e878dc597dc41f6a3712c5a5cdebb794c99c)
 
-- lingxi-app: HEAD 2c1528a557a52d8652f4cee2d9bb3e46f7d569d6; Referenced input fingerprint sha256:3e09a114ea3046bd62d2333be94726f0169efbe46b3cd64422178d54079069f9
-- harness-runtime: HEAD e18e31ef3fa0b739147f13db3c2c9e61e815a9f5; Referenced input fingerprint sha256:ee5e12368e31aa0021cee361f5c031d077c0371600228a09970bfd11e0bda8ab; Product pin 05f2e97050bcda8e36df4bc533267acb740b8bd9
-- llm-client: HEAD ce32fd07402c13fbfcfa185942162a87907ea0a1; Referenced input fingerprint sha256:a78ca8575ddb70589a8cc04ff4f043825bd52db40d751181584ea10118bfe2b4; Product pin 87db6e234e32cbc251a128d6b370cdda36c4d0c0
-- mobile-linux-runtime: HEAD eb82dcd73080bc35d0236abc15209a3bbee9f52c; Referenced input fingerprint sha256:78374cc6ec701b4b4e082679fb8033d488b6379c3345bd5d03cd383177c3daf4; Product pin b65f8856d773d27ebf73b0cade907884d3080704
+- lingxi-app: HEAD ed180d70d6dc36d7bed12c654620d0bccb231883; Referenced input fingerprint sha256:ef51a25cc818084d97b831957cb840fd84e1a4666089524025c7544ee886acda
+- harness-runtime: HEAD 1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d; Referenced input fingerprint sha256:d77506e15375f8653d0ae9198567f3dbeba4e931dce8226b58971350a635ae8a; Product pin 1c08d9265d9a4fbf20d59c0776ddbfb96cb03e4d
+- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; Referenced input fingerprint sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; Product pin 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
+- mobile-linux-runtime: HEAD a632e878dc597dc41f6a3712c5a5cdebb794c99c; Referenced input fingerprint sha256:de6f69b8671150c8682b938faea726c0360978b776acaa4c077b257b13792174; Product pin b65f8856d773d27ebf73b0cade907884d3080704
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

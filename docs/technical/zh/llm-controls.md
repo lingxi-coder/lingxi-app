@@ -100,21 +100,21 @@ client.embeddings().embed 使用独立配置路由，并遵守 ServiceSetting �
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/inference.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/request_controls.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/structured.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/codecs/inference.rs — 未提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/codecs/structured.rs — 未提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/codecs/cache.rs — 未提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- llm-client/src/client/decisions.rs — 未提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/protocol/decision.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/embeddings/mod.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/token_count/request.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/src/providers/openrouter/response_cache.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/structured_output.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/decisions.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
-- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/ce32fd07402c13fbfcfa185942162a87907ea0a1/tests/embeddings.rs) — 已提交源码 (ce32fd07402c13fbfcfa185942162a87907ea0a1)
+- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/inference.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/request_controls.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/structured.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/codecs/inference.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/codecs/structured.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/codecs/cache.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/client/decisions.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/protocol/decision.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/embeddings/mod.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/token_count/request.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/src/providers/openrouter/response_cache.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/structured_output.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/decisions.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
+- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/179d336607b2367cf0709a78c760c9333ec25bb3/tests/embeddings.rs) — 已提交源码 (179d336607b2367cf0709a78c760c9333ec25bb3)
 
-- llm-client: HEAD ce32fd07402c13fbfcfa185942162a87907ea0a1; 所据文件指纹 sha256:a78ca8575ddb70589a8cc04ff4f043825bd52db40d751181584ea10118bfe2b4; 产品固定版本 87db6e234e32cbc251a128d6b370cdda36c4d0c0
+- llm-client: HEAD 179d336607b2367cf0709a78c760c9333ec25bb3; 所据文件指纹 sha256:64423ae6bcb4985bab0883b693378509bb7fe060e59bf4facafedcb4d2f32293; 产品固定版本 450d52b12b6d88a377ab3332c3b8a6a1820e2b7c
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

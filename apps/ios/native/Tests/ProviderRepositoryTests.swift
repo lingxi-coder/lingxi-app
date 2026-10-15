@@ -682,7 +682,7 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(reconnectSnapshots[0], repository.makeLaunchSnapshot())
     }
 
-    func testApplyDraftCredentialOnlyStillReconnectsWhenLaunchSnapshotIsUnchanged() async throws {
+    func testApplyDraftCredentialOnlyDoesNotReconnectWhenLaunchSnapshotIsUnchanged() async throws {
         let recorder = CommandRecorder()
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let id = repository.addProfile(presetID: "openai")
@@ -723,8 +723,9 @@ final class ProviderRepositoryTests: XCTestCase {
         let applied = await apply.value
         XCTAssertTrue(applied)
         XCTAssertEqual(repository.makeLaunchSnapshot(), before)
-        XCTAssertEqual(reconnectSnapshots.count, 1)
-        XCTAssertEqual(reconnectSnapshots[0], before)
+        // The key is stored through the engine's credential store, which is
+        // read per request: no rebuild.
+        XCTAssertTrue(reconnectSnapshots.isEmpty)
     }
 
     func testEditingAndDiscardingDraftDoesNotChangeSavedSnapshot() throws {
@@ -1574,6 +1575,38 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertEqual(logoutsRequested, ["anthropic"])
     }
 
+    /// OAuth tokens are read per request from the engine's credential store, so
+    /// signing in or out of an already-enabled profile must not rebuild it.
+    func testOAuthLoginAndLogoutDoNotReconnectWhenLaunchSnapshotIsUnchanged() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let chatgpt = repository.addProfile(presetID: "openai-chatgpt")
+        var reconnects = 0
+        repository.configure(
+            submitCommand: nil,
+            applyReconnect: { _ in reconnects += 1 },
+            oauthLogin: { provider in
+                ProviderOAuthState(
+                    provider: provider,
+                    signedIn: true,
+                    accountLabel: nil,
+                    accountID: nil,
+                    organizationID: nil,
+                    fedramp: false
+                )
+            },
+            oauthLogout: { _ in }
+        )
+        let before = repository.makeLaunchSnapshot()
+
+        await repository.loginOAuth(for: chatgpt)
+        XCTAssertEqual(repository.state(for: chatgpt)?.oauthState?.signedIn, true)
+        await repository.logoutOAuth(for: chatgpt)
+        XCTAssertNil(repository.state(for: chatgpt)?.oauthState)
+
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(reconnects, 0)
+    }
+
     /// `loginOAuth` resolves the row index, then awaits the reconnect handler.
     /// This class is `@MainActor`, which serializes but does NOT freeze state
     /// across a suspension: a `removeProfile` landing inside that window shifts
@@ -1585,6 +1618,12 @@ final class ProviderRepositoryTests: XCTestCase {
         let removed = repository.addProfile(presetID: "openai")
         let target = repository.addProfile(presetID: "openai-chatgpt")
         let bystander = repository.addProfile(presetID: "deepseek")
+        // Signing in flips a disabled profile on, which changes the launch
+        // snapshot — the only OAuth case that still rebuilds the engine.
+        repository.updateProfile(target) {
+            $0.enabled = false
+            $0.isDefault = false
+        }
 
         // The stale index must point at a row that still EXISTS after the
         // removal, so the defect shows up as a wrong-row write rather than a

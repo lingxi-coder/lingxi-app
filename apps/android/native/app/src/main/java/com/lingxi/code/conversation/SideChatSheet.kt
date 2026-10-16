@@ -5,10 +5,13 @@ import android.util.Base64
 import androidx.compose.ui.graphics.asImageBitmap
 import com.lingxi.code.vision.rememberCameraCapture
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.testTag
+import com.lingxi.code.components.LXIcon
+import com.lingxi.code.components.LXIconName
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
@@ -19,63 +22,53 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean) {
+internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean, onCreate: () -> Unit) {
     val chats by manager.chats.collectAsState()
     val selected by manager.selected.collectAsState()
     val visible by manager.visible.collectAsState()
     val error by manager.error.collectAsState()
+    val creating by manager.isCreating.collectAsState()
     val scope = rememberCoroutineScope()
+    var controlsOpen by remember(selected) { mutableStateOf(false) }
     if (!visible) return
     ModalBottomSheet(onDismissRequest = { manager.visible.value = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxHeight(0.94f).imePadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                LazyRow(Modifier.weight(1f)) {
-                    itemsIndexed(chats, key = { _, entry -> entry.source.sideId }) { index, entry ->
-                        TextButton(onClick = { manager.selected.value = entry }) { Text(stringResource(R.string.side_chat_number, index + 1)) }
+        Column(Modifier.fillMaxHeight(0.94f).imePadding().testTag("side-chat.sheet")) {
+            var selectorOpen by remember { mutableStateOf(false) }
+            TopAppBar(
+                title = { Text(selected?.let { stringResource(R.string.side_chat_number, chats.indexOf(it) + 1) }
+                    ?: stringResource(R.string.side_chats_title), maxLines = 1,
+                    style = MaterialTheme.typography.titleMedium) },
+                navigationIcon = {
+                    Box {
+                        IconButton(onClick = { selectorOpen = true }, enabled = chats.isNotEmpty(), modifier = Modifier.testTag("side-chat.select")) {
+                            LXIcon(LXIconName.SideChat, size = 22.dp,
+                                contentDescription = stringResource(R.string.side_chats_title))
+                        }
+                        DropdownMenu(expanded = selectorOpen, onDismissRequest = { selectorOpen = false }) {
+                            chats.forEachIndexed { index, entry ->
+                                DropdownMenuItem(text = { Text(stringResource(R.string.side_chat_number, index + 1)) },
+                                    onClick = { manager.selected.value = entry; selectorOpen = false })
+                            }
+                        }
                     }
-                }
-                selected?.let { entry ->
-                    val closing by entry.closing.collectAsState()
-                    TextButton(onClick = { manager.end(entry) }) { Text(stringResource(if (closing) R.string.side_chat_retry_end else R.string.side_chat_end)) }
-                }
-            }
+                },
+                actions = {
+                    IconButton(onClick = onCreate, enabled = !creating, modifier = Modifier.testTag("side-chat.create")) {
+                        LXIcon(LXIconName.Plus, size = 22.dp, contentDescription = stringResource(R.string.side_chat_new))
+                    }
+                    selected?.let { SideChatControls(it, manager, controlsOpen, { controlsOpen = it }) }
+                    IconButton(onClick = { manager.visible.value = false }, modifier = Modifier.testTag("side-chat.hide")) {
+                        LXIcon(LXIconName.X, size = 22.dp, contentDescription = stringResource(R.string.side_chat_hide))
+                    }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0),
+            )
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
             selected?.let { entry ->
                 key(entry) {
                     val state by entry.viewModel.state.collectAsState()
-                    val controls by entry.source.controls.collectAsState()
                     val closing by entry.closing.collectAsState()
-                    var controlMenu by remember { mutableStateOf(false) }
-                    Box {
-                        TextButton(onClick = { controlMenu = true }, enabled = controls != null && !closing) {
-                            Text(controls?.reasoning?.effective?.let(::reasoningLabel) ?: stringResource(R.string.side_chat_controls))
-                        }
-                        DropdownMenu(expanded = controlMenu, onDismissRequest = { controlMenu = false }) {
-                            controls?.let { current ->
-                                current.reasoning.spec.options.forEach { option ->
-                                    DropdownMenuItem(text = { Text(reasoningLabel(option.selection)) },
-                                        enabled = current.reasoning.spec.editable,
-                                        onClick = {
-                                            controlMenu = false
-                                            scope.launch {
-                                                runCatching { entry.source.submitClientCommand(ClientCommand.SetReasoningSelection(option.selection)) }
-                                                    .onFailure { manager.error.value = it.message }
-                                            }
-                                        })
-                                }
-                                current.permission.options.forEach { option ->
-                                    DropdownMenuItem(text = { Text(option.mode) }, enabled = option.available,
-                                        onClick = {
-                                            controlMenu = false
-                                            scope.launch {
-                                                runCatching { entry.source.setPermissionMode(option.mode) }
-                                                    .onFailure { manager.error.value = it.message }
-                                            }
-                                        })
-                                }
-                            }
-                        }
-                    }
+                    val controls by entry.source.controls.collectAsState()
                     val permission by entry.viewModel.pendingPermission.collectAsState()
                     val draft by entry.draft.collectAsState()
                     val attachment by entry.attachment.collectAsState()
@@ -114,7 +107,9 @@ internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean) {
                         onSendPreflight = { text, attachment -> entry.viewModel.admitComposerSend(text, attachment != null) },
                         onNewChat = { manager.visible.value = false },
                         onSelectModel = entry.viewModel::selectModel,
-                        isDark = isDark, modifier = Modifier.weight(1f),
+                        isDark = isDark, modifier = Modifier.weight(1f), showTopBar = false, showNewChatControls = false,
+                        effectivePermissionMode = controls?.permission?.effective ?: "auto",
+                        onOpenPermissionSettings = { controlsOpen = true },
                         draft = draft, onDraftChange = { entry.draft.value = it },
                         pendingPermission = permission != null,
                         voiceInputSupported = false, voiceConversationSupported = false,
@@ -130,6 +125,40 @@ internal fun SideChatSheet(manager: SideChatManager, isDark: Boolean) {
                         onDeny = { id -> scope.launch { entry.viewModel.denyPermission(id) } })
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SideChatControls(entry: SideChatEntry, manager: SideChatManager, open: Boolean, onOpenChange: (Boolean) -> Unit) {
+    val controls by entry.source.controls.collectAsState()
+    val closing by entry.closing.collectAsState()
+    val scope = rememberCoroutineScope()
+    Box {
+        IconButton(onClick = { onOpenChange(true) }) {
+            Icon(Icons.Outlined.MoreHoriz, contentDescription = stringResource(R.string.side_chat_controls), modifier = Modifier.size(22.dp))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { onOpenChange(false) }) {
+            controls?.let { current ->
+                current.reasoning.spec.options.forEach { option ->
+                    DropdownMenuItem(text = { Text(reasoningLabel(option.selection)) },
+                        enabled = current.reasoning.spec.editable && !closing,
+                        onClick = { onOpenChange(false); scope.launch {
+                            runCatching { entry.source.submitClientCommand(ClientCommand.SetReasoningSelection(option.selection)) }
+                                .onFailure { manager.error.value = it.message }
+                        } })
+                }
+                current.permission.options.forEach { option ->
+                    DropdownMenuItem(text = { Text(option.mode) }, enabled = option.available && !closing,
+                        onClick = { onOpenChange(false); scope.launch {
+                            runCatching { entry.source.setPermissionMode(option.mode) }
+                                .onFailure { manager.error.value = it.message }
+                        } })
+                }
+                HorizontalDivider()
+            }
+            DropdownMenuItem(text = { Text(stringResource(if (closing) R.string.side_chat_retry_end else R.string.side_chat_end),
+                color = MaterialTheme.colorScheme.error) }, onClick = { onOpenChange(false); manager.end(entry) })
         }
     }
 }

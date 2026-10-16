@@ -24,11 +24,11 @@ class AskUserQuestionSummaryUiTest {
     @Test fun selectionSubmitsOriginalQuestionKey() {
         val question = "同时纳入原生实时对话？"
         val answer = "同时纳入"
-        var submitted: Map<String, String>? = null
+        var submitted: com.lingxi.code.bindings.client.AskUserQuestionAnswersDto? = null
         val request = com.lingxi.code.bindings.client.AskUserQuestionRequestDto(
             requestId = 42uL,
             questions = listOf(com.lingxi.code.bindings.client.AskQuestionDto(
-                question, "范围", listOf(com.lingxi.code.bindings.client.AskOptionDto(answer, "双向音频与打断", null)), false)),
+                question.toClientTextDto(), "范围".toClientTextDto(), listOf(com.lingxi.code.bindings.client.AskOptionDto(answer.toClientTextDto(), "双向音频与打断".toClientTextDto(), null)), false)),
             timeoutSecs = null)
         rule.setContent {
             LingXiTheme(darkTheme = false) {
@@ -38,7 +38,7 @@ class AskUserQuestionSummaryUiTest {
         rule.onNodeWithText(answer).performClick()
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         rule.onNodeWithText(context.getString(com.lingxi.code.R.string.chat_question_submit)).performClick()
-        rule.runOnIdle { org.junit.Assert.assertEquals(mapOf(question to answer), submitted) }
+        rule.runOnIdle { org.junit.Assert.assertEquals(listOf(question to answer), submitted?.pairs?.map { it.question.displayText() to it.answer.displayText() }) }
     }
 
     @Test fun lightDarkDisclosurePreservesWrappedAnswer() {

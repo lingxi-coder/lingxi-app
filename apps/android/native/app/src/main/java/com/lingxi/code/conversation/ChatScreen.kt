@@ -116,6 +116,8 @@ fun ChatScreen(
     workspaceName: String = "",
     onOpenSessionPanel: (() -> Unit)? = null,
     onOpenSideChats: (() -> Unit)? = null,
+    showTopBar: Boolean = true,
+    showNewChatControls: Boolean = true,
     /** New-chat mode bar: start a fresh conversation in this mode. */
     onSelectNewChatMode: (SessionMode) -> Unit = {},
     /** New-chat workspace capsule: choose where the conversation runs. */
@@ -291,7 +293,7 @@ fun ChatScreen(
                     onFollowup = { currentOnVisualizationFollowup(it) },
                 )
             }
-            CompositionLocalProvider(LocalAppCardHost provides localAppCardLinks,
+            if (showTopBar) CompositionLocalProvider(LocalAppCardHost provides localAppCardLinks,
                 LocalVisualizationContext provides visualizationContext) {
                 TopBar(
                     title = state.session.title,
@@ -365,7 +367,7 @@ fun ChatScreen(
                 onToggleToolCall = onToggleToolCall,
             )
             flowModePanel?.invoke()
-            if (isNewChat) {
+            if (isNewChat && showNewChatControls) {
                 NewChatBar(
                     mode = sessionMode,
                     workspaceName = workspaceName,
@@ -524,16 +526,15 @@ private fun TopBar(
             }
         },
         navigationIcon = {
-            IconButton(LXIconName.Menu, t.text, 24.dp, onOpenDrawer,
+            IconButton(LXIconName.Menu, t.text, 22.dp, onOpenDrawer,
                 stringResource(R.string.chat_open_side_drawer), Modifier.testTag(UiTags.OPEN_DRAWER))
         },
         actions = {
             onOpenSideChats?.let { open ->
-                androidx.compose.material3.IconButton(onClick = open) {
-                    LXIcon(LXIconName.Message, contentDescription = stringResource(R.string.side_chat_title))
-                }
+                IconButton(LXIconName.SideChat, t.text, 22.dp, open,
+                    stringResource(R.string.side_chats_title), Modifier.testTag("conversation.side-chats"))
             }
-            IconButton(LXIconName.Edit, t.text, 24.dp, onNewChat, stringResource(R.string.chat_new_chat))
+            IconButton(LXIconName.Edit, t.text, 22.dp, onNewChat, stringResource(R.string.chat_new_chat))
             ConversationSummaryMenu(state)
         },
         expandedHeight = maxOf(64.dp, (48 * androidx.compose.ui.platform.LocalDensity.current.fontScale).dp),

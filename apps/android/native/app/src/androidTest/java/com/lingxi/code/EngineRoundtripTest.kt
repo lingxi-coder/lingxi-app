@@ -1,5 +1,6 @@
 package com.lingxi.code
 
+import com.lingxi.code.conversation.toClientTextDto
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -138,7 +139,8 @@ class EngineRoundtripTest {
             // queued; a turn failure streams to the listener, it is NOT thrown.
             engine.submit(
                 ClientCommand.SendPrompt(
-                    text = "Reply with exactly: hello from lingxi",
+                    text = "Reply with exactly: hello from lingxi".toClientTextDto(),
+                    visualizationContext = null,
                     promptMode = null,
                     images = emptyList(),
                     turnId = null,
@@ -170,7 +172,7 @@ class EngineRoundtripTest {
         // must carry a human-readable, engine-originated message. We do NOT assert
         // the key value or print any secret.
         (terminalEvent as? ClientEvent.Error)?.let {
-            assertFalse("the terminal error must carry a message", it.message.isEmpty())
+            assertFalse("the terminal error must carry a message", it.message.codeUnits.isEmpty())
         }
     }
 

@@ -16,6 +16,42 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
+    func testSideChatOpensWithComposerAndPreservesDrafts() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_SIDE_CHAT"] = "1"
+        app.launch()
+        let sideButton = app.buttons["conversation.side-chats"]
+        XCTAssertTrue(sideButton.waitForExistence(timeout: 15), app.debugDescription)
+        sideButton.tap()
+        let hide = app.buttons["side-chat.hide"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 10), app.debugDescription)
+        let input = app.otherElements["side-chat.sheet"].textViews["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 15), app.debugDescription)
+        input.tap()
+        input.typeText("First side draft")
+        XCTAssertEqual(input.value as? String, "First side draft")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Side-chat-composer-keyboard"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        hide.tap()
+        XCTAssertTrue(sideButton.waitForExistence(timeout: 5))
+        sideButton.tap()
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        XCTAssertEqual(input.value as? String, "First side draft")
+        app.buttons["side-chat.create"].tap()
+        let deadline = Date().addingTimeInterval(15)
+        while (input.value as? String) == "First side draft" && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        XCTAssertNotEqual(input.value as? String, "First side draft", app.debugDescription)
+        input.tap()
+        input.typeText("Second side draft")
+        app.buttons["side-chat.select"].tap()
+        let first = app.buttons["旁聊 1"]
+        XCTAssertTrue(first.waitForExistence(timeout: 3), app.debugDescription)
+        first.tap()
+        XCTAssertEqual(input.value as? String, "First side draft", app.debugDescription)
+    }
+
     func testAnsweredQuestionDisclosureMatchesReference() {
         let baseArguments = app.launchArguments
         for theme in ["light", "dark"] {

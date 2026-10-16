@@ -453,54 +453,55 @@ struct ChatView: View {
         }
         #endif
         .toolbar {
-            #if canImport(harness_runtimeFFI)
-            if let engine = source as? EngineConversationSource, !engine.isSideChat {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { sideChatSheetOpen = true } label: {
-                        Label(String(localized: "side_chats_title"), systemImage: "bubble.left.and.bubble.right")
-                    }
-                    .accessibilityIdentifier("conversation.side-chats")
-                }
-            }
-            #endif
-            ToolbarItem(placement: .principal) {
-                // Tap the title to open everything about this session.
-                Button { if !source.isTemporaryConversation { sessionPanelOpen = true } } label: {
-                    VStack(spacing: 1) {
-                        Text(sessionTitle)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(t.text)
-                            .lineLimit(1)
-                        Text("\(sessionMode.title) · \(workspaceName)")
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(sessionMode.color(t))
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: 220)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "chat_session_panel_a11y"))
-                .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
-                .accessibilityIdentifier("conversation.project-context")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                if !source.isTemporaryConversation {
-                Button(action: newChat) {
-                    Image(systemName: "square.and.pencil")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(t.accent)
-                        .frame(width: 36, height: 36)
+            if !source.isTemporaryConversation {
+                ToolbarItem(placement: .principal) {
+                    Button { sessionPanelOpen = true } label: {
+                        VStack(spacing: 1) {
+                            Text(sessionTitle).font(.subheadline.weight(.semibold)).foregroundStyle(t.text)
+                            Text("\(sessionMode.title) · \(workspaceName)")
+                                .font(.caption2).foregroundStyle(sessionMode.color(t))
+                        }
+                        .lineLimit(1)
                         .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(localized: "chat_session_panel_a11y"))
+                    .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
+                    .accessibilityIdentifier("conversation.project-context")
                 }
-                .accessibilityLabel(String(localized: "chat_new_chat"))
-                .accessibilityIdentifier("conversation.new-chat")
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    #if canImport(harness_runtimeFFI)
+                    if let engine = source as? EngineConversationSource, !engine.isSideChat {
+                        Button { sideChatSheetOpen = true } label: {
+                            toolbarIcon("bubble.left.and.bubble.right", label: String(localized: "side_chats_title"))
+                        }
+                        .accessibilityIdentifier("conversation.side-chats")
+                    }
+                    #endif
+                    Button(action: newChat) {
+                        toolbarIcon("square.and.pencil", label: String(localized: "chat_new_chat"))
+                    }
+                    .accessibilityIdentifier("conversation.new-chat")
+                    summaryMenu
                 }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                if !source.isTemporaryConversation { summaryMenu }
             }
         }
+    }
+
+    private func toolbarIcon(_ symbol: String, label: String) -> some View {
+        Label {
+            Text(label)
+        } icon: {
+            Image(systemName: symbol)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 20, height: 20)
+        }
+            .labelStyle(.iconOnly)
+            .font(.system(size: 17, weight: .medium))
+            .imageScale(.medium)
+            .frame(width: 44, height: 44)
+            .contentShape(.rect)
     }
 
     // MARK: session panel
@@ -511,7 +512,7 @@ struct ChatView: View {
 
     /// The new-chat strip is only for a chat that has not started yet.
     private var showsNewChatBar: Bool {
-        convo.isNew && renderItems.isEmpty && !convo.streaming
+        !source.isTemporaryConversation && convo.isNew && renderItems.isEmpty && !convo.streaming
     }
 
     private var activeModelName: String {
@@ -565,8 +566,7 @@ struct ChatView: View {
                 .accessibilityIdentifier("conversation.summary.category.\(category.rawValue)")
             }
         } label: {
-            Image(systemName: "ellipsis.circle")
-                .symbolRenderingMode(.monochrome)
+            toolbarIcon("ellipsis", label: "Open conversation summary")
         }
         .menuStyle(.automatic)
         .buttonStyle(.automatic)

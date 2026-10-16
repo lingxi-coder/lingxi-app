@@ -42,7 +42,8 @@ internal fun ConversationSummaryMenu(state: ChatState) {
     val detail = LocalConversationDetail.current
     Box {
         IconButton(onClick = { expanded = true }, modifier = Modifier.testTag("conversation.more")) {
-            Icon(Icons.Outlined.MoreHoriz, contentDescription = stringResource(R.string.chat_summary_more))
+            Icon(Icons.Outlined.MoreHoriz, contentDescription = stringResource(R.string.chat_summary_more),
+                modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             ConversationSummaryCategory.entries.forEach { category ->

@@ -1942,4 +1942,8 @@
     <string name="chat_summary_plan_empty">この会話には計画がありません</string>
     <string name="voice_rate_decrease">読み上げ速度を 0.1 下げる</string>
     <string name="voice_rate_increase">読み上げ速度を 0.1 上げる</string>
+    <string name="side_chat_new">新しいサイドチャット</string>
+    <string name="side_chat_creating">サイドチャットを作成中…</string>
+    <string name="side_chats_title">サイドチャット</string>
+    <string name="side_chat_hide">サイドチャットを閉じる</string>
 </resources>

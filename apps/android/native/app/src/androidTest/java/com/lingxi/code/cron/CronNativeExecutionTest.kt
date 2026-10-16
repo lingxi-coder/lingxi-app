@@ -1,5 +1,6 @@
 package com.lingxi.code.cron
 
+import com.lingxi.code.conversation.toClientTextDto
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.bindings.client.*
@@ -137,7 +138,7 @@ class CronNativeExecutionTest {
                     // must return a durable busy result, then retry the same run.
                     val humanGate = server.blockNextRequest()
                     val humanTurn = async {
-                        engine.submit(ClientCommand.SendPrompt("Human busy fixture", null, emptyList(), null))
+                        engine.submit(ClientCommand.SendPrompt("Human busy fixture".toClientTextDto(), null, emptyList(), null, null))
                     }
                     humanGate.awaitRequest()
                     val manualOccurrence = System.currentTimeMillis().toULong()

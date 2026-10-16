@@ -3,6 +3,7 @@ package com.lingxi.code.components
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Search
@@ -47,7 +48,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 enum class LXIconName {
-    Menu, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
+    Menu, SideChat, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, AudioWave, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
     ArrowRight, Terminal, Lightbulb, Apps, AppBuilder,
@@ -56,6 +57,7 @@ enum class LXIconName {
 /** Shared semantic names resolve to Android's Material icon family. */
 val LXIconName.materialIcon: ImageVector get() = when (this) {
     LXIconName.Menu -> Icons.Outlined.Menu
+    LXIconName.SideChat -> Icons.Outlined.Forum
     LXIconName.Edit -> Icons.Outlined.Edit
     LXIconName.Search -> Icons.Outlined.Search
     LXIconName.Sparkle -> Icons.Outlined.AutoAwesome

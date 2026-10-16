@@ -1942,4 +1942,8 @@
     <string name="chat_summary_plan_empty">此對話暫無計畫</string>
     <string name="voice_rate_decrease">降低語速 0.1 倍</string>
     <string name="voice_rate_increase">提高語速 0.1 倍</string>
+    <string name="side_chat_new">新增旁聊</string>
+    <string name="side_chat_creating">正在建立旁聊…</string>
+    <string name="side_chats_title">旁聊</string>
+    <string name="side_chat_hide">收起旁聊</string>
 </resources>

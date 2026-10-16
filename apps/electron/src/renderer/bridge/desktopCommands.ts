@@ -172,7 +172,7 @@ export const DESKTOP_ENGINE_BUILTIN_COMMANDS = [
   'keybindings', 'mcp', 'memory', 'output-style', 'plan', 'powerup', 'recap',
   'release-notes', 'reload-skills', 'rename', 'resume', 'security-review', 'skill-doctor',
   'skills', 'status',
-  'stickers', 'stop', 'subtask', 'usage', 'workflows', 'worktree',
+  'stickers', 'stop', 'subtask', 'team-onboarding', 'usage', 'workflows', 'worktree',
 ] as const;
 
 /**

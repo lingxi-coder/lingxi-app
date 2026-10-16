@@ -30,7 +30,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bridge::lockfile::IdeLockfile;
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client::adapter::{AdapterPermissionGate, ClientEventSink};
@@ -38,8 +38,8 @@ use client::protocol::commands::ClientCommand;
 use client::protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 /// A deterministic, network-free [`TurnDriver`]: every turn echoes the prompt
 /// back as a single `TextDelta`, then ends the turn with a clean `EndTurn`.
@@ -196,7 +196,8 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     //     in the filename, the authToken in the body. The recovered token is what
     //     a client must present.
     assert!(lockfile_path.exists(), "lockfile must be written to disk");
-    let (body, lock_port) = IdeLockfile::read_secure(&lockfile_path).expect("private lockfile parses securely");
+    let (body, lock_port) =
+        IdeLockfile::read_secure(&lockfile_path).expect("private lockfile parses securely");
     assert_eq!(lock_port, port, "lockfile filename encodes the bound port");
     assert_eq!(body.transport, "ws");
     assert!(

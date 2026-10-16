@@ -454,6 +454,10 @@ pub struct ChatWidget {
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
     pending_slash_dispatches: Vec<PendingSlashDispatch>,
+    /// Session scope for restoring attachments from an unadmitted slash.
+    slash_image_restore_scope: uuid::Uuid,
+    /// Dispatch identities awaiting an image result, bound to their session scope.
+    pending_slash_image_restores: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
     queued_prompt_owners: Vec<CancellationToken>,
     /// Whether turn-scoped bridge events still have a live owner. This remains
     /// true while cancellation is waiting for Block tools, and flips only at

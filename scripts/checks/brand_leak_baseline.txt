@@ -159,8 +159,6 @@ G1	apps/cli/host/src/repl.rs	\.lingxi
 G1	apps/cli/host/src/session_cost.rs	\.lingxi
 G1	apps/cli/host/src/startup_resources.rs	LINGXI
 G1	apps/cli/host/src/startup_trace.rs	LINGXI
-G1	apps/cli/host/src/stream_json.rs	LINGXI
-G1	apps/cli/host/src/stream_json.rs	\.lingxi
 G1	apps/cli/host/src/teammate_worker.rs	LINGXI
 G1	apps/cli/host/tests/cli_agents.rs	LINGXI
 G1	apps/cli/host/tests/cli_argv_errors.rs	LINGXI
@@ -337,8 +335,6 @@ G3	apps/cli/host/src/mode.rs	/etc/lingxi
 G3	apps/cli/host/src/mode.rs	LINGXI.md
 G3	apps/cli/host/src/repl.rs	.lingxi.json
 G3	apps/cli/host/src/session_cost.rs	.lingxi.json
-G3	apps/cli/host/src/stream_json.rs	.lingxi
-G3	apps/cli/host/src/stream_json.rs	.lingxi.json
 G3	apps/cli/host/tests/cli_agents.rs	LINGXI_CONFIG_DIR
 G3	apps/cli/host/tests/cli_argv_errors.rs	LINGXI_CONFIG_DIR
 G3	apps/cli/host/tests/cli_auto_mode_setup.rs	LINGXI_CONFIG_DIR

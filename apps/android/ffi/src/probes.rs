@@ -2,6 +2,15 @@
 use super::callbacks::AndroidGitCredentialProvider;
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 use super::callbacks::AndroidGitCredentialProviderBridge;
+#[cfg(all(feature = "uniffi", any(target_os = "android", test)))]
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+#[cfg(all(feature = "uniffi", any(target_os = "android", test)))]
+fn git_probe_result_json(data: &Utf16JsonProjection) -> String {
+    data.to_json_string().unwrap_or_else(|error| {
+        serde_json::json!({ "error": format!("serialize: {error}") }).to_string()
+    })
+}
 
 /// P4d acceptance probe: drive the REAL [`tool_git_mobile::GitTool`] path for one
 /// structured git operation, and return the `ToolCallResult` data (or the error)
@@ -14,8 +23,8 @@ use super::callbacks::AndroidGitCredentialProviderBridge;
 /// workspace_root })` + `mobile_git_secret = Some(MobileGitSecret {
 /// credential_provider: None, ca_dir: Some(ca_cert_dir), .. })`, constructs the
 /// `GitTool`, parses
-/// `operation_json` into the tool input `Value`, and runs `GitTool::call(..)` on
-/// a transient current-thread runtime — exactly the engine's path. No token is
+/// `operation_json` into a source-preserving JSON projection, and runs
+/// `GitTool::call(..)` on a transient current-thread runtime — exactly the engine's path. No token is
 /// needed: the acceptance clone targets a PUBLIC repo.
 ///
 /// - `operation_json` — the structured tool input (e.g.
@@ -47,7 +56,7 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
 
         // Parse the structured operation input. A malformed payload is a probe
         // error, not a tool failure.
-        let input: serde_json::Value = match serde_json::from_str(&operation_json) {
+        let input = match Utf16JsonProjection::parse(&operation_json) {
             Ok(v) => v,
             Err(e) => {
                 return format!(
@@ -96,8 +105,7 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
             Err(e) => return format!("{{\"error\":\"probe runtime build: {e}\"}}"),
         };
         match rt.block_on(tool.call(input, fresh_ctx(), fresh_tx())) {
-            Ok(result) => serde_json::to_string(&result.data)
-                .unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}")),
+            Ok(result) => git_probe_result_json(&result.data),
             Err(e) => format!(
                 "{{\"error\":\"{}\"}}",
                 e.to_string().replace('"', "'").replace('\n', " ")
@@ -154,7 +162,7 @@ pub fn android_git_probe_authed(
         use tool_api::tool_trait::Tool;
         use tool_api::{MobileGitSecret, MobileGitToolCtx};
 
-        let input: serde_json::Value = match serde_json::from_str(&operation_json) {
+        let input = match Utf16JsonProjection::parse(&operation_json) {
             Ok(v) => v,
             Err(e) => {
                 return format!(
@@ -203,12 +211,36 @@ pub fn android_git_probe_authed(
             Err(e) => return format!("{{\"error\":\"probe runtime build: {e}\"}}"),
         };
         match rt.block_on(tool.call(input, fresh_ctx(), fresh_tx())) {
-            Ok(result) => serde_json::to_string(&result.data)
-                .unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}")),
+            Ok(result) => git_probe_result_json(&result.data),
             Err(e) => format!(
                 "{{\"error\":\"{}\"}}",
                 e.to_string().replace('"', "'").replace('\n', " ")
             ),
         }
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod projection_result_tests {
+    use super::{git_probe_result_json, Utf16JsonProjection};
+
+    #[test]
+    fn git_probe_returns_the_documented_json_object() {
+        let data =
+            Utf16JsonProjection::parse(r#"{"ok":true,"head":"abc123","files":["README.md"]}"#)
+                .unwrap();
+        let decoded: serde_json::Value =
+            serde_json::from_str(&git_probe_result_json(&data)).unwrap();
+        assert_eq!(
+            decoded,
+            serde_json::json!({"ok":true,"head":"abc123","files":["README.md"]})
+        );
+    }
+
+    #[test]
+    fn git_probe_preserves_unpaired_utf16_in_json_output() {
+        let data = Utf16JsonProjection::parse(r#"{"path":"\ud800"}"#).unwrap();
+        let json = git_probe_result_json(&data).to_ascii_lowercase();
+        assert_eq!(json, r#"{"path":"\ud800"}"#);
     }
 }

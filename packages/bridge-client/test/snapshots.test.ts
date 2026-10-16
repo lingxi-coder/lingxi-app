@@ -2158,10 +2158,10 @@ test('tool_result uses only the current display diff carrier', () => {
   });
   assert.throws(() => validateMessageBlock({
     type: 'tool_use', id: 'tool-2', tool: 'Edit', input_json: '{}',
-  }), /unknown key/);
+  }), /missing required key header/);
   assert.throws(() => validateMessageBlock({
     type: 'tool_result', id: 'tool-3', tool: 'Edit', result_json: '{}', is_error: false,
-  }), /unknown key/);
+  }), /missing required key display/);
 });
 
 test('tool call carriers are required on transcript and streaming events', () => {

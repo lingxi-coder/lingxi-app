@@ -21,9 +21,86 @@ use lingxi_core::host::{
     ContextPressureBanner, CostSnapshot, OutputStream, RefusalContinuationJoin,
     RefusalContinuationPhase, ServerFallbackTombstoneMessage, TurnOutcome,
 };
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
+
+/// Convert exact source JSON to the display-only `Value` accepted by the TUI
+/// tool renderer. Strings and object keys use their source carrier's display
+/// form only at this rendering boundary; the original projection stays intact.
+pub fn projection_to_display_value(projection: &Utf16JsonProjection) -> serde_json::Value {
+    enum Frame<'a> {
+        Visit(JsonValueView<'a>),
+        Null,
+        Array(usize),
+        Object(Vec<String>),
+    }
+
+    let Some(root) = projection.at_pointer("") else {
+        return serde_json::Value::Null;
+    };
+    let mut frames = vec![Frame::Visit(root)];
+    let mut values = Vec::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Null => values.push(serde_json::Value::Null),
+            Frame::Visit(value) if value.is_null() => values.push(serde_json::Value::Null),
+            Frame::Visit(value) if value.as_str().is_some() => values.push(
+                serde_json::Value::String(value.as_str().unwrap_or_default().to_owned()),
+            ),
+            Frame::Visit(value) if value.as_bool().is_some() => {
+                values.push(serde_json::Value::Bool(value.as_bool().unwrap_or_default()))
+            }
+            Frame::Visit(value) if value.as_number().is_some() => {
+                let number = value.as_number().unwrap_or_default();
+                // Keep integer-valued fields usable by renderers calling
+                // as_u64/as_i64, as in the previous JSON serialization path.
+                // JSON stringification also normalizes negative zero to zero.
+                let number = if number == 0.0 { 0.0 } else { number };
+                values.push(
+                    serde_json::from_str(&number.to_string()).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Frame::Visit(value) if value.array_len().is_some() => {
+                let len = value.array_len().unwrap_or_default();
+                frames.push(Frame::Array(len));
+                for index in (0..len).rev() {
+                    frames.push(value.get_index(index).map_or(Frame::Null, Frame::Visit));
+                }
+            }
+            Frame::Visit(value) => {
+                let Some(entries) = value.object_entries() else {
+                    values.push(serde_json::Value::Null);
+                    continue;
+                };
+                let keys = entries
+                    .iter()
+                    .map(|entry| entry.display_key.to_owned())
+                    .collect();
+                frames.push(Frame::Object(keys));
+                for entry in entries.into_iter().rev() {
+                    frames.push(Frame::Visit(entry.value));
+                }
+            }
+            Frame::Array(len) => {
+                let start = values.len().saturating_sub(len);
+                let children = values.split_off(start);
+                values.push(serde_json::Value::Array(children));
+            }
+            Frame::Object(keys) => {
+                let start = values.len().saturating_sub(keys.len());
+                let children = values.split_off(start);
+                let mut object = serde_json::Map::new();
+                for (key, child) in keys.into_iter().zip(children) {
+                    object.insert(key, child);
+                }
+                values.push(serde_json::Value::Object(object));
+            }
+        }
+    }
+    values.pop().unwrap_or(serde_json::Value::Null)
+}
 
 /// One live heartbeat value retained by the bridge. Heartbeats are transient
 /// render state and therefore may be replaced by a newer value for the same
@@ -95,21 +172,21 @@ impl CoalescedToolHeartbeats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCatalogEntry {
     /// Command name including the leading slash.
-    pub name: String,
+    pub name: client::protocol::text::ClientTextDto,
     /// Full searchable description.
-    pub description: String,
+    pub description: client::protocol::text::ClientTextDto,
     /// Optional compact menu description.
-    pub menu_description: Option<String>,
+    pub menu_description: Option<client::protocol::text::ClientTextDto>,
     /// Alternate names including the leading slash.
-    pub aliases: Vec<String>,
+    pub aliases: Vec<client::protocol::text::ClientTextDto>,
     /// Hidden entries still dispatch and may surface on an exact name match.
     pub hidden: bool,
     /// A described static TUI command replaces its original menu row.
     pub replaces_builtin: bool,
     /// Argument hint returned by `command.describe`.
-    pub argument_hint: Option<String>,
+    pub argument_hint: Option<client::protocol::text::ClientTextDto>,
     /// Declared positional argument names for progressive hints after each argument.
-    pub argument_names: Vec<String>,
+    pub argument_names: Vec<client::protocol::text::ClientTextDto>,
 }
 
 /// One live agent rendered next to the TUI composer.
@@ -290,7 +367,7 @@ pub enum TurnEvent {
         /// UX estimate of bytes freed.
         bytes_saved: u64,
         /// Full transcript-only compact summary revealed by Ctrl-O.
-        summary: String,
+        summary: client::protocol::text::ClientTextDto,
     },
     /// Unified rate-limit header snapshot (llm-runtime future-work batch 3,
     /// Task 9). Mirrors `lingxi_core::host::OutputEvent::RateLimit`'s nine fields —
@@ -348,22 +425,30 @@ pub enum TurnEvent {
     /// next render tick.
     SystemNotice {
         /// The notice text.
-        body: String,
+        body: client::protocol::text::ClientTextDto,
         /// `true` → render as an error (red); `false` → dim informational.
         is_error: bool,
     },
     /// A Mod log line displayed independently of assistant text.
-    UiLog { plugin: String, text: String },
+    UiLog {
+        plugin: String,
+        text: client::protocol::text::ClientTextDto,
+    },
     /// A transient Mod notification shown near the composer.
     UiToast {
         plugin: String,
-        text: String,
+        text: client::protocol::text::ClientTextDto,
         timeout_ms: u64,
+    },
+    /// A Mod notification without a source-provided duration.
+    UiNotify {
+        plugin: String,
+        text: client::protocol::text::ClientTextDto,
     },
     /// Set or clear a plugin's pinned line below the composer.
     UiStatus {
         plugin: String,
-        text: Option<String>,
+        text: Option<client::protocol::text::ClientTextDto>,
     },
     /// The persisted top-level JSONL UUID for a live user row token.
     TranscriptRowIdentity { row_token: String, uuid: String },
@@ -449,7 +534,7 @@ pub enum TurnEvent {
     /// inner work is invisible. Rendered as an indented `⎿` line.
     SubagentActivity {
         /// Pre-formatted one-line summary, e.g. `"Read(src/main.rs)"`.
-        text: String,
+        text: client::protocol::text::ClientTextDto,
     },
     /// An API request failed with a retry-worthy error and is backing off before
     /// the next attempt. Rendered as Claude Code's `SystemAPIErrorMessage`:
@@ -510,36 +595,83 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::TurnStarted);
     }
 
-    async fn emit_text(&self, text: &str, _utf16_code_units: Option<&[u16]>) {
-        let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        let _ = self.tx.send(TurnEvent::TextDelta(
+            text.string_at("").unwrap_or_default().to_owned(),
+        ));
     }
 
-    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+    async fn emit_system_notice(
+        &self,
+        body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        is_error: bool,
+    ) {
         let _ = self.tx.send(TurnEvent::SystemNotice {
-            body: body.to_string(),
+            body: client::protocol::text::ClientTextDto::from_code_units(
+                body.string_units("")
+                    .expect("system notice is a root JSON string"),
+            ),
             is_error,
         });
     }
 
-    async fn emit_mod_log(&self, plugin: &str, text: &str) {
+    async fn emit_mod_log(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
         let _ = self.tx.send(TurnEvent::UiLog {
             plugin: plugin.to_string(),
-            text: text.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("Mod log output is a root-string projection"),
+            ),
         });
     }
 
-    async fn emit_mod_toast(&self, plugin: &str, text: &str, timeout_ms: u64) {
+    async fn emit_mod_toast(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        timeout_ms: u64,
+    ) {
         let _ = self.tx.send(TurnEvent::UiToast {
             plugin: plugin.to_string(),
-            text: text.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("Mod toast output is a root-string projection"),
+            ),
             timeout_ms,
         });
     }
 
-    async fn emit_mod_status(&self, plugin: &str, text: Option<&str>) {
+    async fn emit_mod_notify(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let _ = self.tx.send(TurnEvent::UiNotify {
+            plugin: plugin.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("Mod notify output is a root-string projection"),
+            ),
+        });
+    }
+
+    async fn emit_mod_status(
+        &self,
+        plugin: &str,
+        text: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) {
         let _ = self.tx.send(TurnEvent::UiStatus {
             plugin: plugin.to_string(),
-            text: text.map(str::to_string),
+            text: text.map(|text| {
+                client::protocol::text::ClientTextDto::from_code_units(
+                    text.string_units("")
+                        .expect("Mod status output is a root-string projection"),
+                )
+            }),
         });
     }
 
@@ -620,9 +752,15 @@ impl OutputStream for BridgeOutputStream {
             .store(mode == Some("omitted"), Ordering::Relaxed);
     }
 
-    async fn emit_subagent_activity(&self, text: &str) {
+    async fn emit_subagent_activity(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
         let _ = self.tx.send(TurnEvent::SubagentActivity {
-            text: text.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("subagent activity is a root JSON string"),
+            ),
         });
     }
 
@@ -651,13 +789,12 @@ impl OutputStream for BridgeOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        input: &serde_json::Value,
-        _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        input: &Utf16JsonProjection,
     ) {
         let _ = self.tx.send(TurnEvent::ToolUseStart {
             id: id.clone(),
             tool: tool.to_string(),
-            input: input.clone(),
+            input: projection_to_display_value(input),
         });
     }
 
@@ -712,9 +849,9 @@ impl OutputStream for BridgeOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        model_text: &str,
-        result: &serde_json::Value,
-        _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+        _mcp_meta: Option<&Utf16JsonProjection>,
     ) {
         // (gap-3 general) Many tools return a structured `data` object with no
         // human-display string (Read's `{type,file:{…}}`, …), so the scrollback
@@ -724,6 +861,8 @@ impl OutputStream for BridgeOutputStream {
         // `model_content` so `body_text` can surface it; the structured fields
         // stay intact for tools that render off them (Bash stdout/stderr,
         // Edit/Write diffs).
+        let result = projection_to_display_value(result);
+        let model_text = model_text.string_at("").unwrap_or_default();
         let result = match result.as_object() {
             Some(obj) if !model_text.is_empty() && !obj.contains_key("model_content") => {
                 let mut obj = obj.clone();
@@ -770,13 +909,17 @@ impl OutputStream for BridgeOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
-        summary: &str,
+        summary: &Utf16JsonProjection,
     ) {
         let _ = self.tx.send(TurnEvent::CompactionCompleted {
             messages_before,
             messages_after,
             bytes_saved,
-            summary: summary.to_string(),
+            summary: client::protocol::text::ClientTextDto::from_code_units(
+                summary
+                    .string_units("")
+                    .expect("compaction summary is a root-string projection"),
+            ),
         });
     }
 
@@ -888,7 +1031,12 @@ mod tests {
                     message_type: "assistant".into(),
                     timestamp: "2026-10-03T12:00:00.000Z".into(),
                     request_id: Some("request-1".into()),
-                    request_ref: Some(serde_json::json!({"lane": "main"})),
+                    request_ref: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"lane": "main"}),
+                        )
+                        .unwrap(),
+                    ),
                     provider_message_id: Some("provider-1".into()),
                     model: Some("claude-sonnet-4".into()),
                     stop_reason: Some("refusal".into()),
@@ -958,7 +1106,7 @@ mod tests {
     async fn emit_text_translates_to_text_delta() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_text("hello", None).await;
+        bridge.emit_text(&Utf16JsonProjection::from("hello")).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::TextDelta(ref s) if s == "hello"));
     }
@@ -968,12 +1116,12 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
         bridge
-            .emit_system_notice("transcript unavailable", true)
+            .emit_system_notice(&"transcript unavailable".into(), true)
             .await;
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::SystemNotice { body, is_error }
-                if body == "transcript unavailable" && is_error
+                if body.display() == "transcript unavailable" && is_error
         ));
     }
 
@@ -981,11 +1129,78 @@ mod tests {
     async fn emit_mod_log_keeps_plugin_and_text_separate() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_mod_log("review", "Found a mismatch").await;
+        let text = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#""Found a \ud800 mismatch""#,
+        )
+        .unwrap();
+        bridge.emit_mod_log("review", &text).await;
+        let expected = vec![
+            b'F' as u16,
+            b'o' as u16,
+            b'u' as u16,
+            b'n' as u16,
+            b'd' as u16,
+            b' ' as u16,
+            b'a' as u16,
+            b' ' as u16,
+            0xd800,
+            b' ' as u16,
+            b'm' as u16,
+            b'i' as u16,
+            b's' as u16,
+            b'm' as u16,
+            b'a' as u16,
+            b't' as u16,
+            b'c' as u16,
+            b'h' as u16,
+        ];
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::UiLog { plugin, text }
-                if plugin == "review" && text == "Found a mismatch"
+                if plugin == "review" && text.code_units == expected
+        ));
+    }
+
+    #[tokio::test]
+    async fn mod_toast_and_status_keep_source_units_until_rendering() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let toast = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""toast \ud800""#)
+            .unwrap();
+        let status =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""status \udfff""#)
+                .unwrap();
+        let notify =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""notify \ud800""#)
+                .unwrap();
+
+        bridge.emit_mod_toast("plugin", &toast, 2500).await;
+        bridge.emit_mod_notify("plugin", &notify).await;
+        bridge.emit_mod_status("plugin", Some(&status)).await;
+        bridge.emit_mod_status("plugin", None).await;
+
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiToast { plugin, text, timeout_ms }
+                if plugin == "plugin"
+                    && text.code_units == vec![b't' as u16, b'o' as u16, b'a' as u16, b's' as u16, b't' as u16, b' ' as u16, 0xd800]
+                    && timeout_ms == 2500
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiNotify { plugin, text }
+                if plugin == "plugin"
+                    && text.code_units == vec![b'n' as u16, b'o' as u16, b't' as u16, b'i' as u16, b'f' as u16, b'y' as u16, b' ' as u16, 0xd800]
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiStatus { plugin, text: Some(text) }
+                if plugin == "plugin"
+                    && text.code_units == vec![b's' as u16, b't' as u16, b'a' as u16, b't' as u16, b'u' as u16, b's' as u16, b' ' as u16, 0xdfff]
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiStatus { plugin, text: None } if plugin == "plugin"
         ));
     }
 
@@ -1011,6 +1226,23 @@ mod tests {
             rx.recv().await.unwrap(),
             TurnEvent::AssistantTranscriptRowUuids { message_id: actual, uuids }
                 if actual == message_id && uuids == vec![Some(persisted_uuid.to_string())]
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_mod_log_keeps_plain_text_separate() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let text = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!("Found a mismatch"),
+        )
+        .unwrap();
+        bridge.emit_mod_log("review", &text).await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiLog { plugin, text }
+                if plugin == "review"
+                    && text.code_units == "Found a mismatch".encode_utf16().collect::<Vec<_>>()
         ));
     }
 
@@ -1055,6 +1287,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_completed_keeps_exact_source_utf16_summary() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let summary =
+            Utf16JsonProjection::parse(r#""before\ud800after""#).expect("valid exact JSON string");
+
+        OutputStream::emit_compaction_completed(&bridge, 10, 3, 1024, &summary).await;
+
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::CompactionCompleted { summary, .. }
+                if summary.code_units
+                    == "before"
+                        .encode_utf16()
+                        .chain([0xd800])
+                        .chain("after".encode_utf16())
+                        .collect::<Vec<_>>()
+        ));
+    }
+
+    #[tokio::test]
     async fn emit_thinking_translates_to_thinking_delta() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
@@ -1088,8 +1341,8 @@ mod tests {
             .emit_tool_call(
                 &id,
                 "Read",
-                &serde_json::json!({"file_path": "/tmp/x"}),
-                None,
+                &Utf16JsonProjection::from_serde_value(&serde_json::json!({"file_path": "/tmp/x"}))
+                    .unwrap(),
             )
             .await;
         match rx.recv().await.unwrap() {
@@ -1104,6 +1357,58 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tool_call_with_lone_surrogate_keeps_the_complete_display_object() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let id = lingxi_core::types::ToolUseId::new();
+        let source = Utf16JsonProjection::parse(
+            r#"{"command":"printf","args":["before\ud800after",{"key":"value"}],"count":2,"enabled":true,"empty":null}"#,
+        )
+        .unwrap();
+        let original = source.to_json_string().unwrap();
+
+        bridge.emit_tool_call(&id, "Bash", &source).await;
+
+        let TurnEvent::ToolUseStart { input, .. } = rx.recv().await.unwrap() else {
+            panic!("expected tool call");
+        };
+        assert_eq!(input["command"], "printf");
+        assert_eq!(input["args"][0], "before�after");
+        assert_eq!(input["args"][1]["key"], "value");
+        assert_eq!(input["count"].as_u64(), Some(2));
+        assert_eq!(input["enabled"], true);
+        assert!(input["empty"].is_null());
+        assert_eq!(source.to_json_string().unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn tool_result_with_lone_surrogates_keeps_output_status_and_model_text() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let id = lingxi_core::types::ToolUseId::new();
+        let result = Utf16JsonProjection::parse(
+            r#"{"stdout":"a\ud800b","exitCode":7,"nested":{"values":[1,"\udc00"]}}"#,
+        )
+        .unwrap();
+        let original = result.to_json_string().unwrap();
+        let model_text = Utf16JsonProjection::parse(r#""summary\ud800tail""#).unwrap();
+
+        bridge
+            .emit_tool_result(&id, "Bash", &model_text, &result, None)
+            .await;
+
+        let TurnEvent::ToolUseResult { result: shown, .. } = rx.recv().await.unwrap() else {
+            panic!("expected tool result");
+        };
+        assert_eq!(shown["stdout"], "a�b");
+        assert_eq!(shown["exitCode"].as_i64(), Some(7));
+        assert_eq!(shown["nested"]["values"][0].as_u64(), Some(1));
+        assert_eq!(shown["nested"]["values"][1], "�");
+        assert_eq!(shown["model_content"], "summary�tail");
+        assert_eq!(result.to_json_string().unwrap(), original);
     }
 
     #[tokio::test]

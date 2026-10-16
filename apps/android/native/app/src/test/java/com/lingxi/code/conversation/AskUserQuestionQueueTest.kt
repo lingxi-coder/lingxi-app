@@ -99,13 +99,13 @@ class AskUserQuestionQueueTest {
             runCurrent()
 
             viewModel.reduceClientEvent(ClientEvent.AskUserQuestion(request(7u)))
-            viewModel.answerQuestion(7u, mapOf("想要什么布局？" to "列表"))
+            viewModel.answerQuestion(7u, assembleAskAnswers(request(7u), mapOf(0 to listOf(0)), emptyMap()))
             runCurrent()
 
             assertTrue(viewModel.state.value.pendingQuestions.isEmpty())
             val sent = source.commands.filterIsInstance<ClientCommand.AnswerAskUserQuestion>().single()
             assertEquals(7uL, sent.requestId)
-            assertEquals(mapOf("想要什么布局？" to "列表"), sent.answers)
+            assertEquals(listOf("想要什么布局？" to "列表"), sent.answers.pairs.map { it.question.displayText() to it.answer.displayText() })
 
             // The engine's own Resolved for the same id is then a no-op.
             viewModel.reduceClientEvent(ClientEvent.AskUserQuestionResolved(7u))
@@ -183,7 +183,7 @@ class AskUserQuestionQueueTest {
                         "abc123def",
                         "local_workflow",
                         TaskStatusDto.RUNNING,
-                        "创建应用「食谱盒」",
+                        "创建应用「食谱盒」".toClientTextDto(),
                         false,
                         null,
                         null,
@@ -222,12 +222,12 @@ class AskUserQuestionQueueTest {
 
     @Test
     fun `single select replaces and re-tapping clears while multi select toggles`() {
-        assertEquals(listOf("列表"), toggleAskSelection(emptyList(), "列表", multiSelect = false))
-        assertEquals(listOf("卡片"), toggleAskSelection(listOf("列表"), "卡片", multiSelect = false))
-        assertEquals(emptyList<String>(), toggleAskSelection(listOf("列表"), "列表", multiSelect = false))
+        assertEquals(listOf(0), toggleAskSelection(emptyList(), 0, multiSelect = false))
+        assertEquals(listOf(1), toggleAskSelection(listOf(0), 1, multiSelect = false))
+        assertEquals(emptyList<Int>(), toggleAskSelection(listOf(0), 0, multiSelect = false))
 
-        assertEquals(listOf("列表", "卡片"), toggleAskSelection(listOf("列表"), "卡片", multiSelect = true))
-        assertEquals(listOf("列表"), toggleAskSelection(listOf("列表", "卡片"), "卡片", multiSelect = true))
+        assertEquals(listOf(0, 1), toggleAskSelection(listOf(0), 1, multiSelect = true))
+        assertEquals(listOf(0), toggleAskSelection(listOf(0, 1), 1, multiSelect = true))
     }
 
     @Test
@@ -242,33 +242,58 @@ class AskUserQuestionQueueTest {
         )
         val answers = assembleAskAnswers(
             request = request,
-            selections = mapOf(0 to listOf("列表", "卡片")),
+            selections = mapOf(0 to listOf(0, 1)),
             freeTexts = mapOf(1 to " 喝水打卡 "),
         )
         assertEquals(
-            mapOf(
+            listOf(
                 "想要什么布局？" to "列表, 卡片",
                 "应用叫什么名字？" to "喝水打卡",
             ),
-            answers,
+            answers.pairs.map { it.question.displayText() to it.answer.displayText() },
         )
         // The unanswered third question is omitted, so the set is incomplete.
-        assertFalse(askAnswersComplete(request, mapOf(0 to listOf("列表")), mapOf(1 to "喝水打卡")))
+        assertFalse(askAnswersComplete(request, mapOf(0 to listOf(0)), mapOf(1 to "喝水打卡")))
         assertTrue(
             askAnswersComplete(
                 request,
-                mapOf(0 to listOf("列表"), 2 to listOf("要")),
+                mapOf(0 to listOf(0), 2 to listOf(0)),
                 mapOf(1 to "喝水打卡"),
             ),
         )
     }
 
     @Test
+    fun `answers preserve original question and option UTF16 units`() {
+        val questionText = com.lingxi.code.bindings.client.ClientTextDto(codeUnits = listOf(0xD800u.toUShort()))
+        val optionText = com.lingxi.code.bindings.client.ClientTextDto(codeUnits = listOf(0xDC00u.toUShort()))
+        val request = AskUserQuestionRequestDto(
+            requestId = 4u,
+            questions = listOf(
+                AskQuestionDto(
+                    question = questionText,
+                    header = "Pick".toClientTextDto(),
+                    options = listOf(AskOptionDto(optionText, "Option".toClientTextDto(), null)),
+                    multiSelect = false,
+                ),
+            ),
+            timeoutSecs = null,
+        )
+
+        val answer = assembleAskAnswers(request, mapOf(0 to listOf(0)), emptyMap()).pairs.single()
+
+        assertEquals(questionText.codeUnits, answer.question.codeUnits)
+        assertEquals(optionText.codeUnits, answer.answer.codeUnits)
+    }
+
+    @Test
     fun `a selection plus free text joins both into one answer`() {
         val request = request(3u, listOf(question("想要什么布局？", options = listOf("列表"))))
         assertEquals(
-            mapOf("想要什么布局？" to "列表, 也要日历视图"),
-            assembleAskAnswers(request, mapOf(0 to listOf("列表")), mapOf(0 to "也要日历视图")),
+            listOf("想要什么布局？" to "列表, 也要日历视图"),
+            assembleAskAnswers(request, mapOf(0 to listOf(0)), mapOf(0 to "也要日历视图")).pairs.map {
+                it.question.displayText() to it.answer.displayText()
+            },
         )
     }
 
@@ -312,9 +337,9 @@ class AskUserQuestionQueueTest {
         options: List<String>,
         multiSelect: Boolean = false,
     ) = AskQuestionDto(
-        question = text,
-        header = "布局",
-        options = options.map { AskOptionDto(label = it, description = "$it 的说明", preview = null) },
+        question = text.toClientTextDto(),
+        header = "布局".toClientTextDto(),
+        options = options.map { AskOptionDto(label = it.toClientTextDto(), description = "$it 的说明".toClientTextDto(), preview = null) },
         multiSelect = multiSelect,
     )
 }

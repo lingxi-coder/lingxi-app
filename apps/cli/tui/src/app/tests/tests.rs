@@ -7,6 +7,9 @@ use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::history_cell::attachments::UserImageCell;
 use crate::history_cell::message::{AssistantTextCell, UserTextCell};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -18,6 +21,44 @@ fn ctrl(code: KeyCode) -> KeyEvent {
 
 fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
+}
+
+fn text_projection(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    text.into()
+}
+
+fn json_projection(source: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source)
+        .expect("valid source JSON fixture")
+}
+
+#[derive(Default)]
+struct FakeEventDriver {
+    queued: VecDeque<Event>,
+    polls: usize,
+    reads: usize,
+}
+
+impl AppEventDriver for FakeEventDriver {
+    fn poll(&mut self, _timeout: Duration) -> io::Result<bool> {
+        self.polls += 1;
+        Ok(!self.queued.is_empty())
+    }
+
+    fn read(&mut self) -> io::Result<Event> {
+        self.reads += 1;
+        self.queued.pop_front().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "fake event queue is empty")
+        })
+    }
+}
+
+struct FakeTerminalRestoreGuard(Arc<AtomicBool>);
+
+impl Drop for FakeTerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 /// An app over dummy (immediately closed) channels and no-op callbacks:
@@ -60,6 +101,58 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         },
     );
     app
+}
+
+#[test]
+fn idle_exit_probe_unwinds_app_and_releases_the_terminal_restore_scope() {
+    let mut app = test_app(Vec::new());
+    let mut terminal = inline_test_terminal(app.viewport_height(80));
+    let mut event_driver = FakeEventDriver::default();
+    let probe_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = probe_calls.clone();
+    let exit_probe: Arc<dyn Fn() -> bool + Send + Sync> =
+        Arc::new(move || observed_calls.fetch_add(1, Ordering::SeqCst) >= 1);
+    let restore_dropped = Arc::new(AtomicBool::new(false));
+
+    let result = {
+        // Production `run_app` keeps TerminalSession in this enclosing scope;
+        // returning AppExit::Quit must take this ordinary drop path.
+        let _restore_guard = FakeTerminalRestoreGuard(restore_dropped.clone());
+        app.run_inner(
+            &mut terminal,
+            None,
+            Some(exit_probe.as_ref()),
+            &mut event_driver,
+        )
+    };
+
+    assert_eq!(result.unwrap(), AppExit::Quit);
+    assert_eq!(event_driver.polls, 1, "the loop first waited while idle");
+    assert_eq!(event_driver.reads, 0, "no input event was needed to exit");
+    assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
+    assert!(
+        restore_dropped.load(Ordering::SeqCst),
+        "the normal exit unwinds the enclosing terminal restore guard"
+    );
+}
+
+#[test]
+fn no_exit_probe_preserves_the_existing_idle_double_ctrl_c_exit() {
+    let mut app = test_app(Vec::new());
+    let mut terminal = inline_test_terminal(app.viewport_height(80));
+    let mut event_driver = FakeEventDriver {
+        queued: VecDeque::from([
+            Event::Key(ctrl(KeyCode::Char('c'))),
+            Event::Key(ctrl(KeyCode::Char('c'))),
+        ]),
+        ..Default::default()
+    };
+
+    let result = app.run_inner(&mut terminal, None, None, &mut event_driver);
+
+    assert_eq!(result.unwrap(), AppExit::Quit);
+    assert_eq!(event_driver.polls, 2);
+    assert_eq!(event_driver.reads, 2);
 }
 
 #[test]
@@ -133,7 +226,9 @@ fn alt_enter_inserts_newline_plain_enter_submits_whole_buffer() {
     );
     // Plain Enter submits the full multi-line buffer.
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "line one\nline two"));
+    assert!(
+        matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("line one\nline two"))
+    );
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
 }
 
@@ -174,7 +269,7 @@ fn typing_then_submit_echoes_user_and_returns_prompt() {
     }
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "hi");
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi"));
+    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("hi")));
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
     assert!(app.chat_widget.turn_running());
     assert_eq!(cells(&app).len(), 1);
@@ -193,7 +288,7 @@ fn submit_while_running_returns_pending_prompt_without_replacing_turn() {
     assert!(matches!(
         app.on_key(press(KeyCode::Enter)),
         ChatOutcome::QueuePrompt(ref prompt, _, ref images, _)
-            if prompt == "pending" && images.is_empty()
+            if prompt == &text_projection("pending") && images.is_empty()
     ));
     assert!(!active.is_cancelled());
     assert!(app.chat_widget.turn_running());
@@ -395,7 +490,7 @@ fn vim_normal_enter_submits() {
     typ(&mut app, "hi");
     app.on_key(press(KeyCode::Esc)); // → Normal
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi"));
+    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("hi")));
 }
 
 #[test]
@@ -434,7 +529,7 @@ fn tab_completes_selected_command_into_composer() {
     typ(&mut app, "/mc");
     assert!(app.chat_widget.bottom_pane().completion().is_some());
     app.on_key(press(KeyCode::Tab));
-    assert_eq!(app.chat_widget.bottom_pane().composer().text(), "/mcp");
+    assert_eq!(app.chat_widget.bottom_pane().composer().text(), "/mcp ");
 }
 
 #[test]
@@ -624,7 +719,7 @@ fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>
     let (resp_tx, resp_rx) = oneshot::channel();
     let request = PermissionRequest::ToolUseConfirm {
         tool_name: "Bash".to_string(),
-        tool_input: serde_json::json!({ "command": "ls -la" }),
+        tool_input: json_projection(r#"{"command":"ls -la"}"#),
         default_decision: permission::gate::PromptDefault::DenyByDefault,
         suppress_always_allow_rule: false,
     };
@@ -636,12 +731,9 @@ fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>
             suppress_always_allow_rule: false,
             permission_persistence: permission::allow_suggestion::permission_persistence_suggestion(
                 "Bash",
-                &serde_json::json!([{
-                    "type": "addRules",
-                    "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
-                    "behavior": "allow",
-                    "destination": "session"
-                }]),
+                &json_projection(
+                    r#"[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls -la"}],"behavior":"allow","destination":"session"}]"#,
+                ),
             ),
             auto_mode_prompt: None,
             background_owned: false,
@@ -765,7 +857,9 @@ fn non_command_slash_input_is_sent_as_a_prompt() {
     }
     let outcome = app.on_key(press(KeyCode::Enter));
     // Unrecognized slash command falls through as a normal prompt.
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "/frobnicate"));
+    assert!(
+        matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("/frobnicate"))
+    );
     assert_eq!(cells(&app).len(), 1);
 }
 
@@ -806,17 +900,20 @@ fn session_clear_drops_render_tree_and_retries_the_same_ui_site_request() {
         .expect("initial site request");
     let old_revision = app.mod_ui_render_revision;
     let old_generation = app.mod_ui_generation_tracker.generation().unwrap_or(0);
-    let max_rows = original_request["props"]["maxRows"]
-        .as_u64()
+    let max_rows = original_request
+        .number_at("/props/maxRows")
         .expect("measured row budget") as u16;
     assert!(max_rows > 0, "test viewport leaves an AbovePrompt row");
     let baseline_height = app.chat_widget.desired_height(80);
-    let old_tree = serde_json::json!({
+    let old_tree_json = serde_json::json!({
         "type":"Button",
         "props":{"key":"stale","label":"Stale"},
         "children":[],
         "press":{"plugin":"test-mod","handle":1,"workerEpoch":"old-worker","renderRevision":1}
     });
+    let old_tree =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&old_tree_json)
+            .expect("test tree is valid JSON");
     app.chat_widget.set_mod_ui_render_tree(&old_tree, max_rows);
     app.mod_ui_button_actions =
         crate::mod_ui_render::tree_buttons(&old_tree, old_revision.saturating_add(1)).unwrap();
@@ -856,9 +953,9 @@ fn session_clear_drops_render_tree_and_retries_the_same_ui_site_request() {
             old_generation,
             old_revision,
             original_request,
-            Ok(serde_json::json!({
-                "type":"Text","props":{},"children":["stale old tree"]
-            })),
+            Ok(json_projection(
+                r#"{"type":"Text","props":{},"children":["stale old tree"]}"#,
+            )),
         ))
         .unwrap();
     app.drain_mod_ui_render_results();
@@ -1103,7 +1200,7 @@ fn submitted_prompt_is_trimmed_before_echo_and_submit() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "  hi there  ");
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi there"));
+    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("hi there")));
     assert_eq!(cell::<UserTextCell>(&app, 0).body(), "hi there");
 }
 
@@ -1185,7 +1282,7 @@ fn permission_resolution_is_single_shot_and_releases_keyboard() {
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "x");
     assert!(matches!(
         app.on_key(press(KeyCode::Enter)),
-        ChatOutcome::Submit(ref p, ..) if p == "x"
+        ChatOutcome::Submit(ref p, ..) if p == &text_projection("x")
     ));
 }
 

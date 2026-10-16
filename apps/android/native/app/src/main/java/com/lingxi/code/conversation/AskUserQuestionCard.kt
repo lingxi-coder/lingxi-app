@@ -47,36 +47,53 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.AskQuestionDto
+import com.lingxi.code.bindings.client.AskUserQuestionAnswerDto
+import com.lingxi.code.bindings.client.AskUserQuestionAnswersDto
 import com.lingxi.code.bindings.client.AskUserQuestionRequestDto
+import com.lingxi.code.bindings.client.ClientTextDto
 
-/** Toggle [label] in a question's selection list. */
+/** Toggle an option index in a question's selection list. */
 internal fun toggleAskSelection(
-    current: List<String>,
-    label: String,
+    current: List<Int>,
+    optionIndex: Int,
     multiSelect: Boolean,
-): List<String> = when {
-    multiSelect -> if (label in current) current - label else current + label
-    label in current -> emptyList()
-    else -> listOf(label)
+): List<Int> = when {
+    multiSelect -> if (optionIndex in current) current - optionIndex else current + optionIndex
+    optionIndex in current -> emptyList()
+    else -> listOf(optionIndex)
 }
 
 /** Assemble the answer payload expected by AnswerAskUserQuestion. */
 internal fun assembleAskAnswers(
     request: AskUserQuestionRequestDto,
-    selections: Map<Int, List<String>>,
+    selections: Map<Int, List<Int>>,
     freeTexts: Map<Int, String>,
-): Map<String, String> = buildMap {
-    request.questions.forEachIndexed { index, question ->
-        val parts = selections[index].orEmpty() +
-            listOfNotNull(freeTexts[index]?.trim()?.takeIf { it.isNotEmpty() })
-        if (parts.isNotEmpty()) put(question.question, parts.joinToString(", "))
+): AskUserQuestionAnswersDto {
+    val pairs = request.questions.mapIndexedNotNull { index, question ->
+        val parts = selections[index].orEmpty().mapNotNull { optionIndex ->
+            question.options.getOrNull(optionIndex)?.label?.codeUnits
+        }.toMutableList()
+        freeTexts[index]?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            parts += it.toClientTextDto().codeUnits
+        }
+        if (parts.isEmpty()) return@mapIndexedNotNull null
+        val joined = mutableListOf<UShort>()
+        parts.forEachIndexed { partIndex, units ->
+            if (partIndex > 0) joined += listOf(','.code.toUShort(), ' '.code.toUShort())
+            joined += units
+        }
+        AskUserQuestionAnswerDto(
+            question = question.question,
+            answer = ClientTextDto(codeUnits = joined),
+        )
     }
+    return AskUserQuestionAnswersDto(pairs = pairs)
 }
 
 /** True when every question has a selected option or non-blank custom answer. */
 internal fun askAnswersComplete(
     request: AskUserQuestionRequestDto,
-    selections: Map<Int, List<String>>,
+    selections: Map<Int, List<Int>>,
     freeTexts: Map<Int, String>,
 ): Boolean = request.questions.indices.all { index ->
     selections[index].orEmpty().isNotEmpty() ||
@@ -91,12 +108,12 @@ internal fun askAnswersComplete(
 @Composable
 fun AskUserQuestionCard(
     request: AskUserQuestionRequestDto,
-    onSubmit: (requestId: ULong, answers: Map<String, String>) -> Unit,
+    onSubmit: (requestId: ULong, answers: AskUserQuestionAnswersDto) -> Unit,
     onCancel: (requestId: ULong) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var expandedQuestion by remember(request.requestId) { mutableIntStateOf(0) }
-    val selections = remember(request.requestId) { mutableStateMapOf<Int, List<String>>() }
+    val selections = remember(request.requestId) { mutableStateMapOf<Int, List<Int>>() }
     val freeTexts = remember(request.requestId) { mutableStateMapOf<Int, String>() }
     val questions = request.questions
     val answeredCount = questions.indices.count { index ->
@@ -152,7 +169,7 @@ fun AskUserQuestionCard(
                 modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
             ) {
                 questions.forEachIndexed { index, question ->
-                    val answer = answerSummary(index, selections, freeTexts)
+                    val answer = answerSummary(index, question, selections, freeTexts)
                     AskQuestionAccordionRow(
                         question = question,
                         expanded = expandedQuestion == index,
@@ -162,10 +179,10 @@ fun AskUserQuestionCard(
                         onExpand = {
                             expandedQuestion = if (expandedQuestion == index) -1 else index
                         },
-                        onToggleOption = { label ->
+                        onToggleOption = { optionIndex ->
                             val next = toggleAskSelection(
                                 selections[index].orEmpty(),
-                                label,
+                                optionIndex,
                                 question.multiSelect,
                             )
                             selections[index] = next
@@ -198,10 +215,10 @@ private fun AskQuestionAccordionRow(
     question: AskQuestionDto,
     expanded: Boolean,
     answer: String?,
-    selected: List<String>,
+    selected: List<Int>,
     freeText: String,
     onExpand: () -> Unit,
-    onToggleOption: (String) -> Unit,
+    onToggleOption: (Int) -> Unit,
     onFreeTextChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -224,7 +241,7 @@ private fun AskQuestionAccordionRow(
                 modifier = Modifier.weight(1f),
             ) {
                 Text(
-                    text = question.question,
+                    text = question.question.displayText(),
                     style = MaterialTheme.typography.bodyLarge,
                     color = colors.onSurface,
                     fontWeight = FontWeight.Normal,
@@ -247,8 +264,8 @@ private fun AskQuestionAccordionRow(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 10.dp),
             ) {
-                question.options.forEach { option ->
-                    val active = option.label in selected
+                question.options.forEachIndexed { optionIndex, option ->
+                    val active = optionIndex in selected
                     Surface(
                         shape = shape,
                         color = if (active) colors.secondaryContainer.copy(alpha = 0.7f) else colors.surface,
@@ -261,7 +278,7 @@ private fun AskQuestionAccordionRow(
                             .selectable(
                                 selected = active,
                                 role = if (question.multiSelect) Role.Checkbox else Role.RadioButton,
-                                onClick = { onToggleOption(option.label) },
+                                onClick = { onToggleOption(optionIndex) },
                             ),
                     ) {
                         Row(
@@ -276,14 +293,14 @@ private fun AskQuestionAccordionRow(
                             Spacer(Modifier.width(8.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(
-                                    text = option.label,
+                                    text = option.label.displayText(),
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = colors.onSurface,
                                     fontWeight = FontWeight.Medium,
                                 )
-                                if (option.description.isNotBlank()) {
+                                if (option.description.displayText().isNotBlank()) {
                                     Text(
-                                        text = option.description,
+                                        text = option.description.displayText(),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = colors.onSurfaceVariant,
                                     )
@@ -313,10 +330,12 @@ private fun AskQuestionAccordionRow(
 
 private fun answerSummary(
     index: Int,
-    selections: Map<Int, List<String>>,
+    question: AskQuestionDto,
+    selections: Map<Int, List<Int>>,
     freeTexts: Map<Int, String>,
 ): String? {
-    val parts = selections[index].orEmpty() +
-        listOfNotNull(freeTexts[index]?.trim()?.takeIf { it.isNotEmpty() })
+    val parts = selections[index].orEmpty().mapNotNull { optionIndex ->
+        question.options.getOrNull(optionIndex)?.label?.displayText()
+    } + listOfNotNull(freeTexts[index]?.trim()?.takeIf { it.isNotEmpty() })
     return parts.takeIf { it.isNotEmpty() }?.joinToString(", ")
 }

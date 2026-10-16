@@ -303,6 +303,9 @@ pub struct SubagentStatusLineTask {
     /// Task type wire value.
     #[serde(rename = "type")]
     pub task_type: String,
+    /// Agent type for task rows that represent an agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     /// Lifecycle status wire value.
     pub status: String,
     /// User-facing task description.
@@ -945,6 +948,7 @@ mod tests {
                 id: "a123".into(),
                 name: "Explore".into(),
                 task_type: "local_agent".into(),
+                agent_type: Some("general-purpose".into()),
                 status: "running".into(),
                 description: "Map runtime".into(),
                 label: "Map runtime".into(),
@@ -961,8 +965,12 @@ mod tests {
         assert_eq!(payload["columns"], 132);
         assert_eq!(payload["tasks"][0]["id"], "a123");
         assert_eq!(payload["tasks"][0]["type"], "local_agent");
+        assert_eq!(payload["tasks"][0]["agentType"], "general-purpose");
         assert_eq!(payload["tasks"][0]["startTime"], 1_700_000_000_000_u64);
         assert_eq!(payload["tasks"][0]["contextWindowSize"], 200_000);
+
+        let no_agent_type = serde_json::to_value(SubagentStatusLineTask::default()).unwrap();
+        assert!(no_agent_type.get("agentType").is_none());
     }
 
     #[cfg(unix)]

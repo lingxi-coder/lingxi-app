@@ -57,6 +57,8 @@ use client::protocol::commands::{ClientCommand, ImageRefDto, UiSurfaceDto};
 use client::protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
+use client::protocol::text::ClientTextDto;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use msgqueue::{
     join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
     QueuedCommandContent, TelemetryQueueRecorder,
@@ -65,6 +67,36 @@ use permission::computer_access::ComputerAccessExchange;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::ask_user_question::AskUserQuestionExchange;
+
+fn deserialize_source<T>(source: &Utf16JsonProjection) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let json = source.to_json_string().map_err(|error| error.to_string())?;
+    serde_json::from_str(&json).map_err(|error| error.to_string())
+}
+
+fn serialize_source<T: serde::Serialize>(value: &T) -> Result<Utf16JsonProjection, String> {
+    let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    Utf16JsonProjection::parse(&json).map_err(|error| error.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionRequestScopeQuery {
+    request_id: u64,
+}
+
+#[derive(serde::Serialize)]
+struct PermissionRequestScopeResult {
+    request_id: u64,
+    background_owned: bool,
+}
+
+#[derive(serde::Serialize)]
+struct DesktopRuntimeSnapshotResult<'a> {
+    events: &'a [ClientEvent],
+}
 
 use client::adapter::AdapterPermissionGate;
 use client::adapter::ComputerAccessBroker;
@@ -86,7 +118,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// keeps servicing inbound frames (notably the approval that unblocks a
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
-    async fn run_turn(&self, prompt: String);
+    async fn run_turn(&self, prompt: Utf16JsonProjection);
     async fn record_prompt_suggestion_submission(&self, _text: &str) {}
     /// Mounted conversation identity for immutable permission owners.
     async fn current_session_id(&self) -> Option<String> {
@@ -100,11 +132,33 @@ pub trait TurnDriver: Send + Sync + 'static {
     async fn ui_detach(&self, _client_id: &str) -> bool {
         false
     }
+    /// Execute a session-bound Native Mod UI control.
+    async fn mod_ui_control(
+        &self,
+        _request: Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        Err(lingxi_core::host::HandleError::ActionFailed(
+            "Mod UI controls are unavailable on this turn driver".into(),
+        ))
+    }
+    /// Execute a session-bound host-local Mod Client operation.
+    async fn mod_ui_client_operation(
+        &self,
+        _operation: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::HandleError> {
+        Err(lingxi_core::host::HandleError::ActionFailed(
+            "Mod Client operations are unavailable on this turn driver".into(),
+        ))
+    }
     /// Cancel session-local timers before replacing the conversation.
     async fn stop_dynamic_loop(&self) {}
 
     /// Resolve a scheduled sentinel against this session's working directory.
-    fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
+    fn resolve_loop_prompt(
+        &self,
+        prompt: &Utf16JsonProjection,
+    ) -> std::io::Result<Utf16JsonProjection> {
         let cwd = std::env::current_dir()?;
         tool_cron::LoopRuntime::default().try_resolve_loop_default_fire(prompt, &cwd, &cwd)
     }
@@ -113,7 +167,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     }
     async fn run_scheduled_turn(
         &self,
-        _prompt: String,
+        _prompt: Utf16JsonProjection,
         _model: String,
         _reasoning: client::protocol::controls::ReasoningSelectionDto,
         _cancel: CancellationToken,
@@ -125,21 +179,40 @@ pub trait TurnDriver: Send + Sync + 'static {
         inputs: Vec<orchestrator::QueuedPromptInput>,
         cancel: CancellationToken,
     ) {
+        // Simple test drivers may lower ordinary user rows to text, but a
+        // companion envelope or typed Native history row needs a real batch
+        // consumer. Never silently erase those fields in the fallback.
+        if inputs.iter().any(|input| {
+            input.is_meta
+                || input.turn_companion
+                || !input.trailing_history_rows.is_empty()
+                || input.goal_retry_id.is_some()
+                || input.mod_origin.is_some()
+                || input.message_origin.is_some()
+                || input.prompt_source.is_some()
+                || input.message_id.is_some()
+                || input.transcript_row_token.is_some()
+                || input.queue_priority.is_some()
+                || input.scheduled_task_id.is_some()
+                || input.scheduled_fire_id.is_some()
+        }) {
+            tracing::error!(
+                "source-preserving prompt rows require a TurnDriver batch implementation"
+            );
+            return;
+        }
         let human = inputs.iter().any(|input| !input.is_meta);
-        self.run_queued_turn(
-            inputs
+        let prompt = join_source_text(
+            &inputs
                 .into_iter()
                 .map(|input| input.text)
-                .collect::<Vec<_>>()
-                .join("\n"),
-            human,
-            cancel,
-        )
-        .await;
+                .collect::<Vec<_>>(),
+        );
+        self.run_queued_turn(prompt, human, cancel).await;
     }
     async fn run_queued_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         _in_human_turn: bool,
         cancel: CancellationToken,
     ) {
@@ -150,7 +223,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// drivers announce this new turn before streaming or requesting approvals.
     async fn run_queued_turn_with_images(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -177,7 +250,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// through to the model. With an empty `images` vector the override is, by
     /// construction, identical to the plain text-only `run_turn` path — so the
     /// dispatch can always call this entry without a special-case for "no images".
-    async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
+    async fn run_turn_with_images(&self, prompt: Utf16JsonProjection, images: Vec<ImageRefDto>) {
         // Default: images are not supported by this driver — drop them and run the
         // text-only turn (byte-identical to the pre-MULTIMODAL.1 behavior).
         let _ = images;
@@ -188,7 +261,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// Legacy/test drivers keep their existing natural-completion behavior;
     /// the production orchestrator driver overrides this and consumes the
     /// token at its structured cancellation checkpoints.
-    async fn run_turn_with_cancel(&self, prompt: String, cancel: CancellationToken) {
+    async fn run_turn_with_cancel(&self, prompt: Utf16JsonProjection, cancel: CancellationToken) {
         let _ = cancel;
         self.run_turn(prompt).await;
     }
@@ -196,7 +269,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// Cancel-aware multimodal sibling of [`Self::run_turn_with_images`].
     async fn run_turn_with_images_and_cancel(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -223,6 +296,7 @@ type QuestionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
 struct QueuedPromptPayload {
     images: Vec<ImageRefDto>,
     turn_id: Option<u64>,
+    prompt_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
 }
 
 /// A [`ClientEventSink`] that forwards each lowered [`ClientEvent`] out as a
@@ -253,9 +327,11 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
     matches!(
         event,
         ClientEvent::SystemNotice { .. }
+            | ClientEvent::TerminalApiError { .. }
             | ClientEvent::UiLog { .. }
             | ClientEvent::UiToast { .. }
             | ClientEvent::UiStatus { .. }
+            | ClientEvent::UiNotify { .. }
             | ClientEvent::TextDelta { .. }
             | ClientEvent::AskUserQuestion { .. }
             | ClientEvent::TurnStarted { .. }
@@ -591,6 +667,9 @@ pub struct BridgeConnection {
     /// connection's [`ClientEventSink`]. `None` in the F2-05/06/07 skeleton (only
     /// the turn + permission path was routed there).
     router: Option<Arc<dyn CommandRouter>>,
+    /// A retained terminal Native policy-helper refusal fences every new
+    /// command and cancels the current owner.
+    policy_helper_refusal: Option<harness_runtime::desktop::PolicyHelperRefusalProbe>,
     /// Set once the opening `hello` handshake is ACCEPTED (compatible versions).
     handshaken: Arc<AtomicBool>,
     /// Set once a `hello` handshake is refused. A refused connection's
@@ -1075,7 +1154,62 @@ impl Default for BridgeConnection {
 /// arrived while a turn was in flight (twin of claude-code's `enqueue` defaulting
 /// a direct prompt to `'next'`). `agent_id` is `None` (main thread) so the
 /// between-turn drain picks it up.
-fn prompt_command(text: String) -> QueuedCommand {
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display is derived from the exact UTF-16 units")
+}
+
+fn prefixed_source_text(prefix: &str, source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    units.extend(
+        source
+            .string_units("")
+            .expect("slash parse failure input is a root string"),
+    );
+    projection_from_units(units)
+}
+
+fn join_source_text(values: &[Utf16JsonProjection]) -> Utf16JsonProjection {
+    let mut units = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            units.push(b'\n' as u16);
+        }
+        units.extend(
+            value
+                .string_units("")
+                .expect("queued prompt input is a root string"),
+        );
+    }
+    projection_from_units(units)
+}
+
+fn text_object_projection(text: Utf16JsonProjection) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(vec![("text".to_owned(), text)])
+        .expect("generated command result has a unique text member")
+}
+
+fn mod_command_line(
+    command: &Utf16JsonProjection,
+    args: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+    let Some(command_units) = command.string_units("") else {
+        return Err("command name must be a string".into());
+    };
+    let Some(args_units) = args.string_units("") else {
+        return Err("command arguments must be a string".into());
+    };
+    let mut units = Vec::with_capacity(1 + command_units.len() + args_units.len() + 1);
+    units.push(b'/' as u16);
+    units.extend(command_units);
+    if !args_units.is_empty() {
+        units.push(b' ' as u16);
+        units.extend(args_units);
+    }
+    Ok(projection_from_units(units))
+}
+
+fn prompt_command(text: Utf16JsonProjection) -> QueuedCommand {
     // Process-unique monotonic counter — the drain loop removes consumed
     // commands by uuid, so each queued prompt needs a distinct id.
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1093,9 +1227,28 @@ fn prompt_command(text: String) -> QueuedCommand {
     }
 }
 
+enum SlashAdmission {
+    Owned((u64, CancellationToken)),
+    Queued(QueuedCommand),
+}
+
+enum PromptSeedAdmission {
+    Owned(
+        (
+            u64,
+            CancellationToken,
+            Vec<ImageRefDto>,
+            Option<Vec<orchestrator::QueuedPromptInput>>,
+        ),
+    ),
+    Queued(QueuedCommand),
+    BusyScheduled,
+    Refused,
+}
+
 struct PendingModCommand {
     plugin: String,
-    settle: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+    settle: tokio::sync::oneshot::Sender<Result<Utf16JsonProjection, Utf16JsonProjection>>,
 }
 
 type PendingModCommands = Arc<StdMutex<HashMap<String, PendingModCommand>>>;
@@ -1103,15 +1256,42 @@ type PendingModCommands = Arc<StdMutex<HashMap<String, PendingModCommand>>>;
 struct PendingModPrompt {
     plugin: String,
     as_user: bool,
-    settle: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+    settle: tokio::sync::oneshot::Sender<Result<Utf16JsonProjection, String>>,
 }
 
 type PendingModPrompts = Arc<StdMutex<HashMap<String, PendingModPrompt>>>;
+
+#[cfg(test)]
+#[derive(Default)]
+struct ModQueueEnqueuePause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl ModQueueEnqueuePause {
+    async fn pause(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
+}
 
 struct BridgeModCommandQueue {
     queue: Arc<MessageQueueManager>,
     pending: PendingModCommands,
     prompts: PendingModPrompts,
+    policy_helper_refusal: Option<harness_runtime::desktop::PolicyHelperRefusalProbe>,
+    #[cfg(test)]
+    before_enqueue: Option<Arc<ModQueueEnqueuePause>>,
+}
+
+impl BridgeModCommandQueue {
+    #[cfg(test)]
+    async fn pause_before_enqueue(&self) {
+        if let Some(pause) = &self.before_enqueue {
+            pause.pause().await;
+        }
+    }
 }
 
 #[async_trait]
@@ -1119,54 +1299,122 @@ impl command_api::ModCommandQueue for BridgeModCommandQueue {
     async fn enqueue(
         &self,
         plugin: &str,
-        command: &str,
-        args: &str,
-    ) -> Result<serde_json::Value, String> {
-        let text = if args.is_empty() {
-            format!("/{command}")
-        } else {
-            format!("/{command} {args}")
-        };
+        command: Utf16JsonProjection,
+        args: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+        let text = mod_command_line(&command, &args)?;
         let mut queued = prompt_command(text);
         queued.uuid = format!("mod-command-{}", uuid::Uuid::new_v4());
         queued.source = QueueSource::Plugin;
         queued.priority = QueuePriority::Later;
         queued.is_meta = true;
         let (settle, receive) = tokio::sync::oneshot::channel();
-        self.pending.lock().unwrap().insert(
-            queued.uuid.clone(),
-            PendingModCommand {
-                plugin: plugin.to_owned(),
-                settle,
-            },
-        );
+        let uuid = queued.uuid.clone();
+        let publish = || {
+            self.pending.lock().unwrap().insert(
+                uuid.clone(),
+                PendingModCommand {
+                    plugin: plugin.to_owned(),
+                    settle,
+                },
+            );
+        };
+        let admitted = match &self.policy_helper_refusal {
+            Some(probe) => probe.with_not_refused(publish),
+            None => {
+                publish();
+                Some(())
+            }
+        };
+        if admitted.is_none() {
+            let error = self
+                .policy_helper_refusal
+                .as_ref()
+                .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+                .map(|error| BridgeConnection::policy_refusal_projection(&error))
+                .unwrap_or_else(|| Utf16JsonProjection::from("policy helper refused new work"));
+            return Err(error);
+        }
+        #[cfg(test)]
+        self.pause_before_enqueue().await;
         self.queue.enqueue(queued).await;
+        if let Some(error) = self
+            .policy_helper_refusal
+            .as_ref()
+            .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+        {
+            let error = BridgeConnection::policy_refusal_projection(&error);
+            let pending = self.pending.lock().unwrap().remove(&uuid);
+            // The refusal observer may already have removed and settled this
+            // pending entry while queue publication was in flight. It could not
+            // remove the not-yet-enqueued UUID, so always retire the late queue
+            // insertion even when there is no map entry left.
+            self.queue
+                .remove(std::slice::from_ref(&uuid), "policy helper refusal")
+                .await;
+            if let Some(pending) = pending {
+                let _ = pending.settle.send(Err(error));
+            }
+        }
         receive
             .await
-            .map_err(|_| "the command did not run".to_owned())?
+            .map_err(|_| Utf16JsonProjection::from("the command did not run"))?
     }
 
     async fn enqueue_prompt(
         &self,
         plugin: &str,
-        text: &str,
+        text: Utf16JsonProjection,
         as_user: bool,
-    ) -> Result<serde_json::Value, String> {
-        let mut queued = prompt_command(text.to_owned());
+    ) -> Result<Utf16JsonProjection, String> {
+        let mut queued = prompt_command(text);
         queued.uuid = format!("mod-prompt-{}", uuid::Uuid::new_v4());
         queued.source = QueueSource::Plugin;
         queued.priority = QueuePriority::Later;
         queued.is_meta = !as_user;
         let (settle, receive) = tokio::sync::oneshot::channel();
-        self.prompts.lock().unwrap().insert(
-            queued.uuid.clone(),
-            PendingModPrompt {
-                plugin: plugin.to_owned(),
-                as_user,
-                settle,
-            },
-        );
+        let uuid = queued.uuid.clone();
+        let publish = || {
+            self.prompts.lock().unwrap().insert(
+                uuid.clone(),
+                PendingModPrompt {
+                    plugin: plugin.to_owned(),
+                    as_user,
+                    settle,
+                },
+            );
+        };
+        let admitted = match &self.policy_helper_refusal {
+            Some(probe) => probe.with_not_refused(publish),
+            None => {
+                publish();
+                Some(())
+            }
+        };
+        if admitted.is_none() {
+            return Err("policy helper refused new work".to_owned());
+        }
+        #[cfg(test)]
+        self.pause_before_enqueue().await;
         self.queue.enqueue(queued).await;
+        if self
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some())
+        {
+            let pending = { self.prompts.lock().unwrap().remove(&uuid) };
+            // As with command results, the observer can settle the pending map
+            // before the awaited queue insertion becomes visible. Remove the
+            // UUID unconditionally, and never hold the std mutex over this await.
+            self.queue
+                .remove(std::slice::from_ref(&uuid), "policy helper refusal")
+                .await;
+            if let Some(pending) = pending {
+                let _ = pending
+                    .settle
+                    .send(Err("policy helper refused new work".to_owned()));
+            }
+        }
         receive
             .await
             .map_err(|_| "the prompt did not run".to_owned())?
@@ -1179,14 +1427,43 @@ struct ModQueueDrain {
     prompts: PendingModPrompts,
     router: Option<Arc<dyn CommandRouter>>,
     events: Arc<dyn ClientEventSink>,
+    policy_helper_refusal: Option<harness_runtime::desktop::PolicyHelperRefusalProbe>,
+    queue: Arc<MessageQueueManager>,
+    driver: Option<Arc<dyn TurnDriver>>,
+    loop_runtime: Arc<tool_cron::LoopRuntime>,
+    transition_active: Arc<AtomicBool>,
+}
+
+struct BridgeSlashOwnerContext {
+    driver: Arc<dyn TurnDriver>,
+    active_turn: ActiveTurnControl,
+    interactions: TurnInteractions,
+    queue: Arc<MessageQueueManager>,
+    queued_prompt_payloads: QueuedPromptPayloads,
+    loop_runtime: Arc<tool_cron::LoopRuntime>,
+    turn_handoff: Arc<tokio::sync::Mutex<()>>,
+    turn_running: Arc<AtomicBool>,
+    mod_drain: ModQueueDrain,
+    task_notification_registry:
+        Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
 }
 
 struct QueuedModTurn {
-    prompt: String,
+    prompt: Utf16JsonProjection,
+    prompt_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
     as_user: bool,
     origin: serde_json::Value,
     generation: u64,
     cancel: CancellationToken,
+    owns_generation: bool,
+}
+
+fn skill_prompt_inputs(
+    command: Utf16JsonProjection,
+    body: Utf16JsonProjection,
+    hook_messages: Vec<Utf16JsonProjection>,
+) -> Vec<orchestrator::QueuedPromptInput> {
+    orchestrator::skill_prompt_inputs(command, body, hook_messages)
 }
 
 struct TransitionScope(Arc<AtomicBool>);
@@ -1244,6 +1521,367 @@ async fn batchable_prompt_snapshot(
     }
 }
 
+async fn stop_loop_for_session_transition_parts(
+    queue: &Arc<MessageQueueManager>,
+    driver: Option<&Arc<dyn TurnDriver>>,
+    pending_commands: &PendingModCommands,
+    pending_prompts: &PendingModPrompts,
+    loop_runtime: &Arc<tool_cron::LoopRuntime>,
+) {
+    if let Some(driver) = driver {
+        driver.stop_dynamic_loop().await;
+    }
+    let queued: Vec<_> = queue
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|command| {
+            command.source == QueueSource::Plugin
+                || command.source == QueueSource::Cron && command.uuid.starts_with("loop-wakeup-")
+        })
+        .map(|command| command.uuid)
+        .collect();
+    for id in &queued {
+        if let Some(pending) = pending_commands.lock().unwrap().remove(id) {
+            let _ = pending.settle.send(Err(
+                "the command was removed from the queue before it ran".into(),
+            ));
+        }
+        if let Some(pending) = pending_prompts.lock().unwrap().remove(id) {
+            let dropped = Utf16JsonProjection::object(vec![(
+                "drop".to_owned(),
+                "the prompt was removed from the queue before it ran".into(),
+            )])
+            .expect("generated prompt result has a unique member");
+            let _ = pending.settle.send(Ok(dropped));
+        }
+    }
+    queue.remove(&queued, "conversation replaced").await;
+    loop_runtime.reset();
+}
+
+async fn dispatch_queued_bridge_slash(
+    raw: Utf16JsonProjection,
+    turn_id: Option<u64>,
+    generation: u64,
+    cancellation: CancellationToken,
+    mod_drain: &ModQueueDrain,
+) -> Option<QueuedModTurn> {
+    if mod_drain
+        .policy_helper_refusal
+        .as_ref()
+        .is_some_and(|probe| probe.current().is_some())
+        || cancellation.is_cancelled()
+    {
+        return None;
+    }
+    let parsed = command_api::parser::parse_slash_command(&raw);
+    let is_compact = parsed.as_ref().is_some_and(|parsed| {
+        crate::router::source_text_eq_ascii_ignore_case(&parsed.name, "compact")
+    });
+    let changes_session = parsed.as_ref().is_some_and(|parsed| {
+        ["clear", "new", "reset"]
+            .iter()
+            .any(|name| crate::router::source_text_eq_ascii_ignore_case(&parsed.name, name))
+    });
+    let _transition = changes_session.then(|| TransitionScope::begin(&mod_drain.transition_active));
+    if changes_session {
+        stop_loop_for_session_transition_parts(
+            &mod_drain.queue,
+            mod_drain.driver.as_ref(),
+            &mod_drain.pending,
+            &mod_drain.prompts,
+            &mod_drain.loop_runtime,
+        )
+        .await;
+    }
+    if cancellation.is_cancelled()
+        || mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some())
+    {
+        return None;
+    }
+    if is_compact {
+        mod_drain.loop_runtime.reset_autonomous_loop_delivered();
+    }
+    let Some(router) = mod_drain.router.as_ref() else {
+        mod_drain
+            .events
+            .emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "no slash-command dispatcher wired".into(),
+            })
+            .await;
+        return None;
+    };
+    let context = command_api::ModCommandRunContext {
+        origin: serde_json::json!({"kind":"bridge"}),
+        is_fullscreen: false,
+        columns: 80,
+    };
+    let outcome = command_api::with_mod_command_context(
+        context,
+        router.dispatch_slash(raw.clone(), cancellation.clone()),
+    )
+    .await;
+    if cancellation.is_cancelled()
+        || mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some())
+    {
+        return None;
+    }
+    drop(_transition);
+    let authority_events = outcome
+        .as_ref()
+        .map(|outcome| outcome.authority_events.clone())
+        .unwrap_or_default();
+    let result = outcome.map(|outcome| outcome.result);
+    let turn = match result {
+        Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt }) => Some(QueuedModTurn {
+            prompt: Utf16JsonProjection::from(""),
+            prompt_inputs: Some(vec![orchestrator::QueuedPromptInput {
+                text: prompt,
+                ..Default::default()
+            }]),
+            as_user: false,
+            origin: serde_json::json!({"kind":"bridge"}),
+            generation,
+            cancel: cancellation.clone(),
+            owns_generation: true,
+        }),
+        Some(lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        }) => Some(QueuedModTurn {
+            prompt: Utf16JsonProjection::from(""),
+            prompt_inputs: Some(skill_prompt_inputs(command, body, hook_messages)),
+            as_user: false,
+            origin: serde_json::json!({"kind":"bridge"}),
+            generation,
+            cancel: cancellation.clone(),
+            owns_generation: true,
+        }),
+        Some(lingxi_core::host::SlashDispatchResult::Handled { display }) => {
+            mod_drain
+                .events
+                .emit(ClientEvent::SlashCommandResult {
+                    turn_id,
+                    display: ClientTextDto::from_projection(&display)
+                        .expect("slash display is a root string"),
+                    is_error: false,
+                })
+                .await;
+            None
+        }
+        Some(lingxi_core::host::SlashDispatchResult::Failed { diagnostic }) => {
+            let display = crate::router::slash_failure_display(&diagnostic);
+            mod_drain
+                .events
+                .emit(ClientEvent::SlashCommandResult {
+                    turn_id,
+                    display: ClientTextDto::from_projection(&display)
+                        .expect("slash failure display is a root string"),
+                    is_error: true,
+                })
+                .await;
+            None
+        }
+        Some(lingxi_core::host::SlashDispatchResult::Unknown { display, .. }) => {
+            mod_drain
+                .events
+                .emit(ClientEvent::SlashCommandResult {
+                    turn_id,
+                    display: ClientTextDto::from_projection(&display)
+                        .expect("slash display is a root string"),
+                    is_error: true,
+                })
+                .await;
+            None
+        }
+        Some(lingxi_core::host::SlashDispatchResult::ParseFailure { .. }) => {
+            mod_drain
+                .events
+                .emit(ClientEvent::SlashCommandResult {
+                    turn_id,
+                    display: "Commands are in the form /command [args]".into(),
+                    is_error: true,
+                })
+                .await;
+            None
+        }
+        Some(lingxi_core::host::SlashDispatchResult::NotASlashCommand) => {
+            let mut units = "not a slash command: ".encode_utf16().collect::<Vec<_>>();
+            units.extend(raw.string_units("").unwrap_or_default());
+            mod_drain
+                .events
+                .emit(ClientEvent::SlashCommandResult {
+                    turn_id,
+                    display: ClientTextDto::from_code_units(units),
+                    is_error: true,
+                })
+                .await;
+            None
+        }
+        None => None,
+    };
+    for event in authority_events {
+        mod_drain.events.emit(event).await;
+    }
+    turn
+}
+
+async fn run_owned_bridge_slash(
+    raw: Utf16JsonProjection,
+    turn_id: Option<u64>,
+    generation: u64,
+    cancellation: CancellationToken,
+    owner: BridgeSlashOwnerContext,
+) {
+    let dispatch_was_cancelled = cancellation.is_cancelled()
+        || owner
+            .mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some());
+    if !dispatch_was_cancelled {
+        if let Some(registry) = &owner.task_notification_registry {
+            registry.update_shell_session_activity(true, true, true);
+        }
+        if let Some(units) = raw.string_units("") {
+            if let Ok(submission) = String::from_utf16(&units) {
+                owner
+                    .driver
+                    .record_prompt_suggestion_submission(&submission)
+                    .await;
+            }
+        }
+        if let Some(router) = &owner.mod_drain.router {
+            router.stop_realtime_audio().await;
+        }
+    }
+    let result =
+        dispatch_queued_bridge_slash(raw, turn_id, generation, cancellation, &owner.mod_drain)
+            .await;
+    if let Some(gate) = owner.active_turn.gate() {
+        gate.set_session_id(owner.driver.current_session_id().await);
+    }
+    if let Some(turn) = result {
+        drive_queued_mod_turn(&owner.driver, turn).await;
+    }
+    finish_turn(
+        &owner.active_turn,
+        generation,
+        &owner.interactions,
+        &owner.turn_handoff,
+    )
+    .await;
+    loop {
+        if owner
+            .mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some())
+        {
+            let _handoff = owner.turn_handoff.lock().await;
+            owner.turn_running.store(false, Ordering::SeqCst);
+            break;
+        }
+        drain_main_thread(
+            &owner.driver,
+            &owner.queue,
+            &owner.loop_runtime,
+            &owner.active_turn,
+            &owner.interactions,
+            &owner.queued_prompt_payloads,
+            &owner.turn_handoff,
+            Some(&owner.mod_drain),
+        )
+        .await;
+        let _handoff = owner.turn_handoff.lock().await;
+        owner.turn_running.store(false, Ordering::SeqCst);
+        if owner
+            .mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some())
+        {
+            break;
+        }
+        if owner.queue.has_main_thread_commands().await
+            && owner
+                .turn_running
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            continue;
+        }
+        break;
+    }
+}
+
+async fn begin_plugin_turn_if_not_refused(
+    active_turn: &ActiveTurnControl,
+    driver: &Arc<dyn TurnDriver>,
+    turn_handoff: &Arc<tokio::sync::Mutex<()>>,
+    transition_owns_handoff: bool,
+    refusal: Option<&harness_runtime::desktop::PolicyHelperRefusalProbe>,
+) -> Option<(u64, CancellationToken, bool)> {
+    if let Some(gate) = active_turn.gate() {
+        gate.set_session_id(driver.current_session_id().await);
+    }
+    let begin = || {
+        if transition_owns_handoff {
+            if let Some((generation, cancellation)) = active_turn.cancellation_target(None) {
+                return Some((generation, cancellation, false));
+            }
+        }
+        let (generation, cancellation) = active_turn.begin(None);
+        Some((generation, cancellation, true))
+    };
+    let admitted = if transition_owns_handoff {
+        match refusal {
+            Some(probe) => probe.with_not_refused(begin),
+            None => Some(begin()),
+        }
+    } else {
+        let _handoff = turn_handoff.lock().await;
+        match refusal {
+            Some(probe) => probe.with_not_refused(begin),
+            None => Some(begin()),
+        }
+    };
+    admitted.flatten()
+}
+
+async fn fail_pending_mod_calls_on_refusal(
+    mod_drain: &ModQueueDrain,
+    refusal: &harness_runtime::desktop::PolicyHelperStartupError,
+) {
+    let message = BridgeConnection::policy_refusal_projection(refusal);
+    let pending = std::mem::take(&mut *mod_drain.pending.lock().unwrap());
+    let prompts = std::mem::take(&mut *mod_drain.prompts.lock().unwrap());
+    let mut uuids = Vec::with_capacity(pending.len() + prompts.len());
+    for (uuid, pending) in pending {
+        uuids.push(uuid);
+        let _ = pending.settle.send(Err(message.clone()));
+    }
+    for (uuid, pending) in prompts {
+        uuids.push(uuid);
+        let _ = pending
+            .settle
+            .send(Err("policy helper refused new work".to_owned()));
+    }
+    mod_drain
+        .queue
+        .remove(&uuids, "policy helper refusal")
+        .await;
+}
+
 async fn run_queued_mod_command(
     command: &QueuedCommand,
     mod_drain: &ModQueueDrain,
@@ -1254,25 +1892,56 @@ async fn run_queued_mod_command(
 ) -> Option<QueuedModTurn> {
     let queued_prompt = mod_drain.prompts.lock().unwrap().remove(&command.uuid);
     if let Some(pending) = queued_prompt {
-        let (generation, cancel) = if transition_owns_handoff {
-            begin_owned_turn(active_turn, driver, None).await
-        } else {
-            let _handoff = turn_handoff.lock().await;
-            begin_owned_turn(active_turn, driver, None).await
+        let Some((generation, cancel, owns_generation)) = begin_plugin_turn_if_not_refused(
+            active_turn,
+            driver,
+            turn_handoff,
+            transition_owns_handoff,
+            mod_drain.policy_helper_refusal.as_ref(),
+        )
+        .await
+        else {
+            let message = mod_drain
+                .policy_helper_refusal
+                .as_ref()
+                .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+                .map(|error| BridgeConnection::policy_refusal_projection(&error))
+                .unwrap_or_else(|| Utf16JsonProjection::from("command was cancelled"));
+            let _ = pending.settle.send(Err(message
+                .string_at("")
+                .map(str::to_owned)
+                .unwrap_or_default()));
+            return None;
         };
-        let prompt = command.text().unwrap_or_default().to_owned();
-        let _ = pending.settle.send(Ok(serde_json::json!({"text":prompt})));
-        return Some(QueuedModTurn {
-            prompt,
-            as_user: pending.as_user,
-            origin: if pending.as_user {
-                serde_json::json!({"kind":"plugin","name":pending.plugin,"asUser":true})
+        let PendingModPrompt {
+            plugin,
+            as_user,
+            settle,
+        } = pending;
+        let prompt = command
+            .text_projection()
+            .cloned()
+            .unwrap_or_else(|| Utf16JsonProjection::from(""));
+        let turn = QueuedModTurn {
+            prompt: prompt.clone(),
+            prompt_inputs: None,
+            as_user,
+            origin: if as_user {
+                serde_json::json!({"kind":"plugin","name":plugin,"asUser":true})
             } else {
-                serde_json::json!({"kind":"plugin","name":pending.plugin})
+                serde_json::json!({"kind":"plugin","name":plugin})
             },
             generation,
             cancel,
-        });
+            owns_generation,
+        };
+        if owns_generation {
+            let _ = settle.send(Ok(text_object_projection(prompt)));
+            return Some(turn);
+        }
+        drive_queued_mod_turn(driver, turn).await;
+        let _ = settle.send(Ok(text_object_projection(prompt)));
+        return None;
     }
     let pending = mod_drain.pending.lock().unwrap().remove(&command.uuid);
     let Some(PendingModCommand { plugin, settle }) = pending else {
@@ -1282,6 +1951,24 @@ async fn run_queued_mod_command(
         let _ = settle.send(Err("Mod command router is unavailable".into()));
         return None;
     };
+    let Some((generation, cancel, owns_generation)) = begin_plugin_turn_if_not_refused(
+        active_turn,
+        driver,
+        turn_handoff,
+        transition_owns_handoff,
+        mod_drain.policy_helper_refusal.as_ref(),
+    )
+    .await
+    else {
+        let error = mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+            .map(|error| BridgeConnection::policy_refusal_projection(&error))
+            .unwrap_or_else(|| Utf16JsonProjection::from("command was cancelled"));
+        let _ = settle.send(Err(error));
+        return None;
+    };
     let context = command_api::ModCommandRunContext {
         origin: serde_json::json!({"kind":"plugin","name":plugin}),
         is_fullscreen: false,
@@ -1289,11 +1976,38 @@ async fn run_queued_mod_command(
     };
     let (outcome, settlement) = command_api::with_mod_command_capture(
         context,
-        router.dispatch_slash(command.text().unwrap_or_default()),
+        router.dispatch_slash(
+            command
+                .text_projection()
+                .cloned()
+                .unwrap_or_else(|| Utf16JsonProjection::from("")),
+            cancel.clone(),
+        ),
     )
     .await;
+    if cancel.is_cancelled()
+        || mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .is_some_and(|probe| probe.current().is_some())
+    {
+        let error = mod_drain
+            .policy_helper_refusal
+            .as_ref()
+            .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+            .map(|error| BridgeConnection::policy_refusal_projection(&error))
+            .unwrap_or_else(|| Utf16JsonProjection::from("command was cancelled"));
+        let _ = settle.send(Err(error));
+        if owns_generation {
+            active_turn.finish(generation);
+        }
+        return None;
+    }
     let Some(outcome) = outcome else {
         let _ = settle.send(Err("Mod command dispatcher is unavailable".into()));
+        if owns_generation {
+            active_turn.finish(generation);
+        }
         return None;
     };
     let mut queued_turn = None;
@@ -1303,48 +2017,125 @@ async fn run_queued_mod_command(
                 .events
                 .emit(ClientEvent::SlashCommandResult {
                     turn_id: None,
-                    display: display.clone(),
+                    display: ClientTextDto::from_projection(&display)
+                        .expect("slash display is a root string"),
                     is_error: false,
                 })
                 .await;
-            Ok(settlement.unwrap_or_else(|| serde_json::json!({"text":display})))
+            Ok(settlement.unwrap_or_else(|| text_object_projection(display)))
+        }
+        lingxi_core::host::SlashDispatchResult::Failed { diagnostic } => {
+            let display = crate::router::slash_failure_display(&diagnostic);
+            mod_drain
+                .events
+                .emit(ClientEvent::SlashCommandResult {
+                    turn_id: None,
+                    display: ClientTextDto::from_projection(&display)
+                        .expect("slash failure display is a root string"),
+                    is_error: true,
+                })
+                .await;
+            Err(diagnostic)
         }
         lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
-            let (generation, cancel) = if transition_owns_handoff {
-                begin_owned_turn(active_turn, driver, None).await
-            } else {
-                let _handoff = turn_handoff.lock().await;
-                begin_owned_turn(active_turn, driver, None).await
-            };
             queued_turn = Some(QueuedModTurn {
-                prompt,
+                prompt: Utf16JsonProjection::from(""),
+                prompt_inputs: Some(vec![orchestrator::QueuedPromptInput {
+                    text: prompt,
+                    ..Default::default()
+                }]),
                 as_user: false,
                 origin: serde_json::json!({"kind":"plugin","name":plugin}),
                 generation,
-                cancel,
+                cancel: cancel.clone(),
+                owns_generation,
             });
-            Ok(serde_json::json!({}))
+            Ok(Utf16JsonProjection::object(Vec::new())
+                .expect("generated command result is an empty object"))
+        }
+        lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+            command,
+            body,
+            hook_messages,
+        } => {
+            queued_turn = Some(QueuedModTurn {
+                prompt: Utf16JsonProjection::from(""),
+                prompt_inputs: Some(skill_prompt_inputs(command, body, hook_messages)),
+                as_user: false,
+                origin: serde_json::json!({"kind":"plugin","name":plugin}),
+                generation,
+                cancel: cancel.clone(),
+                owns_generation,
+            });
+            Ok(Utf16JsonProjection::object(Vec::new())
+                .expect("generated command result is an empty object"))
         }
         lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
             mod_drain
                 .events
                 .emit(ClientEvent::SlashCommandResult {
                     turn_id: None,
-                    display: display.clone(),
+                    display: ClientTextDto::from_projection(&display)
+                        .expect("slash display is a root string"),
                     is_error: true,
                 })
                 .await;
             Err(display)
         }
         lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
-            Err(format!("{plugin}: queued command was not a slash command"))
+            Err(format!("{plugin}: queued command was not a slash command").into())
         }
+        lingxi_core::host::SlashDispatchResult::ParseFailure { input } => Err(
+            prefixed_source_text("could not parse slash command ", &input),
+        ),
     };
     for event in outcome.authority_events {
         mod_drain.events.emit(event).await;
     }
+    if queued_turn
+        .as_ref()
+        .is_some_and(|turn| !turn.owns_generation)
+    {
+        drive_queued_mod_turn(
+            driver,
+            queued_turn.take().expect("borrowed turn is present"),
+        )
+        .await;
+    }
     let _ = settle.send(result);
+    if queued_turn.is_none() && owns_generation {
+        active_turn.finish(generation);
+    }
     queued_turn
+}
+
+async fn drive_queued_mod_turn(driver: &Arc<dyn TurnDriver>, turn: QueuedModTurn) {
+    let QueuedModTurn {
+        prompt,
+        prompt_inputs,
+        as_user,
+        origin,
+        cancel,
+        ..
+    } = turn;
+    orchestrator::mod_prompt_origin::with_origin(origin, async move {
+        if let Some(inputs) = prompt_inputs {
+            let human = inputs.iter().any(|input| !input.is_meta);
+            let run = driver.run_queued_batch(inputs, cancel);
+            if human {
+                orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    run,
+                )
+                .await;
+            } else {
+                run.await;
+            }
+        } else {
+            driver.run_queued_turn(prompt, as_user, cancel).await;
+        }
+    })
+    .await;
 }
 
 /// Drain every queued MAIN-THREAD prompt as a follow-up turn, coalescing
@@ -1361,6 +2152,12 @@ async fn drain_main_thread(
     mod_drain: Option<&ModQueueDrain>,
 ) {
     loop {
+        if mod_drain
+            .and_then(|drain| drain.policy_helper_refusal.as_ref())
+            .is_some_and(|probe| probe.current().is_some())
+        {
+            break;
+        }
         // Native hJe selects the head by priority, then Rr collects compatible
         // messages in insertion order. Each retains its own origin in the batch.
         let batch = batchable_prompt_snapshot(queue, queued_prompt_payloads, turn_handoff).await;
@@ -1386,7 +2183,10 @@ async fn drain_main_thread(
                 let owned_turn = if command.as_ref().is_some_and(|command| {
                     command.source != QueueSource::Plugin
                         && (payload.is_some()
-                            || command.text().is_some_and(|text| !text.is_empty()))
+                            || command
+                                .text_projection()
+                                .and_then(|text| text.string_units(""))
+                                .is_some_and(|units| !units.is_empty()))
                 }) {
                     Some(
                         begin_owned_turn(
@@ -1403,6 +2203,29 @@ async fn drain_main_thread(
             };
             match command {
                 Some(cmd) => {
+                    if cmd.source == QueueSource::PromptInput && cmd.is_slash_command() {
+                        let (generation, cancel) =
+                            owned_turn.expect("claimed raw slash command owns a turn");
+                        let raw = cmd
+                            .text_projection()
+                            .cloned()
+                            .expect("raw queued slash retains exact UTF-16 source");
+                        let turn_id = payload.as_ref().and_then(|payload| payload.turn_id);
+                        let turn = match mod_drain {
+                            Some(mod_drain) => {
+                                dispatch_queued_bridge_slash(
+                                    raw, turn_id, generation, cancel, mod_drain,
+                                )
+                                .await
+                            }
+                            None => None,
+                        };
+                        if let Some(turn) = turn {
+                            drive_queued_mod_turn(driver, turn).await;
+                        }
+                        finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                        continue;
+                    }
                     if cmd.source == QueueSource::Plugin {
                         if let Some(mod_drain) = mod_drain {
                             if let Some(turn) = run_queued_mod_command(
@@ -1415,48 +2238,74 @@ async fn drain_main_thread(
                             )
                             .await
                             {
-                                orchestrator::mod_prompt_origin::with_origin(
-                                    turn.origin,
-                                    driver.run_queued_turn(turn.prompt, turn.as_user, turn.cancel),
-                                )
-                                .await;
-                                finish_turn(
-                                    active_turn,
-                                    turn.generation,
-                                    interactions,
-                                    turn_handoff,
-                                )
-                                .await;
+                                let generation = turn.generation;
+                                let owns_generation = turn.owns_generation;
+                                drive_queued_mod_turn(driver, turn).await;
+                                if owns_generation {
+                                    finish_turn(
+                                        active_turn,
+                                        generation,
+                                        interactions,
+                                        turn_handoff,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         continue;
                     }
                     if let Some(payload) = payload {
                         let (generation, cancel) = owned_turn.expect("complete prompt owns a turn");
-                        tag_loop_tick_in_flight(
-                            loop_runtime,
-                            false,
-                            cmd.text().unwrap_or_default(),
-                        );
-                        orchestrator::mod_prompt_origin::with_origin(
-                            serde_json::json!({"kind":"bridge"}),
-                            driver.run_queued_turn_with_images(
-                                cmd.text().unwrap_or_default().to_string(),
-                                payload.images,
-                                cancel,
-                            ),
-                        )
-                        .await;
+                        let native_source =
+                            if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
+                                orchestrator::native_user_message_source::human()
+                            } else {
+                                Default::default()
+                            };
+                        if let Some(inputs) = payload.prompt_inputs {
+                            if payload.images.is_empty() {
+                                orchestrator::native_user_message_source::with_source(
+                                    native_source,
+                                    orchestrator::mod_prompt_origin::with_origin(
+                                        serde_json::json!({"kind":"bridge"}),
+                                        driver.run_queued_batch(inputs, cancel),
+                                    ),
+                                )
+                                .await;
+                            } else {
+                                tracing::error!(
+                                    "queued prompt batch cannot also carry image attachments"
+                                );
+                            }
+                        } else {
+                            let prompt = cmd
+                                .text_projection()
+                                .cloned()
+                                .unwrap_or_else(|| Utf16JsonProjection::from(""));
+                            tag_loop_tick_in_flight(loop_runtime, false, &prompt);
+                            orchestrator::native_user_message_source::with_source(
+                                native_source,
+                                orchestrator::mod_prompt_origin::with_origin(
+                                    serde_json::json!({"kind":"bridge"}),
+                                    driver.run_queued_turn_with_images(
+                                        prompt,
+                                        payload.images,
+                                        cancel,
+                                    ),
+                                ),
+                            )
+                            .await;
+                        }
                         finish_turn(active_turn, generation, interactions, turn_handoff).await;
                         continue;
                     }
-                    if let Some(t) = cmd.text() {
-                        if !t.is_empty() {
+                    if let Some(text) = cmd.text_projection() {
+                        if text.string_units("").is_some_and(|units| !units.is_empty()) {
                             tag_loop_tick_in_flight(
                                 loop_runtime,
                                 cmd.source == QueueSource::Cron
                                     && cmd.uuid.starts_with("loop-wakeup-"),
-                                t,
+                                text,
                             );
                             let (generation, cancel) =
                                 owned_turn.expect("nonempty queued prompt owns a turn");
@@ -1468,12 +2317,21 @@ async fn drain_main_thread(
                                 QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
                                 _ => serde_json::json!({"kind":"unclassified"}),
                             };
-                            orchestrator::mod_prompt_origin::with_origin(
-                                origin,
-                                driver.run_queued_turn(
-                                    t.to_string(),
-                                    cmd.source == QueueSource::PromptInput && !cmd.is_meta,
-                                    cancel,
+                            let native_source =
+                                if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
+                                    orchestrator::native_user_message_source::human()
+                                } else {
+                                    Default::default()
+                                };
+                            orchestrator::native_user_message_source::with_source(
+                                native_source,
+                                orchestrator::mod_prompt_origin::with_origin(
+                                    origin,
+                                    driver.run_queued_turn(
+                                        text.clone(),
+                                        cmd.source == QueueSource::PromptInput && !cmd.is_meta,
+                                        cancel,
+                                    ),
                                 ),
                             )
                             .await;
@@ -1497,7 +2355,7 @@ async fn drain_main_thread(
                     && c.uuid.starts_with("loop-wakeup-")
                     && consumed.contains(&c.uuid)
             })
-            .and_then(|c| c.text().map(str::to_string));
+            .and_then(|c| c.text_projection().cloned());
         match cron_tick {
             Some(ref t) => tag_loop_tick_in_flight(loop_runtime, true, t),
             None => tag_loop_tick_in_flight(loop_runtime, false, &joined),
@@ -1515,9 +2373,11 @@ async fn drain_main_thread(
             .iter()
             .filter(|command| consumed.contains(&command.uuid))
         {
-            let Some(text) = command.text() else { continue };
+            let Some(source_text) = command.text_projection() else {
+                continue;
+            };
             let text = if command.source == QueueSource::Cron {
-                match driver.resolve_loop_prompt(text) {
+                match driver.resolve_loop_prompt(source_text) {
                     Ok(text) => text,
                     Err(error) => {
                         failed_uuids.push(command.uuid.clone());
@@ -1526,22 +2386,36 @@ async fn drain_main_thread(
                     }
                 }
             } else {
-                text.to_string()
+                source_text.clone()
             };
+            let is_human_prompt = command.source == QueueSource::PromptInput && !command.is_meta;
+            let native_source =
+                is_human_prompt.then(orchestrator::native_user_message_source::human);
             inputs.push(orchestrator::QueuedPromptInput {
                 goal_retry_id: command
                     .uuid
                     .starts_with("goal-retry-")
                     .then(|| command.uuid.clone()),
                 text,
+                prompt_ingress_kind: is_human_prompt
+                    .then_some(orchestrator::PromptIngressKind::RegularUser),
+                skip_model_query: false,
                 is_meta: command.is_meta || command.source != QueueSource::PromptInput,
+                turn_companion: false,
                 mod_origin: Some(match command.source {
                     QueueSource::PromptInput => serde_json::json!({"kind":"bridge"}),
                     QueueSource::Cron => serde_json::json!({"kind":"scheduled-trigger"}),
                     QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
                     _ => serde_json::json!({"kind":"unclassified"}),
                 }),
+                message_origin: native_source
+                    .as_ref()
+                    .and_then(|source| source.message_origin.clone()),
+                prompt_source: None,
                 message_id: None,
+                pending_prompt_identity: None,
+                images: Vec::new(),
+                trailing_history_rows: Vec::new(),
                 transcript_row_token: None,
                 queue_priority: (command.priority == QueuePriority::Later)
                     .then(|| "later".to_string()),
@@ -1582,9 +2456,13 @@ async fn drain_main_thread(
 /// edge can arm the keepalive fallback. A `QueueSource::Cron` command IS a loop
 /// tick (binary `d.kind==="loop"`); any other turn clears a stale tag so a user
 /// turn never inherits one.
-fn tag_loop_tick_in_flight(loop_runtime: &tool_cron::LoopRuntime, is_cron: bool, text: &str) {
+fn tag_loop_tick_in_flight(
+    loop_runtime: &tool_cron::LoopRuntime,
+    is_cron: bool,
+    text: &Utf16JsonProjection,
+) {
     if is_cron {
-        loop_runtime.begin_tick(text.to_string());
+        loop_runtime.begin_tick(text.clone());
     } else {
         loop_runtime.take_in_flight_prompt();
         loop_runtime.invalidate_noop_streak();
@@ -1638,6 +2516,7 @@ impl BridgeConnection {
             ui_attached_clients: Arc::new(Mutex::new(HashSet::new())),
             ui_lifecycle_gate: Arc::new(tokio::sync::Mutex::new(())),
             router: None,
+            policy_helper_refusal: None,
             handshaken: Arc::new(AtomicBool::new(false)),
             handshake_refused: Arc::new(AtomicBool::new(false)),
             // Install the telemetry recorder synchronously at construction so
@@ -1663,9 +2542,18 @@ impl BridgeConnection {
         }
     }
 
-    /// Answer `visualization` requests and resolve follow-up context from the
-    /// store under `config_home`.
+    /// Bind the runtime's retained Native managed-policy refusal. Once set,
+    /// it is terminal for this connection: new work is rejected and the
+    /// current active-turn token is cancelled by the queue owner.
     #[must_use]
+    pub fn with_policy_helper_refusal(
+        mut self,
+        refusal: harness_runtime::desktop::PolicyHelperRefusalProbe,
+    ) -> Self {
+        self.policy_helper_refusal = Some(refusal);
+        self
+    }
+
     pub fn with_visualization(
         mut self,
         fs: Arc<dyn lingxi_core::host::FileSystem>,
@@ -1701,6 +2589,7 @@ impl BridgeConnection {
         let turn_handoff = self.turn_handoff.clone();
         let transition_active = self.transition_active.clone();
         let handshaken = self.handshaken.clone();
+        let policy_helper_refusal = self.policy_helper_refusal.clone();
         let active_turn = self.active_turn.clone();
         let active_task = self.active_turn_task.clone();
         let queued_prompt_payloads = self.queued_prompt_payloads.clone();
@@ -1715,100 +2604,126 @@ impl BridgeConnection {
         let watcher = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Some(refusal) = policy_helper_refusal
+                    .as_ref()
+                    .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+                {
+                    active_turn.cancel(None);
+                    mod_drain
+                        .events
+                        .emit(BridgeConnection::refusal_error_event(&refusal))
+                        .await;
+                    fail_pending_mod_calls_on_refusal(&mod_drain, &refusal).await;
+                    queued_prompt_payloads.lock().await.clear();
+                    let _ = queue.clear().await;
+                    break;
+                }
                 // A transition may be waiting inside session.start for its
-                // own queued plugin command. The parent owns `turn_handoff`,
-                // so consume only that plugin item through its reentrant lane.
-                if transition_active.load(Ordering::SeqCst)
+                // own queued plugin command. A connection-level slash already
+                // owns the active turn, so that reentrant lane borrows its token
+                // instead of trying to claim a second owner.
+                let transition_candidate = transition_active.load(Ordering::SeqCst)
                     && handshaken.load(Ordering::SeqCst)
                     && queue
                         .peek(|command| {
                             command.is_main_thread() && command.source == QueueSource::Plugin
                         })
                         .await
-                        .is_some()
-                    && running
+                        .is_some();
+                if transition_candidate {
+                    let claimed_running = running
                         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                {
-                    if let Some(command) = queue
-                        .dequeue_filtered(|command| {
-                            command.is_main_thread() && command.source == QueueSource::Plugin
-                        })
-                        .await
-                    {
-                        let turn = run_queued_mod_command(
-                            &command,
-                            &mod_drain,
-                            &driver,
-                            &active_turn,
-                            &turn_handoff,
-                            true,
-                        )
-                        .await;
-                        if let Some(turn) = turn {
-                            // The plugin's command has run and its API promise
-                            // is settled. Drive the resulting model prompt on
-                            // a separate owner so this socket can still read
-                            // permission replies while the turn is in flight.
-                            let driver = driver.clone();
-                            let queue = queue.clone();
-                            let running = running.clone();
-                            let loop_runtime = loop_runtime.clone();
-                            let active_turn = active_turn.clone();
-                            let interactions = interactions.clone();
-                            let queued_prompt_payloads = queued_prompt_payloads.clone();
-                            let turn_handoff = turn_handoff.clone();
-                            let mod_drain = mod_drain.clone();
-                            let task = tokio::spawn(async move {
-                                orchestrator::mod_prompt_origin::with_origin(
-                                    turn.origin,
-                                    driver.run_queued_turn(turn.prompt, turn.as_user, turn.cancel),
-                                )
-                                .await;
-                                finish_turn(
-                                    &active_turn,
-                                    turn.generation,
-                                    &interactions,
-                                    &turn_handoff,
-                                )
-                                .await;
-                                loop {
-                                    drain_main_thread(
-                                        &driver,
-                                        &queue,
-                                        &loop_runtime,
+                        .is_ok();
+                    let borrowing_owner = !claimed_running
+                        && running.load(Ordering::SeqCst)
+                        && active_turn.cancellation_target(None).is_some();
+                    if claimed_running || borrowing_owner {
+                        if let Some(command) = queue
+                            .dequeue_filtered(|command| {
+                                command.is_main_thread() && command.source == QueueSource::Plugin
+                            })
+                            .await
+                        {
+                            let turn = run_queued_mod_command(
+                                &command,
+                                &mod_drain,
+                                &driver,
+                                &active_turn,
+                                &turn_handoff,
+                                true,
+                            )
+                            .await;
+                            if let Some(turn) = turn {
+                                if !turn.owns_generation {
+                                    drive_queued_mod_turn(&driver, turn).await;
+                                    if claimed_running {
+                                        running.store(false, Ordering::SeqCst);
+                                    }
+                                    continue;
+                                }
+                                // The plugin's command has run and its API promise
+                                // is settled. Drive the resulting model prompt on
+                                // a separate owner so this socket can still read
+                                // permission replies while the turn is in flight.
+                                let driver = driver.clone();
+                                let queue = queue.clone();
+                                let running = running.clone();
+                                let loop_runtime = loop_runtime.clone();
+                                let active_turn = active_turn.clone();
+                                let interactions = interactions.clone();
+                                let queued_prompt_payloads = queued_prompt_payloads.clone();
+                                let turn_handoff = turn_handoff.clone();
+                                let mod_drain = mod_drain.clone();
+                                let task = tokio::spawn(async move {
+                                    let generation = turn.generation;
+                                    drive_queued_mod_turn(&driver, turn).await;
+                                    finish_turn(
                                         &active_turn,
+                                        generation,
                                         &interactions,
-                                        &queued_prompt_payloads,
                                         &turn_handoff,
-                                        Some(&mod_drain),
                                     )
                                     .await;
-                                    let _handoff = turn_handoff.lock().await;
-                                    running.store(false, Ordering::SeqCst);
-                                    if queue.has_main_thread_commands().await
-                                        && running
-                                            .compare_exchange(
-                                                false,
-                                                true,
-                                                Ordering::SeqCst,
-                                                Ordering::SeqCst,
-                                            )
-                                            .is_ok()
-                                    {
-                                        continue;
+                                    loop {
+                                        drain_main_thread(
+                                            &driver,
+                                            &queue,
+                                            &loop_runtime,
+                                            &active_turn,
+                                            &interactions,
+                                            &queued_prompt_payloads,
+                                            &turn_handoff,
+                                            Some(&mod_drain),
+                                        )
+                                        .await;
+                                        let _handoff = turn_handoff.lock().await;
+                                        running.store(false, Ordering::SeqCst);
+                                        if queue.has_main_thread_commands().await
+                                            && running
+                                                .compare_exchange(
+                                                    false,
+                                                    true,
+                                                    Ordering::SeqCst,
+                                                    Ordering::SeqCst,
+                                                )
+                                                .is_ok()
+                                        {
+                                            continue;
+                                        }
+                                        break;
                                     }
-                                    break;
-                                }
-                            });
-                            *active_task
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
-                            continue;
+                                });
+                                *active_task
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
+                                continue;
+                            }
                         }
+                        if claimed_running {
+                            running.store(false, Ordering::SeqCst);
+                        }
+                        continue;
                     }
-                    running.store(false, Ordering::SeqCst);
-                    continue;
                 }
                 if handshaken.load(Ordering::SeqCst)
                     && running.load(Ordering::SeqCst)
@@ -1934,12 +2849,61 @@ impl BridgeConnection {
         self.unscoped_event_sink()
     }
 
+    /// Sink used only to report a host-level Native policy semantic worker
+    /// failure before the bridge process tears down the connection.
+    #[must_use]
+    pub fn policy_semantic_worker_failure_sink(&self) -> Arc<dyn ClientEventSink> {
+        self.unscoped_event_sink()
+    }
+
     /// Sink reserved for command output that is not part of a turn lifecycle.
     /// Keeping it private prevents orchestrator events from bypassing ownership.
     pub(crate) fn unscoped_event_sink(&self) -> Arc<dyn ClientEventSink> {
         Arc::new(UnscopedFrameEventSink {
             out: self.out.clone(),
         })
+    }
+
+    async fn dispatch_mod_ui_control(
+        &self,
+        request_id: String,
+        request_json: String,
+        expected_subtype: &str,
+    ) {
+        let result = match client::adapter::turn::parse_mod_ui_control_request(
+            &request_json,
+            expected_subtype,
+        ) {
+            Ok(request) => match self.driver.as_ref() {
+                Some(driver) => driver.mod_ui_control(request).await,
+                None => Err(lingxi_core::host::HandleError::ActionFailed(
+                    "Mod UI controls are unavailable without a session driver".into(),
+                )),
+            },
+            Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error)),
+        };
+        self.unscoped_event_sink()
+            .emit(client::adapter::turn::mod_ui_control_result_event(
+                request_id, result,
+            ))
+            .await;
+    }
+
+    async fn dispatch_mod_ui_client_operation(&self, request_id: String, operation_json: String) {
+        let result = match client::adapter::turn::parse_mod_ui_client_operation(&operation_json) {
+            Ok(operation) => match self.driver.as_ref() {
+                Some(driver) => driver.mod_ui_client_operation(operation).await,
+                None => Err(lingxi_core::host::HandleError::ActionFailed(
+                    "Mod Client operations are unavailable without a session driver".into(),
+                )),
+            },
+            Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error)),
+        };
+        self.unscoped_event_sink()
+            .emit(client::adapter::turn::mod_ui_client_operation_result_event(
+                request_id, result,
+            ))
+            .await;
     }
 
     pub(crate) fn realtime_execution_owners(
@@ -2100,6 +3064,9 @@ impl BridgeConnection {
             queue: self.queue.clone(),
             pending: self.mod_commands.clone(),
             prompts: self.mod_prompts.clone(),
+            policy_helper_refusal: self.policy_helper_refusal.clone(),
+            #[cfg(test)]
+            before_enqueue: None,
         })
     }
 
@@ -2109,6 +3076,11 @@ impl BridgeConnection {
             prompts: self.mod_prompts.clone(),
             router: self.router.clone(),
             events: self.unscoped_event_sink(),
+            policy_helper_refusal: self.policy_helper_refusal.clone(),
+            queue: self.queue.clone(),
+            driver: self.driver.clone(),
+            loop_runtime: self.loop_runtime.clone(),
+            transition_active: self.transition_active.clone(),
         }
     }
 
@@ -2152,7 +3124,7 @@ impl BridgeConnection {
         }
     }
 
-    fn error_response(id: u64, message: impl Into<String>) -> Frame {
+    fn error_response(id: u64, message: impl Into<ClientTextDto>) -> Frame {
         Frame::Response(BridgeResponse {
             id,
             result: None,
@@ -2204,7 +3176,7 @@ impl BridgeConnection {
             BridgeResponse {
                 id: request_id,
                 result: Some(
-                    serde_json::to_value(ServerHello {
+                    serialize_source(&ServerHello {
                         protocol_version: BRIDGE_PROTOCOL_VERSION.to_string(),
                         server_name: concat!("lingxi-bridge-server/", env!("CARGO_PKG_VERSION"))
                             .to_string(),
@@ -2247,7 +3219,7 @@ impl BridgeConnection {
                     // JSON-RPC "invalid request" range; the version disagreement
                     // is a structural rejection of the opening frame.
                     code: -32600,
-                    message,
+                    message: message.into(),
                 }),
             }
         };
@@ -2269,12 +3241,47 @@ impl BridgeConnection {
     }
 
     /// Route one decoded [`ClientCommand`].
+    fn policy_refusal_projection(
+        error: &harness_runtime::desktop::PolicyHelperStartupError,
+    ) -> Utf16JsonProjection {
+        error
+            .diagnostic()
+            .cloned()
+            .unwrap_or_else(|| error.field_path().into())
+    }
+
+    fn refusal_error_event(
+        error: &harness_runtime::desktop::PolicyHelperStartupError,
+    ) -> ClientEvent {
+        let message = ClientTextDto::from_projection(&Self::policy_refusal_projection(error))
+            .expect("policy refusal message is a root string");
+        ClientEvent::Error {
+            kind: ErrorKindDto::Rejected,
+            message,
+        }
+    }
+
+    async fn reject_if_policy_refused(&self) -> bool {
+        let Some(error) = self
+            .policy_helper_refusal
+            .as_ref()
+            .and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+        else {
+            return false;
+        };
+        self.unscoped_event_sink()
+            .emit(Self::refusal_error_event(&error))
+            .await;
+        true
+    }
+
     async fn dispatch(&self, command: ClientCommand) {
+        if self.reject_if_policy_refused().await {
+            return;
+        }
         if matches!(
             &command,
-            ClientCommand::SendPrompt { .. }
-                | ClientCommand::RunSlashCommand { .. }
-                | ClientCommand::TaskMessage { .. }
+            ClientCommand::SendPrompt { .. } | ClientCommand::TaskMessage { .. }
         ) {
             if let Some(registry) = &self.task_notification_registry {
                 registry.update_shell_session_activity(
@@ -2299,6 +3306,37 @@ impl BridgeConnection {
                         .await;
                 }
             }
+            command @ (ClientCommand::SideChatCreate { .. }
+            | ClientCommand::SideChatList {}
+            | ClientCommand::SideChatGet { .. }
+            | ClientCommand::SideChatEnd { .. }
+            | ClientCommand::SideChatSubmit { .. }) => {
+                let sink = self.unscoped_event_sink();
+                if let Some(router) = self.router.clone() {
+                    router.route(command, sink).await;
+                } else {
+                    let (request_id, side_id) = match &command {
+                        ClientCommand::SideChatCreate { request_id, .. } => {
+                            (Some(request_id.clone()), None)
+                        }
+                        ClientCommand::SideChatGet { side_id }
+                        | ClientCommand::SideChatEnd { side_id } => (None, Some(side_id.clone())),
+                        ClientCommand::SideChatSubmit {
+                            side_id,
+                            request_id,
+                            ..
+                        } => (Some(request_id.clone()), Some(side_id.clone())),
+                        ClientCommand::SideChatList {} => (None, None),
+                        _ => unreachable!("side-chat command group is exhaustive"),
+                    };
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id,
+                        side_id,
+                        message: "side chat command router is unavailable".into(),
+                    })
+                    .await;
+                }
+            }
             ClientCommand::UiAttach { surface, client_id } => {
                 let _lifecycle = self.ui_lifecycle_gate.lock().await;
                 let mut owned = self.ui_attached_clients.lock().await;
@@ -2319,42 +3357,70 @@ impl BridgeConnection {
                     }
                 }
             }
-            command @ (ClientCommand::UiRender { .. }
-            | ClientCommand::UiClientModule { .. }
-            | ClientCommand::UiMessage { .. }
-            | ClientCommand::UiClientFault { .. }
-            | ClientCommand::UiClientPress { .. }
-            | ClientCommand::UiPress { .. }
-            | ClientCommand::UiInput { .. }
-            | ClientCommand::UiSelect { .. }
-            | ClientCommand::UiClientOperation { .. }) => {
-                let request_id = match &command {
-                    ClientCommand::UiRender { request_id, .. }
-                    | ClientCommand::UiClientModule { request_id, .. }
-                    | ClientCommand::UiMessage { request_id, .. }
-                    | ClientCommand::UiClientFault { request_id, .. }
-                    | ClientCommand::UiClientPress { request_id, .. }
-                    | ClientCommand::UiPress { request_id, .. }
-                    | ClientCommand::UiInput { request_id, .. }
-                    | ClientCommand::UiSelect { request_id, .. }
-                    | ClientCommand::UiClientOperation { request_id, .. } => request_id.clone(),
-                    _ => unreachable!("the UI request match is exhaustive"),
-                };
-                if let Some(router) = self.router.clone() {
-                    // UI controls are session-scoped but not owned by the
-                    // assistant turn. Route them even while a model turn is
-                    // active, and publish the correlated response unscoped.
-                    router.route(command, self.unscoped_event_sink()).await;
-                } else {
-                    self.unscoped_event_sink()
-                        .emit(ClientEvent::UiControlResult {
-                            request_id,
-                            response_json: None,
-                            metadata_json: None,
-                            error: Some("Mod UI requests need a mounted session".into()),
-                        })
-                        .await;
-                }
+            ClientCommand::UiRender {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_render")
+                    .await;
+            }
+            ClientCommand::UiMessage {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_message")
+                    .await;
+            }
+            ClientCommand::UiClientFault {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_client_fault")
+                    .await;
+            }
+            ClientCommand::UiClientPress {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_client_press")
+                    .await;
+            }
+            ClientCommand::UiPress {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_press")
+                    .await;
+            }
+            ClientCommand::UiInput {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_input")
+                    .await;
+            }
+            ClientCommand::UiSelect {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_select")
+                    .await;
+            }
+            ClientCommand::UiClientModule { request_id, plugin } => {
+                let request_json = serde_json::json!({
+                    "subtype": "ui_client_module",
+                    "plugin": plugin,
+                })
+                .to_string();
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_client_module")
+                    .await;
+            }
+            ClientCommand::UiClientOperation {
+                request_id,
+                operation_json,
+            } => {
+                self.dispatch_mod_ui_client_operation(request_id, operation_json)
+                    .await;
             }
             ClientCommand::SendPrompt {
                 text,
@@ -2364,10 +3430,14 @@ impl BridgeConnection {
                 ..
             } => {
                 if let Some(driver) = &self.driver {
-                    driver.record_prompt_suggestion_submission(&text).await;
+                    if let Ok(submission) = String::from_utf16(&text.code_units) {
+                        driver
+                            .record_prompt_suggestion_submission(&submission)
+                            .await;
+                    }
                 }
                 let text = self
-                    .visualization_followup(text, visualization_context.as_ref())
+                    .visualization_followup(text.into_projection(), visualization_context.as_ref())
                     .await;
                 if let Some(router) = &self.router {
                     router.stop_realtime_audio().await;
@@ -2380,8 +3450,13 @@ impl BridgeConnection {
                 model,
                 reasoning,
             } => {
-                self.handle_prompt_seed(prompt, Vec::new(), None, Some((run_id, model, reasoning)))
-                    .await;
+                self.handle_prompt_seed(
+                    prompt.into(),
+                    Vec::new(),
+                    None,
+                    Some((run_id, model, reasoning)),
+                )
+                .await;
             }
             ClientCommand::Cancel { turn_id } => {
                 self.cancel_active_turn(turn_id).await;
@@ -2446,145 +3521,134 @@ impl BridgeConnection {
                     );
                 }
             }
-            // A slash command may be a `type: "prompt"` command (`/loop`,
-            // Markdown/Plugin): claude-code injects its expanded prompt as the
-            // user turn. Pre-dispatch via the router's dispatcher (which the
-            // connection cannot reach otherwise) so a `RunAsTurn` result is fed
-            // through the SAME enqueue-or-spawn turn path as a `SendPrompt` (the
-            // connection owns the driver + queue + turn-running flag). Display-
-            // only / unknown / no-dispatcher cases fall back to the router's
-            // text-surface path.
+            // A raw slash command is admitted before expansion. Busy requests
+            // are queued as singleton raw inputs and are not dispatched until
+            // the between-turn drain claims them.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
-                if let Some(driver) = &self.driver {
-                    driver.record_prompt_suggestion_submission(&raw).await;
-                }
-                if let Some(router) = &self.router {
-                    router.stop_realtime_audio().await;
-                }
-                // Check before dispatch_slash: builtins execute there, not in
-                // the later display-only routing fallback. Use connection run
-                // ownership, which also covers queued follow-up turns.
-                let is_compact = command_api::parser::parse_slash_command(&raw)
-                    .is_some_and(|parsed| parsed.name.eq_ignore_ascii_case("compact"));
-                // Match the ALIAS SPELLINGS the registry accepts, not just the
-                // canonical builtin: `commands/core/src/register.rs` maps both
-                // `new` and `reset` onto `clear`, and `dispatch_slash` resolves
-                // through that map. Missing a spelling here does not stop the
-                // conversation from being replaced — it only skips
-                // `stop_loop_for_session_transition`, so the armed `/loop`
-                // wakeup and its already-queued `loop-wakeup-*` command leak
-                // into the new session.
-                let changes_session =
-                    command_api::parser::parse_slash_command(&raw).is_some_and(|parsed| {
-                        matches!(
-                            parsed.name.to_ascii_lowercase().as_str(),
-                            "clear" | "new" | "reset"
-                        )
-                    });
-                let _handoff = if is_compact || changes_session {
-                    Some(self.turn_handoff.lock().await)
-                } else {
-                    None
-                };
-                if (is_compact || changes_session) && self.turn_running.load(Ordering::SeqCst) {
+                let raw_source = raw.clone().into_projection();
+                let Some(driver) = self.driver.clone() else {
                     self.unscoped_event_sink()
-                        .emit(ClientEvent::SlashCommandResult {
-                            turn_id,
-                            display: if is_compact {
-                                "cannot compact the session while a turn is in flight"
-                            } else {
-                                "cannot replace the session while a turn is in flight"
-                            }
-                            .into(),
-                            is_error: true,
+                        .emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Rejected,
+                            message: "slash command requires a session driver".into(),
                         })
                         .await;
                     return;
-                }
-                let _transition = (is_compact || changes_session)
-                    .then(|| TransitionScope::begin(&self.transition_active));
-                if changes_session {
-                    self.stop_loop_for_session_transition().await;
-                }
-                if is_compact {
-                    self.loop_runtime.reset_autonomous_loop_delivered();
-                }
-                let context = command_api::ModCommandRunContext {
-                    origin: serde_json::json!({"kind":"bridge"}),
-                    is_fullscreen: false,
-                    columns: 80,
                 };
-                let outcome = match self.router.as_ref() {
-                    Some(router) => {
-                        command_api::with_mod_command_context(context, router.dispatch_slash(&raw))
-                            .await
-                    }
-                    None => None,
-                };
-                let authority_events = outcome
-                    .as_ref()
-                    .map(|outcome| outcome.authority_events.clone())
-                    .unwrap_or_default();
-                match outcome.map(|outcome| outcome.result) {
-                    Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt }) => {
-                        // Run the expanded prompt exactly like a direct user
-                        // prompt (enqueue-or-spawn; no images).
-                        drop(_transition);
-                        drop(_handoff);
-                        self.handle_send_prompt(prompt, Vec::new(), turn_id).await;
-                    }
-                    // Display-only / unknown result: surface the SAME dispatch
-                    // result's text directly. We must NOT re-`route()` here —
-                    // `route(RunSlashCommand)` calls `dispatcher.dispatch()` a
-                    // SECOND time (router.rs), which would re-run the builtin's
-                    // `handle()` (and any of its `EmitEffects`/`InjectMessage`
-                    // side effects) twice and discard the first result. Reuse
-                    // the already-computed disposition instead.
-                    Some(lingxi_core::host::SlashDispatchResult::Handled { display }) => {
+
+                let _handoff = self.turn_handoff.lock().await;
+                if self.turn_running.load(Ordering::SeqCst) {
+                    let requires_idle_turn = match self.router.as_ref() {
+                        Some(router) => router.requires_idle_turn_for_slash(&raw_source).await,
+                        None => false,
+                    };
+                    if requires_idle_turn {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
-                                display,
-                                is_error: false,
-                            })
-                            .await;
-                    }
-                    Some(lingxi_core::host::SlashDispatchResult::Unknown { display, .. }) => {
-                        self.unscoped_event_sink()
-                            .emit(ClientEvent::SlashCommandResult {
-                                turn_id,
-                                display,
-                                is_error: true,
-                            })
-                            .await;
-                    }
-                    Some(lingxi_core::host::SlashDispatchResult::NotASlashCommand) => {
-                        self.unscoped_event_sink()
-                            .emit(ClientEvent::SlashCommandResult {
-                                turn_id,
-                                display: format!("not a slash command: {raw}"),
-                                is_error: true,
-                            })
-                            .await;
-                    }
-                    // No dispatcher wired: delegate to the router's text-surface
-                    // path, which emits the "no slash-command dispatcher wired"
-                    // error (unchanged behavior). It dispatches at most once.
-                    None => {
-                        if let Some(router) = self.router.clone() {
-                            router
-                                .route(
-                                    ClientCommand::RunSlashCommand { raw, turn_id },
-                                    self.unscoped_event_sink(),
+                                display: ClientTextDto::from_projection(
+                                    &"this command requires an idle session".into(),
                                 )
-                                .await;
-                        }
+                                .expect("slash failure display is a root string"),
+                                is_error: true,
+                            })
+                            .await;
+                        return;
                     }
                 }
-                for event in authority_events {
-                    self.unscoped_event_sink().emit(event).await;
+                if let Some(gate) = self.active_turn.gate() {
+                    gate.set_session_id(driver.current_session_id().await);
                 }
-                self.refresh_permission_session().await;
+                let mut queued_payloads = self.queued_prompt_payloads.lock().await;
+                let queued_command = prompt_command(raw_source.clone());
+                let admit = || {
+                    if self
+                        .turn_running
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        SlashAdmission::Owned(self.active_turn.begin(turn_id))
+                    } else {
+                        queued_payloads.insert(
+                            queued_command.uuid.clone(),
+                            QueuedPromptPayload {
+                                images: Vec::new(),
+                                turn_id,
+                                prompt_inputs: None,
+                            },
+                        );
+                        SlashAdmission::Queued(queued_command)
+                    }
+                };
+                let admission = match &self.policy_helper_refusal {
+                    Some(probe) => probe.with_not_refused(admit),
+                    None => Some(admit()),
+                };
+                drop(queued_payloads);
+                let Some(admission) = admission else {
+                    drop(_handoff);
+                    self.reject_if_policy_refused().await;
+                    return;
+                };
+                let (generation, cancellation) = match admission {
+                    SlashAdmission::Queued(command) => {
+                        let queued_uuid = command.uuid.clone();
+                        self.queue.enqueue(command).await;
+                        if self
+                            .policy_helper_refusal
+                            .as_ref()
+                            .is_some_and(|probe| probe.current().is_some())
+                        {
+                            self.queued_prompt_payloads
+                                .lock()
+                                .await
+                                .remove(&queued_uuid);
+                            self.queue
+                                .remove(std::slice::from_ref(&queued_uuid), "policy helper refusal")
+                                .await;
+                            drop(_handoff);
+                            self.reject_if_policy_refused().await;
+                            return;
+                        }
+                        drop(_handoff);
+                        if let Some(registry) = &self.task_notification_registry {
+                            registry.update_shell_session_activity(true, true, true);
+                        }
+                        return;
+                    }
+                    SlashAdmission::Owned(owner) => {
+                        drop(_handoff);
+                        owner
+                    }
+                };
+                let owner = BridgeSlashOwnerContext {
+                    driver,
+                    active_turn: self.active_turn.clone(),
+                    interactions: TurnInteractions {
+                        gate: self.gate.clone(),
+                        computer_access_broker: self.computer_access_broker.clone(),
+                        ask_user_question_broker: self.ask_user_question_broker.clone(),
+                        tool_names: self.tool_names.clone(),
+                    },
+                    queue: self.queue.clone(),
+                    queued_prompt_payloads: self.queued_prompt_payloads.clone(),
+                    loop_runtime: self.loop_runtime.clone(),
+                    turn_handoff: self.turn_handoff.clone(),
+                    turn_running: self.turn_running.clone(),
+                    mod_drain: self.mod_queue_drain(),
+                    task_notification_registry: self.task_notification_registry.clone(),
+                };
+                let task = tokio::spawn(run_owned_bridge_slash(
+                    raw_source,
+                    turn_id,
+                    generation,
+                    cancellation,
+                    owner,
+                ));
+                *self
+                    .active_turn_task
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
             }
             command @ (ClientCommand::ClearSession
             | ClientCommand::NewSession { .. }
@@ -2620,15 +3684,6 @@ impl BridgeConnection {
             command @ ClientCommand::SetModel { .. } => {
                 if let Some(router) = &self.router {
                     router.stop_realtime_audio().await;
-                    router.route(command, self.unscoped_event_sink()).await;
-                }
-            }
-            command @ (ClientCommand::SideChatCreate { .. }
-            | ClientCommand::SideChatList {}
-            | ClientCommand::SideChatGet { .. }
-            | ClientCommand::SideChatEnd { .. }
-            | ClientCommand::SideChatSubmit { .. }) => {
-                if let Some(router) = &self.router {
                     router.route(command, self.unscoped_event_sink()).await;
                 }
             }
@@ -2669,44 +3724,23 @@ impl BridgeConnection {
     /// prompt. Plain uncorrelated text can still enter the SDK's mid-turn batch;
     /// metadata-bearing input runs independently after the current turn.
     async fn stop_loop_for_session_transition(&self) {
-        if let Some(driver) = &self.driver {
-            driver.stop_dynamic_loop().await;
-        }
-        let queued: Vec<_> = self
-            .queue
-            .snapshot()
-            .await
-            .into_iter()
-            .filter(|command| {
-                command.source == QueueSource::Plugin
-                    || command.source == QueueSource::Cron
-                        && command.uuid.starts_with("loop-wakeup-")
-            })
-            .map(|command| command.uuid)
-            .collect();
-        for id in &queued {
-            if let Some(pending) = self.mod_commands.lock().unwrap().remove(id) {
-                let _ = pending.settle.send(Err(
-                    "the command was removed from the queue before it ran".into(),
-                ));
-            }
-            if let Some(pending) = self.mod_prompts.lock().unwrap().remove(id) {
-                let _ = pending.settle.send(Ok(serde_json::json!({
-                    "drop":"the prompt was removed from the queue before it ran"
-                })));
-            }
-        }
-        self.queue.remove(&queued, "conversation replaced").await;
-        self.loop_runtime.reset();
+        stop_loop_for_session_transition_parts(
+            &self.queue,
+            self.driver.as_ref(),
+            &self.mod_commands,
+            &self.mod_prompts,
+            &self.loop_runtime,
+        )
+        .await;
     }
 
     /// A follow-up from a widget carries that revision's confirmed state,
     /// snapshotted now (at send or enqueue time) ahead of the typed text.
     async fn visualization_followup(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         context: Option<&client::protocol::message::VisualizationRefDto>,
-    ) -> String {
+    ) -> Utf16JsonProjection {
         let (Some(visualization), Some(context), Some(driver)) =
             (&self.visualization, context, &self.driver)
         else {
@@ -2725,9 +3759,70 @@ impl BridgeConnection {
         .await
     }
 
+    fn spawn_queue_drain_loop(&self, driver: Arc<dyn TurnDriver>) {
+        let queue = self.queue.clone();
+        let queued_prompt_payloads = self.queued_prompt_payloads.clone();
+        let loop_runtime = self.loop_runtime.clone();
+        let turn_running = self.turn_running.clone();
+        let turn_handoff = self.turn_handoff.clone();
+        let active_turn = self.active_turn.clone();
+        let interactions = TurnInteractions {
+            gate: self.gate.clone(),
+            computer_access_broker: self.computer_access_broker.clone(),
+            ask_user_question_broker: self.ask_user_question_broker.clone(),
+            tool_names: self.tool_names.clone(),
+        };
+        let mod_drain = self.mod_queue_drain();
+        let task = tokio::spawn(async move {
+            loop {
+                if mod_drain
+                    .policy_helper_refusal
+                    .as_ref()
+                    .is_some_and(|probe| probe.current().is_some())
+                {
+                    let _handoff = turn_handoff.lock().await;
+                    turn_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                drain_main_thread(
+                    &driver,
+                    &queue,
+                    &loop_runtime,
+                    &active_turn,
+                    &interactions,
+                    &queued_prompt_payloads,
+                    &turn_handoff,
+                    Some(&mod_drain),
+                )
+                .await;
+                let _handoff = turn_handoff.lock().await;
+                turn_running.store(false, Ordering::SeqCst);
+                if mod_drain
+                    .policy_helper_refusal
+                    .as_ref()
+                    .is_some_and(|probe| probe.current().is_some())
+                {
+                    break;
+                }
+                if queue.has_main_thread_commands().await
+                    && turn_running
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                {
+                    continue;
+                }
+                break;
+            }
+        });
+        *self
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(task);
+    }
+
     async fn handle_send_prompt(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         turn_id: Option<u64>,
     ) {
@@ -2736,7 +3831,7 @@ impl BridgeConnection {
 
     async fn handle_prompt_seed(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         turn_id: Option<u64>,
         scheduled: Option<(
@@ -2745,54 +3840,156 @@ impl BridgeConnection {
             client::protocol::controls::ReasoningSelectionDto,
         )>,
     ) {
-        // A new seed turn is intervening work, even if the prior loop tick
-        // already finished and its keepalive consumed the in-flight marker.
-        self.loop_runtime.invalidate_noop_streak();
+        self.handle_prompt_seed_with_batch(text, images, turn_id, scheduled, None, None)
+            .await;
+    }
+
+    async fn handle_prompt_batch_seed(
+        &self,
+        inputs: Vec<orchestrator::QueuedPromptInput>,
+        turn_id: Option<u64>,
+    ) {
+        self.handle_prompt_seed_with_batch(
+            Utf16JsonProjection::from(""),
+            Vec::new(),
+            turn_id,
+            None,
+            Some(inputs),
+            None,
+        )
+        .await;
+    }
+
+    async fn handle_prompt_seed_with_batch(
+        &self,
+        text: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
+        turn_id: Option<u64>,
+        scheduled: Option<(
+            String,
+            String,
+            client::protocol::controls::ReasoningSelectionDto,
+        )>,
+        queued_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
+        reserved_owner: Option<(u64, CancellationToken)>,
+    ) {
         let Some(driver) = self.driver.clone() else {
             return;
         };
 
-        // Try to win the run-loop ownership. compare_exchange fails if a turn is
-        // already running, in which case we enqueue instead of spawning.
         let _handoff = self.turn_handoff.lock().await;
-        if self
-            .turn_running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
+        let (seed_generation, seed_cancel, images, queued_inputs) = if let Some(owner) =
+            reserved_owner
         {
-            if let Some((run_id, _, _)) = scheduled {
-                self.unscoped_event_sink()
-                    .emit(ClientEvent::ScheduledRunFinished {
-                        run_id,
-                        summary: None,
-                        error: Some("busy:Target session is running".into()),
-                    })
-                    .await;
+            if !self.active_turn.owns_generation(owner.0) {
                 return;
             }
-            let mut command = prompt_command(text);
-            if !images.is_empty() || turn_id.is_some() {
-                // `Later` is not consumed by the SDK's text-only mid-turn
-                // adapter. The connection restores this payload at follow-up
-                // admission instead of silently dropping images or correlation.
-                command.priority = QueuePriority::Later;
-                self.queued_prompt_payloads.lock().await.insert(
-                    command.uuid.clone(),
-                    QueuedPromptPayload { images, turn_id },
-                );
+            (owner.0, owner.1, images, queued_inputs)
+        } else {
+            if let Some(gate) = self.active_turn.gate() {
+                gate.set_session_id(driver.current_session_id().await);
             }
-            self.queue.enqueue(command).await;
-            if !lingxi_core::host::env::background_tasks_disabled() {
-                if let Some(registry) = &self.task_notification_registry {
-                    registry
-                        .background_all_tasks_with_reason(
-                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
-                        )
-                        .await;
+            let mut payloads = self.queued_prompt_payloads.lock().await;
+            let mut queue_command = prompt_command(text.clone());
+            // This entry already chose model input rather than RunSlashCommand.
+            // Preserve that choice when a path-like prompt waits in the queue.
+            queue_command.skip_slash_commands = true;
+            let mut queued_images = Some(images);
+            let mut queued_inputs = Some(queued_inputs);
+            let scheduled_run_id = scheduled.as_ref().map(|(run_id, _, _)| run_id.clone());
+            let admit = || {
+                if self
+                    .turn_running
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let owner = self.active_turn.begin(turn_id);
+                    PromptSeedAdmission::Owned((
+                        owner.0,
+                        owner.1,
+                        queued_images.take().unwrap_or_default(),
+                        queued_inputs.take().unwrap_or(None),
+                    ))
+                } else if scheduled_run_id.is_some() {
+                    PromptSeedAdmission::BusyScheduled
+                } else {
+                    let images = queued_images.take().unwrap_or_default();
+                    let prompt_inputs = queued_inputs.take().unwrap_or(None);
+                    if !images.is_empty() || turn_id.is_some() || prompt_inputs.is_some() {
+                        queue_command.priority = QueuePriority::Later;
+                        payloads.insert(
+                            queue_command.uuid.clone(),
+                            QueuedPromptPayload {
+                                images,
+                                turn_id,
+                                prompt_inputs,
+                            },
+                        );
+                    }
+                    PromptSeedAdmission::Queued(queue_command)
+                }
+            };
+            let admission = match &self.policy_helper_refusal {
+                Some(probe) => probe.with_not_refused(admit),
+                None => Some(admit()),
+            };
+            let admission = admission.unwrap_or(PromptSeedAdmission::Refused);
+            drop(payloads);
+            match admission {
+                PromptSeedAdmission::Owned(owner) => owner,
+                PromptSeedAdmission::Queued(command) => {
+                    let queued_uuid = command.uuid.clone();
+                    self.queue.enqueue(command).await;
+                    if self
+                        .policy_helper_refusal
+                        .as_ref()
+                        .is_some_and(|probe| probe.current().is_some())
+                    {
+                        self.queued_prompt_payloads
+                            .lock()
+                            .await
+                            .remove(&queued_uuid);
+                        self.queue
+                            .remove(std::slice::from_ref(&queued_uuid), "policy helper refusal")
+                            .await;
+                        drop(_handoff);
+                        self.reject_if_policy_refused().await;
+                        return;
+                    }
+                    self.loop_runtime.invalidate_noop_streak();
+                    drop(_handoff);
+                    if !lingxi_core::host::env::background_tasks_disabled() {
+                        if let Some(registry) = &self.task_notification_registry {
+                            registry
+                                    .background_all_tasks_with_reason(
+                                        lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
+                                    )
+                                    .await;
+                        }
+                    }
+                    return;
+                }
+                PromptSeedAdmission::BusyScheduled => {
+                    drop(_handoff);
+                    if let Some((run_id, _, _)) = scheduled {
+                        self.unscoped_event_sink()
+                            .emit(ClientEvent::ScheduledRunFinished {
+                                run_id,
+                                summary: None,
+                                error: Some("busy:Target session is running".into()),
+                            })
+                            .await;
+                    }
+                    return;
+                }
+                PromptSeedAdmission::Refused => {
+                    drop(_handoff);
+                    self.reject_if_policy_refused().await;
+                    return;
                 }
             }
-            return;
-        }
+        };
+        self.loop_runtime.invalidate_noop_streak();
 
         let queue = self.queue.clone();
         let queued_prompt_payloads = self.queued_prompt_payloads.clone();
@@ -2806,9 +4003,7 @@ impl BridgeConnection {
             ask_user_question_broker: self.ask_user_question_broker.clone(),
             tool_names: self.tool_names.clone(),
         };
-        // Claim the active owner before spawning. Cancel can now safely arrive
-        // immediately after SendPrompt without missing the driver's token.
-        let (seed_generation, seed_cancel) = begin_owned_turn(&active_turn, &driver, turn_id).await;
+
         let scheduled_sink = self.unscoped_event_sink();
         let mod_drain = self.mod_queue_drain();
         let task = tokio::spawn(async move {
@@ -2828,10 +4023,28 @@ impl BridgeConnection {
                         error,
                     })
                     .await;
+            } else if let Some(inputs) = queued_inputs {
+                let human = inputs.iter().any(|input| !input.is_meta);
+                let native_source = if human {
+                    orchestrator::native_user_message_source::human()
+                } else {
+                    Default::default()
+                };
+                orchestrator::native_user_message_source::with_source(
+                    native_source,
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"bridge"}),
+                        driver.run_queued_batch(inputs, seed_cancel),
+                    ),
+                )
+                .await;
             } else {
-                orchestrator::mod_prompt_origin::with_origin(
-                    serde_json::json!({"kind":"bridge"}),
-                    driver.run_turn_with_images_and_cancel(text, images, seed_cancel),
+                orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"bridge"}),
+                        driver.run_turn_with_images_and_cancel(text, images, seed_cancel),
+                    ),
                 )
                 .await;
             }
@@ -3044,11 +4257,15 @@ impl BridgeConnection {
             .await;
     }
 
-    async fn resolve_ask_user_question(&self, request_id: u64, answers: HashMap<String, String>) {
+    async fn resolve_ask_user_question(
+        &self,
+        request_id: u64,
+        answers: client::protocol::ask_user_question::AskUserQuestionAnswersDto,
+    ) {
         let Some(broker) = self.ask_user_question_broker.as_ref() else {
             return;
         };
-        if !broker.resolve(request_id, answers).await {
+        if !broker.resolve(request_id, answers.into_projections()).await {
             tracing::debug!(
                 request_id,
                 "bridge-server: resolve for unknown / already-resolved AskUserQuestion id"
@@ -3083,7 +4300,7 @@ impl FramePump for BridgeConnection {
         if request.method == "permission_request_scope" || request.method == "visualization" {
             return self.handshaken.load(Ordering::SeqCst);
         }
-        match serde_json::from_value::<ClientCommand>(request.params.clone()) {
+        match deserialize_source::<ClientCommand>(&request.params) {
             // A cancel for a prompt still queued behind a slow control must
             // remain behind that prompt. Otherwise it is ignored before the
             // prompt has claimed an owner and the cancelled work starts later.
@@ -3128,7 +4345,7 @@ impl FramePump for BridgeConnection {
             // error, and is the ONLY frame routed before `handshaken` is set.
             Frame::Request(BridgeRequest {
                 id, method, params, ..
-            }) if method == "hello" => match serde_json::from_value::<ClientHello>(params) {
+            }) if method == "hello" => match deserialize_source::<ClientHello>(&params) {
                 Ok(hello) => self.handle_hello(id, hello).await,
                 Err(e) => {
                     tracing::debug!(error = %e, "bridge-server: undecodable ClientHello");
@@ -3151,21 +4368,33 @@ impl FramePump for BridgeConnection {
                 }
                 if method == "permission_request_scope" {
                     let request_id = params
-                        .as_object()
-                        .filter(|params| params.len() == 1)
-                        .and_then(|params| params.get("request_id"))
-                        .and_then(serde_json::Value::as_u64);
+                        .object_entries()
+                        .filter(|entries| entries.len() == 1)
+                        .and_then(|_| {
+                            deserialize_source::<PermissionRequestScopeQuery>(&params).ok()
+                        })
+                        .map(|query| query.request_id);
                     let response = match request_id {
                         Some(request_id) => {
                             let scope = match &self.gate {
                                 Some(gate) => gate.request_is_background(request_id).await,
                                 None => None,
                             };
+                            let result = match scope {
+                                Some(background_owned) => {
+                                    serialize_source(&PermissionRequestScopeResult {
+                                        request_id,
+                                        background_owned,
+                                    })
+                                    .expect("permission scope response serializes")
+                                }
+                                None => {
+                                    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+                                }
+                            };
                             Frame::Response(BridgeResponse {
                                 id,
-                                result: Some(scope.map_or(serde_json::Value::Null, |background_owned| {
-                                    serde_json::json!({"request_id":request_id,"background_owned":background_owned})
-                                })),
+                                result: Some(result),
                                 error: None,
                             })
                         }
@@ -3210,7 +4439,9 @@ impl FramePump for BridgeConnection {
                     // No broker drain, turn-gate wait, or outbound callback is
                     // allowed inside runtime_snapshot.
                     let out = self.out.lock().await;
-                    let response = if params != serde_json::json!({"type":"list_session_agents"}) {
+                    let expected = Utf16JsonProjection::parse(r#"{"type":"list_session_agents"}"#)
+                        .expect("static snapshot request is valid JSON");
+                    let response = if !params.semantically_eq(&expected) {
                         Self::error_response(id, "invalid desktop runtime snapshot request")
                     } else {
                         let snapshot = match &self.router {
@@ -3218,11 +4449,21 @@ impl FramePump for BridgeConnection {
                             None => Err("desktop runtime snapshot is unavailable".into()),
                         };
                         match snapshot {
-                            Ok(events) => Frame::Response(BridgeResponse {
-                                id,
-                                result: Some(serde_json::json!({"events":events})),
-                                error: None,
-                            }),
+                            Ok(events) => match serialize_source(&DesktopRuntimeSnapshotResult {
+                                events: &events,
+                            }) {
+                                Ok(result) => Frame::Response(BridgeResponse {
+                                    id,
+                                    result: Some(result),
+                                    error: None,
+                                }),
+                                Err(error) => Self::error_response(
+                                    id,
+                                    format!(
+                                        "could not serialize desktop runtime snapshot: {error}"
+                                    ),
+                                ),
+                            },
                             Err(error) => Self::error_response(id, error),
                         }
                     };
@@ -3231,7 +4472,7 @@ impl FramePump for BridgeConnection {
                     }
                     return;
                 }
-                match serde_json::from_value::<ClientCommand>(params) {
+                match deserialize_source::<ClientCommand>(&params) {
                     Ok(command) => self.dispatch(command).await,
                     Err(e) => {
                         tracing::debug!(error = %e, "bridge-server: undecodable command params");
@@ -3332,6 +4573,7 @@ impl BridgeConnection {
         }
         if let Some(router) = &self.router {
             router.stop_realtime_audio().await;
+            router.connection_closed().await;
         }
         self.abort_and_join_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);
@@ -3344,9 +4586,11 @@ impl BridgeConnection {
             ));
         }
         for (_, pending) in self.mod_prompts.lock().unwrap().drain() {
-            let _ = pending.settle.send(Ok(serde_json::json!({
-                "drop":"the prompt was removed from the queue before it ran"
-            })));
+            let dropped = Utf16JsonProjection::parse(
+                r#"{"drop":"the prompt was removed from the queue before it ran"}"#,
+            )
+            .expect("static prompt result is valid JSON");
+            let _ = pending.settle.send(Ok(dropped));
         }
         self.queued_prompt_payloads.lock().await.clear();
         self.loop_runtime.take_in_flight_prompt();
@@ -3425,26 +4669,86 @@ mod turn_handoff_regression_test;
 mod permission_owner_regression_test;
 
 #[cfg(test)]
+#[path = "server/prompt_ingress_regression_test.rs"]
+mod prompt_ingress_regression_test;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
 
     use async_trait::async_trait;
-    use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
+    use bridge::wire::Frame;
+    use client::adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
     use client::protocol::commands::{ClientCommand, ImageRefDto, UiSurfaceDto};
-    use client::protocol::events::ClientEvent;
+    use client::protocol::events::{ClientEvent, ErrorKindDto};
     use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
+    use client::protocol::text::ClientTextDto;
     use lingxi_core::host::{PermissionDecision, PermissionGate};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use msgqueue::{MessageQueueManager, QueuePriority, QueueSource};
     use tokio::sync::{Mutex, Notify};
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        batchable_prompt_snapshot, drain_main_thread, is_owned_turn_event, run_queued_mod_command,
-        ActiveTurnControl, BridgeConnection, BridgeModCommandQueue, ModQueueDrain,
-        PendingModCommands, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
+        batchable_prompt_snapshot, deserialize_source, drain_main_thread,
+        fail_pending_mod_calls_on_refusal, is_owned_turn_event, run_queued_mod_command,
+        serialize_source, text_object_projection, ActiveTurnControl, BridgeConnection,
+        BridgeModCommandQueue, ModQueueDrain, ModQueueEnqueuePause, PendingModCommands,
+        PendingModPrompts, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
     };
+
+    struct NoTurn;
+
+    #[async_trait]
+    impl TurnDriver for NoTurn {
+        async fn run_turn(&self, _: Utf16JsonProjection) {}
+    }
+
+    #[test]
+    fn slash_parse_failure_prefix_preserves_exact_utf16_source() {
+        let source_units = vec![u16::from(b'/'), u16::from(b'x'), 0xd800];
+        let source = Utf16JsonProjection::root_string("/x�".into(), source_units.clone()).unwrap();
+
+        let prefixed = super::prefixed_source_text("could not parse slash command ", &source);
+        let expected = "could not parse slash command "
+            .encode_utf16()
+            .chain(source_units)
+            .collect::<Vec<_>>();
+
+        assert_eq!(prefixed.string_units(""), Some(expected));
+    }
+
+    #[test]
+    fn bridge_command_source_decode_preserves_isolated_utf16_units() {
+        let prompt = Utf16JsonProjection::parse(
+            r#"{"type":"send_prompt","text":"prompt\ud800","images":[]}"#,
+        )
+        .unwrap();
+        let ClientCommand::SendPrompt { text, .. } = deserialize_source(&prompt).unwrap() else {
+            panic!("send_prompt source must decode as a prompt command");
+        };
+        assert_eq!(
+            text.code_units,
+            [
+                b'p' as u16,
+                b'r' as u16,
+                b'o' as u16,
+                b'm' as u16,
+                b'p' as u16,
+                b't' as u16,
+                0xd800,
+            ]
+        );
+
+        let slash =
+            Utf16JsonProjection::parse(r#"{"type":"run_slash_command","raw":"/x\udfff"}"#).unwrap();
+        let ClientCommand::RunSlashCommand { raw, .. } = deserialize_source(&slash).unwrap() else {
+            panic!("run_slash_command source must decode as a slash command");
+        };
+        assert_eq!(raw.code_units, [b'/' as u16, b'x' as u16, 0xdfff]);
+    }
 
     #[test]
     fn terminal_closes_all_turn_events_without_releasing_the_driver_slot() {
@@ -3471,7 +4775,7 @@ mod tests {
         assert!(!active.is_active());
 
         assert!(is_owned_turn_event(&ClientEvent::TextDelta {
-            text: "late".to_string(),
+            text: "late".into(),
         }));
         // Manual /compact runs while idle; progress must bypass turn ownership.
         assert!(!is_owned_turn_event(&ClientEvent::CompactionStatus {
@@ -3482,24 +4786,33 @@ mod tests {
             messages_before: 2,
             messages_after: 1,
             bytes_saved: 10,
-            summary: "kept context".to_string(),
+            summary: "kept context".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::SystemNotice {
-            message: "late notice".to_string(),
+            message: "late notice".into(),
             is_error: false,
+        }));
+        assert!(is_owned_turn_event(&ClientEvent::TerminalApiError {
+            api_error_status: Some(400),
+            terminal_reason: "api_error".into(),
+            stop_reason: "stop_sequence".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiLog {
             plugin: "review".to_string(),
-            text: "late log".to_string(),
+            text: "late log".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiToast {
             plugin: "review".to_string(),
-            text: "late toast".to_string(),
+            text: "late toast".into(),
             timeout_ms: 4000,
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiStatus {
             plugin: "review".to_string(),
-            text: Some("late status".to_string()),
+            text: Some("late status".into()),
+        }));
+        assert!(is_owned_turn_event(&ClientEvent::UiNotify {
+            plugin: "review".to_string(),
+            text: "late notice".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::Attachment {
             attachment: client::protocol::events::AttachmentDto::NestedMemory {
@@ -3521,7 +4834,15 @@ mod tests {
     }
 
     /// Shared cell capturing the `(prompt, images)` a driver was driven with.
-    type CapturedTurn = Arc<Mutex<Option<(String, Vec<ImageRefDto>)>>>;
+    type CapturedTurn = Arc<
+        Mutex<
+            Option<(
+                Utf16JsonProjection,
+                Vec<ImageRefDto>,
+                Option<orchestrator::native_user_message_source::NativeUserMessageSource>,
+            )>,
+        >,
+    >;
 
     /// A [`TurnDriver`] that records the `(prompt, images)` it was driven with, so a
     /// test can assert the `SendPrompt` dispatch forwarded the wire `images`.
@@ -3530,14 +4851,58 @@ mod tests {
         notify: Arc<Notify>,
     }
 
+    /// A queue-drain fixture that retains the complete source-preserving input
+    /// batch instead of relying on `TurnDriver`'s text-only fallback.
+    struct BatchRecordingDriver {
+        captured: Arc<Mutex<Option<Vec<orchestrator::QueuedPromptInput>>>>,
+        notify: Arc<Notify>,
+    }
+
     #[derive(Default)]
     struct RecordingSurfaceDriver {
         calls: StdMutex<Vec<String>>,
     }
 
+    #[derive(Default)]
+    struct RecordingUiDriver {
+        controls: StdMutex<Vec<Utf16JsonProjection>>,
+        operations: StdMutex<Vec<Utf16JsonProjection>>,
+    }
+
+    #[async_trait]
+    impl TurnDriver for RecordingUiDriver {
+        async fn run_turn(&self, _prompt: Utf16JsonProjection) {}
+
+        async fn mod_ui_control(
+            &self,
+            request: Utf16JsonProjection,
+        ) -> Result<
+            lingxi_core::host::orchestrator::ModUiControlOutcome,
+            lingxi_core::host::HandleError,
+        > {
+            self.controls.lock().unwrap().push(request);
+            Ok(lingxi_core::host::orchestrator::ModUiControlOutcome {
+                response: Utf16JsonProjection::parse(r#"{"handled":true}"#)
+                    .expect("static test response is valid JSON"),
+                render_revision: None,
+                client_runtime_epochs: Default::default(),
+                client_state_token: None,
+            })
+        }
+
+        async fn mod_ui_client_operation(
+            &self,
+            operation: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::HandleError> {
+            self.operations.lock().unwrap().push(operation);
+            Ok(Utf16JsonProjection::parse(r#"{"ok":true}"#)
+                .expect("static test response is valid JSON"))
+        }
+    }
+
     #[async_trait]
     impl TurnDriver for RecordingSurfaceDriver {
-        async fn run_turn(&self, _prompt: String) {}
+        async fn run_turn(&self, _prompt: Utf16JsonProjection) {}
 
         async fn ui_attach(&self, client_id: &str, surface: UiSurfaceDto) -> bool {
             self.calls.lock().unwrap().push(format!(
@@ -3562,16 +4927,44 @@ mod tests {
 
     #[async_trait]
     impl TurnDriver for RecordingDriver {
-        async fn run_turn(&self, prompt: String) {
+        async fn run_turn(&self, prompt: Utf16JsonProjection) {
             // Record an EMPTY image set so a regression (dispatch taking the old
             // text-only `run_turn` path despite carried images) shows up as a
             // mismatch against the sent images.
-            *self.captured.lock().await = Some((prompt, Vec::new()));
+            *self.captured.lock().await = Some((
+                prompt,
+                Vec::new(),
+                orchestrator::native_user_message_source::current(),
+            ));
             self.notify.notify_one();
         }
 
-        async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
-            *self.captured.lock().await = Some((prompt, images));
+        async fn run_turn_with_images(
+            &self,
+            prompt: Utf16JsonProjection,
+            images: Vec<ImageRefDto>,
+        ) {
+            *self.captured.lock().await = Some((
+                prompt,
+                images,
+                orchestrator::native_user_message_source::current(),
+            ));
+            self.notify.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl TurnDriver for BatchRecordingDriver {
+        async fn run_turn(&self, _: Utf16JsonProjection) {
+            panic!("queue drain must invoke the source-preserving batch path");
+        }
+
+        async fn run_queued_batch(
+            &self,
+            inputs: Vec<orchestrator::QueuedPromptInput>,
+            _: CancellationToken,
+        ) {
+            *self.captured.lock().await = Some(inputs);
             self.notify.notify_one();
         }
     }
@@ -3640,6 +5033,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn desktop_mod_ui_commands_reach_the_bound_session_driver() {
+        let connection = BridgeConnection::new();
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let driver = Arc::new(RecordingUiDriver::default());
+        let connection = connection.bind(gate, driver.clone());
+
+        connection
+            .dispatch(ClientCommand::UiRender {
+                request_id: "render-1".to_owned(),
+                request_json: r#"{"subtype":"ui_render","surface":"desktop","component":"AbovePrompt","instance_id":"above-prompt","props":{},"viewport":{"columns":90,"rows":12}}"#.to_owned(),
+            })
+            .await;
+        connection
+            .dispatch(ClientCommand::UiClientOperation {
+                request_id: "operation-1".to_owned(),
+                operation_json: r#"{"subtype":"mount","target":null}"#.to_owned(),
+            })
+            .await;
+
+        assert_eq!(driver.controls.lock().unwrap().len(), 1);
+        assert_eq!(
+            driver.controls.lock().unwrap()[0].string_at("/subtype"),
+            Some("ui_render")
+        );
+        assert_eq!(driver.operations.lock().unwrap().len(), 1);
+        assert_eq!(
+            driver.operations.lock().unwrap()[0].string_at("/subtype"),
+            Some("mount")
+        );
+    }
+
     /// `bind` requires a gate; this sink drops every request (the dispatch path
     /// under test never emits one).
     struct NoopPermissionSink;
@@ -3676,10 +5101,11 @@ mod tests {
     async fn queued_teammate_message_wakes_idle_driver_without_interrupting_busy_turn() {
         let captured = Arc::new(Mutex::new(None));
         let notify = Arc::new(Notify::new());
-        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+        let batch_driver = Arc::new(BatchRecordingDriver {
             captured: captured.clone(),
             notify: notify.clone(),
         });
+        let driver: Arc<dyn TurnDriver> = batch_driver;
         let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
         let connection = BridgeConnection::new()
             .bind(gate, driver)
@@ -3702,10 +5128,29 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
             .await
             .unwrap();
+        let captured = captured.lock().await;
+        let inputs = captured
+            .as_ref()
+            .expect("idle wakeup must deliver the complete queued batch");
+        assert_eq!(inputs.len(), 1);
         assert_eq!(
-            captured.lock().await.as_ref().unwrap().0,
-            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>"
+            inputs[0].text,
+            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>".into()
         );
+        assert!(inputs[0].is_meta);
+        assert!(!inputs[0].turn_companion);
+        assert!(inputs[0].trailing_history_rows.is_empty());
+        assert_eq!(
+            inputs[0].mod_origin,
+            Some(serde_json::json!({"kind":"peer"}))
+        );
+        assert!(inputs[0].prompt_ingress_kind.is_none());
+        assert!(inputs[0].message_origin.is_none());
+        assert!(inputs[0].prompt_source.is_none());
+        assert!(inputs[0].queue_priority.is_none());
+        assert!(inputs[0].scheduled_task_id.is_none());
+        assert!(inputs[0].scheduled_fire_id.is_none());
+        drop(captured);
         assert!(connection.queue.is_empty().await);
     }
 
@@ -3807,7 +5252,7 @@ mod tests {
     }
     #[async_trait]
     impl TurnDriver for NotificationDriver {
-        async fn run_turn(&self, _: String) {
+        async fn run_turn(&self, _: Utf16JsonProjection) {
             panic!("completion must never become a human prompt");
         }
         async fn run_task_notification_turn(
@@ -3935,7 +5380,7 @@ mod tests {
         ];
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "look at these".to_string(),
+                text: "look at these".into(),
                 prompt_mode: None,
                 images: images.clone(),
                 turn_id: None,
@@ -3951,11 +5396,22 @@ mod tests {
             .await
             .clone()
             .expect("the bound driver must have been driven");
-        assert_eq!(got.0, "look at these");
+        assert_eq!(got.0.string_at(""), Some("look at these".into()));
         assert_eq!(
             got.1, images,
             "the SendPrompt images must reach run_turn_with_images, not be dropped"
         );
+        let native_source = got
+            .2
+            .expect("direct SendPrompt stamps a known Native user source");
+        assert_eq!(
+            native_source
+                .message_origin
+                .as_ref()
+                .and_then(|origin| origin.string_at("/kind")),
+            Some("human")
+        );
+        assert!(native_source.prompt_source.is_none());
     }
 
     /// A [`CommandRouter`] that returns a fixed dispatch result for
@@ -3977,12 +5433,552 @@ mod tests {
         ) {
             self.routed.store(true, Ordering::SeqCst);
         }
-        async fn dispatch_slash(&self, _raw: &str) -> Option<crate::router::SlashDispatchOutcome> {
+        async fn dispatch_slash(
+            &self,
+            _raw: Utf16JsonProjection,
+            _cancellation: CancellationToken,
+        ) -> Option<crate::router::SlashDispatchOutcome> {
             Some(crate::router::SlashDispatchOutcome {
                 result: self.result.clone(),
                 authority_events: Vec::new(),
             })
         }
+    }
+
+    struct CountingSlashRouter {
+        calls: Arc<AtomicUsize>,
+        raw: Arc<StdMutex<Option<Utf16JsonProjection>>>,
+    }
+
+    #[async_trait]
+    impl crate::router::CommandRouter for CountingSlashRouter {
+        async fn route(
+            &self,
+            _command: ClientCommand,
+            _sink: Arc<dyn client::adapter::ClientEventSink>,
+        ) {
+            panic!("connection-owned slash dispatch should not use router.route");
+        }
+
+        async fn dispatch_slash(
+            &self,
+            raw: Utf16JsonProjection,
+            _cancellation: CancellationToken,
+        ) -> Option<crate::router::SlashDispatchOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.raw.lock().unwrap() = Some(raw);
+            Some(crate::router::SlashDispatchOutcome {
+                result: lingxi_core::host::SlashDispatchResult::Handled {
+                    display: "expanded only after claim".into(),
+                },
+                authority_events: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_raw_slash_waits_for_claim_then_dispatches_exact_source() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(StdMutex::new(None));
+        let router = Arc::new(CountingSlashRouter {
+            calls: calls.clone(),
+            raw: seen.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, Arc::new(NoTurn))
+            .bind_router(router);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        let raw: Utf16JsonProjection = "/check-rewrite 🚀 keep raw".into();
+
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: ClientTextDto::from_projection(&raw)
+                    .expect("test slash raw text is a root string"),
+                turn_id: Some(77),
+            })
+            .await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "busy input is not expanded early"
+        );
+        let queued = connection
+            .queue
+            .peek(|command| command.is_main_thread())
+            .await
+            .expect("busy slash is retained in the run-loop queue");
+        assert!(queued.is_slash_command());
+        assert_eq!(
+            queued.text_projection().unwrap().string_units(""),
+            raw.string_units(""),
+            "queue retains the exact raw slash source"
+        );
+
+        let driver = connection.driver.as_ref().unwrap().clone();
+        let mod_drain = connection.mod_queue_drain();
+        super::drain_main_thread(
+            &driver,
+            &connection.queue,
+            &connection.loop_runtime,
+            &connection.active_turn,
+            &TurnInteractions::default(),
+            &connection.queued_prompt_payloads,
+            &connection.turn_handoff,
+            Some(&mod_drain),
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            raw.string_units(""),
+            "claim-time dispatch receives the original raw slash source"
+        );
+        connection.turn_running.store(false, Ordering::SeqCst);
+    }
+
+    struct BlockingHandledSlashRouter {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl crate::router::CommandRouter for BlockingHandledSlashRouter {
+        async fn route(&self, _: ClientCommand, _: Arc<dyn ClientEventSink>) {
+            panic!("slash dispatch must use the connection-owned path");
+        }
+
+        async fn dispatch_slash(
+            &self,
+            _: Utf16JsonProjection,
+            _: CancellationToken,
+        ) -> Option<crate::router::SlashDispatchOutcome> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Some(crate::router::SlashDispatchOutcome {
+                result: lingxi_core::host::SlashDispatchResult::Handled {
+                    display: "local result".into(),
+                },
+                authority_events: Vec::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct QueueDrainDriver {
+        prompts: StdMutex<Vec<String>>,
+        notify: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl TurnDriver for QueueDrainDriver {
+        async fn run_turn(&self, prompt: Utf16JsonProjection) {
+            self.prompts
+                .lock()
+                .unwrap()
+                .push(prompt.string_at("").unwrap_or_default().to_owned());
+            self.notify.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn local_idle_slash_hands_intervening_prompt_to_queue_drainer() {
+        let router = Arc::new(BlockingHandledSlashRouter {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let driver = Arc::new(QueueDrainDriver::default());
+        let connection = Arc::new(
+            BridgeConnection::new()
+                .bind(
+                    Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink))),
+                    driver.clone(),
+                )
+                .bind_router(router.clone()),
+        );
+        let started = router.started.notified();
+        let dispatch_connection = connection.clone();
+        let slash = tokio::spawn(async move {
+            dispatch_connection
+                .dispatch(ClientCommand::RunSlashCommand {
+                    raw: "/local".into(),
+                    turn_id: Some(81),
+                })
+                .await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .expect("idle slash dispatch started under its owner");
+
+        connection
+            .handle_send_prompt("queued while slash expands".into(), Vec::new(), Some(82))
+            .await;
+        assert!(!connection.queue.is_empty().await);
+        router.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), slash)
+            .await
+            .expect("local slash returns")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), driver.notify.notified())
+            .await
+            .expect("the local slash result must start a drainer for queued prompts");
+        assert_eq!(
+            driver.prompts.lock().unwrap().as_slice(),
+            &["queued while slash expands".to_owned()]
+        );
+        let task = connection
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the follow-up drainer owns cleanup");
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("the follow-up drainer releases admission")
+            .unwrap();
+        assert!(!connection.turn_running.load(Ordering::SeqCst));
+    }
+
+    struct CancellationObservingSlashRouter {
+        started: tokio::sync::Notify,
+        received: StdMutex<Option<CancellationToken>>,
+    }
+
+    #[async_trait]
+    impl crate::router::CommandRouter for CancellationObservingSlashRouter {
+        async fn route(&self, _: ClientCommand, _: Arc<dyn ClientEventSink>) {
+            panic!("slash dispatch must use the connection-owned path");
+        }
+
+        async fn dispatch_slash(
+            &self,
+            _: Utf16JsonProjection,
+            cancellation: CancellationToken,
+        ) -> Option<crate::router::SlashDispatchOutcome> {
+            *self.received.lock().unwrap() = Some(cancellation.clone());
+            self.started.notify_one();
+            cancellation.cancelled().await;
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_slash_cancel_reaches_the_dispatcher_owned_token() {
+        let router = Arc::new(CancellationObservingSlashRouter {
+            started: tokio::sync::Notify::new(),
+            received: StdMutex::new(None),
+        });
+        let connection = Arc::new(
+            BridgeConnection::new()
+                .bind(
+                    Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink))),
+                    Arc::new(NoTurn),
+                )
+                .bind_router(router.clone()),
+        );
+        let started = router.started.notified();
+        let dispatch_connection = connection.clone();
+        let slash = tokio::spawn(async move {
+            dispatch_connection
+                .dispatch(ClientCommand::RunSlashCommand {
+                    raw: "/cancel-me".into(),
+                    turn_id: Some(83),
+                })
+                .await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .expect("slash dispatch starts only after owner admission");
+        let cancellation = router.received.lock().unwrap().as_ref().unwrap().clone();
+        connection.cancel_active_turn(Some(83)).await;
+        assert!(cancellation.is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), slash)
+            .await
+            .expect("cancelled dispatcher returns and is joined")
+            .unwrap();
+        let task = connection
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("cancelled expansion hands off queue cleanup");
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("drainer joins after cancellation")
+            .unwrap();
+        assert!(!connection.turn_running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_unclaimed_raw_slash_before_dispatch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, Arc::new(NoTurn))
+            .bind_router(Arc::new(CountingSlashRouter {
+                calls: calls.clone(),
+                raw: seen,
+            }));
+        connection.turn_running.store(true, Ordering::SeqCst);
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: "/inspect".into(),
+                turn_id: Some(78),
+            })
+            .await;
+        assert!(!connection.queue.is_empty().await);
+        assert_eq!(connection.queued_prompt_payloads.lock().await.len(), 1);
+
+        connection.cancel_active_turn(Some(78)).await;
+
+        assert!(connection.queue.is_empty().await);
+        assert!(connection.queued_prompt_payloads.lock().await.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn retained_policy_refusal_rejects_prompts_and_slashes_before_publication() {
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
+        let refusal = harness_runtime::desktop::PolicyHelperRefusalProbe::test_probe();
+        refusal.trigger_refusal_for_test();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let raw = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, Arc::new(NoTurn))
+            .bind_router(Arc::new(CountingSlashRouter {
+                calls: calls.clone(),
+                raw,
+            }))
+            .with_policy_helper_refusal(refusal);
+        assert!(connection.claim_outbound(&sink).await);
+
+        connection
+            .dispatch(ClientCommand::SendPrompt {
+                text: "must not be admitted".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(701),
+                visualization_context: None,
+            })
+            .await;
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: "/must-not-expand".into(),
+                turn_id: Some(702),
+            })
+            .await;
+
+        for _ in 0..2 {
+            let Frame::Event(ClientEvent::Error { kind, message }) =
+                super::connection_regression_test::next_frame(&mut socket).await
+            else {
+                panic!("retained refusal must be reported as an Error event");
+            };
+            assert!(matches!(kind, ErrorKindDto::Rejected));
+            assert_eq!(message.display(), "policyHelpers.linux");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(connection.queue.is_empty().await);
+        assert!(connection.queued_prompt_payloads.lock().await.is_empty());
+        assert!(!connection.turn_running.load(Ordering::SeqCst));
+        assert!(!connection.active_turn.is_active());
+
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn policy_refusal_latch_cancels_and_joins_the_owned_slash() {
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
+        let refusal = harness_runtime::desktop::PolicyHelperRefusalProbe::test_probe();
+        let router = Arc::new(CancellationObservingSlashRouter {
+            started: tokio::sync::Notify::new(),
+            received: StdMutex::new(None),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = Arc::new(
+            BridgeConnection::new()
+                .bind(gate, Arc::new(NoTurn))
+                .bind_router(router.clone())
+                .with_policy_helper_refusal(refusal.clone())
+                .with_queue_wakeup(),
+        );
+        assert!(connection.claim_outbound(&sink).await);
+
+        let started = router.started.notified();
+        let dispatch_connection = connection.clone();
+        let slash = tokio::spawn(async move {
+            dispatch_connection
+                .dispatch(ClientCommand::RunSlashCommand {
+                    raw: "/cancel-on-policy-refusal".into(),
+                    turn_id: Some(703),
+                })
+                .await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .expect("slash is admitted before the refusal is latched");
+        slash.await.unwrap();
+        let cancellation = router.received.lock().unwrap().as_ref().unwrap().clone();
+
+        refusal.trigger_refusal_for_test();
+        tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled())
+            .await
+            .expect("the refusal watcher cancels the active owner");
+        let Frame::Event(ClientEvent::Error { kind, message }) =
+            super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("the terminal refusal must reach the Bridge client");
+        };
+        assert!(matches!(kind, ErrorKindDto::Rejected));
+        assert_eq!(message.display(), "policyHelpers.linux");
+
+        let task = connection
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the slash expansion task remains owned until it settles");
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("the cancelled slash task is joined after dispatch settles")
+            .unwrap();
+        assert!(connection.queue.is_empty().await);
+        assert!(connection.queued_prompt_payloads.lock().await.is_empty());
+        assert!(!connection.turn_running.load(Ordering::SeqCst));
+        assert!(!connection.active_turn.is_active());
+
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
+    }
+
+    fn mod_queue_drain_for_refusal_test(
+        queue: Arc<MessageQueueManager>,
+        pending: PendingModCommands,
+        prompts: PendingModPrompts,
+        refusal: harness_runtime::desktop::PolicyHelperRefusalProbe,
+    ) -> ModQueueDrain {
+        ModQueueDrain {
+            pending,
+            prompts,
+            router: None,
+            events: Arc::new(UnscopedFrameEventSink {
+                out: Arc::new(Mutex::new(None)),
+            }),
+            policy_helper_refusal: Some(refusal),
+            queue,
+            driver: None,
+            loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
+            transition_active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_command_refusal_removes_late_queue_publication_after_observer_drains_map() {
+        use command_api::ModCommandQueue as _;
+
+        let queue = Arc::new(MessageQueueManager::new());
+        let pending: PendingModCommands = Arc::new(StdMutex::new(HashMap::new()));
+        let prompts: PendingModPrompts = Arc::new(StdMutex::new(HashMap::new()));
+        let refusal = harness_runtime::desktop::PolicyHelperRefusalProbe::test_probe();
+        let pause = Arc::new(ModQueueEnqueuePause::default());
+        let runner = BridgeModCommandQueue {
+            queue: queue.clone(),
+            pending: pending.clone(),
+            prompts: prompts.clone(),
+            policy_helper_refusal: Some(refusal.clone()),
+            before_enqueue: Some(pause.clone()),
+        };
+        let drain = mod_queue_drain_for_refusal_test(
+            queue.clone(),
+            pending.clone(),
+            prompts,
+            refusal.clone(),
+        );
+        let reached = pause.reached.notified();
+        let call =
+            tokio::spawn(async move { runner.enqueue("demo", "hello".into(), "Ada".into()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), reached)
+            .await
+            .expect("pause after pending publication, before queue insertion");
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert!(queue.is_empty().await);
+
+        refusal.trigger_refusal_for_test();
+        let error = refusal.current().expect("refusal is retained");
+        fail_pending_mod_calls_on_refusal(&drain, &error).await;
+        assert!(pending.lock().unwrap().is_empty());
+        assert!(queue.is_empty().await, "observer ran before publication");
+
+        pause.release.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), call)
+            .await
+            .expect("late publication is removed and the already-settled call returns")
+            .unwrap();
+        assert!(result.is_err());
+        assert!(
+            queue.is_empty().await,
+            "the UUID cannot survive refusal after the observer drained the map"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_prompt_refusal_removes_late_queue_publication_after_observer_drains_map() {
+        use command_api::ModCommandQueue as _;
+
+        let queue = Arc::new(MessageQueueManager::new());
+        let pending: PendingModCommands = Arc::new(StdMutex::new(HashMap::new()));
+        let prompts: PendingModPrompts = Arc::new(StdMutex::new(HashMap::new()));
+        let refusal = harness_runtime::desktop::PolicyHelperRefusalProbe::test_probe();
+        let pause = Arc::new(ModQueueEnqueuePause::default());
+        let runner = BridgeModCommandQueue {
+            queue: queue.clone(),
+            pending,
+            prompts: prompts.clone(),
+            policy_helper_refusal: Some(refusal.clone()),
+            before_enqueue: Some(pause.clone()),
+        };
+        let drain = mod_queue_drain_for_refusal_test(
+            queue.clone(),
+            runner.pending.clone(),
+            prompts.clone(),
+            refusal.clone(),
+        );
+        let reached = pause.reached.notified();
+        let call = tokio::spawn(async move {
+            runner
+                .enqueue_prompt("demo", "follow up".into(), true)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), reached)
+            .await
+            .expect("pause after pending publication, before queue insertion");
+        assert_eq!(prompts.lock().unwrap().len(), 1);
+        assert!(queue.is_empty().await);
+
+        refusal.trigger_refusal_for_test();
+        let error = refusal.current().expect("refusal is retained");
+        fail_pending_mod_calls_on_refusal(&drain, &error).await;
+        assert!(prompts.lock().unwrap().is_empty());
+        assert!(queue.is_empty().await, "observer ran before publication");
+
+        pause.release.notify_one();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), call)
+            .await
+            .expect("late publication is removed and the already-settled call returns")
+            .unwrap();
+        assert!(result.is_err());
+        assert!(
+            queue.is_empty().await,
+            "the UUID cannot survive refusal after the observer drained the map"
+        );
     }
 
     struct ModContextExecutor;
@@ -3992,10 +5988,11 @@ mod tests {
         async fn run(
             &self,
             _plugin: &str,
-            _command: &str,
-            args: &str,
+            _command: &Utf16JsonProjection,
+            args: &Utf16JsonProjection,
             context: command_api::ModCommandRunContext,
-        ) -> Result<String, String> {
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+            let args = args.string_at("").unwrap_or_default();
             let raw = format!(
                 "{}:{}:{}:{}:{args}",
                 context.origin["kind"].as_str().unwrap(),
@@ -4003,8 +6000,8 @@ mod tests {
                 context.is_fullscreen,
                 context.columns
             );
-            command_api::record_mod_command_settlement(serde_json::json!({"text":raw}));
-            Ok(format!("display: {raw}"))
+            command_api::record_mod_command_settlement(text_object_projection(raw.clone().into()));
+            Ok(format!("display: {raw}").into())
         }
     }
 
@@ -4017,10 +6014,10 @@ mod tests {
         async fn run(
             &self,
             _plugin: &str,
-            _command: &str,
-            _args: &str,
+            _command: &Utf16JsonProjection,
+            _args: &Utf16JsonProjection,
             context: command_api::ModCommandRunContext,
-        ) -> Result<String, String> {
+        ) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
             *self.0.lock().unwrap() = Some(context);
             Ok("recorded".into())
         }
@@ -4035,10 +6032,14 @@ mod tests {
         ) {
         }
 
-        async fn dispatch_slash(&self, raw: &str) -> Option<crate::router::SlashDispatchOutcome> {
+        async fn dispatch_slash(
+            &self,
+            raw: Utf16JsonProjection,
+            cancellation: CancellationToken,
+        ) -> Option<crate::router::SlashDispatchOutcome> {
             use lingxi_core::host::SlashCommandDispatcher as _;
             Some(crate::router::SlashDispatchOutcome {
-                result: self.0.dispatch(raw).await,
+                result: self.0.dispatch(raw, cancellation).await,
                 authority_events: Vec::new(),
             })
         }
@@ -4046,7 +6047,7 @@ mod tests {
 
     struct ReentrantModRouter {
         queue: Arc<dyn command_api::ModCommandQueue>,
-        settled: Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
+        settled: Arc<Mutex<Option<Result<Utf16JsonProjection, Utf16JsonProjection>>>>,
         queued_result: lingxi_core::host::SlashDispatchResult,
     }
 
@@ -4057,13 +6058,13 @@ mod tests {
 
     #[async_trait]
     impl TurnDriver for BlockingQueuedDriver {
-        async fn run_turn(&self, _prompt: String) {
+        async fn run_turn(&self, _prompt: Utf16JsonProjection) {
             panic!("queued turn must use its queue entry");
         }
 
         async fn run_queued_turn(
             &self,
-            _prompt: String,
+            _prompt: Utf16JsonProjection,
             _in_human_turn: bool,
             _cancel: CancellationToken,
         ) {
@@ -4080,14 +6081,24 @@ mod tests {
             _sink: Arc<dyn client::adapter::ClientEventSink>,
         ) {
             if matches!(command, ClientCommand::ClearSession) {
-                let result = self.queue.enqueue("demo", "hello", "Ada").await;
+                let result = self
+                    .queue
+                    .enqueue("demo", "hello".into(), "Ada".into())
+                    .await;
                 *self.settled.lock().await = Some(result);
             }
         }
 
-        async fn dispatch_slash(&self, raw: &str) -> Option<crate::router::SlashDispatchOutcome> {
-            if raw == "/clear" {
-                let result = self.queue.enqueue("demo", "hello", "Ada").await;
+        async fn dispatch_slash(
+            &self,
+            raw: Utf16JsonProjection,
+            _cancellation: CancellationToken,
+        ) -> Option<crate::router::SlashDispatchOutcome> {
+            if crate::router::source_text_eq_ascii(&raw, "/clear") {
+                let result = self
+                    .queue
+                    .enqueue("demo", "hello".into(), "Ada".into())
+                    .await;
                 *self.settled.lock().await = Some(result);
                 return Some(crate::router::SlashDispatchOutcome {
                     result: lingxi_core::host::SlashDispatchResult::Handled {
@@ -4114,8 +6125,11 @@ mod tests {
             queue: queue.clone(),
             pending: pending.clone(),
             prompts: Arc::new(StdMutex::new(HashMap::new())),
+            policy_helper_refusal: None,
+            before_enqueue: None,
         };
-        let call = tokio::spawn(async move { runner.enqueue("demo", "hello", "Ada").await });
+        let call =
+            tokio::spawn(async move { runner.enqueue("demo", "hello".into(), "Ada".into()).await });
         let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Some(command) = queue.peek(|_| true).await {
@@ -4136,7 +6150,10 @@ mod tests {
         catalog
             .register(
                 "demo",
-                serde_json::json!({"name":"hello","description":"Greet"}),
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"name":"hello","description":"Greet"}),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -4149,6 +6166,11 @@ mod tests {
             events: Arc::new(UnscopedFrameEventSink {
                 out: Arc::new(Mutex::new(None)),
             }),
+            policy_helper_refusal: None,
+            queue: queue.clone(),
+            driver: None,
+            loop_runtime: Arc::new(tool_cron::LoopRuntime::default()),
+            transition_active: Arc::new(AtomicBool::new(false)),
         };
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),
@@ -4166,8 +6188,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            call.await.unwrap().unwrap(),
-            serde_json::json!({"text":"plugin:demo:false:80:Ada"})
+            call.await.unwrap().unwrap().string_at("/text"),
+            Some("plugin:demo:false:80:Ada")
         );
     }
 
@@ -4176,8 +6198,11 @@ mod tests {
         let connection = BridgeConnection::new();
         let queue = connection.queue_handle();
         let runner = connection.mod_command_queue();
-        let call =
-            tokio::spawn(async move { runner.enqueue_prompt("demo", "follow up", true).await });
+        let call = tokio::spawn(async move {
+            runner
+                .enqueue_prompt("demo", "follow up".into(), true)
+                .await
+        });
         let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Some(command) = queue.peek(|_| true).await {
@@ -4214,15 +6239,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(turn.prompt, "follow up");
+        assert_eq!(turn.prompt.string_at(""), Some("follow up"));
         assert!(turn.as_user);
         assert_eq!(
             turn.origin,
             serde_json::json!({"kind":"plugin","name":"demo","asUser":true})
         );
         assert_eq!(
-            call.await.unwrap().unwrap(),
-            serde_json::json!({"text":"follow up"})
+            call.await.unwrap().unwrap().string_at("/text"),
+            Some("follow up")
         );
     }
 
@@ -4232,7 +6257,7 @@ mod tests {
 
         #[async_trait]
         impl TurnDriver for OriginDriver {
-            async fn run_turn(&self, _prompt: String) {
+            async fn run_turn(&self, _prompt: Utf16JsonProjection) {
                 *self.0.lock().await = Some(orchestrator::mod_prompt_origin::current());
             }
         }
@@ -4240,8 +6265,11 @@ mod tests {
         let connection = BridgeConnection::new();
         let queue = connection.queue_handle();
         let runner = connection.mod_command_queue();
-        let call =
-            tokio::spawn(async move { runner.enqueue_prompt("demo", "follow up", true).await });
+        let call = tokio::spawn(async move {
+            runner
+                .enqueue_prompt("demo", "follow up".into(), true)
+                .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while queue.peek(|_| true).await.is_none() {
                 tokio::task::yield_now().await;
@@ -4263,8 +6291,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            call.await.unwrap().unwrap(),
-            serde_json::json!({"text":"follow up"})
+            call.await.unwrap().unwrap().string_at("/text"),
+            Some("follow up")
         );
         assert_eq!(
             *seen.lock().await,
@@ -4277,7 +6305,8 @@ mod tests {
         let connection = BridgeConnection::new();
         let queue = connection.queue_handle();
         let runner = connection.mod_command_queue();
-        let call = tokio::spawn(async move { runner.enqueue("demo", "hello", "Ada").await });
+        let call =
+            tokio::spawn(async move { runner.enqueue("demo", "hello".into(), "Ada".into()).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while queue.peek(|_| true).await.is_none() {
                 tokio::task::yield_now().await;
@@ -4287,15 +6316,15 @@ mod tests {
         .unwrap();
         connection.stop_loop_for_session_transition().await;
         assert_eq!(
-            call.await.unwrap().unwrap_err(),
-            "the command was removed from the queue before it ran"
+            call.await.unwrap().unwrap_err().string_at(""),
+            Some("the command was removed from the queue before it ran")
         );
         assert!(queue.snapshot().await.is_empty());
 
         let prompt_runner = connection.mod_command_queue();
         let prompt_call = tokio::spawn(async move {
             prompt_runner
-                .enqueue_prompt("demo", "follow up", false)
+                .enqueue_prompt("demo", "follow up".into(), false)
                 .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4307,14 +6336,16 @@ mod tests {
         .unwrap();
         connection.stop_loop_for_session_transition().await;
         assert_eq!(
-            prompt_call.await.unwrap().unwrap(),
-            serde_json::json!({"drop":"the prompt was removed from the queue before it ran"})
+            prompt_call.await.unwrap().unwrap().string_at("/drop"),
+            Some("the prompt was removed from the queue before it ran")
         );
         assert!(queue.snapshot().await.is_empty());
 
         let runner = connection.mod_command_queue();
         let disconnect_call =
-            tokio::spawn(async move { runner.enqueue("demo", "hello", "again").await });
+            tokio::spawn(
+                async move { runner.enqueue("demo", "hello".into(), "again".into()).await },
+            );
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while queue.peek(|_| true).await.is_none() {
                 tokio::task::yield_now().await;
@@ -4324,10 +6355,23 @@ mod tests {
         .unwrap();
         connection.close_connection(None).await;
         assert_eq!(
-            disconnect_call.await.unwrap().unwrap_err(),
-            "the command was removed from the queue before it ran"
+            disconnect_call.await.unwrap().unwrap_err().string_at(""),
+            Some("the command was removed from the queue before it ran")
         );
         assert!(queue.snapshot().await.is_empty());
+    }
+
+    async fn join_active_slash_task(connection: &BridgeConnection) {
+        let task = connection
+            .active_turn_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("idle slash command owns a background task");
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .expect("owned slash task completes")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -4341,7 +6385,10 @@ mod tests {
         catalog
             .register(
                 "demo",
-                serde_json::json!({"name":"origin","description":"Inspect"}),
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"name":"origin","description":"Inspect"}),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -4361,6 +6408,7 @@ mod tests {
                 turn_id: None,
             })
             .await;
+        join_active_slash_task(&connection).await;
         let context = seen.lock().unwrap().clone().expect("Mod handler ran");
         assert_eq!(context.origin, serde_json::json!({"kind":"bridge"}));
         assert!(!context.is_fullscreen);
@@ -4397,23 +6445,33 @@ mod tests {
         .await
         .expect("ClearSession must settle its nested Mod command");
         assert_eq!(
-            settled.lock().await.take().unwrap().unwrap(),
-            serde_json::json!({"text":"nested"})
+            settled
+                .lock()
+                .await
+                .take()
+                .unwrap()
+                .unwrap()
+                .string_at("/text"),
+            Some("nested")
         );
         assert!(!connection.transition_active.load(Ordering::SeqCst));
 
-        tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            connection.dispatch(ClientCommand::RunSlashCommand {
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/clear".into(),
                 turn_id: None,
-            }),
-        )
-        .await
-        .expect("/clear must settle its nested Mod command");
+            })
+            .await;
+        join_active_slash_task(&connection).await;
         assert_eq!(
-            settled.lock().await.take().unwrap().unwrap(),
-            serde_json::json!({"text":"nested"})
+            settled
+                .lock()
+                .await
+                .take()
+                .unwrap()
+                .unwrap()
+                .string_at("/text"),
+            Some("nested")
         );
         assert!(!connection.transition_active.load(Ordering::SeqCst));
         assert!(captured.lock().await.is_none());
@@ -4450,8 +6508,15 @@ mod tests {
         .await
         .expect("prompt command must settle under a parent transition");
         assert_eq!(
-            settled.lock().await.take().unwrap().unwrap(),
-            serde_json::json!({})
+            settled
+                .lock()
+                .await
+                .take()
+                .unwrap()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            "{}"
         );
         tokio::time::timeout(std::time::Duration::from_secs(3), notify.notified())
             .await
@@ -4468,7 +6533,7 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
-                .map(|(prompt, _)| prompt.as_str()),
+                .and_then(|(prompt, _, _)| prompt.string_at("")),
             Some("expanded plugin prompt")
         );
         assert!(!connection.active_turn.is_active());
@@ -4506,8 +6571,15 @@ mod tests {
         .await
         .expect("command admission must leave the socket loop free");
         assert_eq!(
-            settled.lock().await.take().unwrap().unwrap(),
-            serde_json::json!({})
+            settled
+                .lock()
+                .await
+                .take()
+                .unwrap()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            "{}"
         );
         tokio::time::timeout(std::time::Duration::from_secs(3), started.notified())
             .await
@@ -4541,7 +6613,7 @@ mod tests {
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
             result: lingxi_core::host::SlashDispatchResult::RunAsTurn {
-                prompt: "EXPANDED /loop prompt".to_string(),
+                prompt: "EXPANDED /loop prompt".into(),
             },
             routed: routed.clone(),
         });
@@ -4552,15 +6624,16 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
-                raw: "/loop 5m /babysit-prs".to_string(),
+                raw: "/loop 5m /babysit-prs".into(),
                 turn_id: Some(41),
             })
             .await;
 
         // `dispatch` SPAWNS the turn; wait for the recording driver to fire.
         notify.notified().await;
+        join_active_slash_task(&connection).await;
         let got = captured.lock().await.clone().expect("driver must run");
-        assert_eq!(got.0, "EXPANDED /loop prompt");
+        assert_eq!(got.0.string_at(""), Some("EXPANDED /loop prompt".into()));
         assert!(
             !routed.load(Ordering::SeqCst),
             "a RunAsTurn result must NOT take the display-only route fallback"
@@ -4584,7 +6657,7 @@ mod tests {
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
             result: lingxi_core::host::SlashDispatchResult::Handled {
-                display: "help text".to_string(),
+                display: "help text".into(),
             },
             routed: routed.clone(),
         });
@@ -4595,10 +6668,11 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
-                raw: "/help".to_string(),
+                raw: "/help".into(),
                 turn_id: Some(42),
             })
             .await;
+        join_active_slash_task(&connection).await;
 
         assert!(
             !routed.load(Ordering::SeqCst),
@@ -4619,13 +6693,13 @@ mod tests {
 
     #[async_trait]
     impl TurnDriver for CancelAwareBlockDriver {
-        async fn run_turn(&self, _prompt: String) {
+        async fn run_turn(&self, _prompt: Utf16JsonProjection) {
             panic!("connection must use the cancel-aware entry");
         }
 
         async fn run_turn_with_images_and_cancel(
             &self,
-            _prompt: String,
+            _prompt: Utf16JsonProjection,
             _images: Vec<ImageRefDto>,
             cancel: CancellationToken,
         ) {
@@ -4647,7 +6721,8 @@ mod tests {
             Frame::Request(BridgeRequest {
                 id: 1,
                 method: "command".into(),
-                params: serde_json::to_value(ClientCommand::Cancel { turn_id }).unwrap(),
+                params: serialize_source(&ClientCommand::Cancel { turn_id })
+                    .expect("cancel command serializes as source JSON"),
             })
         };
         // Slow SetModel -> queued SendPrompt(42) -> Cancel(42): cancellation
@@ -4674,7 +6749,7 @@ mod tests {
         let update = Frame::Request(BridgeRequest {
             id: 1,
             method: "command".into(),
-            params: serde_json::to_value(ClientCommand::UpdateAudioCapabilities {
+            params: serialize_source(&ClientCommand::UpdateAudioCapabilities {
                 capabilities: client::protocol::audio::AudioCapabilitySnapshotDto {
                     service_epoch: 8,
                     support_revision: 1,
@@ -4683,7 +6758,7 @@ mod tests {
                     max_payload_bytes: 1024,
                 },
             })
-            .unwrap(),
+            .expect("audio capability command serializes as source JSON"),
         });
 
         assert!(!connection.is_priority_frame(&update));
@@ -4706,7 +6781,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "block".to_string(),
+                text: "block".into(),
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(41),
@@ -4761,7 +6836,13 @@ mod tests {
 
         let decision = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            gate.check("Bash", &serde_json::json!({ "command": "echo late" })),
+            gate.check(
+                "Bash",
+                &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({ "command": "echo late" }),
+                )
+                .unwrap(),
+            ),
         )
         .await
         .expect("a post-cancel permission must not wait for the normal prompt timeout");
@@ -4802,8 +6883,14 @@ mod tests {
         let check = tokio::spawn({
             let gate = gate.clone();
             async move {
-                gate.check("Bash", &serde_json::json!({"command": "echo hi"}))
-                    .await
+                gate.check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command": "echo hi"}),
+                    )
+                    .unwrap(),
+                )
+                .await
             }
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -4866,20 +6953,33 @@ mod tests {
     /// second `SendPrompt` arriving mid-turn does NOT spawn a concurrent turn but
     /// is enqueued and run as a follow-up once the first turn ends.
     struct GatedDriver {
-        prompts: Arc<Mutex<Vec<String>>>,
+        prompts: Arc<Mutex<Vec<Utf16JsonProjection>>>,
+        sources: Arc<
+            Mutex<Vec<Option<orchestrator::native_user_message_source::NativeUserMessageSource>>>,
+        >,
+        active_turn: ActiveTurnControl,
+        turn_ids: Arc<Mutex<Vec<Option<u64>>>>,
         /// Released by the test to let the FIRST turn complete.
         release: Arc<Notify>,
         /// Notifies the test each time a turn STARTS.
         started: Arc<Notify>,
         /// Notifies the test each time a turn COMPLETES.
         completed: Arc<Notify>,
+        started_count: Arc<AtomicUsize>,
+        completed_count: Arc<AtomicUsize>,
         first_seen: AtomicBool,
     }
 
     #[async_trait]
     impl TurnDriver for GatedDriver {
-        async fn run_turn(&self, prompt: String) {
+        async fn run_turn(&self, prompt: Utf16JsonProjection) {
+            self.turn_ids.lock().await.push(self.active_turn.turn_id());
             self.prompts.lock().await.push(prompt);
+            self.sources
+                .lock()
+                .await
+                .push(orchestrator::native_user_message_source::current());
+            self.started_count.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             // Only the FIRST turn parks; follow-up turns run straight through.
             if self
@@ -4889,6 +6989,7 @@ mod tests {
             {
                 self.release.notified().await;
             }
+            self.completed_count.fetch_add(1, Ordering::SeqCst);
             self.completed.notify_one();
         }
     }
@@ -4899,40 +7000,105 @@ mod tests {
     #[tokio::test]
     async fn second_prompt_is_queued_and_drained_after_first_turn() {
         let prompts = Arc::new(Mutex::new(Vec::new()));
+        let sources = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
         let started = Arc::new(Notify::new());
         let completed = Arc::new(Notify::new());
+        let started_count = Arc::new(AtomicUsize::new(0));
+        let completed_count = Arc::new(AtomicUsize::new(0));
+        let turn_ids = Arc::new(Mutex::new(Vec::new()));
+        let unbound_connection = BridgeConnection::new();
+        let active_turn = unbound_connection.active_turn.clone();
         let driver: Arc<dyn TurnDriver> = Arc::new(GatedDriver {
             prompts: prompts.clone(),
+            sources: sources.clone(),
+            active_turn,
+            turn_ids: turn_ids.clone(),
             release: release.clone(),
             started: started.clone(),
             completed: completed.clone(),
+            started_count: started_count.clone(),
+            completed_count: completed_count.clone(),
             first_seen: AtomicBool::new(false),
         });
         let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
-        let connection = Arc::new(BridgeConnection::new().bind(gate, driver));
+        let connection = Arc::new(unbound_connection.bind(gate, driver));
+
+        async fn wait_for_turn_signal(
+            stage: &str,
+            signal: &Notify,
+            signal_count: &AtomicUsize,
+            expected_signal_count: usize,
+            connection: &BridgeConnection,
+            prompts: &Mutex<Vec<Utf16JsonProjection>>,
+            counts: (&AtomicUsize, &AtomicUsize),
+        ) {
+            let (started_count, completed_count) = counts;
+            // Notify stores at most one permit. A fast follow-up can complete
+            // before the test consumes the first completion signal, so wait on
+            // the monotonic count predicate as well as the wakeup.
+            let reached = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if signal_count.load(Ordering::SeqCst) >= expected_signal_count {
+                        return;
+                    }
+                    signal.notified().await;
+                }
+            })
+            .await
+            .is_ok();
+            if reached {
+                return;
+            }
+            let prompts = prompts
+                .lock()
+                .await
+                .iter()
+                .map(|prompt| prompt.string_at("").unwrap_or_default().to_owned())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting for {stage} (signal count {}/{}): turn_running={}, active_turn_id={:?}, queue_len={}, prompts={prompts:?}, starts={}, completions={}",
+                signal_count.load(Ordering::SeqCst),
+                expected_signal_count,
+                connection.turn_running.load(Ordering::SeqCst),
+                connection.active_turn.turn_id(),
+                connection.queue.len().await,
+                started_count.load(Ordering::SeqCst),
+                completed_count.load(Ordering::SeqCst),
+            );
+        }
 
         // First prompt — wins the run loop and parks on the barrier.
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "first".to_string(),
+                text: "first".into(),
                 prompt_mode: None,
                 images: Vec::new(),
-                turn_id: None,
+                turn_id: Some(41),
                 visualization_context: None,
             })
             .await;
-        started.notified().await;
+        wait_for_turn_signal(
+            "first turn start",
+            &started,
+            &started_count,
+            1,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
+        assert_eq!(connection.active_turn.turn_id(), Some(41));
 
         // While the first turn is parked, the loop owns `turn_running`; a second
         // prompt must be ENQUEUED, not spawned. Nothing new starts.
         assert!(connection.turn_running.load(Ordering::SeqCst));
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "second".to_string(),
+                text: "second".into(),
                 prompt_mode: None,
                 images: Vec::new(),
-                turn_id: None,
+                turn_id: Some(42),
                 visualization_context: None,
             })
             .await;
@@ -4943,26 +7109,95 @@ mod tests {
         );
         // Still only ONE turn has started.
         assert_eq!(prompts.lock().await.len(), 1);
+        assert_eq!(connection.active_turn.turn_id(), Some(41));
 
         // Release the first turn; the loop then drains the queued prompt as a
         // follow-up turn and finally clears `turn_running`.
         release.notify_one();
-        completed.notified().await; // first turn done
-        started.notified().await; // follow-up turn started
-        completed.notified().await; // follow-up turn done
+        wait_for_turn_signal(
+            "first turn completion",
+            &completed,
+            &completed_count,
+            1,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
+        wait_for_turn_signal(
+            "queued follow-up turn start",
+            &started,
+            &started_count,
+            2,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
+        wait_for_turn_signal(
+            "queued follow-up turn completion",
+            &completed,
+            &completed_count,
+            2,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
 
         // Drain settles: queue empty, flag cleared, both prompts ran in order.
         // (Yield until the spawned loop finishes its post-drain bookkeeping.)
-        for _ in 0..100 {
-            if !connection.turn_running.load(Ordering::SeqCst) && connection.queue.is_empty().await
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while connection.turn_running.load(Ordering::SeqCst)
+                || !connection.queue.is_empty().await
             {
-                break;
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
+        })
+        .await
+        .is_ok();
+        if !drained {
+            let queue_len = connection.queue.len().await;
+            panic!(
+                "timed out draining queued prompt: turn_running={}, active_turn_id={:?}, queue_len={}, starts={}, completions={}",
+                connection.turn_running.load(Ordering::SeqCst),
+                connection.active_turn.turn_id(),
+                queue_len,
+                started_count.load(Ordering::SeqCst),
+                completed_count.load(Ordering::SeqCst),
+            );
         }
         assert!(!connection.turn_running.load(Ordering::SeqCst));
         assert!(connection.queue.is_empty().await);
-        assert_eq!(*prompts.lock().await, vec!["first", "second"]);
+        assert_eq!(
+            prompts
+                .lock()
+                .await
+                .iter()
+                .map(|prompt| prompt.string_at("").unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            turn_ids.lock().await.as_slice(),
+            &[Some(41), Some(42)],
+            "each prompt must run under its own active turn id"
+        );
+        let sources = sources.lock().await;
+        assert_eq!(sources.len(), 2);
+        for source in sources.iter() {
+            let source = source
+                .as_ref()
+                .expect("direct and busy-queued SendPrompt each stamp Native human origin");
+            assert_eq!(
+                source
+                    .message_origin
+                    .as_ref()
+                    .and_then(|origin| origin.string_at("/kind")),
+                Some("human")
+            );
+            assert!(source.prompt_source.is_none());
+        }
     }
 
     // ── Keepalive: drain tags the in-flight loop tick on SOURCE, not text shape ──
@@ -4976,9 +7211,7 @@ mod tests {
             } else {
                 format!("drain-ka-{text}")
             },
-            content: super::QueuedCommandContent::UserInput {
-                text: text.to_string(),
-            },
+            content: super::QueuedCommandContent::UserInput { text: text.into() },
             priority: super::QueuePriority::Next,
             queued_at: std::time::SystemTime::now(),
             source,
@@ -4993,7 +7226,7 @@ mod tests {
         struct StopRecorder(Arc<std::sync::atomic::AtomicUsize>);
         #[async_trait]
         impl TurnDriver for StopRecorder {
-            async fn run_turn(&self, _: String) {}
+            async fn run_turn(&self, _: Utf16JsonProjection) {}
             async fn stop_dynamic_loop(&self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
@@ -5028,12 +7261,17 @@ mod tests {
         let second = super::BridgeConnection::new();
         first
             .loop_runtime
-            .begin_tick("first connection tick".to_string());
+            .begin_tick("first connection tick".into());
 
         // A normal prompt on another connection clears only its own state.
         second.loop_runtime.take_in_flight_prompt();
         assert_eq!(
-            first.loop_runtime.in_flight_prompt().as_deref(),
+            first
+                .loop_runtime
+                .in_flight_prompt()
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("first connection tick")
         );
         assert_eq!(second.loop_runtime.in_flight_prompt(), None);
@@ -5075,7 +7313,11 @@ mod tests {
         )
         .await;
         assert_eq!(
-            loop_runtime.in_flight_prompt().as_deref(),
+            loop_runtime
+                .in_flight_prompt()
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("# Autonomous loop tick"),
             "the batched drain branch must tag a Cron tick as in-flight"
         );
@@ -5084,10 +7326,12 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_queue_batch_retains_insertion_order_and_each_origin() {
-        struct BatchRecorder(Arc<Mutex<Vec<Vec<(String, bool)>>>>);
+        struct BatchRecorder(
+            Arc<Mutex<Vec<Vec<(String, bool, Option<orchestrator::PromptIngressKind>, bool)>>>>,
+        );
         #[async_trait]
         impl TurnDriver for BatchRecorder {
-            async fn run_turn(&self, _: String) {
+            async fn run_turn(&self, _: Utf16JsonProjection) {
                 panic!("expected a batch");
             }
             async fn run_queued_batch(
@@ -5098,7 +7342,14 @@ mod tests {
                 self.0.lock().await.push(
                     inputs
                         .into_iter()
-                        .map(|input| (input.text, input.is_meta))
+                        .map(|input| {
+                            (
+                                input.text.string_at("").unwrap_or_default().to_owned(),
+                                input.is_meta,
+                                input.prompt_ingress_kind,
+                                input.skip_model_query,
+                            )
+                        })
                         .collect(),
                 );
             }
@@ -5129,14 +7380,23 @@ mod tests {
         assert_eq!(
             *captured.lock().await,
             vec![vec![
-                ("scheduled first".into(), true),
-                ("human second".into(), false)
+                ("scheduled first".into(), true, None, false),
+                (
+                    "human second".into(),
+                    false,
+                    Some(orchestrator::PromptIngressKind::RegularUser),
+                    false,
+                ),
             ]]
         );
     }
 
     #[tokio::test]
     async fn fixed_cron_resolves_in_main_turn_without_dynamic_keepalive() {
+        let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_loop_runtime_state();
         let queue = Arc::new(super::MessageQueueManager::new());
         let mut command =
             drain_test_command("/scheduled raw instruction", super::QueueSource::Cron);
@@ -5146,10 +7406,11 @@ mod tests {
         command.is_meta = true;
         queue.enqueue(command).await;
         let captured = Arc::new(Mutex::new(None));
-        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+        let batch_driver = Arc::new(BatchRecordingDriver {
             captured: captured.clone(),
             notify: Arc::new(Notify::new()),
         });
+        let driver: Arc<dyn TurnDriver> = batch_driver;
         let runtime = Arc::new(tool_cron::LoopRuntime::default());
         super::drain_main_thread(
             &driver,
@@ -5163,10 +7424,23 @@ mod tests {
         )
         .await;
         assert_eq!(runtime.in_flight_prompt(), None);
+        let captured = captured.lock().await;
+        let inputs = captured
+            .as_ref()
+            .expect("scheduled input must reach the real queue batch consumer");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].text, "/scheduled raw instruction".into());
+        assert!(inputs[0].is_meta);
+        assert!(!inputs[0].turn_companion);
+        assert!(inputs[0].trailing_history_rows.is_empty());
         assert_eq!(
-            captured.lock().await.as_ref().unwrap().0,
-            "/scheduled raw instruction"
+            inputs[0].mod_origin,
+            Some(serde_json::json!({"kind":"scheduled-trigger"}))
         );
+        assert_eq!(inputs[0].queue_priority.as_deref(), Some("later"));
+        assert!(inputs[0].scheduled_task_id.is_none());
+        assert!(inputs[0].scheduled_fire_id.is_none());
+        tool_cron::reset_loop_runtime_state();
     }
 
     #[tokio::test]
@@ -5174,6 +7448,7 @@ mod tests {
         let _serial = crate::driver::LOOP_KA_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_loop_runtime_state();
         let queue = Arc::new(super::MessageQueueManager::new());
         queue
             .enqueue(drain_test_command(
@@ -5182,10 +7457,11 @@ mod tests {
             ))
             .await;
         let captured = Arc::new(Mutex::new(None));
-        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+        let batch_driver = Arc::new(BatchRecordingDriver {
             captured: captured.clone(),
             notify: Arc::new(Notify::new()),
         });
+        let driver: Arc<dyn TurnDriver> = batch_driver;
         let runtime = Arc::new(tool_cron::LoopRuntime::default());
         super::drain_main_thread(
             &driver,
@@ -5199,13 +7475,30 @@ mod tests {
         )
         .await;
         assert_eq!(
-            runtime.in_flight_prompt().as_deref(),
+            runtime
+                .in_flight_prompt()
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("<<autonomous-loop-dynamic>>")
         );
         let result = captured.lock().await;
-        let text = &result.as_ref().unwrap().0;
+        let inputs = result
+            .as_ref()
+            .expect("resolved loop tick must reach the source-preserving batch consumer");
+        assert_eq!(inputs.len(), 1);
+        let text = inputs[0].text.string_at("").unwrap();
         assert_ne!(text, "<<autonomous-loop-dynamic>>");
         assert!(text.contains("ScheduleWakeup"));
+        assert!(inputs[0].is_meta);
+        assert!(!inputs[0].turn_companion);
+        assert!(inputs[0].trailing_history_rows.is_empty());
+        assert_eq!(
+            inputs[0].mod_origin,
+            Some(serde_json::json!({"kind":"scheduled-trigger"}))
+        );
+        assert!(inputs[0].queue_priority.is_none());
+        tool_cron::reset_loop_runtime_state();
     }
 
     /// A normal user prompt (non-Cron) through the same batched drain branch must
@@ -5281,7 +7574,7 @@ mod realtime_audio_connection_tests {
         Frame::Request(bridge::BridgeRequest {
             id: 2,
             method: "command".into(),
-            params: serde_json::to_value(ClientCommand::RealtimeAudioInput {
+            params: serialize_source(&ClientCommand::RealtimeAudioInput {
                 input_json: r#"{"type":"commit","operationId":"owner"}"#.into(),
             })
             .unwrap(),
@@ -5314,7 +7607,7 @@ mod realtime_audio_connection_tests {
     struct NoTurn;
     #[async_trait]
     impl TurnDriver for NoTurn {
-        async fn run_turn(&self, _: String) {}
+        async fn run_turn(&self, _: Utf16JsonProjection) {}
     }
     #[tokio::test]
     async fn native_execution_uses_current_permission_broker_and_cancellation_is_fail_closed() {
@@ -5334,7 +7627,13 @@ mod realtime_audio_connection_tests {
         let pending_gate = gate.clone();
         let pending = tokio::spawn(async move {
             pending_gate
-                .check("Bash", &serde_json::json!({"command":"echo permitted"}))
+                .check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"echo permitted"}),
+                    )
+                    .unwrap(),
+                )
                 .await
         });
         let Frame::PermissionRequest(request) =
@@ -5356,7 +7655,13 @@ mod realtime_audio_connection_tests {
         let pending_gate = gate.clone();
         let pending = tokio::spawn(async move {
             pending_gate
-                .check("Bash", &serde_json::json!({"command":"echo pending"}))
+                .check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"echo pending"}),
+                    )
+                    .unwrap(),
+                )
                 .await
         });
         let Frame::PermissionRequest(request) =
@@ -5447,8 +7752,12 @@ mod realtime_audio_connection_tests {
             panic!("hello response")
         };
         assert_eq!(
-            response.result.unwrap()["capabilities"]["realtime_audio"],
-            true
+            response
+                .result
+                .unwrap()
+                .at_pointer("/capabilities/realtime_audio")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
         connection
             .dispatch(ClientCommand::RealtimeAudioInput {

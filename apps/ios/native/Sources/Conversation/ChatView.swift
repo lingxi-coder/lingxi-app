@@ -1,5 +1,6 @@
 import SwiftUI
 import OSLog
+import harness_runtimeFFI
 
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
@@ -194,6 +195,7 @@ struct ChatView: View {
                          availableModels: convo.availableModels,
                          availableModelDetails: convo.availableModelDetails,
                          activeModelId: convo.activeModelId,
+                         activeModelDisplay: convo.activeModelSource,
                          contextUsage: convo.sessionTransitionPending ? nil : convo.contextUsage,
                          providerConfigured: convo.providerConfigured,
                          onSelectModel: { reference in
@@ -227,7 +229,9 @@ struct ChatView: View {
                          onConfirmBypassPermissions: { source.confirmAndSetBypassPermissions(suppressWarning: $0) },
                          recentModels: recentModels,
                          draft: $draft,
-                         onSend: send,
+                         onSend: { text, selectedSlashCommand in
+                             send(text, selectedSlashCommand: selectedSlashCommand)
+                         },
                          promptSuggestion: convo.promptSuggestion,
                          promptSuggestionNotice: convo.promptSuggestionNotice,
                          suggestionTurnKey: "\(convo.activeSessionId):\(convo.promptSuggestionUuid ?? "")",
@@ -513,7 +517,7 @@ struct ChatView: View {
     private var activeModelName: String {
         let id = convo.activeModelId
         guard !id.isEmpty else { return "—" }
-        return convo.availableModelDetails[id]?.displayName ?? id
+        return convo.activeModelSource ?? convo.availableModelDetails[id]?.displayName ?? id
     }
 
     private var effortLabel: String {
@@ -749,7 +753,7 @@ struct ChatView: View {
     /// 提交 for a pending questionnaire. The card stays disabled until the
     /// engine confirms with `askUserQuestionResolved` (which removes it);
     /// returning `false` re-enables the card for a retry.
-    private func answerQuestion(_ requestId: UInt64, answers: [String: String]) async -> Bool {
+    private func answerQuestion(_ requestId: UInt64, answers: AskUserQuestionAnswersDto) async -> Bool {
         #if canImport(harness_runtimeFFI)
             do {
                 try await source.submitEngineCommand(
@@ -993,7 +997,7 @@ struct ChatView: View {
         }
     }
 
-    private func send(_ txt: String) {
+    private func send(_ txt: String, selectedSlashCommand: ConversationSlashCommand? = nil) {
         #if canImport(harness_runtimeFFI)
         if let engine = source as? EngineConversationSource,
            !engine.isSideChat,
@@ -1013,7 +1017,11 @@ struct ChatView: View {
         }
         #endif
         let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
-        guard let token = source.send(txt, images: images) else { return }
+        guard let token = source.send(
+            txt,
+            images: images,
+            selectedSlashCommand: selectedSlashCommand
+        ) else { return }
         draft = ""
         // The source owns the durable transcript now; remove only after it has
         // accepted the turn so a failed send leaves the attachment retryable.

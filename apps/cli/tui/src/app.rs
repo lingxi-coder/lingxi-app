@@ -24,8 +24,9 @@ use crate::RataTerminal;
 #[cfg(test)]
 use crossterm::event::KeyEvent;
 use crossterm::event::{self, Event, KeyEventKind};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::computer_access::ComputerAccessExchange;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use std::io;
 use std::io::Write;
 use std::time::Duration;
@@ -39,6 +40,23 @@ mod events;
 mod input;
 mod render;
 
+trait AppEventDriver {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
+    fn read(&mut self) -> io::Result<Event>;
+}
+
+struct CrosstermEventDriver;
+
+impl AppEventDriver for CrosstermEventDriver {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        event::poll(timeout)
+    }
+
+    fn read(&mut self) -> io::Result<Event> {
+        event::read()
+    }
+}
+
 /// How the [`run_app`] event loop exited.
 ///
 /// The historical loop only ever ended one way (the user quit), so `run`
@@ -49,7 +67,8 @@ mod render;
 /// across files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppExit {
-    /// The user quit (`/exit`, `/stop`, Ctrl-C twice): the embedder tears down.
+    /// The user (`/exit`, `/stop`, Ctrl-C twice) or host probe requested
+    /// normal shutdown: the embedder tears down.
     Quit,
     /// Exit after a successful durable background handoff.
     Backgrounded(String),
@@ -85,12 +104,15 @@ pub struct AppCallbacks<'cb> {
     /// prompt, honoring the paired [`CancellationToken`] (the widget cancels
     /// it on Ctrl-C/Esc). The second `String` is the visible row's opaque
     /// correlation token.
-    pub on_submit: Box<dyn FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
+    pub on_submit: Box<
+        dyn FnMut(Utf16JsonProjection, String, Vec<std::path::PathBuf>, CancellationToken) + 'cb,
+    >,
     /// Executed for a prompt entered while a turn is already active. The host
     /// queues it at the canonical `Next` priority; the second `String` is the
     /// visible row's opaque correlation token.
-    pub on_queue_prompt:
-        Box<dyn FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
+    pub on_queue_prompt: Box<
+        dyn FnMut(Utf16JsonProjection, String, Vec<std::path::PathBuf>, CancellationToken) + 'cb,
+    >,
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
@@ -189,7 +211,8 @@ pub struct AppCallbacks<'cb> {
     /// to `run_turn` (Ctrl-C then cancels the dispatched turn) and emits a
     /// `TurnEnded` for a non-turn result to clear the widget's running state.
     /// `None` (tests / no registry) is a no-op.
-    pub on_dispatch_slash: Box<dyn FnMut(String, crate::chat_widget::PendingSlashDispatch) + 'cb>,
+    pub on_dispatch_slash:
+        Box<dyn FnMut(Utf16JsonProjection, crate::chat_widget::PendingSlashDispatch) + 'cb>,
     /// Executed on [`ChatOutcome::RewakePeer`]: the caller drives
     /// `OrchestratorHandle::run_async_hook_rewake` off the render thread so
     /// a just-delivered held peer message is injected without a synthetic
@@ -229,14 +252,14 @@ pub struct RataApp<'cb> {
     mod_ui_render_tx: std::sync::mpsc::Sender<(
         u64,
         u64,
-        serde_json::Value,
-        Result<serde_json::Value, String>,
+        Utf16JsonProjection,
+        Result<Utf16JsonProjection, String>,
     )>,
     mod_ui_render_rx: std::sync::mpsc::Receiver<(
         u64,
         u64,
-        serde_json::Value,
-        Result<serde_json::Value, String>,
+        Utf16JsonProjection,
+        Result<Utf16JsonProjection, String>,
     )>,
     /// Lightweight session-local invalidate generation polled off-thread
     /// while the input loop waits for its next redraw.
@@ -245,8 +268,8 @@ pub struct RataApp<'cb> {
     mod_ui_generation_poll_in_flight: bool,
     mod_ui_generation_tracker: crate::mod_ui_render::RenderGenerationTracker,
     mod_ui_orchestrator: Option<std::sync::Arc<dyn lingxi_core::host::OrchestratorHandle>>,
-    mod_ui_render_input: Option<serde_json::Value>,
-    mod_ui_render_pending: Option<serde_json::Value>,
+    mod_ui_render_input: Option<Utf16JsonProjection>,
+    mod_ui_render_pending: Option<Utf16JsonProjection>,
     mod_ui_render_in_flight: bool,
     /// Button action identities extracted from the latest accepted render.
     mod_ui_button_actions: Vec<crate::mod_ui_render::AbovePromptButtonAction>,
@@ -343,7 +366,7 @@ impl<'cb> RataApp<'cb> {
         self.start_mod_ui_render(input);
     }
 
-    fn start_mod_ui_render(&mut self, input: serde_json::Value) {
+    fn start_mod_ui_render(&mut self, input: Utf16JsonProjection) {
         let Some(orchestrator) = self.mod_ui_orchestrator.clone() else {
             return;
         };
@@ -429,7 +452,11 @@ impl<'cb> RataApp<'cb> {
                 && self.mod_ui_render_input.as_ref() == Some(&request)
             {
                 if let Ok(tree) = result {
-                    let max_rows = request["props"]["maxRows"].as_u64().unwrap_or(0) as u16;
+                    let max_rows = request
+                        .number_at("/props/maxRows")
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| value as u16)
+                        .unwrap_or(0);
                     self.chat_widget.set_mod_ui_render_tree(&tree, max_rows);
                     self.mod_ui_button_actions =
                         crate::mod_ui_render::tree_buttons(&tree, revision).unwrap_or_default();
@@ -463,8 +490,8 @@ impl<'cb> RataApp<'cb> {
         });
     }
 
-    /// Run the event loop until the user quits. Per-tick order (locked by the
-    /// Phase 1 handoff): drain turn events into the widget, drain permission
+    /// Run the event loop until the user or host requests exit. Per-tick order
+    /// (locked by the Phase 1 handoff): drain turn events into the widget, drain permission
     /// requests into the widget, size the bottom viewport BEFORE flushing
     /// (history insertion wraps at the viewport width), flush finalized
     /// history to native scrollback, draw the widget, then route input and
@@ -473,7 +500,8 @@ impl<'cb> RataApp<'cb> {
     /// # Errors
     /// Propagates the first terminal IO error.
     pub fn run(&mut self, terminal: &mut RataTerminal) -> io::Result<AppExit> {
-        self.run_inner(terminal, None)
+        let mut event_driver = CrosstermEventDriver;
+        self.run_inner(terminal, None, None, &mut event_driver)
     }
 
     /// Production loop with access to the terminal RAII guard, allowing
@@ -484,16 +512,25 @@ impl<'cb> RataApp<'cb> {
         terminal: &mut RataTerminal,
         session: &mut TerminalSession,
     ) -> io::Result<AppExit> {
-        self.run_inner(terminal, Some(session))
+        let mut event_driver = CrosstermEventDriver;
+        self.run_inner(terminal, Some(session), None, &mut event_driver)
     }
 
-    fn run_inner(
+    fn run_inner<B>(
         &mut self,
-        terminal: &mut RataTerminal,
+        terminal: &mut crate::terminal::Terminal<B>,
         mut session: Option<&mut TerminalSession>,
-    ) -> io::Result<AppExit> {
+        exit_request_probe: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        event_driver: &mut dyn AppEventDriver,
+    ) -> io::Result<AppExit>
+    where
+        B: Backend<Error = io::Error> + Write,
+    {
         let mut need_draw = true;
         loop {
+            if exit_request_probe.is_some_and(|probe| probe()) {
+                return Ok(AppExit::Quit);
+            }
             let mut dirty = false;
             dirty |= self.drain_mod_ui_render_results();
             dirty |= self.drain_mod_ui_render_generation();
@@ -527,7 +564,7 @@ impl<'cb> RataApp<'cb> {
                     if !self.copy_error_shown {
                         self.copy_error_shown = true;
                         self.apply_turn_event(TurnEvent::SystemNotice {
-                            body: format!("Clipboard copy failed: {error}"),
+                            body: format!("Clipboard copy failed: {error}").into(),
                             is_error: true,
                         });
                     }
@@ -569,9 +606,9 @@ impl<'cb> RataApp<'cb> {
             } else {
                 self.redraw_interval
             };
-            if event::poll(poll_timeout)? {
+            if event_driver.poll(poll_timeout)? {
                 need_draw = true;
-                let outcome = match event::read()? {
+                let outcome = match event_driver.read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
                     Event::Paste(text) => self.on_paste(&text),
                     Event::Mouse(mouse) if self.fullscreen => {
@@ -583,7 +620,7 @@ impl<'cb> RataApp<'cb> {
                 match outcome {
                     ChatOutcome::Quit => return Ok(AppExit::Quit),
                     ChatOutcome::BackgroundedExit(receipt) => {
-                        return Ok(AppExit::Backgrounded(receipt))
+                        return Ok(AppExit::Backgrounded(receipt));
                     }
                     ChatOutcome::Detach => {
                         if let Ok(token) =
@@ -818,12 +855,17 @@ impl<'cb> RataApp<'cb> {
 /// multi-provider catalog at startup); `/connect` reads clones to build its
 /// picker. Empty maps (the default) render an empty picker.
 ///
+/// `exit_request_probe` lets an embedder request normal loop unwinding while
+/// the UI is otherwise idle. The probe is checked before each tick can draw or
+/// wait for terminal input; returning `true` yields [`AppExit::Quit`], so the
+/// terminal session guard follows the same restore path as a user-requested exit.
+///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
 #[allow(clippy::too_many_arguments)]
 pub fn run_app(
     messages: Vec<RenderedMessage>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<Utf16JsonProjection>,
     background_handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
@@ -865,8 +907,8 @@ pub fn run_app(
         std::sync::Arc<dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync>,
     >,
     loop_interrupt: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-    on_submit: impl FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken),
-    on_queue_prompt: impl FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken),
+    on_submit: impl FnMut(Utf16JsonProjection, String, Vec<std::path::PathBuf>, CancellationToken),
+    on_queue_prompt: impl FnMut(Utf16JsonProjection, String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_fusion_setup_action: impl FnMut(FusionSetupAction),
     on_connect_action: impl FnMut(ConnectAction),
@@ -889,8 +931,9 @@ pub fn run_app(
     on_clear_session: impl FnMut(Option<String>),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
-    on_dispatch_slash: impl FnMut(String, crate::chat_widget::PendingSlashDispatch),
+    on_dispatch_slash: impl FnMut(Utf16JsonProjection, crate::chat_widget::PendingSlashDispatch),
     on_rewake_peer: impl FnMut(),
+    exit_request_probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -1058,14 +1101,24 @@ pub fn run_app(
     if let Some(snapshot) = background_handoff.as_ref() {
         app.chat_widget.restore_background_handoff(snapshot);
     }
-    if let Some(prompt) = initial_prompt.filter(|value| !value.trim().is_empty()) {
+    if let Some(prompt) = initial_prompt.filter(|value| {
+        value
+            .string_at("")
+            .is_some_and(|text| !text.trim().is_empty())
+    }) {
         if let ChatOutcome::Submit(prompt, row_token, images, token) =
             app.chat_widget.submit_prompt(prompt)
         {
             (app.callbacks.on_submit)(prompt, row_token, images, token);
         }
     }
-    let result = app.run_with_session(&mut terminal, &mut session_guard);
+    let mut event_driver = CrosstermEventDriver;
+    let result = app.run_inner(
+        &mut terminal,
+        Some(&mut session_guard),
+        exit_request_probe.as_deref(),
+        &mut event_driver,
+    );
     app.chat_widget.set_mod_ui_selection(None);
     app.chat_widget.cancel_active_turn();
     result

@@ -80,6 +80,7 @@ struct ModelRuntimeDetails: Identifiable, Equatable {
     let pricing: ModelPricingDto?
     let capabilities: ModelCapabilitiesDto
     let reasoning: ReasoningControlSpecDto
+    var contextBudget: ModelContextBudgetDto? = nil
     var supportsFastMode: Bool = false
 
     var id: String { reference }
@@ -108,6 +109,7 @@ struct ModelRuntimeDetails: Identifiable, Equatable {
             pricing: dto.pricing,
             capabilities: dto.capabilities,
             reasoning: dto.reasoning,
+            contextBudget: dto.contextBudget,
             supportsFastMode: dto.supportsFastMode
         )
     }

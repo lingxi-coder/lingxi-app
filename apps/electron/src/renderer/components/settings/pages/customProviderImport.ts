@@ -167,6 +167,7 @@ function validMetadata(value: unknown): boolean {
   for (const [key, v] of Object.entries(value)) {
     if (['family','status','releaseDate','lastUpdated','knowledgeCutoff'].includes(key) && v !== null && typeof v !== 'string') return false;
     if (['contextWindowTokens','maxInputTokens','maxOutputTokens'].includes(key) && v !== null && !integer(v)) return false;
+    if (key === 'context' && v !== null && !validContextMetadata(v)) return false;
     if (key === 'applicationOutputTokens' && v !== null && (!integer(v) || Number(v) === 0 || Number(v) > 0xffffffff)) return false;
     if (['openWeights','attachments','temperatureControl'].includes(key) && v !== null && typeof v !== 'boolean') return false;
     if (['inputModalities','outputModalities'].includes(key) && (!Array.isArray(v) || v.some(item => typeof item !== 'string'))) return false;
@@ -313,4 +314,23 @@ export function mergeProviderImport(current: Record<string, CustomProviderDraft>
     if (nonempty(entry.apiKey)) credentials[entry.name] = entry.apiKey.trim();
   }
   return { providers, credentials };
+}
+
+function validContextMetadata(value: unknown): boolean {
+  if (!record(value)) return false;
+  if (Object.keys(value).some(key => !['sharedWindow', 'thinkingMaxInputTokens', 'recommendation', 'application'].includes(key))) return false;
+  if (value.sharedWindow != null && typeof value.sharedWindow !== 'boolean') return false;
+  if (value.thinkingMaxInputTokens != null && (!integer(value.thinkingMaxInputTokens) || value.thinkingMaxInputTokens === 0)) return false;
+  if (value.recommendation != null) {
+    const r = value.recommendation;
+    if (!record(r) || !integer(r.inputTokens) || r.inputTokens === 0 || !nonempty(r.source) || !nonempty(r.verifiedAt)) return false;
+    if (Object.keys(r).some(key => !['inputTokens', 'source', 'verifiedAt'].includes(key))) return false;
+  }
+  if (value.application != null) {
+    const p = value.application;
+    if (!record(p) || !['auto', 'long', 'custom'].includes(String(p.mode))) return false;
+    if (Object.keys(p).some(key => !['mode', ...(p.mode === 'custom' ? ['input_tokens'] : [])].includes(key))) return false;
+    if (p.mode === 'custom' && (!integer(p.input_tokens) || p.input_tokens === 0)) return false;
+  }
+  return true;
 }

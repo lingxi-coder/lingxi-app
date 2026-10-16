@@ -208,6 +208,13 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedTrash = selection.kind === 'trash' ? trashedSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedDocument = selectedSkill && document?.id === selectedSkill.id ? document : null;
+  const uninstallDisabledReason = selectedDocument?.writable
+    ? undefined
+    : selectedDocument?.readonlyReason || (loadingDocument
+      ? '正在读取 SKILL.md；完成后才能确认是否可卸载。'
+      : selectedDocument
+        ? '此 Skill 为只读，无法卸载。'
+        : '无法读取 SKILL.md，因此无法确认是否可卸载。');
 
   useEffect(() => {
     if (!selectedSkill || !adminAvailable) return;
@@ -622,13 +629,13 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             {selection.kind === 'skill' && !editingDocument ? <>
               {selectedDocument?.parseError && <div role="alert" style={noteStyle(t, 'danger')}>{selectedDocument.parseError}</div>}
               <div className="extension-skill-preview">{loadingDocument ? <div role="status">Loading SKILL.md…</div> : selectedDocument ? <MarkdownContent text={previewMarkdown || 'This skill has no instructions yet.'} /> : <div className="extension-hub-empty">The skill document is not available.</div>}</div>
-              {selectedDocument && !selectedDocument.writable && <div id="skill-uninstall-readonly-reason" style={noteStyle(t, 'warn')}>
-                {selectedDocument.readonlyReason || '此 Skill 为只读，无法卸载。'}
+              {uninstallDisabledReason && <div id="skill-uninstall-readonly-reason" style={noteStyle(t, 'warn')}>
+                {uninstallDisabledReason}
               </div>}
             </> : detail}
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
-            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={selectedDocument && !selectedDocument.writable ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>Uninstall</button>
+            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={handleTrashSkill}>Uninstall</button>
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);

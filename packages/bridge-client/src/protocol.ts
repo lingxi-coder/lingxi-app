@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '22.0.0';
+export const CLIENT_PROTOCOL_VERSION = '26.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -525,7 +525,27 @@ export interface UiClientWorkerFaultSnapshotDto {
   fault: UiClientWorkerFaultResponseDto['fault'];
 }
 
-export type UiClientFrameEventPayloadDto = Omit<UiClientFrameDto, 'runtimeId'> | UiClientWorkerFaultSnapshotDto;
+/** Successful asynchronous worker frame; identity is supplied by the Host. */
+export interface UiClientFrameEventSnapshotDto {
+  renderRevision: number;
+  /** Host-local per-runtime ordering for RPC and asynchronous frames. */
+  frameSequence: number;
+  tree: UiJsonValue;
+  hasPointerListener: boolean;
+  hasKeyListener: boolean;
+  parent: {
+    surface: 'desktop';
+    component: NativeUiComponent;
+    instance_id: string;
+  };
+  client: {
+    plugin: string;
+    key: string;
+    module: string;
+  };
+}
+
+export type UiClientFrameEventPayloadDto = UiClientFrameEventSnapshotDto | UiClientWorkerFaultSnapshotDto;
 
 export interface UiClientHandledOperationResponseDto {
   handled: boolean;
@@ -588,24 +608,10 @@ export interface UiInvalidateEventDto {
 }
 
 export type ClientCommand =
-  | { type: 'side_chat_create'; request_id: string; initial_input?: string }
-  | { type: 'side_chat_list' }
-  | { type: 'side_chat_get'; side_id: string }
-  | { type: 'side_chat_end'; side_id: string }
-  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string }
   | { type: 'cron_run_started'; run_id: string; session_id: string }
   | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }
   | { type: 'cron_run_completed'; run_id: string; session_id?: string | null; summary?: string | null; error?: string | null }
   | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
-  | { type: 'ui_render'; request_id: string; request_json: string }
-  | { type: 'ui_client_module'; request_id: string; plugin: string }
-  | { type: 'ui_message'; request_id: string; request_json: string }
-  | { type: 'ui_client_fault'; request_id: string; request_json: string }
-  | { type: 'ui_client_press'; request_id: string; request_json: string }
-  | { type: 'ui_press'; request_id: string; request_json: string }
-  | { type: 'ui_input'; request_id: string; request_json: string }
-  | { type: 'ui_select'; request_id: string; request_json: string }
-  | { type: 'ui_client_operation'; request_id: string; operation_json: string }
   // ── Turn driving ──────────────────────────────────────────────────────────
   | {
       type: 'send_prompt';
@@ -636,6 +642,8 @@ export type ClientCommand =
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
   | { type: 'set_permission_mode'; mode: PermissionModeId }
+  | { type: 'initialize_proactivity'; proactivity?: boolean; reinitialize?: boolean }
+  | { type: 'set_proactivity_level'; level: NativeProactivityLevelDto; offer_bypass?: boolean }
   | { type: 'set_typescript_lsp_mode'; mode: TypescriptLspModeId }
   // ── `computer` tool request_access resolution ───────────────────────────────
   | { type: 'approve_computer_access'; request_id: number; response: ComputerAccessResponseDto }
@@ -675,6 +683,17 @@ export type ClientCommand =
   // Explicit UI mount lifecycle; transport hello/close does not imply an attach.
   | { type: 'ui_attach'; surface: 'desktop' | 'mobile' | 'vscode'; client_id: string }
   | { type: 'ui_detach'; client_id: string }
+  // Mod UI request channels are part of the canonical wire protocol. Electron
+  // keeps them off its generic desktop command allowlist.
+  | { type: 'ui_render'; request_id: string; request_json: string }
+  | { type: 'ui_client_module'; request_id: string; plugin: string }
+  | { type: 'ui_message'; request_id: string; request_json: string }
+  | { type: 'ui_client_fault'; request_id: string; request_json: string }
+  | { type: 'ui_client_press'; request_id: string; request_json: string }
+  | { type: 'ui_press'; request_id: string; request_json: string }
+  | { type: 'ui_input'; request_id: string; request_json: string }
+  | { type: 'ui_select'; request_id: string; request_json: string }
+  | { type: 'ui_client_operation'; request_id: string; operation_json: string }
   // ── Auth + session control ────────────────────────────────────────────────
   | { type: 'login' }
   | { type: 'logout' }
@@ -690,8 +709,8 @@ export type ClientCommand =
   | { type: 'request_exit' }
   // ── Settings (persisted) ─────────────────────────────────────────────────────
   | { type: 'update_settings'; destination: WritableScopeDto; patch_json: string }
-  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
-  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: 'shown' | 'accepted' | 'dismissed' }
+  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: string; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
+  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: string }
   | { type: 'record_prompt_suggestion_submission'; text: string }
   // ── Permissions (persisted) ──────────────────────────────────────────────────
   | {
@@ -722,7 +741,15 @@ export type ClientCommand =
   | { type: 'realtime_audio_input'; input_json: string }
   | { type: 'stop_realtime_audio' }
   | { type: 'get_audio_session_context' }
-  | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto };
+  | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto }
+  // Lightweight in-memory child conversations (client-protocol protocol 25).
+  // ClientTextDto remains an ordinary JSON string on the wire; command_json is
+  // a JSON-encoded ClientCommand carried as a string, not a nested object.
+  | { type: 'side_chat_create'; request_id: string; initial_input?: string }
+  | { type: 'side_chat_list' }
+  | { type: 'side_chat_get'; side_id: string }
+  | { type: 'side_chat_end'; side_id: string }
+  | { type: 'side_chat_submit'; side_id: string; request_id: string; command_json: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1039,6 +1066,10 @@ export interface ReasoningControlSpecDto {
 export type ModelBillingModeDto = 'per_token' | 'subscription' | 'free' | 'unknown';
 
 export interface ModelPricingTierDto {
+  max_input_tokens?: number;
+  service_tier?: string;
+  source?: string;
+  verified_at?: string;
   context_threshold_tokens: number;
   input_per_million?: number;
   output_per_million?: number;
@@ -1067,7 +1098,17 @@ export interface ModelCapabilitiesDto {
   structured_output: boolean;
 }
 
+export interface ModelContextBudgetDto {
+  policy: 'auto' | 'long' | 'custom';
+  effective_input_budget?: number | null;
+  hard_input_limit?: number | null;
+  standard_price_input_tokens?: number | null;
+  recommendation_input_tokens?: number | null;
+  recommendation_source?: string | null;
+}
+
 export interface ModelDetailsDto {
+  context_budget?: ModelContextBudgetDto;
   reference: string;
   provider_id: string;
   provider_label: string;
@@ -1137,11 +1178,25 @@ export interface PermissionControlStateDto {
   options: PermissionModeOptionDto[];
 }
 
+/** Session-local Native proactivity opt-in and level state. */
+export type NativeProactivityLevelDto = 'ask' | 'default' | 'proactive';
+
+export interface NativeProactivityControlStateDto {
+  opted_in: boolean;
+  selector_gate: boolean;
+  selector_gate_ever_on: boolean;
+  attachments_enabled: boolean;
+  opt_in_available: boolean;
+  level: NativeProactivityLevelDto;
+}
+
 /** Full conversation-controls snapshot authored by the engine. */
 export interface ConversationControlsDto {
   qualified_model: string;
   permission: PermissionControlStateDto;
   reasoning: ReasoningControlStateDto;
+  /** Present when the host exposes Native's session proactivity control. */
+  proactivity?: NativeProactivityControlStateDto;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1231,12 +1286,12 @@ export interface SessionAgentSummaryDto {
   updated_at_ms?: number;
 }
 
-/** One UUID-addressable persisted row in a session-agent transcript. */
+/** One indexed child transcript row, including its persisted UUID and error sidecar. */
 export interface SessionAgentMessageRowDto {
   message_index: number;
   message_uuid: string;
   message: MessageDto;
-  /** Complete serialized Native synthetic API-error row, kept losslessly. */
+  /** Complete serialized API-error row when the child response was a host error. */
   api_error_json?: string;
 }
 
@@ -1394,6 +1449,7 @@ export interface MemoryEntryDto {
 export interface StatusSnapshotDto {
   session_id: string;
   model: string;
+  model_source?: string;
   n_messages: number;
   total_cost_usd: number;
   input_tokens: number;
@@ -1536,24 +1592,29 @@ export interface CostDto {
   formatted: string;
 }
 
-/** Provider message facts retained on an accepted server-fallback tombstone. */
+/**
+ * Outbound events the engine streams to a client (events.rs `ClientEvent`).
+ * Internally tagged on `type`, `snake_case`.
+ *
+ * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
+ */
 export interface ServerFallbackProviderMessageDto {
   id?: string;
   model?: string;
   stop_reason?: string;
   stop_details_json?: string;
   usage_json?: string;
-  /** Serialized array of the complete provider content blocks. */
+  /** Serialized JSON array of all provider content blocks. */
   content_json: string;
 }
 
-/** Complete durable-row facts forwarded when accepted server fallback removes a row. */
 export interface ServerFallbackTombstoneMessageDto {
   uuid: string;
-  /** Native outer row kind, serialized on the wire as `type`. */
+  /** Native row type; currently emitted for assistant rows. */
   type: string;
   timestamp: string;
   request_id?: string;
+  /** Serialized request-reference payload, kept opaque at this boundary. */
   request_ref_json?: string;
   message: ServerFallbackProviderMessageDto;
   is_api_error_message?: boolean;
@@ -1563,60 +1624,29 @@ export interface ServerFallbackTombstoneMessageDto {
 export type RefusalContinuationPhaseDto = 'begin';
 export type RefusalContinuationJoinDto = 'exact';
 
-/**
-/**
- * Outbound events the engine streams to a client (events.rs `ClientEvent`).
- * Internally tagged on `type`, `snake_case`.
- *
- * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
- */
 export type ClientEvent =
-  | { type: 'side_chat_permission'; side_id: string; request: PermissionRequest }
-  | { type: 'side_chat_submitted'; side_id: string; request_id: string }
-  | { type: 'side_chat_created'; request_id: string; side_id: string }
-  | { type: 'side_chat_list'; side_ids: string[] }
-  | { type: 'side_chat_snapshot'; side_id: string; events_json: string[] }
-  | { type: 'side_chat_event'; side_id: string; event_json: string }
-  | { type: 'side_chat_ended'; side_id: string }
-  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string }
   | { type: 'scheduled_run_finished'; run_id: string; summary?: string | null; error?: string | null }
   | { type: 'cron_run_bound'; run_id: string; error?: string | null }
   | { type: 'cron_run_requested'; run_id: string; task: CronJobDto }
   | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
-  | { type: 'ui_control_result'; request_id: string; response_json?: string; metadata_json?: string; error?: string }
-  | { type: 'ui_client_frame'; runtime_id: string; frame_json: string }
-  | { type: 'ui_invalidate'; instances_json?: string; uuid: string; session_id: string }
   /** A visualization slot in the live assistant text (events.rs `VisualizationBlock`). */
   | { type: 'visualization_block'; status: VisualizationBlockStatusDto; reference?: VisualizationRefDto }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
+  | { type: 'terminal_api_error'; api_error_status?: number; terminal_reason: string; stop_reason: string }
   | { type: 'message_identity'; message_id: string }
   | { type: 'message_retracted'; message_id: string }
-  /** Native route receipt for an accepted server-fallback hop. */
-  | { type: 'query_model_change'; to_model: string }
-  /** Host/client key for deltas until the completed text block has a durable UUID. */
   | { type: 'assistant_block_start'; block_key: number }
-  /** Maps a transient block key to the persisted JSONL row UUID. */
   | { type: 'assistant_block_identity'; block_key: number; message_uuid: string }
-  /** Complete row facts for a row removed by accepted server fallback. */
-  | { type: 'tombstone'; message: ServerFallbackTombstoneMessageDto; display_only: boolean }
-  /** Native refusal-text continuation; `display_salvage_text` is a host display policy. */
-  | {
-      type: 'refusal_continuation';
-      phase: RefusalContinuationPhaseDto;
-      salvage_text: string;
-      join: RefusalContinuationJoinDto;
-      replaces_uuids: string[];
-      display_salvage_text: boolean;
-    }
-  /** TUI user-row token resolved to the UUID from successful transcript persistence. */
-  | { type: 'user_transcript_row_identity'; row_token: string; uuid: string }
-  /** Persisted text-row UUIDs, grouped by an internal assistant response identity. */
-  | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: Array<string | null> }
+  | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: (string | null)[] }
   | { type: 'system_notice'; message: string; is_error: boolean }
   | { type: 'ui_log'; plugin: string; text: string }
   | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
   | { type: 'ui_status'; plugin: string; text: string | null }
+  | { type: 'ui_notify'; plugin: string; text: string }
+  | { type: 'ui_client_frame'; runtime_id: string; frame_json: string }
+  | { type: 'ui_control_result'; request_id: string; response_json?: string; metadata_json?: string; error?: string }
+  | { type: 'ui_invalidate'; instances_json?: string; uuid: string; session_id: string }
   | { type: 'scheduled_task_fire'; message: string }
   | {
       type: 'loop_wakeup';
@@ -1717,10 +1747,21 @@ export type ClientEvent =
     }
   | { type: 'session_agent_tombstone'; session_id: string; agent_id: string; message_uuid: string; display_only: boolean }
   // ── Listing / screen events ─────────────────────────────────────────────────
-  | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
+  | { type: 'model_list'; models: string[]; current: string; current_model_source?: string; details?: ModelDetailsDto[] }
   | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
+  | { type: 'query_model_change'; to_model: string }
+  | {
+      type: 'refusal_continuation';
+      phase: RefusalContinuationPhaseDto;
+      salvage_text: string;
+      join: RefusalContinuationJoinDto;
+      replaces_uuids: string[];
+      display_salvage_text: boolean;
+    }
+  | { type: 'tombstone'; message: ServerFallbackTombstoneMessageDto; display_only: boolean }
+  | { type: 'user_transcript_row_identity'; row_token: string; uuid: string }
   | { type: 'compaction_status'; phase: string; error?: string }
-  | { type: 'model_changed'; model: string }
+  | { type: 'model_changed'; model: string; model_source?: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | {
       type: 'typescript_lsp_mode_changed';
@@ -1888,7 +1929,16 @@ export type ClientEvent =
   | { type: 'audio_cancel'; identity: AudioOperationIdDto }
   | { type: 'realtime_audio_event'; session_id: string; event_json: string }
   | { type: 'audio_session_context'; session_id: string; profile_id: string; account_scope: string }
-  | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto };
+  | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto }
+  // Lightweight in-memory child-conversation lifecycle and replay events.
+  | { type: 'side_chat_created'; request_id: string; side_id: string }
+  | { type: 'side_chat_list'; side_ids: string[] }
+  | { type: 'side_chat_snapshot'; side_id: string; events_json: string[] }
+  | { type: 'side_chat_event'; side_id: string; event_json: string }
+  | { type: 'side_chat_permission'; side_id: string; request: PermissionRequest }
+  | { type: 'side_chat_submitted'; side_id: string; request_id: string }
+  | { type: 'side_chat_ended'; side_id: string }
+  | { type: 'side_chat_error'; request_id?: string; side_id?: string; message: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs

@@ -160,6 +160,7 @@ pub(crate) async fn run(argv: &Argv, permission_mode: permission::PermissionMode
         } else {
             InputFormat::Text
         },
+        no_stream: argv.no_stream,
         verbose: argv.verbose,
         explicit_print: argv.print,
         replay_user_messages: argv.replay_user_messages,

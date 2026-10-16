@@ -18,10 +18,12 @@ use crate::argv::Argv;
 /// The auto-mode gate (claude-code `xms` mode-load downgrade + the
 /// `kickOutOfAutoIfNeeded` notification) runs AFTER the pure
 /// `initialPermissionModeFromCLI` resolution: when the resolved mode is `Auto`
-/// but auto mode is unavailable (`disableAutoMode` settings killswitch or the
-/// active model does not support it), the mode is downgraded to `Default` and
-/// the byte-exact `Jce()` reason (`"auto mode disabled by settings"` /
-/// `"auto mode unavailable for this model"`) is surfaced as the startup notice.
+/// (including its built-in fresh-session fallback) but auto mode is unavailable (`disableAutoMode` settings killswitch or the
+/// active model does not support it), the mode is downgraded to `Default`. The
+/// gate reason is surfaced when Auto came from an explicit CLI/trusted settings
+/// source, or an agent was selected whose frontmatter is not resolved here.
+/// The built-in Auto fallback stays silent when it is denied. Agent-frontmatter
+/// notice parity remains unverified until the later agent-resolution boundary.
 /// The local denial circuit-breaker is fresh at boot (never tripped); Statsig
 /// remote-disable is a documented omission. The provider is resolved as
 /// `"firstParty"` at this CLI surface (multi-provider provider-mapping into the
@@ -82,8 +84,8 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     if mode != permission::PermissionMode::Auto {
         return (mode, notice);
     }
-    // Auto was requested (CLI flag or settings `defaultMode: auto`). Apply the
-    // availability gate; downgrade + notify when closed.
+    // Auto was resolved (explicitly or as the fresh-session fallback). Apply
+    // the availability gate; the notice below is source-sensitive.
     let model = argv
         .model
         .clone()
@@ -94,11 +96,41 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
         model,
         provider: "firstParty".to_string(),
     };
-    match permission::apply_auto_mode_gate(mode, &inputs) {
+    apply_boot_auto_mode_gate(argv, &settings, mode, notice, &inputs)
+}
+
+fn apply_boot_auto_mode_gate(
+    argv: &Argv,
+    settings: &permission::CliModeSettings,
+    mode: permission::PermissionMode,
+    notice: Option<String>,
+    inputs: &permission::AutoGateInputs,
+) -> (permission::PermissionMode, Option<String>) {
+    match permission::apply_auto_mode_gate(mode, inputs) {
         (permission::PermissionMode::Auto, _) => (mode, notice),
-        (downgraded, Some(reason)) => (downgraded, Some(reason.message().to_string())),
+        (downgraded, Some(reason)) => {
+            if should_surface_auto_mode_gate_notice(argv, settings) {
+                (downgraded, Some(reason.message().to_string()))
+            } else {
+                (downgraded, notice)
+            }
+        }
         (downgraded, None) => (downgraded, notice),
     }
+}
+
+fn should_surface_auto_mode_gate_notice(
+    argv: &Argv,
+    settings: &permission::CliModeSettings,
+) -> bool {
+    argv.permission_mode
+        .as_deref()
+        .is_some_and(|raw| permission::permission_mode_from_cli_string(raw) == permission::PermissionMode::Auto)
+        || settings.auto_default_from_trusted
+        // The selected agent's frontmatter mode is resolved later by the
+        // composition root. Preserve the notice conservatively until that
+        // source can participate in this early boot decision.
+        || argv.agent.is_some()
 }
 
 /// Build [`permission::CliModeSettings`] from the merged user+project
@@ -249,5 +281,115 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         is_bg_session,
         skip_dangerous_mode_permission_prompt,
         bypass_permissions_mode_accepted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(
+        default_mode: Option<permission::PermissionMode>,
+        auto_default_from_trusted: bool,
+    ) -> permission::CliModeSettings {
+        permission::CliModeSettings {
+            default_mode,
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+            auto_default_from_trusted,
+            bypass_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
+        }
+    }
+
+    fn unsupported_model_argv() -> Argv {
+        let mut argv = Argv::default();
+        argv.model = Some("claude-sonnet-4-5".to_string());
+        argv
+    }
+
+    fn resolve_from_inputs(
+        argv: &Argv,
+        settings: &permission::CliModeSettings,
+    ) -> (permission::PermissionMode, Option<String>) {
+        let (mode, notice) = permission::initial_permission_mode_from_cli_with_ide(
+            argv.permission_mode.as_deref(),
+            argv.dangerously_skip_permissions,
+            None,
+            false,
+            settings,
+            permission::IdeSessionInputs::NONE,
+        );
+        let model = argv
+            .model
+            .clone()
+            .unwrap_or_else(|| harness_runtime::desktop::DesktopConfig::default().default_model);
+        let inputs = permission::AutoGateInputs {
+            disabled_by_settings: settings.auto_mode_disabled,
+            circuit_broken: false,
+            model,
+            provider: "firstParty".to_string(),
+        };
+        apply_boot_auto_mode_gate(argv, settings, mode, notice, &inputs)
+    }
+
+    #[test]
+    fn builtin_auto_fallback_denial_is_silent() {
+        let argv = unsupported_model_argv();
+        let (mode, notice) = resolve_from_inputs(&argv, &settings(None, false));
+
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn explicit_cli_auto_denial_keeps_notice() {
+        let mut argv = unsupported_model_argv();
+        argv.permission_mode = Some("auto".to_string());
+        let (mode, notice) = resolve_from_inputs(&argv, &settings(None, false));
+
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(
+            notice.as_deref(),
+            Some("auto mode unavailable for this model")
+        );
+    }
+
+    #[test]
+    fn trusted_stored_auto_denial_keeps_notice() {
+        let argv = unsupported_model_argv();
+        let stored = settings(Some(permission::PermissionMode::Auto), true);
+        let (mode, notice) = resolve_from_inputs(&argv, &stored);
+
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(
+            notice.as_deref(),
+            Some("auto mode unavailable for this model")
+        );
+    }
+
+    #[test]
+    fn untrusted_project_auto_is_rejected_without_gate_notice() {
+        let argv = unsupported_model_argv();
+        let project = settings(Some(permission::PermissionMode::Auto), false);
+        let (mode, notice) = resolve_from_inputs(&argv, &project);
+
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn selected_agent_keeps_notice_until_frontmatter_is_resolved() {
+        let mut argv = unsupported_model_argv();
+        argv.agent = Some("selected-agent".to_string());
+        let (mode, notice) = resolve_from_inputs(&argv, &settings(None, false));
+
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(
+            notice.as_deref(),
+            Some("auto mode unavailable for this model")
+        );
     }
 }

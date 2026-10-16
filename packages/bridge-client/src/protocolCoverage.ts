@@ -66,6 +66,8 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   answer_ask_user_question: true,
   cancel_ask_user_question: true,
   set_permission_mode: true,
+  initialize_proactivity: true,
+  set_proactivity_level: true,
   set_typescript_lsp_mode: true,
   list_provider_credentials: true,
   set_provider_credential: true,
@@ -136,6 +138,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   cron_run_bound: true,
   scheduled_run_finished: true,
   error: true,
+  terminal_api_error: true,
   message_identity: true,
   message_retracted: true,
   query_model_change: true,
@@ -149,6 +152,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   ui_log: true,
   ui_toast: true,
   ui_status: true,
+  ui_notify: true,
   loop_wakeup: true,
   scheduled_task_fire: true,
   ask_user_question: true,
@@ -254,4 +258,3 @@ export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
   model: true,
   effort: true,
 };
-

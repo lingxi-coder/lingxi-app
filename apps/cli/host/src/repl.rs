@@ -5,13 +5,17 @@
 
 use crate::argv::Argv;
 use crate::exit_codes;
-use crate::repl_loop::{step_with_notifications, StepOutcome, TaskNotificationWake};
+use crate::repl_loop::{
+    step_with_notifications_and_unknown_fallback, PolicyHelperRuntimeFailureSignal,
+    SkillBatchTurnFn, StepOutcome, TaskNotificationWake, UnknownSlashFallbackTurnFn,
+};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use harness_runtime::headless::output::{JsonSink, OutputSink, PlainSink};
 use harness_runtime::headless::output_adapter::SinkAdapter;
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::{OrchestratorHandle, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::SessionId;
 use orchestrator::{OrchestratorError, TurnOutcome};
 use std::io::IsTerminal;
@@ -33,7 +37,11 @@ struct ReplTaskWake {
 
 #[async_trait::async_trait]
 impl TaskNotificationWake for ReplTaskWake {
-    async fn send_human_task_message(&self, task_id: &str, message: &str) -> Result<(), String> {
+    async fn send_human_task_message(
+        &self,
+        task_id: &str,
+        message: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), String> {
         if !self.orchestrator.workspace_trusted().await {
             return Err("Trust this workspace before messaging a task".into());
         }
@@ -78,31 +86,42 @@ impl TaskNotificationWake for ReplTaskWake {
             })
             .await
         {
-            let raw = command.text().unwrap_or_default();
+            let raw = command
+                .text_projection()
+                .cloned()
+                .unwrap_or_else(|| "".into());
             let resolved = if command.uuid.starts_with("goal-retry-") {
-                Ok(Some(raw.to_owned()))
+                Ok(Some(raw.clone()))
             } else if command.uuid.starts_with("loop-wakeup-") {
-                self.loop_host.begin(Some(raw), false)
+                self.loop_host.begin(Some(&raw), false)
             } else {
-                self.loop_host.resolve_scheduled(raw).map(Some)
+                self.loop_host.resolve_scheduled(&raw).map(Some)
             };
             match resolved {
                 Ok(prompt) => {
                     self.orchestrator
                         .run_queued_prompt_batch(
                             vec![orchestrator::QueuedPromptInput {
+                                images: Vec::new(),
                                 goal_retry_id: command
                                     .uuid
                                     .starts_with("goal-retry-")
                                     .then(|| command.uuid.clone()),
-                                text: prompt.unwrap_or_else(|| raw.to_owned()),
+                                text: prompt.unwrap_or_else(|| raw.clone()),
                                 is_meta: true,
+                                turn_companion: false,
+                                prompt_ingress_kind: Some(orchestrator::PromptIngressKind::Other),
+                                skip_model_query: false,
+                                message_origin: None,
+                                prompt_source: None,
+                                trailing_history_rows: Vec::new(),
                                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                                     serde_json::json!({"kind":"auto-continuation"})
                                 } else {
                                     serde_json::json!({"kind":"scheduled-trigger"})
                                 }),
                                 message_id: None,
+                                pending_prompt_identity: None,
                                 transcript_row_token: None,
                                 queue_priority: Some("later".into()),
                                 scheduled_task_id: command.scheduled_task_id.clone(),
@@ -152,7 +171,7 @@ async fn confirm_repl_exit<R: AsyncBufRead + Send + Unpin + ?Sized>(
         let handoff = handle.can_background_conversation_on_exit().await;
         let descriptions = live
             .iter()
-            .map(|task| format!("  {}", task.description))
+            .map(|task| format!("  {}", task.description.string_at("").unwrap_or_default()))
             .collect::<Vec<_>>()
             .join("\n");
         sink.text(&format!("Background work is running\nThe following will stop when you exit:\n{descriptions}\n1. Exit and stop tasks\n{}3. Stay\n", if handoff { "2. Move to background and exit\n" } else { "" })).await;
@@ -169,6 +188,7 @@ async fn confirm_repl_exit<R: AsyncBufRead + Send + Unpin + ?Sized>(
                     };
                     match handle.background_conversation(snapshot).await {
                         Ok(receipt) => {
+                            let receipt = receipt.string_at("").unwrap_or_default();
                             sink.text(&format!(
                                 "{receipt}\nLocal tasks that could not be moved will be stopped.\n"
                             ))
@@ -491,7 +511,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         // surface does not render instead.
         while let Some(event) = loop_rx.recv().await {
             if let tui::TurnEvent::SystemNotice { body, .. } = event {
-                loop_sink.text(&format!("{body}\n")).await;
+                loop_sink.text(&format!("{}\n", body.display())).await;
             }
         }
     });
@@ -512,11 +532,12 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     let ended_via;
     let exit_code;
     loop {
+        let unknown_fallback_catalog = runtime.dispatcher.headless_command_catalog().await;
         let orch_for_turn = orch.clone();
         let turn_loop_host = loop_host.clone();
         let turn_loop_queue = loop_queue.clone();
         let run_turn_fn =
-            move |prompt: String,
+            move |prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
                   token: CancellationToken|
                   -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>> {
                 let o = orch_for_turn.clone();
@@ -526,14 +547,75 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                     host.refresh_session().await;
                     let _ = host.begin(None, true);
                     queue.register_active_turn(token.clone()).await;
-                    let result = o.run_turn_with_cancel(&prompt, token.clone()).await;
+                    let result = orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        o.run_turn_with_cancel(&prompt, token.clone()),
+                    )
+                    .await;
                     host.finish(&token).await;
                     queue.clear_active_turn().await;
                     result
                 })
             };
 
-        let outcome = step_with_notifications(
+        let skill_batch_orch = orch.clone();
+        let skill_batch_host = loop_host.clone();
+        let skill_batch_queue = loop_queue.clone();
+        let skill_batch_fn: SkillBatchTurnFn = Arc::new(move |inputs, token| {
+            let o = skill_batch_orch.clone();
+            let host = skill_batch_host.clone();
+            let queue = skill_batch_queue.clone();
+            Box::pin(async move {
+                host.refresh_session().await;
+                let _ = host.begin(None, true);
+                queue.register_active_turn(token.clone()).await;
+                let result = orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"composer"}),
+                        o.run_queued_prompt_batch(inputs, token.clone()),
+                    ),
+                )
+                .await;
+                host.finish(&token).await;
+                queue.clear_active_turn().await;
+                result
+            })
+        });
+
+        let fallback_orch = orch.clone();
+        let fallback_host = loop_host.clone();
+        let fallback_queue = loop_queue.clone();
+        let fallback_catalog = unknown_fallback_catalog.clone();
+        let unknown_fallback_turn_fn: UnknownSlashFallbackTurnFn =
+            Arc::new(move |prompt, command_name, token| {
+                let o = fallback_orch.clone();
+                let host = fallback_host.clone();
+                let queue = fallback_queue.clone();
+                let catalog = fallback_catalog.clone();
+                Box::pin(async move {
+                    let (request_context, transcript_attachment) =
+                        crate::repl_loop::unknown_command_fallback_context(&command_name, &catalog);
+                    host.refresh_session().await;
+                    let _ = host.begin(None, true);
+                    queue.register_active_turn(token.clone()).await;
+                    let result = orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        o.run_turn_with_request_context(
+                            prompt,
+                            request_context,
+                            Some(transcript_attachment),
+                            token.clone(),
+                        ),
+                    )
+                    .await;
+                    host.finish(&token).await;
+                    queue.clear_active_turn().await;
+                    result
+                })
+            });
+
+        let outcome = step_with_notifications_and_unknown_fallback(
             stdin_reader.clone() as Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
             &mut err_writer,
             &runtime.dispatcher,
@@ -542,13 +624,28 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             &sigint,
             Some(&idle_notifier),
             Some(&task_wake),
+            Some(skill_batch_fn),
+            Some(Box::new(PolicyHelperRuntimeFailureSignal::new(
+                runtime.policy_helper_refusal.clone(),
+                runtime.policy_helper_semantic_worker_failure.clone(),
+            ))),
+            &unknown_fallback_turn_fn,
             run_turn_fn,
         )
         .await;
 
-        loop_host.refresh_session().await;
-        turn_count += 1;
+        if !matches!(
+            outcome,
+            StepOutcome::PolicyHelperRefusal | StepOutcome::PolicySemanticWorkerFailure
+        ) {
+            loop_host.refresh_session().await;
+            turn_count += 1;
+        }
         if outcome != StepOutcome::Continue
+            && !matches!(
+                outcome,
+                StepOutcome::PolicyHelperRefusal | StepOutcome::PolicySemanticWorkerFailure
+            )
             && !confirm_repl_exit(
                 &stdin_reader,
                 handle.as_ref(),
@@ -570,6 +667,16 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             StepOutcome::DoubleSigintExit => {
                 ended_via = "double_sigint";
                 exit_code = exit_codes::SIGINT;
+                break;
+            }
+            StepOutcome::PolicyHelperRefusal => {
+                ended_via = "policy_helper_refusal";
+                exit_code = exit_codes::RUNTIME_ERROR;
+                break;
+            }
+            StepOutcome::PolicySemanticWorkerFailure => {
+                ended_via = "policy_semantic_worker_failure";
+                exit_code = exit_codes::RUNTIME_ERROR;
                 break;
             }
             StepOutcome::ExitCommand { undispatched } => {
@@ -619,10 +726,26 @@ async fn finish_repl_lifecycle(
     sink: &dyn OutputSink,
     exit_code: i32,
 ) -> i32 {
+    let semantic_worker_failure_at_exit = runtime.policy_helper_semantic_worker_failure.current();
     runtime.orchestrator.request_exit().await;
     let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
     for error in &shutdown.errors {
         sink.error("session_shutdown", error).await;
+    }
+    if let Some(refusal) = runtime.policy_helper_refusal.current() {
+        if let Some(diagnostic) = refusal.diagnostic() {
+            sink.source_error("policy_helper", diagnostic).await;
+        } else {
+            sink.error("policy_helper", &refusal.to_string()).await;
+        }
+        return exit_codes::RUNTIME_ERROR;
+    }
+    if let Some(failure) = semantic_worker_failure_at_exit
+        .or_else(|| runtime.policy_helper_semantic_worker_failure.current())
+    {
+        sink.error("policy_semantic_worker", &failure.to_string())
+            .await;
+        return exit_codes::RUNTIME_ERROR;
     }
     if exit_code == exit_codes::SUCCESS && (!shutdown.complete || !shutdown.errors.is_empty()) {
         exit_codes::RUNTIME_ERROR
@@ -640,10 +763,15 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for ReplGoalQueue 
     async fn has_queued_goal_work(&self) -> bool {
         self.0.has_main_thread_commands().await
     }
-    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+    async fn enqueue_goal_retry(
+        &self,
+        id: String,
+        body: Utf16JsonProjection,
+        cancel: CancellationToken,
+    ) {
         self.0.enqueue_goal_retry(id, body, cancel).await;
     }
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
         None
     }
 }
@@ -976,11 +1104,12 @@ mod retained_shutdown_tests {
         for code in [exit_codes::SUCCESS, exit_codes::SIGINT] {
             let root = tempfile::tempdir().unwrap();
             let runtime = crate::init::build_runtime_from_config(
-                harness_runtime::desktop::DesktopConfig {
-                    lingxi_home: root.path().join("home"),
-                    cwd: root.path().to_path_buf(),
-                    isolated_credential_storage: true,
-                    ..Default::default()
+                {
+                    let mut __desktop_config = harness_runtime::desktop::DesktopConfig::default();
+                    __desktop_config.lingxi_home = root.path().join("home");
+                    __desktop_config.cwd = root.path().to_path_buf();
+                    __desktop_config.isolated_credential_storage = true;
+                    __desktop_config
                 },
                 Arc::new(orchestrator::test_support::MockOutputStream::new()),
             )
@@ -991,8 +1120,8 @@ mod retained_shutdown_tests {
                 finish_repl_lifecycle(
                     &runtime,
                     &PlainSink::new(
-                        crate::headless_host::process_stdout(),
-                        crate::headless_host::process_stderr()
+                        harness_runtime::headless::io::Output::new(tokio::io::sink()),
+                        harness_runtime::headless::io::Output::new(tokio::io::sink())
                     ),
                     code
                 )

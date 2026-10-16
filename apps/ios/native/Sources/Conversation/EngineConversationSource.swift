@@ -174,6 +174,7 @@ final class EngineConversationSource: ConversationSource {
 
     private struct TurnPrompt: Equatable {
         let text: String
+        let promptMode: PromptModeDto?
         let images: [ImageRefDto]
         let turnId: UInt64
         var visualizationContext: VisualizationContextChip? = nil
@@ -1167,8 +1168,8 @@ final class EngineConversationSource: ConversationSource {
             guard let self else { return }
             do {
                 try await self.submitCommand(.sendPrompt(
-                    text: prompt.text,
-                    promptMode: nil,
+                    text: ClientTextDto(codeUnits: Array(prompt.text.utf16)),
+                    promptMode: prompt.promptMode,
                     images: prompt.images,
                     turnId: prompt.turnId,
                     visualizationContext: prompt.visualizationContext.map {
@@ -1187,12 +1188,16 @@ final class EngineConversationSource: ConversationSource {
             .lowercased() == "/compact"
     }
 
-    private func startSlashCommand(raw: String, turnId: UInt64) -> ConversationTurnToken {
+    private func startSlashCommand(
+        raw: ClientTextDto,
+        displayRaw: String,
+        turnId: UInt64
+    ) -> ConversationTurnToken {
         model.notice = nil
         model.streaming = false
         model.isCancelling = false
         model.slashCommandPending = true
-        model.compactionStatus = Self.isCompactSlash(raw)
+        model.compactionStatus = Self.isCompactSlash(displayRaw)
             ? .queued
             : nil
         model.turnCompletion = nil
@@ -1204,7 +1209,7 @@ final class EngineConversationSource: ConversationSource {
         replayProjectionState = nil
         currentTurnId = turnId
         activeTurnEpoch = sessionEpoch
-        pendingSlashRaw = raw
+        pendingSlashRaw = displayRaw
         let token = ConversationTurnToken(clientTurnId: turnId, sessionEpoch: sessionEpoch)
         model.activeTurnToken = token
 
@@ -1238,6 +1243,15 @@ final class EngineConversationSource: ConversationSource {
 
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
+        send(text, images: images, selectedSlashCommand: nil)
+    }
+
+    @discardableResult
+    func send(
+        _ text: String,
+        images: [ImageRefDto],
+        selectedSlashCommand: ConversationSlashCommand?
+    ) -> ConversationTurnToken? {
         guard
             !sideEnded,
             !sideClosing,
@@ -1250,6 +1264,12 @@ final class EngineConversationSource: ConversationSource {
         else { return nil }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceUnits = Array(text.utf16)
+        let isBashInput = sourceUnits.first == 0x0021
+        let promptText = isBashInput
+            ? String(decoding: sourceUnits.dropFirst(), as: UTF16.self)
+            : text
+        let promptMode: PromptModeDto? = isBashInput ? .bash : nil
         if isSideChat && SideChatCommand.input(trimmed) != nil {
             model.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_nested_rejected"))
             return nil
@@ -1260,15 +1280,21 @@ final class EngineConversationSource: ConversationSource {
         // to the model through non-Composer call sites.
         guard model.slashCommandsLoaded || !trimmed.hasPrefix("/") else { return nil }
 
-        let exactSlash = model.slashCommandsLoaded
-            && SlashCommandMatcher.exactCommand(
+        let exactSlashCommand = selectedSlashCommand.flatMap { selected in
+            guard let token = SlashCommandMatcher.commandToken(in: trimmed),
+                  selected.matchesExactToken(token)
+            else { return nil }
+            return selected
+        } ?? (model.slashCommandsLoaded
+            ? SlashCommandMatcher.exactCommand(
                 in: trimmed,
                 catalog: model.slashCommands
-            ) != nil
+            )
+            : nil)
         guard !isSideChat || !model.streaming else { return nil }
         if isSideChat { pendingSideInput = (text, images) }
         if model.streaming {
-            guard !exactSlash, let token = activeConversationTurnToken else { return nil }
+            guard exactSlashCommand == nil, let token = activeConversationTurnToken else { return nil }
             model.isNew = false
             model.notice = nil
             let chip = takeVisualizationChip()
@@ -1279,8 +1305,8 @@ final class EngineConversationSource: ConversationSource {
                 guard let self else { return }
                 do {
                     try await self.submitCommand(.sendPrompt(
-                        text: text,
-                        promptMode: nil,
+                        text: promptText.clientTextDto,
+                        promptMode: promptMode,
                         images: images,
                         turnId: nil,
                         visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }))
@@ -1294,17 +1320,34 @@ final class EngineConversationSource: ConversationSource {
 
         model.isNew = false
         model.notice = nil
-        let chip = exactSlash ? nil : takeVisualizationChip()
+        let chip = exactSlashCommand == nil ? takeVisualizationChip() : nil
         var prompt = Message(role: .user, text: text, images: uiImages(from: images))
         prompt.visualizationContext = chip
         appendMessage(prompt)
 
         let turnId = nextTurnId
         nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
-        if exactSlash {
-            return startSlashCommand(raw: trimmed, turnId: turnId)
+        if let exactSlashCommand {
+            let token = SlashCommandMatcher.commandToken(in: trimmed) ?? ""
+            let tokenUnits = exactSlashCommand.sourceCodeUnits(for: token) ?? Array(token.utf16)
+            let inputUnits = Array(trimmed.utf16)
+            let suffixStart = min(1 + token.utf16.count, inputUnits.count)
+            var rawUnits: [UInt16] = [0x002f]
+            rawUnits.append(contentsOf: tokenUnits)
+            rawUnits.append(contentsOf: inputUnits.dropFirst(suffixStart))
+            return startSlashCommand(
+                raw: ClientTextDto(codeUnits: rawUnits),
+                displayRaw: trimmed,
+                turnId: turnId
+            )
         }
-        return startPrompt(TurnPrompt(text: text, images: images, turnId: turnId, visualizationContext: chip))
+        return startPrompt(TurnPrompt(
+            text: promptText,
+            promptMode: promptMode,
+            images: images,
+            turnId: turnId,
+            visualizationContext: chip
+        ))
     }
 
     func cancelAndWait() async throws {
@@ -2330,17 +2373,21 @@ final class EngineConversationSource: ConversationSource {
             id: dto.agentId,
             name: dto.agentId == ConversationModel.mainAgentID
                 ? ConversationAgentSummary.main.name
-                : dto.name,
+                : displayText(dto.name),
             agentType: dto.agentType,
             model: dto.model,
             modelProfile: dto.modelProfile,
             status: dto.status,
             latestActivity: dto.agentId == ConversationModel.mainAgentID
                 ? nil
-                : dto.latestActivity,
+                : dto.latestActivity.map(displayText),
             updatedAtMs: dto.updatedAtMs ?? 0
         )
         return ConversationModel.normalizedAgentSummaryForSource(summary)
+    }
+
+    private static func displayText(_ text: ClientTextDto) -> String {
+        String(decoding: text.codeUnits, as: UTF16.self)
     }
 
     private func applyAgentTranscript(
@@ -2967,6 +3014,7 @@ final class EngineConversationSource: ConversationSource {
             }
 
         case let .slashCommandResult(turnId, display, isError):
+            let displayText = display.displayText
             guard let token = activeConversationTurnToken,
                   turnId == nil || turnId == token.clientTurnId
             else { return }
@@ -2976,20 +3024,20 @@ final class EngineConversationSource: ConversationSource {
             if Self.isCompactSlash(raw) {
                 if case .completed = model.compactionStatus {
                     // The authoritative CompactionCompleted metrics arrived first.
-                } else if !isError && display.hasPrefix("Compacted") {
+                } else if !isError && displayText.hasPrefix("Compacted") {
                     model.compactionStatus = .completed(
                         messagesBefore: nil,
                         messagesAfter: nil,
                         bytesSaved: nil
                     )
                 } else {
-                    model.compactionStatus = .failed(detail: display)
+                    model.compactionStatus = .failed(detail: displayText)
                 }
             }
             model.items.append(.commandOutput(ConversationCommandOutput(
                 id: "slash-\(token.sessionEpoch)-\(token.clientTurnId)",
                 command: raw,
-                text: display,
+                text: displayText,
                 isError: isError
             )))
             model.streaming = false
@@ -2997,7 +3045,7 @@ final class EngineConversationSource: ConversationSource {
             model.statusLine = nil
             model.updateMainAgent(
                 status: isError ? "failed" : "idle",
-                latestActivity: isError ? display : String(localized: "chat_completed")
+                latestActivity: isError ? displayText : String(localized: "chat_completed")
             )
             // A CLI slash turn ends HERE — there is no TurnEnded for it — so
             // it must settle its run the way `.turnEnded` does. Without this
@@ -3023,15 +3071,16 @@ final class EngineConversationSource: ConversationSource {
 
         case let .textDelta(text):
             guard acceptTurnEvent(event) else { return }
-            if let messageID = appendDelta(text) {
+            let displayText = text.displayText
+            if let messageID = appendDelta(displayText) {
                 appendTextBoundaryActivity(messageID: messageID)
             }
-            let activity = text
+            let activity = displayText
                 .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
                 .first
                 .map(String.init)
             model.updateMainAgent(status: "working", latestActivity: activity)
-            publishTurnSpeechDelta(text)
+            publishTurnSpeechDelta(displayText)
 
         case let .thinkingDelta(thinking, signature):
             guard acceptTurnEvent(event) else { return }
@@ -3071,14 +3120,15 @@ final class EngineConversationSource: ConversationSource {
 
         case let .systemNotice(message, isError):
             guard acceptTurnEvent(event) else { return }
+            let displayMessage = message.displayText
             let notice = ConversationExecutionNotice(
                 id: "notice-\(UUID().uuidString)",
                 kind: isError ? .error : .info,
-                text: message
+                text: displayMessage
             )
             updateActiveRun { $0.notices.append(notice) }
             appendNoticeActivity(id: notice.id)
-            model.statusLine = message
+            model.statusLine = displayMessage
 
         case let .askUserQuestion(request):
             // Passes the turn gate via the allowlist in `acceptTurnEvent`:
@@ -3121,7 +3171,7 @@ final class EngineConversationSource: ConversationSource {
             if let mapped = Self.backgroundTaskStatus(task.status) {
                 upsertBackgroundTask(
                     id: task.taskId,
-                    description: task.description,
+                    description: task.description.displayText,
                     status: mapped,
                     canResume: task.canResume,
                     startedAtMs: task.startedAtMs,
@@ -3140,7 +3190,7 @@ final class EngineConversationSource: ConversationSource {
             if let mapped = Self.backgroundTaskStatus(task.status) {
                 upsertBackgroundTask(
                     id: task.taskId,
-                    description: task.description,
+                    description: task.description.displayText,
                     status: mapped,
                     canResume: task.canResume,
                     startedAtMs: task.startedAtMs,
@@ -3835,22 +3885,23 @@ final class EngineConversationSource: ConversationSource {
             durableTurns?.updateSequence(turnID: turnId, sequence: sequence)
 
         case let .error(kind, message):
+            let displayMessage = message.displayText
             let accepted = acceptTurnEvent(event)
             if isSideChat {
                 Self.turnLog.error("side turn failed accepted=\(accepted, privacy: .public)")
             } else {
                 Self.turnLog.error(
-                "turn error turn=\(self.currentTurnId ?? 0, privacy: .public) kind=\(String(describing: kind), privacy: .public) accepted=\(accepted, privacy: .public) message=\(message, privacy: .private(mask: .hash))"
-            )
-            Self.turnLog.error(
-                "turn error details kind=\(String(describing: kind), privacy: .public) message=\(message, privacy: .public)"
-            )
-            print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(message)")
+                    "turn error turn=\(self.currentTurnId ?? 0, privacy: .public) kind=\(String(describing: kind), privacy: .public) accepted=\(accepted, privacy: .public) message=\(displayMessage, privacy: .private(mask: .hash))"
+                )
+                Self.turnLog.error(
+                    "turn error details kind=\(String(describing: kind), privacy: .public) message=\(displayMessage, privacy: .public)"
+                )
+                print("[LingxiCode] turn error kind=\(kind) accepted=\(accepted) message=\(displayMessage)")
             }
             guard accepted else { return }
             if model.compactionStatus?.isActive == true,
-               message.lowercased().hasPrefix("force_compact failed:") {
-                let detail = message
+               displayMessage.lowercased().hasPrefix("force_compact failed:") {
+                let detail = displayMessage
                     .replacingOccurrences(
                         of: "^force_compact failed:\\s*", with: "",
                         options: [.regularExpression, .caseInsensitive]
@@ -3861,17 +3912,17 @@ final class EngineConversationSource: ConversationSource {
                         with: "",
                         options: [.regularExpression, .caseInsensitive]
                     )
-                model.compactionStatus = .failed(detail: detail.isEmpty ? message : detail)
+                model.compactionStatus = .failed(detail: detail.isEmpty ? displayMessage : detail)
             }
             if case let .resuming(taskID) = model.workflowResumeState {
-                model.workflowResumeState = .failed(taskID: taskID, message: message)
+                model.workflowResumeState = .failed(taskID: taskID, message: displayMessage)
             }
             // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
             finishActiveRun(.failed)
-            model.updateMainAgent(status: "failed", latestActivity: message)
-            fail(Self.kind(from: kind), message)
+            model.updateMainAgent(status: "failed", latestActivity: displayMessage)
+            fail(Self.kind(from: kind), displayMessage)
 
-        case let .modelList(models, current, details):
+        case let .modelList(models, current, currentModelSource, details):
             // Out-of-band model catalog (SHIP-BLOCKER #2). Drive the picker off
             // these REAL engine ids and adopt the engine's reported active model
             // — not a branded mock default.
@@ -3879,7 +3930,7 @@ final class EngineConversationSource: ConversationSource {
             model.availableModelDetails = Dictionary(
                 uniqueKeysWithValues: details.map { ($0.reference, Self.lowerModelRuntimeDetails($0)) }
             )
-            applyActiveModel(current)
+            applyActiveModel(current, source: currentModelSource)
 
         case let .providerModelCatalog(providers):
             providerCatalogEntries = providers.map(Self.lowerProviderCatalogEntry)
@@ -3890,9 +3941,9 @@ final class EngineConversationSource: ConversationSource {
                 waiter.resume(returning: providerCatalogEntries)
             }
 
-        case let .modelChanged(model: newModel):
+        case let .modelChanged(model: newModel, modelSource: source):
             // Reflect the authoritative model, including slash-command changes.
-            applyActiveModel(newModel)
+            applyActiveModel(newModel, source: source)
 
         case let .fastModeChanged(enabled):
             model.fastMode = enabled
@@ -4167,21 +4218,29 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func applySlashCommandCatalog(_ commands: [SlashCommandDto]) {
+        let sideNameUnits = Array("side".utf16)
+        let sideChatBuiltinNameUnits = ["help", "model", "compact"].map { Array($0.utf16) }
         model.slashCommands = commands.filter { command in
-            !isSideChat || (command.name != "side" && (command.source != "builtin" || ["help", "model", "compact"].contains(command.name)))
+            let nameUnits = command.name.codeUnits
+            return !isSideChat || (
+                nameUnits != sideNameUnits
+                    && (command.source != "builtin" || sideChatBuiltinNameUnits.contains(nameUnits))
+            )
         }.map { command in
             ConversationSlashCommand(
-                name: command.name,
-                description: command.description,
-                aliases: command.aliases,
-                argumentHint: command.argumentHint,
-                argumentNames: command.argumentNames,
+                name: Self.displayText(command.name),
+                sourceNameCodeUnits: command.name.codeUnits,
+                description: Self.displayText(command.description),
+                aliases: command.aliases.map(Self.displayText),
+                sourceAliasCodeUnits: command.aliases.map(\.codeUnits),
+                argumentHint: command.argumentHint.map(Self.displayText),
+                argumentNames: command.argumentNames.map(Self.displayText),
                 menuDescription: command.menuDescription,
                 source: command.source,
                 hidden: command.hidden
             )
         }
-        if !isSideChat && !model.slashCommands.contains(where: { $0.name == "side" }) {
+        if !isSideChat && !commands.contains(where: { $0.name.codeUnits == sideNameUnits }) {
             model.slashCommands.append(ConversationSlashCommand(name: "side", description: String(localized: "side_chat_start_description"), aliases: [], argumentHint: "[input]", menuDescription: nil, source: "builtin", hidden: false))
         }
         model.slashCommandsLoaded = true
@@ -4190,6 +4249,9 @@ final class EngineConversationSource: ConversationSource {
         // than maintaining another command list.
         model.skills = commands.map { command in
             let source = command.source
+            let name = Self.displayText(command.name)
+            let description = Self.displayText(command.description)
+            let aliases = command.aliases.map(Self.displayText)
             let author: String
             switch source {
             case "builtin", "bundled": author = String(localized: "skills_author_official")
@@ -4197,11 +4259,11 @@ final class EngineConversationSource: ConversationSource {
             default: author = command.source
             }
             return Skill(
-                id: "skill:\(command.name)",
-                name: command.name,
+                id: "skill:\(name)",
+                name: name,
                 author: author,
-                desc: command.description,
-                triggers: ["/\(command.name)"] + command.aliases.map { "/\($0)" },
+                desc: description,
+                triggers: ["/\(name)"] + aliases.map { "/\($0)" },
                 enabled: true,
                 builtin: source == "builtin" || source == "bundled" || source == "managed",
                 source: source
@@ -4517,16 +4579,18 @@ final class EngineConversationSource: ConversationSource {
             requestId: dto.requestId,
             questions: dto.questions.map { question in
                 ConversationAskQuestion(
-                    question: question.question,
-                    header: question.header,
+                    question: question.question.displayText,
+                    header: question.header.displayText,
                     options: question.options.map { option in
                         ConversationAskOption(
-                            label: option.label,
-                            description: option.description,
-                            preview: option.preview
+                            label: option.label.displayText,
+                            description: option.description.displayText,
+                            preview: option.preview?.displayText,
+                            sourceLabelCodeUnits: option.label.codeUnits
                         )
                     },
-                    multiSelect: question.multiSelect
+                    multiSelect: question.multiSelect,
+                    sourceQuestionCodeUnits: question.question.codeUnits
                 )
             },
             timeoutSecs: dto.timeoutSecs
@@ -4601,7 +4665,8 @@ final class EngineConversationSource: ConversationSource {
     ) -> ConversationMessageBlock? {
         switch block {
         case let .text(text):
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(text)
+            let displayText = text.displayText
+            return displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .text(displayText)
         case let .thinking(thinking, signature):
             return thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil :
                 .thinking(text: thinking, signature: signature)
@@ -4660,8 +4725,12 @@ final class EngineConversationSource: ConversationSource {
     /// Canonical identity for one wire message. The protocol currently has
     /// no message id, so all fields that can distinguish a replayed message
     /// are length-prefixed into a collision-resistant key.
-    fileprivate static func messageSignature(_ dto: MessageDto) -> String {
+    static func messageSignature(_ dto: MessageDto) -> String {
         func field(_ value: String) -> String { "\(value.utf8.count):\(value)" }
+        func field(_ value: ClientTextDto) -> String {
+            let units = value.codeUnits.map { String($0, radix: 16) }.joined(separator: "-")
+            return "utf16|\(value.codeUnits.count):\(units)"
+        }
         let blocks = dto.blocks.map { block -> String in
             switch block {
             case let .text(text): return "text|\(field(text))"
@@ -5118,9 +5187,10 @@ final class EngineConversationSource: ConversationSource {
     /// Reflect the engine's active model without saving a new preference.
     /// Boot, listings, and resumed sessions can also report a model; only a
     /// successful explicit switch in the shared engine owns persistence.
-    private func applyActiveModel(_ id: String) {
+    private func applyActiveModel(_ id: String, source: ClientTextDto? = nil) {
         guard !id.isEmpty else { return }
         model.activeModelId = id
+        model.activeModelSource = source.map(Self.displayText)
         refreshAudioSessionContext()
         if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
             model.model = opt
@@ -5135,7 +5205,7 @@ final class EngineConversationSource: ConversationSource {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.submitCommand(.setModel(model: id))
+                try await self.submitCommand(.setModel(model: id.clientTextDto))
             } catch {
                 self.model.controlsError = String(localized: "chat_switch_model_failed \(error)")
             }
@@ -5394,7 +5464,7 @@ final class EngineConversationSource: ConversationSource {
         switch type {
         case "text_delta":
             if let text = object["text"] as? String {
-                apply(.textDelta(text: text))
+                apply(.textDelta(text: text.clientTextDto))
             }
         case "tool_use_started":
             if let id = object["id"] as? String,
@@ -5447,7 +5517,7 @@ final class EngineConversationSource: ConversationSource {
         case "system_notice":
             if let message = object["message"] as? String {
                 apply(.systemNotice(
-                    message: message,
+                    message: message.clientTextDto,
                     isError: object["is_error"] as? Bool ?? false
                 ))
             }

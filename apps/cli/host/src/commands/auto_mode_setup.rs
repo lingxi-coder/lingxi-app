@@ -255,9 +255,9 @@ async fn propose_outcome(
         classify_all_shell: false,
     };
 
-    let service = std::sync::Arc::new(harness_runtime::desktop::api_service_from_stack(
-        &cfg, cwd, stack,
-    ));
+    let service = harness_runtime::desktop::api_service_from_stack(&cfg, cwd, stack)
+        .map_err(|error| format!("The model call didn\u{2019}t start: {error}"))?;
+    let service = std::sync::Arc::new(service);
     let query = ApiProposeQuery::new(service, model, profile, thinking);
 
     Ok(

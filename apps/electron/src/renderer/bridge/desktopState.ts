@@ -28,6 +28,7 @@ export interface DesktopState {
   readonly modelDetails: ModelDetailsDto[];
   readonly providerModelCatalog: ProviderModelCatalogEntryDto[];
   readonly currentModel: string | null;
+  readonly currentModelSource: string | null;
   readonly conversationControls: ConversationControlsDto | null;
   readonly fastMode: boolean;
   readonly permissionMode: PermissionModeId;
@@ -63,6 +64,7 @@ export function emptyDesktopState(): DesktopState {
     modelDetails: [],
     providerModelCatalog: [],
     currentModel: null,
+    currentModelSource: null,
     conversationControls: null,
     fastMode: false,
     permissionMode: 'auto',
@@ -114,7 +116,7 @@ function startSession(
         // the first turn creates the durable JSONL transcript.
         path: '',
       }, ...state.sessions];
-  return { ...state, sessions, activeSessionId: sessionId };
+  return { ...state, sessions, activeSessionId: sessionId, conversationControls: null, currentModelSource: null };
 }
 
 export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): DesktopState {
@@ -124,15 +126,15 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_started':
       return startSession({ ...state, lastCost: null, status: null, apiRetry: null }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id, lastCost: null, status: null, apiRetry: null };
+      return { ...state, activeSessionId: event.session_id, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null };
     case 'session_ended':
-      return { ...state, activeSessionId: null, lastCost: null, status: null, apiRetry: null };
+      return { ...state, activeSessionId: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null };
     case 'model_list':
-      return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current };
+      return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current, currentModelSource: event.current_model_source ?? null };
     case 'provider_model_catalog':
       return { ...state, providerModelCatalog: [...event.providers] };
     case 'model_changed':
-      return { ...state, currentModel: event.model };
+      return { ...state, currentModel: event.model, currentModelSource: event.model_source ?? null };
     case 'conversation_controls_changed':
       return { ...state, conversationControls: event.controls };
     case 'permission_request_resolved':
@@ -181,6 +183,7 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
         },
       };
     case 'status_snapshot':
+      // Status carries an unqualified display model, not the selected route.
       return { ...state, status: event.snapshot };
     case 'doctor_report':
       return { ...state, doctor: event.report };

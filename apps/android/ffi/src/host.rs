@@ -37,13 +37,20 @@ use std::sync::Arc;
 #[cfg(feature = "uniffi")]
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn create_android_side_chat(
-    engine: Arc<MobileEngineHandle>, request_id: String, initial_input: Option<String>,
-    listener: Box<dyn AndroidEventListener>, permissions: Box<dyn AndroidPermissionSink>,
+    engine: Arc<MobileEngineHandle>,
+    request_id: String,
+    initial_input: Option<String>,
+    listener: Box<dyn AndroidEventListener>,
+    permissions: Box<dyn AndroidPermissionSink>,
 ) -> Result<harness_runtime::mobile::SideChatInfoDto, MobileEngineError> {
-    engine.create_side_chat(request_id, initial_input,
-        Arc::new(AndroidListenerBridge { inner: listener }),
-        Arc::new(super::callbacks::AndroidPermissionSinkBridge { inner: permissions }),
-    ).await
+    engine
+        .create_side_chat(
+            request_id,
+            initial_input.map(|text| client::protocol::text::ClientTextDto::from_utf8(&text)),
+            Arc::new(AndroidListenerBridge { inner: listener }),
+            Arc::new(super::callbacks::AndroidPermissionSinkBridge { inner: permissions }),
+        )
+        .await
 }
 
 /// The foreign (Kotlin) capability objects + config needed to build an

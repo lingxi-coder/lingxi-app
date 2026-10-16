@@ -49,6 +49,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::computer_access::ComputerAccessExchange;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -78,6 +79,24 @@ pub use view::{
     BottomPaneView, CommandAction, ConnectAction, FusionSetupAction, PermissionAction,
     PluginAction, RewindScope, TaskAction, ViewAction, ViewOutcome,
 };
+
+fn utf16_unit_offset_for_display_char(units: &[u16], target: usize) -> usize {
+    let mut unit = 0;
+    let mut character = 0;
+    while unit < units.len() && character < target {
+        if (0xd800..=0xdbff).contains(&units[unit])
+            && units
+                .get(unit + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            unit += 2;
+        } else {
+            unit += 1;
+        }
+        character += 1;
+    }
+    unit
+}
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -130,9 +149,9 @@ enum LeftArrowOutcome {
 pub enum BottomPaneOutcome {
     /// The pane consumed the input; nothing for the owner to do.
     Consumed,
-    /// The composer submitted this (trimmed) buffer text. Slash-command
-    /// routing versus prompt submission is the owner's decision.
-    Submitted(String),
+    /// The composer submitted this trimmed source text. Display conversion is
+    /// deferred to the UI boundary; command routing uses the original units.
+    Submitted(Utf16JsonProjection),
     /// Idle `Esc Esc` on an empty prompt: open the `/rewind` picker.
     OpenRewindPicker,
     /// A stacked view asks the owner to submit `String` as a user prompt.
@@ -324,9 +343,9 @@ pub struct BottomPane {
     /// Owner-fed task status (spinner text + running flag).
     status: BottomPaneStatus,
     /// Most recent Mod toast, held only until its timeout expires.
-    mod_toast: Option<(String, Instant)>,
+    mod_toast: Option<(client::protocol::text::ClientTextDto, Instant)>,
     /// Insertion-ordered pinned lines, one per plugin.
-    mod_statuses: Vec<(String, String)>,
+    mod_statuses: Vec<(String, client::protocol::text::ClientTextDto)>,
     /// Current terminal `AbovePrompt` Mod tree, flattened to its measured row budget.
     mod_render_lines: Vec<String>,
     /// Mirror of the transcript's verbose mode, for the status hint text.
@@ -469,30 +488,41 @@ impl BottomPane {
         if self.composer.cursor_row_col() == (0, 0) {
             return None;
         }
-        let text = self.composer.text();
-        let (name, args) = text.split_once(' ')?;
-        if !text.ends_with(' ')
-            || !name.strip_prefix('/').is_some_and(|name| {
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b".:_-".contains(&byte))
+        let source = self.composer.source_units();
+        let separator = source.iter().position(|unit| *unit == b' ' as u16)?;
+        if source.last().copied() != Some(b' ' as u16) {
+            return None;
+        }
+        let name_units = &source[..separator];
+        if name_units.len() < 2
+            || name_units.first().copied() != Some(b'/' as u16)
+            || !name_units[1..].iter().all(|unit| {
+                matches!(*unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
+                    || matches!(*unit, 0x2e | 0x3a | 0x5f | 0x2d)
             })
         {
             return None;
         }
+        let args = String::from_utf16_lossy(&source[separator + 1..]);
+        let decoded_name = String::from_utf16(name_units).ok();
 
-        // Native getCommand resolves a canonical name across the whole catalog
-        // before considering aliases. An earlier alias must not shadow a later
-        // command (including the builtins that have no described replacement).
-        let exact_row = self.registry_commands.iter().find(|row| row.name == name);
-        let exact_builtin = crate::command::BUILTIN
-            .iter()
-            .find(|command| command.name == name);
-        let alias_row = self
+        // Native getCommand resolves canonical names across the whole catalog
+        // before considering aliases. A built-in canonical name therefore
+        // cannot be shadowed by an earlier registry alias.
+        let exact_row = self
             .registry_commands
             .iter()
-            .find(|row| row.aliases.iter().any(|alias| alias == name));
+            .find(|row| row.name.code_units == name_units);
+        let exact_builtin = decoded_name.as_deref().and_then(|name| {
+            crate::command::BUILTIN
+                .iter()
+                .find(|command| command.name == name)
+        });
+        let alias_row = self.registry_commands.iter().find(|row| {
+            row.aliases
+                .iter()
+                .any(|alias| alias.code_units == name_units)
+        });
         let row = exact_row.or(if exact_builtin.is_none() {
             alias_row
         } else {
@@ -500,18 +530,24 @@ impl BottomPane {
         });
         if let Some(row) = row {
             if args.is_empty() {
-                if let Some(hint) = row.argument_hint.as_deref().filter(|hint| !hint.is_empty()) {
-                    return Some(hint.to_owned());
+                if let Some(hint) = row
+                    .argument_hint
+                    .as_ref()
+                    .map(client::protocol::text::ClientTextDto::display)
+                    .filter(|hint| !hint.is_empty())
+                {
+                    return Some(hint);
                 }
             }
             if row.argument_names.is_empty() {
                 return None;
             }
-            let count = tui_core::slash_command_argument_count(args.to_owned())? as usize;
+            let count = tui_core::slash_command_argument_count(args)? as usize;
             let remaining = &row.argument_names[count.min(row.argument_names.len())..];
             return (!remaining.is_empty()).then(|| {
                 remaining
                     .iter()
+                    .map(client::protocol::text::ClientTextDto::display)
                     .map(|name| format!("[{name}]"))
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -520,11 +556,12 @@ impl BottomPane {
         if !args.is_empty() {
             return None;
         }
+        let name = decoded_name?;
         exact_builtin
             .or_else(|| {
                 crate::command::BUILTIN
                     .iter()
-                    .find(|command| command.aliases.contains(&name))
+                    .find(|command| command.aliases.contains(&name.as_str()))
             })
             .map(|command| command.hint)
             .filter(|hint| !hint.is_empty())
@@ -568,17 +605,20 @@ impl BottomPane {
         self.completion.is_some()
     }
 
-    /// Whether `name` (WITH the leading `/`) resolves to a registry-backed
-    /// command — by name or alias. Used by
+    /// Whether the exact command name (without `/`) resolves to a
+    /// registry-backed command — by name or alias. Used by
     /// [`ChatWidget::handle_slash`] to route a BUILTIN-miss to the async
     /// dispatcher instead of submitting the text as a literal prompt.
     ///
     /// [`ChatWidget::handle_slash`]: crate::chat_widget::ChatWidget::handle_slash
     #[must_use]
-    pub fn is_registry_command(&self, name: &str) -> bool {
-        self.registry_commands
-            .iter()
-            .any(|r| r.name == name || r.aliases.iter().any(|a| a == name))
+    pub fn is_registry_command(&self, name: &Utf16JsonProjection) -> bool {
+        let mut name_units = vec![b'/' as u16];
+        name_units.extend(name.string_units("").unwrap_or_default());
+        self.registry_commands.iter().any(|r| {
+            r.name.code_units == name_units
+                || r.aliases.iter().any(|alias| alias.code_units == name_units)
+        })
     }
 
     /// Route one key press. Layered: the active view owns the keyboard until
@@ -1111,12 +1151,16 @@ impl BottomPane {
     }
 
     /// Show a transient Mod notification below the composer.
-    pub fn set_mod_toast(&mut self, text: String, timeout_ms: u64) {
+    pub fn set_mod_toast(&mut self, text: client::protocol::text::ClientTextDto, timeout_ms: u64) {
         self.mod_toast = Some((text, Instant::now() + Duration::from_millis(timeout_ms)));
     }
 
     /// Replace or clear one plugin's pinned status without affecting others.
-    pub fn set_mod_status(&mut self, plugin: String, text: Option<String>) {
+    pub fn set_mod_status(
+        &mut self,
+        plugin: String,
+        text: Option<client::protocol::text::ClientTextDto>,
+    ) {
         if let Some(index) = self
             .mod_statuses
             .iter()
@@ -1297,11 +1341,12 @@ impl BottomPane {
     /// Take the composer's submission: pushes non-blank text to history,
     /// clears the buffer, and returns the trimmed text. `None` (buffer
     /// untouched) when the composer is blank.
-    pub fn take_submission_state(&mut self) -> Option<String> {
+    pub fn take_submission_state(&mut self) -> Option<Utf16JsonProjection> {
         if self.composer.is_blank() {
             return None;
         }
-        let mut text = self.composer.take();
+        let mut source = self.composer.take();
+        let mut text = source.string_at("").unwrap_or_default().to_owned();
         // Persist the typed prompt (claude-code `cgr` → queue + background
         // flush). The PRE-expansion text is stored — CC's `display` field also
         // carries the paste placeholders, with contents externalised into
@@ -1341,9 +1386,31 @@ impl BottomPane {
         }
         matches.sort_by_key(|&(start, _, _)| std::cmp::Reverse(start));
         for (start, end, actual) in matches {
+            let start_character = text[..start].chars().count();
+            let end_character = text[..end].chars().count();
+            let mut units = source.string_units("").unwrap_or_default();
+            let start_unit = utf16_unit_offset_for_display_char(&units, start_character);
+            let end_unit = utf16_unit_offset_for_display_char(&units, end_character);
+            units.splice(start_unit..end_unit, actual.encode_utf16());
             text.replace_range(start..end, actual);
+            source = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("display is derived from the exact UTF-16 units");
         }
-        Some(text.trim().to_string())
+        let trimmed_start = text.trim_start();
+        let leading_characters = text.chars().count() - trimmed_start.chars().count();
+        let trimmed = trimmed_start.trim_end();
+        let trailing_characters = trimmed_start.chars().count() - trimmed.chars().count();
+        let units = source.string_units("").unwrap_or_default();
+        let start_unit = utf16_unit_offset_for_display_char(&units, leading_characters);
+        let end_unit = utf16_unit_offset_for_display_char(
+            &units,
+            text.chars().count().saturating_sub(trailing_characters),
+        );
+        let units = units[start_unit..end_unit].to_vec();
+        Some(
+            Utf16JsonProjection::root_string(trimmed.to_owned(), units)
+                .expect("trimmed display matches the exact source units"),
+        )
     }
 
     /// Toggle vim editing mode; returns whether vim is now enabled.
@@ -1685,7 +1752,13 @@ impl BottomPane {
                 Some(BottomPaneOutcome::Consumed)
             }
             KeyCode::Tab => {
-                let insert = self.completion.as_ref()?.selected_insert().to_string();
+                let source_insert = self
+                    .completion
+                    .as_ref()?
+                    .selected_source_insert()
+                    .code_units
+                    .clone();
+                let insert = String::from_utf16_lossy(&source_insert);
                 // Emoji and `@file` tokens complete in place; a `/command`
                 // replaces the whole buffer.
                 if let Some((start, _)) = self
@@ -1699,7 +1772,9 @@ impl BottomPane {
                 } else {
                     // Native HK completes the selected name/alias with one
                     // ASCII space, making argumentHint visible immediately.
-                    self.composer.replace_all(&format!("{insert} "));
+                    let mut completed = source_insert;
+                    completed.push(b' ' as u16);
+                    self.composer.replace_all_source_units(&completed);
                 }
                 self.sync_completion();
                 Some(BottomPaneOutcome::Consumed)
@@ -1722,7 +1797,13 @@ impl BottomPane {
                 {
                     return None;
                 }
-                let insert = self.completion.as_ref()?.selected_insert().to_string();
+                let source_insert = self
+                    .completion
+                    .as_ref()?
+                    .selected_source_insert()
+                    .code_units
+                    .clone();
+                let insert = String::from_utf16_lossy(&source_insert);
                 if let Some((start, _)) = self
                     .emoji_completion_enabled
                     .then(|| self.composer.emoji_fragment())
@@ -1736,16 +1817,20 @@ impl BottomPane {
                     self.composer.complete_at(at, &insert);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
-                } else if self.composer.text() == insert
-                    || completion_view::resolve_catalog_name(
-                        &self.composer.text(),
+                } else if {
+                    let current = self.composer.source_units();
+                    let current_resolved = completion_view::resolve_catalog_name_units(
+                        &current,
                         &self.registry_commands,
-                    )
-                    .is_some_and(|command| {
-                        completion_view::resolve_catalog_name(&insert, &self.registry_commands)
-                            == Some(command)
-                    })
-                {
+                    );
+                    current == source_insert
+                        || current_resolved.is_some()
+                            && current_resolved
+                                == completion_view::resolve_catalog_name_units(
+                                    &source_insert,
+                                    &self.registry_commands,
+                                )
+                } {
                     // Buffer already IS the highlighted command — by name or in
                     // full as one of its aliases (`/quit` highlights `/exit
                     // (quit)`) → let Enter run it (claude-code runs the typed
@@ -1753,7 +1838,9 @@ impl BottomPane {
                     None
                 } else {
                     // Partial/different `/command` → commit it + close the popup.
-                    self.composer.replace_all(&format!("{insert} "));
+                    let mut completed = source_insert;
+                    completed.push(b' ' as u16);
+                    self.composer.replace_all_source_units(&completed);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
                 }
@@ -1781,11 +1868,12 @@ impl BottomPane {
             }
         }
         let text = self.composer.text();
+        let source = self.composer.source_projection();
         let is_command =
             text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
         if is_command {
             self.completion =
-                CompletionView::new(command_items_merged(&text, &self.registry_commands));
+                CompletionView::new(command_items_merged(&source, &self.registry_commands));
             return;
         }
         if self.emoji_completion_enabled {
@@ -2215,7 +2303,7 @@ impl BottomPane {
         lines.extend(tasks);
         lines.extend(self.mod_render_lines.iter().map(|text| {
             Line::from(Span::styled(
-                text.clone(),
+                text.to_owned(),
                 Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
             ))
         }));
@@ -2226,7 +2314,7 @@ impl BottomPane {
         let (text, until) = self.mod_toast.as_ref()?;
         (Instant::now() < *until).then(|| {
             Line::from(Span::styled(
-                text.clone(),
+                text.display(),
                 Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
             ))
         })
@@ -2236,7 +2324,7 @@ impl BottomPane {
         let mut lines = self.mod_toast_line().into_iter().collect::<Vec<_>>();
         lines.extend(self.mod_statuses.iter().map(|(_, text)| {
             Line::from(Span::styled(
-                text.clone(),
+                text.display(),
                 Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
             ))
         }));
@@ -2784,17 +2872,37 @@ mod tests {
         pane.set_mod_status("one".into(), Some("Updated".into()));
         assert_eq!(pane.mod_notification_lines().len(), 2);
         assert_eq!(
-            pane.mod_statuses,
-            vec![
-                ("one".into(), "Updated".into()),
-                ("two".into(), "Second".into())
-            ]
+            pane.mod_statuses
+                .iter()
+                .map(|(plugin, text)| (plugin.as_str(), text.display()))
+                .collect::<Vec<_>>(),
+            vec![("one", "Updated".into()), ("two", "Second".into())]
         );
         pane.set_mod_status("one".into(), None);
-        assert_eq!(pane.mod_statuses, vec![("two".into(), "Second".into())]);
+        assert_eq!(
+            pane.mod_statuses
+                .iter()
+                .map(|(plugin, text)| (plugin.as_str(), text.display()))
+                .collect::<Vec<_>>(),
+            vec![("two", "Second".into())]
+        );
         assert!(pane.planned_task_lines().is_empty());
         pane.clear_mod_ui();
         assert!(pane.mod_notification_lines().is_empty());
+    }
+
+    #[test]
+    fn mod_status_keeps_exact_units_until_rendering() {
+        let mut pane = BottomPane::new(Theme::dark());
+        let units = vec![b's' as u16, b't' as u16, 0xd800, b'x' as u16];
+        pane.set_mod_status(
+            "plugin".into(),
+            Some(client::protocol::text::ClientTextDto::from_code_units(
+                units.clone(),
+            )),
+        );
+        assert_eq!(pane.mod_statuses[0].1.code_units, units);
+        assert_eq!(pane.mod_notification_lines()[0].spans[0].content, "st�x");
     }
 
     #[test]
@@ -3209,7 +3317,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text, big, "submit expands the placeholder to the paste");
+        assert_eq!(
+            text.string_at(""),
+            Some(big.as_str()),
+            "submit expands the placeholder to the paste"
+        );
     }
 
     #[test]
@@ -3225,7 +3337,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text, format!("{big}{big}"), "both placeholders expand");
+        assert_eq!(
+            text.string_at(""),
+            Some(format!("{big}{big}").as_str()),
+            "both placeholders expand"
+        );
     }
 
     #[test]
@@ -3236,7 +3352,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text, "keep this", "deleted placeholder drops the paste");
+        assert_eq!(
+            text.string_at(""),
+            Some("keep this"),
+            "deleted placeholder drops the paste"
+        );
     }
 
     #[test]
@@ -3251,13 +3371,17 @@ mod tests {
         let BottomPaneOutcome::Submitted(first) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected first submit");
         };
-        assert_eq!(first, big);
+        assert_eq!(first.string_at(""), Some(big.as_str()));
         let _ = pane.handle_key(key(KeyCode::Up)); // recall from history
         assert_eq!(pane.composer().text(), "[Pasted Content 1500 chars]");
         let BottomPaneOutcome::Submitted(second) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected resubmit");
         };
-        assert_eq!(second, big, "recalled placeholder re-expands to the paste");
+        assert_eq!(
+            second.string_at(""),
+            Some(big.as_str()),
+            "recalled placeholder re-expands to the paste"
+        );
     }
 
     #[test]
@@ -3680,10 +3804,10 @@ mod tests {
             .selected_insert()
             .to_string();
         pane.set_registry_commands(vec![RegistrySlashRow {
-            name: "/plan-z".to_string(),
-            description: "dynamic".to_string(),
-            menu_description: Some("dynamic".to_string()),
-            aliases: vec!["/pz".to_string()],
+            name: "/plan-z".into(),
+            description: "dynamic".into(),
+            menu_description: Some("dynamic".into()),
+            aliases: vec!["/pz".into()],
             hidden: false,
             replaces_builtin: false,
             argument_hint: None,
@@ -3697,7 +3821,9 @@ mod tests {
             .map(|item| item.insert.clone())
             .collect::<Vec<_>>();
         assert!(
-            after.iter().any(|item| item == "/plan-z"),
+            after.iter().any(|item| {
+                item == &client::protocol::text::ClientTextDto::from_utf8("/plan-z")
+            }),
             "dynamic registry row missing after refresh: {after:?}"
         );
         assert_ne!(before, "/plan-z");
@@ -3751,6 +3877,30 @@ mod tests {
         }]);
         typ(&mut removed_hint_pane, "/model ");
         assert_eq!(removed_hint_pane.command_argument_hint(), None);
+
+        let mut malformed_source_pane = pane();
+        malformed_source_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: client::protocol::text::ClientTextDto::from_code_units(vec![
+                b'/' as u16,
+                b'm' as u16,
+                b'o' as u16,
+                b'd' as u16,
+                b'e' as u16,
+                0xd800,
+            ]),
+            description: "source command".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some("must not match by replacement".into()),
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut malformed_source_pane, "/mode� ");
+        assert_eq!(malformed_source_pane.command_argument_hint(), None);
+        assert!(!malformed_source_pane.is_registry_command(&Utf16JsonProjection::from("mode�")));
+        assert!(malformed_source_pane
+            .is_registry_command(&Utf16JsonProjection::parse(r#""mode\ud800""#).unwrap()));
     }
 
     #[test]
@@ -3842,15 +3992,17 @@ mod tests {
     #[test]
     fn argument_hint_prefers_canonical_names_over_earlier_aliases() {
         let mut pane = pane();
-        let row = |name: &str, aliases: Vec<String>, hint: &str| RegistrySlashRow {
-            name: name.into(),
-            description: String::new(),
-            menu_description: None,
-            aliases,
-            hidden: false,
-            replaces_builtin: false,
-            argument_hint: Some(hint.into()),
-            argument_names: Vec::new(),
+        let row = |name: &str, aliases: Vec<client::protocol::text::ClientTextDto>, hint: &str| {
+            RegistrySlashRow {
+                name: name.into(),
+                description: client::protocol::text::ClientTextDto::default(),
+                menu_description: None,
+                aliases,
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: Some(hint.into()),
+                argument_names: Vec::new(),
+            }
         };
         pane.set_registry_commands(vec![
             row("/other", vec!["/review".into(), "/model".into()], "wrong"),
@@ -3873,7 +4025,7 @@ mod tests {
             let mut pane = pane();
             pane.set_registry_commands(vec![RegistrySlashRow {
                 name: "/z-deploy".into(),
-                description: String::new(),
+                description: client::protocol::text::ClientTextDto::default(),
                 menu_description: None,
                 aliases: vec!["/ship-deploy".into()],
                 hidden: false,
@@ -3891,7 +4043,8 @@ mod tests {
             assert_eq!(pane.command_argument_hint().as_deref(), Some("<target>"));
             assert!(matches!(
                 pane.handle_key(key(KeyCode::Enter)),
-                BottomPaneOutcome::Submitted(ref submitted) if submitted == expected.trim_end()
+                BottomPaneOutcome::Submitted(ref submitted)
+                    if submitted.string_units("") == Some(expected.trim_end().encode_utf16().collect())
             ));
         }
     }
@@ -3901,7 +4054,7 @@ mod tests {
         let mut pane = pane();
         pane.set_registry_commands(vec![RegistrySlashRow {
             name: "/foo".into(),
-            description: String::new(),
+            description: client::protocol::text::ClientTextDto::default(),
             menu_description: None,
             aliases: vec!["/foobar".into()],
             hidden: false,
@@ -3913,7 +4066,8 @@ mod tests {
         assert_eq!(pane.completion().unwrap().selected_insert(), "/foobar");
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref submitted) if submitted == "/foo"
+            BottomPaneOutcome::Submitted(ref submitted)
+                if submitted.string_units("") == Some("/foo".encode_utf16().collect())
         ));
     }
 
@@ -3922,7 +4076,7 @@ mod tests {
         let mut pane = pane();
         pane.set_registry_commands(vec![RegistrySlashRow {
             name: "/deploy".into(),
-            description: String::new(),
+            description: client::protocol::text::ClientTextDto::default(),
             menu_description: None,
             aliases: Vec::new(),
             hidden: false,
@@ -3960,7 +4114,7 @@ mod tests {
         // submission (the unknown command is the owner's routing decision).
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref p) if p == "/mz"
+            BottomPaneOutcome::Submitted(ref p) if p.string_at("") == Some("/mz")
         ));
         // …and an @file fragment with no matching entries.
         let mut pane = super::BottomPane::new(Theme::dark());
@@ -3994,7 +4148,7 @@ mod tests {
         typ(&mut pane, "first");
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref p) if p == "first"
+            BottomPaneOutcome::Submitted(ref p) if p.string_at("") == Some("first")
         ));
         typ(&mut pane, "second");
         let _ = pane.handle_key(key(KeyCode::Enter));
@@ -4016,11 +4170,66 @@ mod tests {
         assert_eq!(pane.composer().text(), "   ", "blank buffer untouched");
         let mut pane = super::BottomPane::new(Theme::dark());
         typ(&mut pane, "  hi there  ");
-        assert_eq!(pane.take_submission_state().as_deref(), Some("hi there"));
+        assert_eq!(
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("hi there")
+        );
         assert!(pane.composer_is_empty());
         // The submission was pushed to history.
         let _ = pane.handle_key(key(KeyCode::Up));
         assert_eq!(pane.composer().text(), "  hi there  ");
+    }
+
+    #[test]
+    fn submitted_source_retains_isolated_surrogate_units() {
+        let mut pane = pane();
+        let units = vec![
+            b'/' as u16,
+            b'c' as u16,
+            b'm' as u16,
+            b'd' as u16,
+            0xd800,
+            b' ' as u16,
+            b'x' as u16,
+            0xdfff,
+        ];
+        pane.composer.replace_all_source_units(&units);
+        let Some(submitted) = pane.take_submission_state() else {
+            panic!("expected source submission");
+        };
+        assert_eq!(submitted.string_units(""), Some(units));
+    }
+
+    #[test]
+    fn registry_completion_inserts_and_submits_the_exact_source_name() {
+        let mut pane = pane();
+        let name = vec![b'/' as u16, b'c' as u16, b'm' as u16, b'd' as u16, 0xd800];
+        pane.set_registry_commands(vec![RegistrySlashRow {
+            name: client::protocol::text::ClientTextDto::from_code_units(name.clone()),
+            description: "source command".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut pane, "/cm");
+
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Tab)),
+            BottomPaneOutcome::Consumed
+        ));
+        let mut completed = name.clone();
+        completed.push(b' ' as u16);
+        assert_eq!(pane.composer().source_units(), completed);
+
+        let BottomPaneOutcome::Submitted(submitted) = pane.handle_key(key(KeyCode::Enter)) else {
+            panic!("the exact highlighted source command should submit");
+        };
+        assert_eq!(submitted.string_units(""), Some(name));
     }
 
     #[test]
@@ -4035,7 +4244,12 @@ mod tests {
         let mut pane = super::BottomPane::new(Theme::dark());
         pane.set_prompt_history_store(old.clone());
         typ(&mut pane, "old prompt");
-        assert_eq!(pane.take_submission_state().as_deref(), Some("old prompt"));
+        assert_eq!(
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("old prompt")
+        );
         assert!(old.flush());
         let new = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
             home.path(),
@@ -4044,7 +4258,12 @@ mod tests {
         ));
         pane.reset_prompt_history_store(new.clone());
         typ(&mut pane, "new prompt");
-        assert_eq!(pane.take_submission_state().as_deref(), Some("new prompt"));
+        assert_eq!(
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("new prompt")
+        );
         assert!(new.flush());
         let rows: Vec<serde_json::Value> =
             std::fs::read_to_string(home.path().join("history.jsonl"))
@@ -4071,7 +4290,9 @@ mod tests {
         pane.set_prompt_history_store(store.clone());
         typ(&mut pane, "persisted prompt");
         assert_eq!(
-            pane.take_submission_state().as_deref(),
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
             Some("persisted prompt")
         );
         // The submit spawned a background flush; a direct flush serializes
@@ -4112,7 +4333,7 @@ mod tests {
         // Normal-mode Enter submits through the same take path.
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref p) if p == "ello"
+            BottomPaneOutcome::Submitted(ref p) if p.string_at("") == Some("ello")
         ));
         assert!(!pane.toggle_vim(), "second toggle disables vim");
     }
@@ -5028,7 +5249,8 @@ mod tests {
         PermissionExchange {
             request: permission::gate::PermissionRequest::ToolUseConfirm {
                 tool_name: "WebFetch".to_string(),
-                tool_input: serde_json::json!({ "url": "https://example.com" }),
+                tool_input: Utf16JsonProjection::parse(r#"{"url":"https://example.com"}"#)
+                    .expect("valid test permission input"),
                 default_decision: permission::gate::PromptDefault::DenyByDefault,
                 suppress_always_allow_rule: false,
             },
@@ -5066,8 +5288,8 @@ mod tests {
         drop(resp_rx);
         p.show_ask_user_question(AskUserQuestionExchange {
             questions: vec![tool_api::ask_user_question::AskQuestion {
-                question: "Pick one".to_string(),
-                header: "Pick".to_string(),
+                question: "Pick one".into(),
+                header: "Pick".into(),
                 options: Vec::new(),
                 multi_select: false,
             }],

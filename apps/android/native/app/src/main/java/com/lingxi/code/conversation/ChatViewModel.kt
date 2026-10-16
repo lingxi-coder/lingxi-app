@@ -4,9 +4,12 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.R
+import com.lingxi.code.bindings.client.AskUserQuestionAnswersDto
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.android.MobileLinuxEventFfi
 import com.lingxi.code.bindings.android.MobileLinuxEventKindFfi
@@ -413,10 +416,10 @@ class ChatViewModel(
             is ClientEvent.SlashCommandCatalog -> _state.update { state ->
                 state.copy(slashCommands = event.commands.map { command ->
                     ConversationSlashCommand(
-                        name = command.name,
-                        aliases = command.aliases,
-                        argumentHint = command.argumentHint,
-                        argumentNames = command.argumentNames,
+                        name = command.name.displayText(),
+                        aliases = command.aliases.map { it.displayText() },
+                        argumentHint = command.argumentHint?.displayText(),
+                        argumentNames = command.argumentNames.map { it.displayText() },
                     )
                 })
             }
@@ -493,18 +496,21 @@ class ChatViewModel(
                     ),
                 )
             }
-            is ClientEvent.Error -> _state.update { state ->
-                val previous = state.compaction
-                if (previous?.status != CompactionProgressStatus.Running ||
-                    !event.message.startsWith("force_compact failed:", ignoreCase = true)) {
-                    state
-                } else {
-                    state.copy(
-                        compaction = previous.copy(
-                            status = CompactionProgressStatus.Failed,
-                            detail = compactFailureDetail(event.message),
-                        ),
-                    )
+            is ClientEvent.Error -> {
+                val message = event.message.displayText()
+                _state.update { state ->
+                    val previous = state.compaction
+                    if (previous?.status != CompactionProgressStatus.Running ||
+                        !message.startsWith("force_compact failed:", ignoreCase = true)) {
+                        state
+                    } else {
+                        state.copy(
+                            compaction = previous.copy(
+                                status = CompactionProgressStatus.Failed,
+                                detail = compactFailureDetail(message),
+                            ),
+                        )
+                    }
                 }
             }
                 is ClientEvent.TaskRow -> _state.update {
@@ -884,11 +890,12 @@ class ChatViewModel(
                     reply !is ReplyEvent.End &&
                     reply !is ReplyEvent.Error &&
                     reply !is ReplyEvent.Completed &&
+                    reply !is ReplyEvent.CommandOutput &&
                     durableTurnId != null
                 ) {
                     pendingRecoveredReplayAckTurnId = durableTurnId
                 }
-                if (reply is ReplyEvent.End || reply is ReplyEvent.Error) {
+                if (reply is ReplyEvent.End || reply is ReplyEvent.Error || reply is ReplyEvent.CommandOutput) {
                     recoveredTurnToken = null
                     recoveryReplayTurnId = null
                     pendingRecoveredReplayAckTurnId = null
@@ -1081,7 +1088,7 @@ class ChatViewModel(
      * [answers] maps each question's full text to the selected label(s)
      * comma-joined or the free-text entry — see `assembleAskAnswers`.
      */
-    fun answerQuestion(requestId: ULong, answers: Map<String, String>) {
+    fun answerQuestion(requestId: ULong, answers: AskUserQuestionAnswersDto) {
         _state.update { s ->
             s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == requestId })
         }
@@ -1586,7 +1593,8 @@ class ChatViewModel(
         _state.update { it.copy(reasoning = engine.reasoning) }
         if (!engine.hasCatalog) return
         val options = EngineModelCatalog.options(engine.available, engine.details)
-        val active = options.firstOrNull { it.id == engine.active } ?: options.first()
+        val activeRoute = options.firstOrNull { it.id == engine.active } ?: options.first()
+        val active = engine.activeSourceDisplay?.let { activeRoute.copy(name = it) } ?: activeRoute
         _state.update { it.copy(availableModels = options, model = active) }
     }
 
@@ -2027,6 +2035,9 @@ class ChatViewModel(
     ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        val isBashInput = text.startsWith("!")
+        val submittedText = if (isBashInput) text.substring(1) else trimmed
+        val promptMode = if (isBashInput) PromptModeDto.BASH else null
         if (!admitComposerSend(trimmed, images.isNotEmpty())) return
         sideChatInput(trimmed)?.let { input ->
             val parent = source as? EngineConversationSource
@@ -2098,8 +2109,8 @@ class ChatViewModel(
                 runCatching {
                     source.submitClientCommand(
                         ClientCommand.SendPrompt(
-                            text = trimmed,
-                            promptMode = null,
+                            text = submittedText.toClientTextDto(),
+                            promptMode = promptMode,
                             images = images,
                             turnId = null,
                             visualizationContext = visualizationChip?.reference?.toDto(),
@@ -2158,8 +2169,18 @@ class ChatViewModel(
         // process has already crossed into the background.
         setBackgroundTurnActive(true)
 
+        val turnSource = source
+        val slashCommandSource = turnSource as? SlashCommandConversationSource
         turnJob = viewModelScope.launch {
-            source.submit(trimmed, images, submittedTurnId, visualizationChip?.reference).collect { event ->
+            val replyStream = if (
+                !isBashInput && images.isEmpty() && isSlashCommandLine(text) &&
+                slashCommandSource != null
+            ) {
+                slashCommandSource.submitSlashCommand(text.toClientTextDto(), submittedTurnId)
+            } else {
+                turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
+            }
+            replyStream.collect { event ->
                 reduce(event, token)
                 if (
                     event is ReplyEvent.DurableTurnReplayAcknowledged &&
@@ -2455,6 +2476,35 @@ class ChatViewModel(
                     agentRun = (it.agentRun ?: AgentRunState(turnId = token))
                         .addNotice(AgentRunNotice(event.message, kind)),
                 )
+            }
+
+            is ReplyEvent.CommandOutput -> {
+                if (event.turnId != null && event.turnId != durableTurnId?.toULong()) return
+                turnJob = null
+                emitTurnCompletion(
+                    token = token,
+                    outcome = if (event.isError) {
+                        ConversationTurnOutcome.Failed
+                    } else {
+                        ConversationTurnOutcome.Completed
+                    },
+                    finalAssistantText = event.display,
+                )
+                _state.update { state ->
+                    state.copy(
+                        streaming = false,
+                        messages = state.messages + Message(role = Role.Ai, text = event.display),
+                        streamingMessage = null,
+                        statusLine = null,
+                        error = if (event.isError) {
+                            ChatError(event.display, classifyError(event.display))
+                        } else {
+                            null
+                        },
+                        // Local commands have no model/tool trace to retain.
+                        agentRun = null,
+                    )
+                }
             }
 
             is ReplyEvent.Usage -> _state.update {

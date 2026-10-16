@@ -58,7 +58,7 @@ export type ModUiSurfaceNode =
       };
       press: ModUiClientPressRef;
       hover?: ModUiJsonValue;
-      children?: readonly [];
+      children?: readonly SurfaceChild[];
     }
   | {
       type: 'Input';
@@ -385,7 +385,7 @@ function validateNode(value: unknown, depth: number, state: { nodes: number }, e
   const children = value.children;
   if (children !== undefined) {
     if (!Array.isArray(children)) fail(`${type}.children must be an array`);
-    if (['Button', 'Input', 'Select', 'Code', 'Markdown'].includes(type) && children.length > 0) fail(`${type} is a leaf`);
+    if (['Input', 'Select', 'Code', 'Markdown'].includes(type) && children.length > 0) fail(`${type} is a leaf`);
     for (const child of children) {
       if (typeof child === 'string') continue;
       validateNode(child, depth + 1, state, expectedPlugin);
@@ -539,7 +539,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
         padding: plain ? '3px 6px' : '6px 10px',
         opacity: dimColor ? 0.72 : 1,
       };
-      return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled} aria-keyshortcuts={hotkey} aria-label={role === 'dismiss' ? label : undefined} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{label}</button>;
+      return <button type="button" className="mod-ui-client-button" style={buttonStyle} autoFocus={autoFocus} disabled={!interactionsEnabled} aria-keyshortcuts={hotkey} aria-label={label} data-action={action} data-role={role} onClick={() => dispatch(node.press, key, { type: 'press' })}>{children?.length ? children : label}</button>;
     }
     case 'Input':
       return <SurfaceInput node={node} dispatch={dispatch} disabled={!interactionsEnabled} />;

@@ -44,7 +44,7 @@
     "secret",
     "session",
     "sidequery",
-    "skill-api",
+    "skill",
     "task-store",
     "tasks",
     "telemetry",

@@ -11,6 +11,7 @@
 //! double-rendered.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io;
 use std::io::Write;
 use std::path::Path;
@@ -30,8 +31,8 @@ pub struct Transcript {
     response_start: usize,
     assistant_message_ids: std::collections::HashMap<usize, lingxi_core::types::MessageId>,
     request_ids: std::collections::HashMap<usize, String>,
-    row_uuids: std::collections::HashMap<usize, Vec<String>>,
     row_tokens: std::collections::HashMap<usize, String>,
+    row_uuids: std::collections::HashMap<usize, Vec<String>>,
     terminal_replay_required: bool,
     /// Finalized cells, in commit order.
     committed: Vec<Box<dyn HistoryCell>>,
@@ -91,8 +92,8 @@ impl Transcript {
     pub fn retract_assistant_response(&mut self, id: lingxi_core::types::MessageId) {
         let old_ids = std::mem::take(&mut self.assistant_message_ids);
         let old_request_ids = std::mem::take(&mut self.request_ids);
-        let old_row_uuids = std::mem::take(&mut self.row_uuids);
         let old_row_tokens = std::mem::take(&mut self.row_tokens);
+        let old_row_uuids = std::mem::take(&mut self.row_uuids);
         let mut old_index = 0;
         let mut new_index = 0;
         let mut removed_before_start = 0;
@@ -108,11 +109,11 @@ impl Transcript {
                 if let Some(request_id) = old_request_ids.get(&old_index) {
                     self.request_ids.insert(new_index, request_id.clone());
                 }
-                if let Some(row_uuids) = old_row_uuids.get(&old_index) {
-                    self.row_uuids.insert(new_index, row_uuids.clone());
-                }
                 if let Some(row_token) = old_row_tokens.get(&old_index) {
                     self.row_tokens.insert(new_index, row_token.clone());
+                }
+                if let Some(row_uuids) = old_row_uuids.get(&old_index) {
+                    self.row_uuids.insert(new_index, row_uuids.clone());
                 }
                 new_index += 1;
             } else {
@@ -181,15 +182,14 @@ impl Transcript {
             request_id,
         } = message
         {
-            self.row_uuids
-                .entry(self.committed.len())
-                .or_default()
-                .push(request_id.clone());
             if matches!(
                 inner.as_ref(),
                 RenderedMessage::UserText { .. } | RenderedMessage::AssistantText { .. }
             ) {
-                self.request_ids.insert(self.committed.len(), request_id);
+                self.request_ids
+                    .insert(self.committed.len(), request_id.clone());
+                self.row_uuids
+                    .insert(self.committed.len(), vec![request_id]);
             }
             self.push_message(*inner);
             return;
@@ -229,115 +229,8 @@ impl Transcript {
             return false;
         };
         self.request_ids.insert(index, uuid.clone());
-        let row_uuids = self.row_uuids.entry(index).or_default();
-        if !row_uuids.contains(&uuid) {
-            row_uuids.push(uuid);
-        }
+        self.row_uuids.insert(index, vec![uuid]);
         true
-    }
-
-    /// Attach the durable JSONL UUID to the active assistant row. It is kept
-    /// separately from selection ids so a tombstone can remove the exact row
-    /// without changing tool-use selection semantics.
-    pub fn identify_active_row(&mut self, uuid: String) -> bool {
-        if self.active.is_none() {
-            return false;
-        }
-        self.active_request_id = Some(uuid.clone());
-        self.identify_active_row_uuid(uuid)
-    }
-
-    /// Attach a durable UUID for display retraction without changing the
-    /// selection identifier of an aggregate row such as a collapsed tool run.
-    pub fn identify_active_row_uuid(&mut self, uuid: String) -> bool {
-        if self.active.is_none() {
-            return false;
-        }
-        if !self.active_row_uuids.contains(&uuid) {
-            self.active_row_uuids.push(uuid);
-        }
-        true
-    }
-
-    /// Attach a durable UUID to the most recently committed row, for provider
-    /// tool blocks whose row is created after their block-identity callback.
-    pub fn identify_latest_committed_row(&mut self, uuid: String) -> bool {
-        let Some(index) = self.committed.len().checked_sub(1) else {
-            return false;
-        };
-        let row_uuids = self.row_uuids.entry(index).or_default();
-        if !row_uuids.contains(&uuid) {
-            row_uuids.push(uuid);
-        }
-        true
-    }
-
-    /// Remove visible cells only after every persisted row UUID backing each
-    /// cell is superseded. This keeps aggregate collapsed-tool cells intact
-    /// while the bridge reports their individual row tombstones.
-    pub fn remove_transcript_rows(&mut self, uuids: &[String]) -> usize {
-        if uuids.is_empty() {
-            return 0;
-        }
-        let uuids = uuids
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>();
-        let mut removed = 0;
-        if self
-            .active_row_uuids
-            .iter()
-            .all(|uuid| uuids.contains(uuid.as_str()))
-            && !self.active_row_uuids.is_empty()
-        {
-            self.active = None;
-            self.active_request_id = None;
-            self.active_row_uuids.clear();
-            removed += 1;
-        }
-
-        let old_ids = std::mem::take(&mut self.assistant_message_ids);
-        let old_request_ids = std::mem::take(&mut self.request_ids);
-        let old_row_uuids = std::mem::take(&mut self.row_uuids);
-        let old_row_tokens = std::mem::take(&mut self.row_tokens);
-        let mut retained = Vec::with_capacity(self.committed.len());
-        let mut removed_before_start = 0;
-        let mut removed_before_turn = 0;
-        for (old_index, cell) in self.committed.drain(..).enumerate() {
-            let remove = old_row_uuids.get(&old_index).is_some_and(|row_uuids| {
-                !row_uuids.is_empty() && row_uuids.iter().all(|uuid| uuids.contains(uuid.as_str()))
-            });
-            if remove {
-                removed += 1;
-                removed_before_start += usize::from(old_index < self.response_start);
-                removed_before_turn += usize::from(old_index < self.turn_start);
-                self.terminal_replay_required |= old_index < self.committed_to_terminal;
-                continue;
-            }
-            let new_index = retained.len();
-            if let Some(message_id) = old_ids.get(&old_index) {
-                self.assistant_message_ids.insert(new_index, *message_id);
-            }
-            if let Some(request_id) = old_request_ids.get(&old_index) {
-                self.request_ids.insert(new_index, request_id.clone());
-            }
-            if let Some(row_uuids) = old_row_uuids.get(&old_index) {
-                self.row_uuids.insert(new_index, row_uuids.clone());
-            }
-            if let Some(row_token) = old_row_tokens.get(&old_index) {
-                self.row_tokens.insert(new_index, row_token.clone());
-            }
-            retained.push(cell);
-        }
-        self.committed = retained;
-        self.response_start -= removed_before_start;
-        self.turn_start -= removed_before_turn;
-        if removed > 0 {
-            self.committed_to_terminal = 0;
-            self.terminal_replay_required = true;
-            self.invalidate_wrap_cache();
-        }
-        removed
     }
 
     /// Attach successful per-block JSONL UUIDs to the ordinary assistant
@@ -365,13 +258,118 @@ impl Transcript {
         for (index, uuid) in indices.into_iter().zip(uuids) {
             if let Some(uuid) = uuid {
                 self.request_ids.insert(index, uuid.clone());
-                let row_uuids = self.row_uuids.entry(index).or_default();
-                if !row_uuids.contains(uuid) {
-                    row_uuids.push(uuid.clone());
-                }
+                self.row_uuids.insert(index, vec![uuid.clone()]);
             }
         }
         true
+    }
+
+    /// Associate the active cell with its single persisted transcript row.
+    /// The row UUID is kept separately from the selection id so tombstones can
+    /// remove the TUI cell without conflating it with tool-use identifiers.
+    pub fn identify_active_row(&mut self, uuid: String) -> bool {
+        if self.active.is_none() {
+            return false;
+        }
+        self.active_request_id = Some(uuid.clone());
+        self.active_row_uuids.clear();
+        self.active_row_uuids.push(uuid);
+        true
+    }
+
+    /// Add one persisted row UUID to an active or just-starting aggregate cell.
+    /// A collapsed tool call can report its identity just before the TUI creates
+    /// the aggregate cell. Collapsed groups may represent multiple JSONL rows
+    /// and are removed only after every represented row has been tombstoned.
+    pub fn identify_active_row_uuid(&mut self, uuid: String) -> bool {
+        if !self.active_row_uuids.contains(&uuid) {
+            self.active_row_uuids.push(uuid);
+        }
+        true
+    }
+
+    /// Associate the newest committed cell with its persisted transcript row.
+    pub fn identify_latest_committed_row(&mut self, uuid: String) -> bool {
+        let Some(index) = self.committed.len().checked_sub(1) else {
+            return false;
+        };
+        self.request_ids.insert(index, uuid.clone());
+        self.row_uuids.insert(index, vec![uuid]);
+        true
+    }
+
+    /// Remove committed or active cells only when all JSONL rows represented
+    /// by the cell have been tombstoned. Reindex per-cell metadata alongside
+    /// retained cells so later identities still refer to the right row.
+    pub fn remove_transcript_rows(&mut self, tombstoned: &[String]) -> usize {
+        let tombstoned = tombstoned
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut removed_count = 0;
+
+        if self.active.is_some()
+            && !self.active_row_uuids.is_empty()
+            && self
+                .active_row_uuids
+                .iter()
+                .all(|uuid| tombstoned.contains(uuid.as_str()))
+        {
+            self.discard_active();
+            removed_count += 1;
+        }
+
+        let old_ids = std::mem::take(&mut self.assistant_message_ids);
+        let old_request_ids = std::mem::take(&mut self.request_ids);
+        let old_row_tokens = std::mem::take(&mut self.row_tokens);
+        let old_row_uuids = std::mem::take(&mut self.row_uuids);
+        let mut old_index = 0;
+        let mut new_index = 0;
+        let mut removed_before_start = 0;
+        let mut removed_before_turn = 0;
+        let mut removed_before_terminal_cursor = false;
+        let mut removed_committed = false;
+
+        self.committed.retain(|_| {
+            let row_uuids = old_row_uuids.get(&old_index);
+            let remove = row_uuids.is_some_and(|uuids| {
+                !uuids.is_empty() && uuids.iter().all(|uuid| tombstoned.contains(uuid.as_str()))
+            });
+            if remove {
+                removed_count += 1;
+                removed_committed = true;
+                removed_before_start += usize::from(old_index < self.response_start);
+                removed_before_turn += usize::from(old_index < self.turn_start);
+                removed_before_terminal_cursor |= old_index < self.committed_to_terminal;
+            } else {
+                if let Some(id) = old_ids.get(&old_index) {
+                    self.assistant_message_ids.insert(new_index, *id);
+                }
+                if let Some(request_id) = old_request_ids.get(&old_index) {
+                    self.request_ids.insert(new_index, request_id.clone());
+                }
+                if let Some(row_token) = old_row_tokens.get(&old_index) {
+                    self.row_tokens.insert(new_index, row_token.clone());
+                }
+                if let Some(row_uuids) = row_uuids {
+                    self.row_uuids.insert(new_index, row_uuids.clone());
+                }
+                new_index += 1;
+            }
+            old_index += 1;
+            !remove
+        });
+
+        self.response_start -= removed_before_start;
+        self.turn_start -= removed_before_turn;
+        if removed_committed {
+            self.invalidate_wrap_cache();
+        }
+        if removed_before_terminal_cursor {
+            self.committed_to_terminal = 0;
+            self.terminal_replay_required = true;
+        }
+        removed_count
     }
 
     /// Replace the active in-flight cell. Callers that must not lose a
@@ -379,7 +377,6 @@ impl Transcript {
     pub fn set_active(&mut self, cell: Box<dyn HistoryCell>) {
         if self.active.is_none() {
             self.active_request_id = None;
-            self.active_row_uuids.clear();
         }
         self.active = Some(cell);
     }
@@ -657,8 +654,8 @@ impl Transcript {
         self.response_start = 0;
         self.assistant_message_ids.clear();
         self.request_ids.clear();
-        self.row_uuids.clear();
         self.row_tokens.clear();
+        self.row_uuids.clear();
         self.committed.clear();
         self.active = None;
         self.active_request_id = None;
@@ -1040,17 +1037,20 @@ mod tests {
     #[test]
     fn aggregate_row_waits_until_all_member_uuids_are_tombstoned() {
         let mut transcript = Transcript::new();
-        transcript.set_active(assistant_cell("collapsed tool run"));
         // A collapsed progress cell can represent several persisted rows. The
         // Native fallback tombstone carries each actual outer message UUID,
         // not the aggregate's tool id or its current screen position.
         let first_row_uuid = "5ad9fc2b-7172-4b95-9db2-6f0e8c1d7a0a";
         let second_row_uuid = "b19f8c0e-40e2-49ab-9fd0-9c3f2d6a710e";
         assert!(transcript.identify_active_row_uuid(first_row_uuid.into()));
+        transcript.set_active(assistant_cell("collapsed tool run"));
         assert!(transcript.identify_active_row_uuid(second_row_uuid.into()));
         transcript.flush_active();
 
-        assert_eq!(transcript.remove_transcript_rows(&[first_row_uuid.into()]), 0);
+        assert_eq!(
+            transcript.remove_transcript_rows(&[first_row_uuid.into()]),
+            0
+        );
         assert_eq!(transcript.committed.len(), 1);
         assert_eq!(
             transcript.remove_transcript_rows(&[first_row_uuid.into(), second_row_uuid.into()]),

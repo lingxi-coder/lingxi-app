@@ -15,7 +15,11 @@ impl crate::router::CommandRouter for AdmissionRouter {
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn dispatch_slash(&self, _: &str) -> Option<crate::router::SlashDispatchOutcome> {
+    async fn dispatch_slash(
+        &self,
+        _: Utf16JsonProjection,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Option<crate::router::SlashDispatchOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Some(crate::router::SlashDispatchOutcome {
             result: if self.run_as_turn {
@@ -30,16 +34,28 @@ impl crate::router::CommandRouter for AdmissionRouter {
             authority_events: Vec::new(),
         })
     }
+
+    async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
+        command_api::parser::parse_slash_command(raw)
+            .is_some_and(|parsed| parsed.name.string_at("").as_deref() == Some("compact"))
+    }
 }
 
 struct AdmissionDriver(tokio::sync::Notify);
 
 #[async_trait]
 impl TurnDriver for AdmissionDriver {
-    async fn run_turn(&self, prompt: String) {
-        assert_eq!(prompt, "custom compact prompt");
+    async fn run_turn(&self, prompt: Utf16JsonProjection) {
+        assert_eq!(prompt.string_at(""), Some("custom compact prompt"));
         self.0.notify_one();
     }
+}
+
+struct IdleTurnDriver;
+
+#[async_trait]
+impl TurnDriver for IdleTurnDriver {
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
 }
 
 #[tokio::test]
@@ -81,7 +97,19 @@ async fn custom_compact_turn_releases_admission_before_starting_turn() {
 async fn compact_cannot_enter_during_transient_idle_handoff() {
     for slash in [false, true] {
         let router = Arc::new(AdmissionRouter::default());
-        let connection = BridgeConnection::new().bind_router(router.clone());
+        let mut connection = BridgeConnection::new().bind_router(router.clone());
+        // Both slash admission and session transitions require a real bound
+        // turn driver. Without one, RunSlashCommand is rejected before it
+        // reaches the handoff gate this regression exercises.
+        connection.driver = Some(Arc::new(IdleTurnDriver));
+        let mut captured = if slash {
+            Some(super::connection_regression_test::captured_sink().await)
+        } else {
+            None
+        };
+        if let Some((_, _, sink)) = captured.as_ref() {
+            assert!(connection.claim_outbound(sink).await);
+        }
         let command = || {
             if slash {
                 ClientCommand::RunSlashCommand {
@@ -110,6 +138,20 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
             .await
             .expect("settled active ownership must reject without entering the router");
         assert_eq!(router.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            connection.queue.is_empty().await,
+            "busy compact must be rejected, not queued for a later turn"
+        );
+        if let Some((_, socket, _)) = captured.as_mut() {
+            assert!(matches!(
+                super::connection_regression_test::next_frame(socket).await,
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id: Some(17),
+                    is_error: true,
+                    display,
+                }) if display.code_units == "this command requires an idle session".encode_utf16().collect::<Vec<_>>()
+            ));
+        }
 
         // Once the drain owner really becomes idle, both command surfaces must
         // dispatch normally; the admission lock must not remain held on refusal.
@@ -123,6 +165,30 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
         )
         .await
         .expect("idle compact must still dispatch");
+        if slash {
+            let task = connection
+                .active_turn_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("idle slash compact owns its dispatched task");
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("idle slash compact dispatch must finish")
+                .unwrap();
+        }
         assert_eq!(router.calls.load(Ordering::SeqCst), 1);
+        if let Some((endpoint, mut socket, _)) = captured {
+            assert!(matches!(
+                super::connection_regression_test::next_frame(&mut socket).await,
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id: Some(17),
+                    is_error: false,
+                    ..
+                })
+            ));
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+        }
     }
 }

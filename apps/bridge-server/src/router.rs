@@ -87,7 +87,9 @@ use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
 use lingxi_core::host::SlashCommandDispatcher;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::mcp_bridge::McpPaths;
 use crate::settings_bridge::SettingsContext;
@@ -95,6 +97,32 @@ use crate::settings_bridge::SettingsContext;
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
 const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
+
+fn split_model_selection_source(
+    source: Utf16JsonProjection,
+    listings: &[lingxi_core::host::ModelListing],
+) -> (
+    Utf16JsonProjection,
+    Option<lingxi_core::host::ModelRouteAnchor>,
+) {
+    let Some(units) = source.string_units("") else {
+        return (source, None);
+    };
+    let Ok(text) = String::from_utf16(&units) else {
+        return (source, None);
+    };
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(&text);
+    let (model, profile) = lingxi_core::host::parse_model_ref(&trimmed, listings);
+    let route_hint = profile.map(|profile| lingxi_core::host::ModelRouteAnchor {
+        model: model.clone(),
+        profile: Some(profile),
+    });
+    if route_hint.is_some() || model != trimmed {
+        (Utf16JsonProjection::from(model), route_hint)
+    } else {
+        (source, route_hint)
+    }
+}
 
 /// Inputs needed to enumerate and replay the persisted JSONL session store.
 ///
@@ -199,6 +227,9 @@ pub trait CommandRouter: Send + Sync + 'static {
     fn abort_realtime_audio(&self) {}
     /// Wait for the native session to release tools and provider transport.
     async fn stop_realtime_audio(&self) {}
+    /// Drain connection-owned in-memory child conversations before their event
+    /// sink is released. Routers without such state need no close hook.
+    async fn connection_closed(&self) {}
     /// Route one decoded [`ClientCommand`], emitting any reply event(s) through
     /// `sink`. Pure side-effecting: it never blocks the caller for a turn (the
     /// turn path lives on [`crate::server::TurnDriver`]).
@@ -218,11 +249,144 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// decide whether to PRINT it (display-only `type: "local"` commands) or run
     /// it AS a turn (`type: "prompt"` commands like `/loop`, plus Markdown /
     /// Plugin prompt commands — claude-code injects the expanded prompt as the
-    /// user message). Returns `None` when no dispatcher is wired (the connection
-    /// then falls back to the display-only `route` path).
-    async fn dispatch_slash(&self, _raw: &str) -> Option<SlashDispatchOutcome> {
+    /// user message). Returns `None` when no dispatcher is wired; callers must
+    /// not retry expansion through the display-only `route` path.
+    async fn dispatch_slash(
+        &self,
+        _raw: Utf16JsonProjection,
+        _cancellation: CancellationToken,
+    ) -> Option<SlashDispatchOutcome> {
         None
     }
+
+    /// Whether `raw` resolves through this router's current slash registry to
+    /// a built-in command that requires an idle session (session replacement
+    /// or manual compaction). This is a
+    /// side-effect-free admission query: callers use it only to refuse such a
+    /// command while another turn owns the connection. Routers without a live
+    /// command catalog leave the result unknown and preserve normal routing.
+    async fn requires_idle_turn_for_slash(&self, _raw: &Utf16JsonProjection) -> bool {
+        false
+    }
+}
+
+pub(crate) fn slash_failure_display(diagnostic: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let units = diagnostic
+        .string_units("/message")
+        .expect("settings diagnostics carry their source message");
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display string matches its exact UTF-16 units")
+}
+
+#[cfg(test)]
+mod slash_failure_display_tests {
+    use super::*;
+
+    #[test]
+    fn slash_failure_display_keeps_the_exact_message_units() {
+        let diagnostic = Utf16JsonProjection::parse(
+            r#"{"kind":"settings_projection","message":"invalid\ud800","sourceValue":"other"}"#,
+        )
+        .unwrap();
+        let display = slash_failure_display(&diagnostic);
+        assert_eq!(
+            display.string_units(""),
+            Some(vec![
+                b'i' as u16,
+                b'n' as u16,
+                b'v' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'd' as u16,
+                0xd800,
+            ])
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_transition_slash_tests {
+    use super::*;
+
+    #[test]
+    fn session_transition_slashes_resolve_by_canonical_builtin_identity() {
+        let mut registry = CommandRegistry::new();
+        let mut clear = command_api::model::SlashCommand::default();
+        clear.name = "clear".into();
+        clear.source = CommandSource::Builtin;
+        clear.aliases = vec!["reset".into(), "new".into()];
+        registry.register_command(clear);
+        let mut compact = command_api::model::SlashCommand::default();
+        compact.name = "compact".into();
+        compact.source = CommandSource::Builtin;
+        registry.register_command(compact);
+
+        for raw in ["/clear", "/new title", "/reset"] {
+            assert!(
+                requires_idle_turn_for_slash(&registry, &raw.into()),
+                "{raw} should resolve to the session-clearing builtin"
+            );
+        }
+        assert!(requires_idle_turn_for_slash(&registry, &"/compact".into()));
+
+        // The parser and registry preserve case. Unknown spellings and custom
+        // commands must not be reclassified as the builtin transition.
+        assert!(!requires_idle_turn_for_slash(
+            &registry,
+            &"/NEW title".into()
+        ));
+        assert!(!requires_idle_turn_for_slash(&registry, &"/clearer".into()));
+
+        let mut custom = command_api::model::SlashCommand::default();
+        custom.name = "custom-clear".into();
+        custom.source = CommandSource::Settings(lingxi_core::types::SettingsScope::Project);
+        registry.register_command(custom);
+        assert!(!requires_idle_turn_for_slash(
+            &registry,
+            &"/custom-clear".into()
+        ));
+    }
+}
+
+pub(crate) fn source_text_eq_ascii(source: &Utf16JsonProjection, expected: &str) -> bool {
+    source
+        .string_units("")
+        .is_some_and(|units| units.iter().copied().eq(expected.encode_utf16()))
+}
+
+pub(crate) fn source_text_eq_ascii_ignore_case(
+    source: &Utf16JsonProjection,
+    expected: &str,
+) -> bool {
+    source.string_units("").is_some_and(|units| {
+        units.len() == expected.len()
+            && units
+                .iter()
+                .copied()
+                .zip(expected.bytes())
+                .all(|(unit, expected)| {
+                    unit <= 0x7f && (unit as u8).eq_ignore_ascii_case(&expected)
+                })
+    })
+}
+
+fn source_text_is_empty(source: &Utf16JsonProjection) -> bool {
+    source
+        .string_units("")
+        .is_some_and(|units| units.is_empty())
+}
+
+fn concat_source_text(parts: &[&Utf16JsonProjection]) -> Utf16JsonProjection {
+    let units = parts
+        .iter()
+        .flat_map(|part| {
+            part.string_units("")
+                .expect("slash prompt fragments are root strings")
+        })
+        .collect::<Vec<_>>();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display projection is derived from the exact UTF-16 units")
 }
 
 #[derive(Default)]
@@ -272,7 +436,6 @@ fn provider_model_catalog_from_listings(
 /// The production [`CommandRouter`]: wraps the real engine handles and lowers
 /// each reply with the pure `client::adapter::lowering` parity fns.
 pub struct EngineCommandRouter {
-    side_chats: Option<Arc<harness_runtime::side_chat::SideChatManager>>,
     session_cron: Option<Arc<cron::CronScheduler>>,
     cron_firer: Option<Arc<crate::cron_host::HostCronFirer>>,
     handle: Arc<dyn OrchestratorHandle>,
@@ -286,6 +449,13 @@ pub struct EngineCommandRouter {
     /// present it lets the router emit `SlashCommandCatalog` pulls and
     /// `CommandsChanged` pushes from the same live registry snapshot.
     slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
+    /// Ready parent and isolated recipe for RAM-only child conversations.
+    side_chat_runtime: Option<(
+        Arc<orchestrator::ConversationOrchestrator>,
+        Arc<dyn harness_runtime::side_chat::SideChatFactory>,
+    )>,
+    /// One child manager per bridge connection generation.
+    side_chat_manager: tokio::sync::Mutex<Option<Arc<harness_runtime::side_chat::SideChatManager>>>,
     /// Optional persisted-session catalog/replay context. Production boot wires
     /// it; lightweight users of the routing seam can omit it.
     session_store: Option<SessionStoreContext>,
@@ -351,6 +521,36 @@ impl EngineCommandRouter {
         self
     }
 
+    /// Install the ready parent and isolated factory used by side-chat wire commands.
+    pub(crate) fn with_side_chat_runtime(
+        mut self,
+        parent: Arc<orchestrator::ConversationOrchestrator>,
+        factory: Arc<dyn harness_runtime::side_chat::SideChatFactory>,
+    ) -> Self {
+        self.side_chat_runtime = Some((parent, factory));
+        self
+    }
+
+    async fn side_chat_manager(
+        &self,
+        owner: Arc<dyn ClientEventSink>,
+    ) -> Result<Arc<harness_runtime::side_chat::SideChatManager>, String> {
+        let mut manager = self.side_chat_manager.lock().await;
+        if let Some(manager) = manager.as_ref() {
+            return Ok(manager.clone());
+        }
+        let Some((parent, factory)) = &self.side_chat_runtime else {
+            return Err("side chat is unavailable on this bridge".into());
+        };
+        let created = harness_runtime::side_chat::SideChatManager::new(
+            parent.clone(),
+            factory.clone(),
+            owner,
+        );
+        *manager = Some(created.clone());
+        Ok(created)
+    }
+
     /// Move this process's live-session presence only after the engine has
     /// successfully activated the destination session.  The bridge process
     /// owns one mutable presence record, while durable coordinators retain
@@ -386,27 +586,30 @@ impl EngineCommandRouter {
 
     async fn dispatch_desktop_slash(
         &self,
-        raw: &str,
+        raw: &Utf16JsonProjection,
     ) -> Option<lingxi_core::host::SlashDispatchResult> {
         let parsed = parse_slash_command(raw)?;
-        match parsed.name.as_str() {
-            "diff" => {
-                let focus = parsed.raw_args.trim();
-                let prompt = if focus.is_empty() {
-                    "Inspect the current working tree and show the user the uncommitted diff. Do not modify any files.".to_string()
-                } else {
-                    format!(
-                        "Inspect the current working tree and show the user the uncommitted diff, focusing on: {focus}. Do not modify any files."
-                    )
-                };
-                Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt })
-            }
-            "plan" => Some(self.dispatch_desktop_plan(&parsed.raw_args).await),
-            _ => None,
+        if source_text_eq_ascii(&parsed.name, "diff") {
+            let focus = parsed.raw_args;
+            let prompt: Utf16JsonProjection = if source_text_is_empty(&focus) {
+                "Inspect the current working tree and show the user the uncommitted diff. Do not modify any files.".into()
+            } else {
+                let prefix: Utf16JsonProjection = "Inspect the current working tree and show the user the uncommitted diff, focusing on: ".into();
+                let suffix: Utf16JsonProjection = ". Do not modify any files.".into();
+                concat_source_text(&[&prefix, &focus, &suffix])
+            };
+            return Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt });
         }
+        if source_text_eq_ascii(&parsed.name, "plan") {
+            return Some(self.dispatch_desktop_plan(&parsed.raw_args).await);
+        }
+        None
     }
 
-    async fn dispatch_desktop_plan(&self, args: &str) -> lingxi_core::host::SlashDispatchResult {
+    async fn dispatch_desktop_plan(
+        &self,
+        args: &Utf16JsonProjection,
+    ) -> lingxi_core::host::SlashDispatchResult {
         let previous_permission = self
             .handle
             .permission_mode()
@@ -417,7 +620,7 @@ impl EngineCommandRouter {
         if previous_permission != "plan" {
             if let Err(error) = self.handle.set_permission_mode("plan").await {
                 return lingxi_core::host::SlashDispatchResult::Handled {
-                    display: format!("Could not enable plan mode: {error}"),
+                    display: format!("Could not enable plan mode: {error}").into(),
                 };
             }
             lingxi_core::host::live_sessions::set_process_permission_mode("plan", false);
@@ -432,24 +635,26 @@ impl EngineCommandRouter {
                     );
                 }
                 return lingxi_core::host::SlashDispatchResult::Handled {
-                    display: format!("Could not enable plan mode: {error}"),
+                    display: format!("Could not enable plan mode: {error}").into(),
                 };
             }
         }
 
-        let request = args.trim();
-        if request.is_empty() || matches!(request, "open" | "share") {
+        if source_text_is_empty(args)
+            || source_text_eq_ascii(args, "open")
+            || source_text_eq_ascii(args, "share")
+        {
             let display = if was_plan_mode {
                 "Plan mode is already enabled. The current plan is shown above the composer."
             } else {
                 "Plan mode enabled. The next request will be planned before any changes are made."
             };
             lingxi_core::host::SlashDispatchResult::Handled {
-                display: display.to_string(),
+                display: display.into(),
             }
         } else {
             lingxi_core::host::SlashDispatchResult::RunAsTurn {
-                prompt: request.to_string(),
+                prompt: args.clone(),
             }
         }
     }
@@ -464,7 +669,6 @@ impl EngineCommandRouter {
         slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
     ) -> Self {
         Self {
-            side_chats: None,
             cron_firer: None,
             session_cron: None,
             handle,
@@ -472,6 +676,8 @@ impl EngineCommandRouter {
             tasks,
             dispatcher,
             slash_registry,
+            side_chat_runtime: None,
+            side_chat_manager: tokio::sync::Mutex::new(None),
             session_store: None,
             session_agent_observer: None,
             team_registry: None,
@@ -491,14 +697,6 @@ impl EngineCommandRouter {
             file_changed_watcher: None,
             turn_active: AtomicBool::new(false),
         }
-    }
-
-    pub fn with_side_chats(
-        mut self,
-        manager: Arc<harness_runtime::side_chat::SideChatManager>,
-    ) -> Self {
-        self.side_chats = Some(manager);
-        self
     }
 
     /// Attach the runtime's shared credential manager so Desktop credential
@@ -718,6 +916,14 @@ impl CommandRouter for EngineCommandRouter {
             controller.stop().await;
         }
     }
+    async fn connection_closed(&self) {
+        let manager = self.side_chat_manager.lock().await.take();
+        if let Some(manager) = manager {
+            if let Err(error) = manager.shutdown().await {
+                tracing::warn!(%error, "side-chat shutdown reported cleanup failures");
+            }
+        }
+    }
     async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
         if self.team_registry.is_none() {
             return Err("desktop runtime snapshot is unavailable".into());
@@ -753,11 +959,15 @@ impl CommandRouter for EngineCommandRouter {
         Ok(events)
     }
 
-    async fn dispatch_slash(&self, raw: &str) -> Option<SlashDispatchOutcome> {
+    async fn dispatch_slash(
+        &self,
+        raw: Utf16JsonProjection,
+        cancellation: CancellationToken,
+    ) -> Option<SlashDispatchOutcome> {
         let before = self.capture_slash_authority().await;
-        let result = match self.dispatch_desktop_slash(raw).await {
+        let result = match self.dispatch_desktop_slash(&raw).await {
             Some(result) => result,
-            None => self.dispatcher.as_ref()?.dispatch(raw).await,
+            None => self.dispatcher.as_ref()?.dispatch(raw, cancellation).await,
         };
         // Display-only feedback belongs to the client's command surface. Persist
         // actual task turns and command effects through their existing paths.
@@ -768,19 +978,19 @@ impl CommandRouter for EngineCommandRouter {
         })
     }
 
+    async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
+        let Some(registry) = self.slash_registry.as_ref() else {
+            return false;
+        };
+        requires_idle_turn_for_slash(&*registry.read().await, raw)
+    }
+
     // The full command dispatch is one match over the command surface; splitting
     // it would scatter the one-place-routes-everything map this module exists to
     // be. (Same convention as `harness_runtime::desktop::build`.)
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
-            command @ (ClientCommand::SideChatCreate { .. }
-            | ClientCommand::SideChatList {}
-            | ClientCommand::SideChatGet { .. }
-            | ClientCommand::SideChatEnd { .. }
-            | ClientCommand::SideChatSubmit { .. }) => {
-                self.route_side_chat(command, sink).await;
-            }
             ClientCommand::StartRealtimeAudio { request_json } => {
                 if let Some(controller) = &self.realtime_audio {
                     controller.start(request_json, sink).await;
@@ -816,11 +1026,11 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
             }
             ClientCommand::UiClientModule { request_id, plugin } => {
-                let request = Ok(serde_json::json!({
-                    "subtype": "ui_client_module",
-                    "plugin": plugin,
-                })
-                .into());
+                let request = Ok(Utf16JsonProjection::object(vec![
+                    ("subtype".to_owned(), "ui_client_module".into()),
+                    ("plugin".to_owned(), plugin.into()),
+                ])
+                .expect("generated Mod UI module request is an object"));
                 self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
                     .await;
             }
@@ -892,6 +1102,129 @@ impl CommandRouter for EngineCommandRouter {
                     client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
                 self.dispatch_mod_ui_client_operation_result(request_id, operation, sink.as_ref())
                     .await;
+            }
+            ClientCommand::SideChatCreate {
+                request_id,
+                initial_input,
+            } => {
+                let manager = self.side_chat_manager(sink.clone()).await;
+                let result = match manager {
+                    Ok(manager) => {
+                        manager
+                            .create(request_id.clone(), initial_input, None, None)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(message) = result {
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: Some(request_id),
+                        side_id: None,
+                        message,
+                    })
+                    .await;
+                }
+            }
+            ClientCommand::SideChatList {} => match self.side_chat_manager(sink.clone()).await {
+                Ok(manager) => {
+                    sink.emit(ClientEvent::SideChatList {
+                        side_ids: manager.list().await,
+                    })
+                    .await;
+                }
+                Err(message) => {
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: None,
+                        side_id: None,
+                        message,
+                    })
+                    .await;
+                }
+            },
+            ClientCommand::SideChatGet { side_id } => {
+                match self.side_chat_manager(sink.clone()).await {
+                    Ok(manager) => {
+                        if let Err(message) = manager.emit_snapshot(&side_id).await {
+                            sink.emit(ClientEvent::SideChatError {
+                                request_id: None,
+                                side_id: Some(side_id),
+                                message,
+                            })
+                            .await;
+                        }
+                    }
+                    Err(message) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: None,
+                            side_id: Some(side_id),
+                            message,
+                        })
+                        .await;
+                    }
+                }
+            }
+            ClientCommand::SideChatEnd { side_id } => {
+                match self.side_chat_manager(sink.clone()).await {
+                    Ok(manager) => match manager.end(&side_id).await {
+                        Ok(()) => {
+                            sink.emit(ClientEvent::SideChatEnded { side_id }).await;
+                        }
+                        Err(message) => {
+                            sink.emit(ClientEvent::SideChatError {
+                                request_id: None,
+                                side_id: Some(side_id),
+                                message,
+                            })
+                            .await;
+                        }
+                    },
+                    Err(message) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: None,
+                            side_id: Some(side_id),
+                            message,
+                        })
+                        .await;
+                    }
+                }
+            }
+            ClientCommand::SideChatSubmit {
+                side_id,
+                request_id,
+                command_json,
+            } => {
+                let manager = match self.side_chat_manager(sink.clone()).await {
+                    Ok(manager) => manager,
+                    Err(message) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: Some(request_id),
+                            side_id: Some(side_id),
+                            message,
+                        })
+                        .await;
+                        return;
+                    }
+                };
+                let command = match serde_json::from_str::<ClientCommand>(&command_json) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        sink.emit(ClientEvent::SideChatError {
+                            request_id: Some(request_id),
+                            side_id: Some(side_id),
+                            message: format!("invalid nested side-chat command: {error}"),
+                        })
+                        .await;
+                        return;
+                    }
+                };
+                if let Err(message) = manager.submit(&side_id, request_id.clone(), command).await {
+                    sink.emit(ClientEvent::SideChatError {
+                        request_id: Some(request_id),
+                        side_id: Some(side_id),
+                        message,
+                    })
+                    .await;
+                }
             }
             // Both arms write the durable automation store — `started` binds a
             // session id into it, `complete` records a run result — so they sit
@@ -1267,13 +1600,57 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Rejected,
-                            message: format!("set_permission_mode failed: {e}"),
+                            message: format!("set_permission_mode failed: {e}").into(),
                         })
                         .await;
                     }
                 }
                 self.emit_controls_snapshot(&*sink).await;
             }
+            ClientCommand::InitializeProactivity {
+                proactivity,
+                reinitialize,
+            } => match self
+                .handle
+                .apply_native_proactivity_initialize(proactivity, reinitialize.unwrap_or(false))
+                .await
+            {
+                Ok(()) => self.emit_controls_snapshot(&*sink).await,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("initialize_proactivity failed: {error}").into(),
+                    })
+                    .await;
+                }
+            },
+            ClientCommand::SetProactivityLevel {
+                level,
+                offer_bypass,
+            } => match self
+                .handle
+                .set_native_proactivity_level(&level, offer_bypass)
+                .await
+            {
+                Ok(response) => {
+                    lingxi_core::host::live_sessions::set_process_permission_mode(
+                        &response.permission_mode,
+                        response.permission_mode == "bypassPermissions",
+                    );
+                    sink.emit(ClientEvent::PermissionModeChanged {
+                        mode: response.permission_mode,
+                    })
+                    .await;
+                    self.emit_controls_snapshot(&*sink).await;
+                }
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("set_proactivity_level failed: {error}").into(),
+                    })
+                    .await;
+                }
+            },
 
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::GetAudioSessionContext => {
@@ -1293,7 +1670,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(message) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Rejected,
-                            message,
+                            message: message.into(),
                         })
                         .await;
                     }
@@ -1301,17 +1678,32 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
-                let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);
+                let model_selection = model.into_projection();
+                let (source, route_hint) = split_model_selection_source(model_selection, &listings);
                 match self
                     .handle
-                    .switch_model(&model_id, profile.as_deref())
+                    .select_model(lingxi_core::host::ModelSelectionRequest::Select {
+                        source,
+                        route_hint,
+                        origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                        validation:
+                            lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+                    })
                     .await
                 {
                     Ok(()) => {
-                        let selected =
-                            lingxi_core::host::qualified_model_ref(&model_id, profile.as_deref());
-                        sink.emit(ClientEvent::ModelChanged { model: selected })
-                            .await;
+                        let current = self.handle.get_status_snapshot().await;
+                        let selected = lingxi_core::host::qualified_model_ref(
+                            &current.model,
+                            current.model_profile.as_deref(),
+                        );
+                        sink.emit(ClientEvent::ModelChanged {
+                            model: selected,
+                            model_source: current.model_source.as_ref().and_then(|source| {
+                                client::protocol::text::ClientTextDto::from_projection(source).ok()
+                            }),
+                        })
+                        .await;
                         if self.persisted_reasoning_selection().is_some() {
                             if self.restore_persisted_reasoning_selection().await.is_err() {
                                 let _ = self
@@ -1340,7 +1732,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("switch_model failed: {e}"),
+                            message: format!("switch_model failed: {e}").into(),
                         })
                         .await;
                     }
@@ -1364,7 +1756,7 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(error) = self.handle.set_reasoning_selection(requested).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("set_reasoning_selection failed: {error}"),
+                        message: format!("set_reasoning_selection failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1404,7 +1796,7 @@ impl CommandRouter for EngineCommandRouter {
                     let _ = self.persist_reasoning_selection(&previous_default);
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("persist reasoning selection failed: {error}"),
+                        message: format!("persist reasoning selection failed: {error}").into(),
                     })
                     .await;
                 }
@@ -1414,7 +1806,7 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(error) = self.handle.set_fast_mode(enabled).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
-                        message: format!("set_fast_mode failed: {error}"),
+                        message: format!("set_fast_mode failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1427,53 +1819,15 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Slash commands ──────────────────────────────────────────────
-            ClientCommand::RunSlashCommand { raw, turn_id } => {
-                if let Some(dispatcher) = self.dispatcher.as_ref() {
-                    let before = self.capture_slash_authority().await;
-                    let context = command_api::ModCommandRunContext {
-                        origin: serde_json::json!({"kind":"bridge"}),
-                        is_fullscreen: false,
-                        columns: 80,
-                    };
-                    let (display, is_error) = match command_api::with_mod_command_context(
-                        context,
-                        dispatcher.dispatch(&raw),
-                    )
-                    .await
-                    {
-                        lingxi_core::host::SlashDispatchResult::Handled { display } => {
-                            (display, false)
-                        }
-                        lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
-                            (display, true)
-                        }
-                        // A `type: "prompt"` command reached the display-only
-                        // fallback (the connection should have intercepted it via
-                        // `dispatch_slash` and run it as a turn). Surface the
-                        // expanded prompt so nothing is silently dropped.
-                        lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
-                            (prompt, false)
-                        }
-                        lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
-                            (format!("not a slash command: {raw}"), true)
-                        }
-                    };
-                    sink.emit(ClientEvent::SlashCommandResult {
-                        turn_id,
-                        display,
-                        is_error,
-                    })
-                    .await;
-                    let after = self.capture_slash_authority().await;
-                    self.emit_slash_authority_changes(&before, &after, &*sink)
-                        .await;
-                } else {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: "no slash-command dispatcher wired".into(),
-                    })
-                    .await;
-                }
+            ClientCommand::RunSlashCommand { turn_id: _, .. } => {
+                // Slash expansion is admitted by BridgeConnection, which owns
+                // the cancellation token and the active-turn identity. A router
+                // fallback has neither authority and must never expand work.
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "slash command requires connection-owned admission".into(),
+                })
+                .await;
             }
 
             // ── Listings ─────────────────────────────────────────────────────
@@ -1491,19 +1845,37 @@ impl CommandRouter for EngineCommandRouter {
 
             // ── Settings ─────────────────────────────────────────────────────
             ClientCommand::UpdatePromptSuggestionContext {
-                session_id, focus, input_empty, pending_permission, elicitation_active,
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
             } => {
-                let _ = self.handle.update_prompt_suggestion_context(
-                    lingxi_core::host::orchestrator::PromptSuggestionContext {
-                        session_id, focus, input_empty, pending_permission, elicitation_active,
-                    },
-                ).await;
+                let _ = self
+                    .handle
+                    .update_prompt_suggestion_context(
+                        lingxi_core::host::orchestrator::PromptSuggestionContext {
+                            session_id,
+                            focus,
+                            input_empty,
+                            pending_permission,
+                            elicitation_active,
+                        },
+                    )
+                    .await;
             }
             ClientCommand::RecordPromptSuggestionSubmission { text } => {
                 let _ = self.handle.record_prompt_suggestion_submission(&text).await;
             }
-            ClientCommand::PromptSuggestionFeedback { session_id, uuid, action } => {
-                let _ = self.handle.prompt_suggestion_feedback(&session_id, &uuid, &action).await;
+            ClientCommand::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            } => {
+                let _ = self
+                    .handle
+                    .prompt_suggestion_feedback(&session_id, &uuid, &action)
+                    .await;
             }
             ClientCommand::UpdateSettings {
                 destination,
@@ -1576,7 +1948,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("login failed: {e}"),
+                            message: format!("login failed: {e}").into(),
                         })
                         .await;
                         lower_auth_state(self.auth.current_user().await)
@@ -1600,7 +1972,7 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(e) = self.auth.logout().await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("logout failed: {e}"),
+                        message: format!("logout failed: {e}").into(),
                     })
                     .await;
                 }
@@ -1617,14 +1989,17 @@ impl CommandRouter for EngineCommandRouter {
                         messages_before: summary.messages_before,
                         messages_after: summary.messages_after,
                         bytes_saved: summary.bytes_saved,
-                        summary: summary.summary,
+                        summary: client::protocol::text::ClientTextDto::from_projection(
+                            &summary.summary,
+                        )
+                        .expect("compaction summary is text"),
                     })
                     .await;
                 }
                 Err(e) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("force_compact failed: {e}"),
+                        message: format!("force_compact failed: {e}").into(),
                     })
                     .await;
                 }
@@ -1655,7 +2030,7 @@ impl CommandRouter for EngineCommandRouter {
                         sink.emit(ClientEvent::SessionEnded).await;
                         if let Some(message) = presence_warning {
                             sink.emit(ClientEvent::SystemNotice {
-                                message,
+                                message: message.into(),
                                 is_error: false,
                             })
                             .await;
@@ -1664,7 +2039,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("clear_session failed: {e}"),
+                            message: format!("clear_session failed: {e}").into(),
                         })
                         .await;
                     }
@@ -1684,11 +2059,37 @@ impl CommandRouter for EngineCommandRouter {
                     return;
                 }
 
+                let requested_model = match model {
+                    Some(model) => {
+                        let listings = self.handle.list_model_listings().await;
+                        let (source, route_hint) =
+                            split_model_selection_source(model.into_projection(), &listings);
+                        Some(lingxi_core::host::ModelSelectionRequest::Select {
+                            source,
+                            route_hint,
+                            origin: lingxi_core::host::ModelSelectionOrigin::Sdk,
+                            validation:
+                                lingxi_core::host::ModelValidationMode::GzrAbortAfterFiveSeconds,
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(request) = requested_model.as_ref() {
+                    if let Err(error) = self.handle.validate_model_selection(request).await {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("new session model validation failed: {error}").into(),
+                        })
+                        .await;
+                        return;
+                    }
+                }
+
                 let previous_session_id = self.handle.current_session_id().await;
                 if let Err(error) = self.handle.clear_session().await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("new session (clear_session) failed: {error}"),
+                        message: format!("new session (clear_session) failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1698,17 +2099,11 @@ impl CommandRouter for EngineCommandRouter {
                     .refresh_process_session_presence(previous_session_id, current_session_id)
                     .await;
 
-                if let Some(model) = model {
-                    let listings = self.handle.list_model_listings().await;
-                    let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);
-                    if let Err(error) = self
-                        .handle
-                        .switch_model(&model_id, profile.as_deref())
-                        .await
-                    {
+                if let Some(request) = requested_model {
+                    if let Err(error) = self.handle.select_model(request).await {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("new session model switch failed: {error}"),
+                            message: format!("new session model switch failed: {error}").into(),
                         })
                         .await;
                         return;
@@ -1724,7 +2119,7 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
-                        message,
+                        message: message.into(),
                         is_error: false,
                     })
                     .await;
@@ -1747,7 +2142,8 @@ impl CommandRouter for EngineCommandRouter {
                             kind: ErrorKindDto::Protocol,
                             message: format!(
                                 "resume: malformed session id {session_id:?}: {error}"
-                            ),
+                            )
+                            .into(),
                         })
                         .await;
                         return;
@@ -1775,7 +2171,8 @@ impl CommandRouter for EngineCommandRouter {
                     Err(error) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Protocol,
-                            message: format!("resume: session {session_id} not resumable: {error}"),
+                            message: format!("resume: session {session_id} not resumable: {error}")
+                                .into(),
                         })
                         .await;
                         return;
@@ -1801,7 +2198,7 @@ impl CommandRouter for EngineCommandRouter {
                     if let Err(error) = self.handle.set_permission_mode("plan").await {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("resume plan permission mode failed: {error}"),
+                            message: format!("resume plan permission mode failed: {error}").into(),
                         })
                         .await;
                         return;
@@ -1813,7 +2210,7 @@ impl CommandRouter for EngineCommandRouter {
                             .await;
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("resume plan mode failed: {error}"),
+                            message: format!("resume plan mode failed: {error}").into(),
                         })
                         .await;
                         return;
@@ -1847,7 +2244,7 @@ impl CommandRouter for EngineCommandRouter {
                     }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("resume_session failed: {error}"),
+                        message: format!("resume_session failed: {error}").into(),
                     })
                     .await;
                     return;
@@ -1878,7 +2275,7 @@ impl CommandRouter for EngineCommandRouter {
                 }
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
-                        message,
+                        message: message.into(),
                         is_error: false,
                     })
                     .await;
@@ -1898,6 +2295,9 @@ impl CommandRouter for EngineCommandRouter {
                             &status.model,
                             status.model_profile.as_deref(),
                         ),
+                        model_source: status.model_source.as_ref().and_then(|source| {
+                            client::protocol::text::ClientTextDto::from_projection(source).ok()
+                        }),
                     })
                     .await;
                 }
@@ -1936,7 +2336,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("task output failed: {e}"),
+                            message: format!("task output failed: {e}").into(),
                         })
                         .await;
                     }
@@ -1954,10 +2354,12 @@ impl CommandRouter for EngineCommandRouter {
                     })
                     .await;
                 } else {
+                    let message =
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from(message);
                     match self.tasks.send_human_task_message(&task_id, &message).await {
                         Ok(()) => {
                             sink.emit(ClientEvent::SystemNotice {
-                                message: format!("Message accepted for task {task_id}"),
+                                message: format!("Message accepted for task {task_id}").into(),
                                 is_error: false,
                             })
                             .await
@@ -1965,7 +2367,7 @@ impl CommandRouter for EngineCommandRouter {
                         Err(error) => {
                             sink.emit(ClientEvent::Error {
                                 kind: ErrorKindDto::Rejected,
-                                message: format!("task message failed: {error}"),
+                                message: format!("task message failed: {error}").into(),
                             })
                             .await
                         }
@@ -1988,7 +2390,7 @@ impl CommandRouter for EngineCommandRouter {
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
-                            message: format!("task stop failed: {e}"),
+                            message: format!("task stop failed: {e}").into(),
                         })
                         .await;
                     }
@@ -2002,7 +2404,9 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::ResumeWorkflow { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "resume_workflow is unavailable on this bridge".to_string(),
+                    message: "resume_workflow is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
@@ -2025,21 +2429,27 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::AttachTurn { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "attach_turn is unavailable on this bridge".to_string(),
+                    message: "attach_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
             ClientCommand::ResumeTurn { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "resume_turn is unavailable on this bridge".to_string(),
+                    message: "resume_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
             ClientCommand::PauseTurn { .. } => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Rejected,
-                    message: "pause_turn is unavailable on this bridge".to_string(),
+                    message: "pause_turn is unavailable on this bridge"
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
@@ -2058,6 +2468,25 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+}
+
+pub(crate) fn requires_idle_turn_for_slash(
+    registry: &CommandRegistry,
+    raw: &Utf16JsonProjection,
+) -> bool {
+    let Some(parsed) = parse_slash_command(raw) else {
+        return false;
+    };
+    let Some(command) = registry.resolve(&parsed.name) else {
+        return false;
+    };
+    // The current registry resolves declared aliases (for example `new` and
+    // `reset`) to the canonical `/clear` builtin. Check the resolved source and
+    // name rather than comparing user text, so custom commands and unknown or
+    // case-mismatched spellings keep their ordinary dispatch behavior.
+    command.source == CommandSource::Builtin
+        && (source_text_eq_ascii(&command.name, "clear")
+            || source_text_eq_ascii(&command.name, "compact"))
 }
 
 /// Serve the access token of the Codex session the desktop sent. Returns the
@@ -2129,6 +2558,10 @@ mod scheduled_chat_anchor_tests;
 #[path = "router/tests/runtime_snapshot_tests.rs"]
 mod runtime_snapshot_tests;
 
+#[cfg(test)]
+#[path = "router/tests/side_chat_shutdown_tests.rs"]
+mod side_chat_shutdown_tests;
+
 mod catalog;
 mod configuration;
 mod sessions;
@@ -2143,72 +2576,3 @@ pub use tasks::TaskPoll;
 
 #[cfg(test)]
 use configuration::parse_mcp_config_json;
-
-impl EngineCommandRouter {
-    async fn route_side_chat(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
-        let (request_id, side_id) = match &command {
-            ClientCommand::SideChatCreate { request_id, .. } => (Some(request_id.clone()), None),
-            ClientCommand::SideChatSubmit {
-                side_id,
-                request_id,
-                ..
-            } => (Some(request_id.clone()), Some(side_id.clone())),
-            ClientCommand::SideChatGet { side_id } | ClientCommand::SideChatEnd { side_id } => {
-                (None, Some(side_id.clone()))
-            }
-            _ => (None, None),
-        };
-        let result: Result<Option<ClientEvent>, String> = async {
-            let manager = self
-                .side_chats
-                .as_ref()
-                .ok_or_else(|| "Side Chat is unavailable".to_owned())?;
-            match command {
-                ClientCommand::SideChatCreate {
-                    request_id,
-                    initial_input,
-                } => {
-                    manager
-                        .create(request_id, initial_input, None, None)
-                        .await?;
-                    Ok(None)
-                }
-                ClientCommand::SideChatList {} => Ok(Some(ClientEvent::SideChatList {
-                    side_ids: manager.list().await,
-                })),
-                ClientCommand::SideChatGet { side_id } => {
-                    manager.emit_snapshot(&side_id).await?;
-                    Ok(None)
-                }
-                ClientCommand::SideChatEnd { side_id } => {
-                    manager.end(&side_id).await?;
-                    Ok(Some(ClientEvent::SideChatEnded { side_id }))
-                }
-                ClientCommand::SideChatSubmit {
-                    side_id,
-                    request_id,
-                    command_json,
-                } => {
-                    let child = serde_json::from_str(&command_json)
-                        .map_err(|e| format!("Invalid Side Chat command: {e}"))?;
-                    manager.submit(&side_id, request_id.clone(), child).await?;
-                    Ok(None)
-                }
-                _ => Err("Invalid Side Chat command".to_owned()),
-            }
-        }
-        .await;
-        match result {
-            Ok(Some(event)) => sink.emit(event).await,
-            Ok(None) => {}
-            Err(message) => {
-                sink.emit(ClientEvent::SideChatError {
-                    request_id,
-                    side_id,
-                    message,
-                })
-                .await
-            }
-        }
-    }
-}

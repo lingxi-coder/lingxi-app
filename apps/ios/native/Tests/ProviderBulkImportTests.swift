@@ -3,6 +3,55 @@ import XCTest
 
 final class ProviderBulkImportTests: XCTestCase {
 
+    func testOutputDefaultRequiresPositiveU32AndAllowsRuntimeClamping() throws {
+        let valid = ["null", "1", "8192", "4294967295"]
+        for budget in valid + ["0", "-1", "1.5", "4294967296", "true", #""8192""#] {
+            let input = #"{"providers":{"custom":{"type":"openai","baseUrl":"https://example.test/v1","apiKeyEnv":"API_KEY","models":[{"id":"m","metadata":{"maxOutputTokens":4096,"applicationOutputTokens":\#(budget)}}]}}}"#
+            let document = ProviderBulkImport.parse(input, existing: [:])
+            let entry = try XCTUnwrap(document.entries.first)
+            if valid.contains(budget) {
+                XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+                XCTAssertNoThrow(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+            } else {
+                XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+                XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+            }
+        }
+    }
+
+    func testContextPolicyImportAndValidation() throws {
+        let valid = [
+            #"{"application":{"mode":"auto"}}"#,
+            #"{"application":{"mode":"long"}}"#,
+            #"{"sharedWindow":true,"recommendation":{"inputTokens":4000,"source":"https://example.test/model","verifiedAt":"2026-10-15"},"application":{"mode":"custom","input_tokens":200000}}"#,
+        ]
+        let invalid = [
+            #"{"sharedWindow":"true"}"#, #"{"thinkingMaxInputTokens":0}"#,
+            #"{"recommendation":{"inputTokens":3000}}"#,
+            #"{"application":{"mode":"custom","input_tokens":0}}"#,
+            #"{"application":{"mode":"custom","input_tokens":"8192"}}"#,
+            #"{"application":{"mode":"auto","input_tokens":8192}}"#,
+            #"{"application":{"mode":"unknown"}}"#,
+        ]
+        for context in valid + invalid {
+            let input = #"{"providers":{"custom":{"type":"openai","baseUrl":"https://example.test/v1","apiKeyEnv":"API_KEY","models":[{"id":"m","metadata":{"context":\#(context)}}]}}}"#
+            let document = ProviderBulkImport.parse(input, existing: [:])
+            let entry = try XCTUnwrap(document.entries.first)
+            if valid.contains(context) {
+                XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+                let merged = try ProviderBulkImport.merge(document.entries, into: [:], configured: [])
+                let provider = try XCTUnwrap(merged["custom"] as? [String: Any])
+                let models = try XCTUnwrap(provider["models"] as? [[String: Any]])
+                let metadata = try XCTUnwrap(models.first?["metadata"] as? [String: Any])
+                let saved = try XCTUnwrap(metadata["context"] as? NSDictionary)
+                XCTAssertEqual(saved, try JSONSerialization.jsonObject(with: Data(context.utf8)) as? NSDictionary)
+            } else {
+                XCTAssertNotNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+                XCTAssertThrowsError(try ProviderBulkImport.merge(document.entries, into: [:], configured: []))
+            }
+        }
+    }
+
     func testProviderRegionsSurviveImportAndMerge() throws {
         let regionPolicies: [[String]] = [["china_mainland"], ["international"], []]
         for regions in regionPolicies {

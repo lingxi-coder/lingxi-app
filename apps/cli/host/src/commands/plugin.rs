@@ -3635,11 +3635,11 @@ async fn validate_component_file(
     // intentionally fail-open behavior.
     match kind {
         ComponentKind::Skill => {
-            let _ = skill_api::parse_skill_markdown(
+            let _ = skill::parse_skill_markdown(
                 &raw,
                 path.to_path_buf(),
-                skill_api::SkillSource::Plugin,
-                skill_api::LoadedFrom::Plugin,
+                skill::SkillSource::Plugin,
+                skill::LoadedFrom::Plugin,
             );
         }
         ComponentKind::Agent => {

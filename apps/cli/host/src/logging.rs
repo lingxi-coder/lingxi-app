@@ -6,16 +6,22 @@
 //! Output goes to stderr so it doesn't interfere with the conversation
 //! transcript on stdout. The `NO_COLOR` env var suppresses ANSI escapes.
 
+use harness_runtime::desktop::NativePolicyWarningLogger;
 use std::fs::File;
-use std::io::IsTerminal;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Directory the per-run debug log lives in, and the name of the pointer file
 /// `memory::retention` preserves while sweeping stale siblings.
 const DEBUG_DIR: &str = "debug";
 const LATEST: &str = "latest";
+
+fn active_debug_sink() -> &'static Mutex<Option<FileSink>> {
+    static ACTIVE: OnceLock<Mutex<Option<FileSink>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(None))
+}
 
 /// A `MakeWriter` over one shared file handle.
 ///
@@ -87,6 +93,134 @@ fn open_debug_log_in(dir: &std::path::Path) -> Option<FileSink> {
 /// (e.g. from a second test in the same process) are silent no-ops.
 pub fn init(debug: bool, suppress_terminal: bool) {
     init_with_sink(debug, suppress_terminal, &open_debug_log);
+}
+
+/// Initialize the launch-specific debug sink once and share that same file
+/// handle with Native policy warning delivery. Explicit `--debug-file` keeps
+/// its caller-selected path; the ordinary debug launch uses the existing
+/// per-run log and `latest` pointer.
+pub fn init_for_launch(argv: &super::argv::Argv, suppress_terminal: bool) {
+    let debug = native_debug_enabled(argv);
+    let sink = if debug {
+        match argv.debug_file.as_deref() {
+            Some(path) => open_debug_log_at(path),
+            None => open_debug_log(),
+        }
+    } else {
+        None
+    };
+    *active_debug_sink()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = sink.clone();
+    init_with_sink(debug, suppress_terminal, &|| sink.clone());
+}
+
+/// Construct the CLI-owned source warning sink after launch logging has been
+/// initialized. A missing debug launch leaves Native's `isAnt=false` gate
+/// silent; no provider identity is used to infer that gate.
+pub(crate) fn native_policy_warning_logger(
+    argv: &super::argv::Argv,
+) -> Option<Arc<dyn NativePolicyWarningLogger>> {
+    let debug_enabled = native_debug_enabled(argv);
+    if !debug_enabled {
+        return None;
+    }
+    let file_sink = if argv.debug_to_stderr {
+        None
+    } else {
+        active_debug_sink()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    };
+    Some(Arc::new(CliNativePolicyWarningLogger {
+        is_ant: false,
+        debug_enabled,
+        to_stderr: argv.debug_to_stderr,
+        minimum_level: NativeWarningLevel::from_environment(),
+        filter_source_units: argv
+            .debug_filter()
+            .map(|source| source.encode_utf16().collect()),
+        file_sink,
+    }))
+}
+
+fn native_debug_enabled(argv: &super::argv::Argv) -> bool {
+    argv.debug_enabled()
+        || ["DEBUG", "DEBUG_SDK"]
+            .into_iter()
+            .any(|key| lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref()))
+}
+
+fn open_debug_log_at(path: &Path) -> Option<FileSink> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let file = File::options().create(true).append(true).open(path).ok()?;
+    Some(FileSink(Arc::new(Mutex::new(file))))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeWarningLevel {
+    Verbose,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl NativeWarningLevel {
+    fn from_environment() -> Self {
+        match std::env::var("CLAUDE_CODE_DEBUG_LOG_LEVEL")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("verbose") => Self::Verbose,
+            Some("debug") => Self::Debug,
+            Some("info") => Self::Info,
+            Some("warn") => Self::Warn,
+            Some("error") => Self::Error,
+            _ => Self::Debug,
+        }
+    }
+
+    fn allows_warning(self) -> bool {
+        self != Self::Error
+    }
+}
+
+struct CliNativePolicyWarningLogger {
+    is_ant: bool,
+    debug_enabled: bool,
+    to_stderr: bool,
+    minimum_level: NativeWarningLevel,
+    filter_source_units: Option<Vec<u16>>,
+    file_sink: Option<FileSink>,
+}
+
+impl NativePolicyWarningLogger for CliNativePolicyWarningLogger {
+    fn warning_enabled(&self) -> bool {
+        (self.is_ant || self.debug_enabled) && self.minimum_level.allows_warning()
+    }
+
+    fn filter_source_units(&self) -> Option<Vec<u16>> {
+        self.filter_source_units.clone()
+    }
+
+    fn write_rendered_warning(&self, line_units: &[u16]) {
+        let Ok(rendered) = String::from_utf16(line_units) else {
+            return;
+        };
+        if self.to_stderr {
+            let _ = std::io::stderr().write_all(rendered.as_bytes());
+        } else if let Some(mut sink) = self.file_sink.clone() {
+            let _ = sink.write_all(rendered.as_bytes());
+        }
+    }
 }
 
 /// The testable half of [`init`]: everything except resolving the sink.
@@ -175,6 +309,64 @@ fn supports_color() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_policy_warning_sink_keeps_filter_source_and_applies_debug_level_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.log");
+        let file = File::options()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let sink = FileSink(Arc::new(Mutex::new(file)));
+        let filter_source_units = "policyHelper".encode_utf16().collect::<Vec<_>>();
+        let logger = CliNativePolicyWarningLogger {
+            is_ant: false,
+            debug_enabled: true,
+            to_stderr: false,
+            minimum_level: NativeWarningLevel::Warn,
+            filter_source_units: Some(filter_source_units.clone()),
+            file_sink: Some(sink.clone()),
+        };
+        assert!(logger.warning_enabled());
+        assert_eq!(logger.filter_source_units(), Some(filter_source_units));
+
+        let line = "2026-10-13T12:34:56.789Z [WARN] policyHelper: warning one\n";
+        logger.write_rendered_warning(&line.encode_utf16().collect::<Vec<_>>());
+        let mut flushed_sink = sink.clone();
+        flushed_sink.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), line);
+
+        let disabled = CliNativePolicyWarningLogger {
+            debug_enabled: false,
+            file_sink: logger.file_sink.clone(),
+            ..logger
+        };
+        assert!(!disabled.warning_enabled());
+    }
+
+    #[test]
+    fn native_policy_warning_sink_encodes_only_already_escaped_utf16_at_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.log");
+        let file = File::options()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let logger = CliNativePolicyWarningLogger {
+            is_ant: false,
+            debug_enabled: true,
+            to_stderr: false,
+            minimum_level: NativeWarningLevel::Warn,
+            filter_source_units: None,
+            file_sink: Some(FileSink(Arc::new(Mutex::new(file)))),
+        };
+        let line = "2026-10-13T12:34:56.789Z [WARN] \"first\\n\\ud800 paired 😀\"\n";
+        logger.write_rendered_warning(&line.encode_utf16().collect::<Vec<_>>());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), line);
+    }
 
     #[test]
     fn init_with_debug_does_not_panic() {

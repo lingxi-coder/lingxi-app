@@ -35,12 +35,12 @@ import XCTest
             hidden: Bool = false
         ) -> SlashCommandDto {
             SlashCommandDto(
-                name: name,
-                description: description,
+                name: name.clientTextDto,
+                description: description.clientTextDto,
                 source: "builtin",
-                aliases: aliases,
-                argumentHint: argumentHint,
-                argumentNames: argumentNames,
+                aliases: aliases.map(\.clientTextDto),
+                argumentHint: argumentHint?.clientTextDto,
+                argumentNames: argumentNames.map(\.clientTextDto),
                 menuDescription: menuDescription,
                 hidden: hidden
             )
@@ -275,22 +275,22 @@ import XCTest
             guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected runSlashCommand")
             }
-            XCTAssertEqual(raw, "/help topic")
+            XCTAssertEqual(raw.codeUnits, Array("/help topic".utf16))
             XCTAssertNotNil(turnId)
 
             submitted.removeAll()
-            source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output", isError: false))
+            source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output".clientTextDto, isError: false))
             XCTAssertNotNil(source.send("  /help spaced topic  "))
             await flushTasks()
             guard case let .runSlashCommand(spacedRaw, spacedTurnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected normalized runSlashCommand")
             }
-            XCTAssertEqual(spacedRaw, "/help spaced topic")
+            XCTAssertEqual(spacedRaw.codeUnits, Array("/help spaced topic".utf16))
 
             submitted.removeAll()
             source.applyForTesting(.slashCommandResult(
                 turnId: spacedTurnId,
-                display: "spaced help output",
+                display: "spaced help output".clientTextDto,
                 isError: false
             ))
             XCTAssertNotNil(source.send("/unknown"))
@@ -298,7 +298,7 @@ import XCTest
             guard case let .sendPrompt(text, _, _, unknownTurnId, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected sendPrompt for unknown slash")
             }
-            XCTAssertEqual(text, "/unknown")
+            XCTAssertEqual(text.codeUnits, Array("/unknown".utf16))
             XCTAssertNotNil(unknownTurnId)
         }
 
@@ -320,7 +320,7 @@ import XCTest
 
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
-                display: "Available commands",
+                display: "Available commands".clientTextDto,
                 isError: false
             ))
 
@@ -373,7 +373,7 @@ import XCTest
                 messagesBefore: 20,
                 messagesAfter: 7,
                 bytesSaved: 4096,
-                summary: "kept context"
+                summary: "kept context".clientTextDto
             ))
             XCTAssertEqual(source.model.compactionStatus, .completed(
                 messagesBefore: 20,
@@ -392,7 +392,7 @@ import XCTest
 
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
-                display: "Compacted (ctrl+o to see full summary)",
+                display: "Compacted (ctrl+o to see full summary)".clientTextDto,
                 isError: false
             ))
             XCTAssertEqual(source.model.compactionStatus, .completed(
@@ -428,7 +428,7 @@ import XCTest
             await flushTasks()
             source.applyForTesting(.slashCommandResult(
                 turnId: token.clientTurnId,
-                display: "Not enough messages to compact.",
+                display: "Not enough messages to compact.".clientTextDto,
                 isError: false
             ))
 
@@ -453,7 +453,7 @@ import XCTest
             guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected runSlashCommand")
             }
-            XCTAssertEqual(raw, "/rv staged")
+            XCTAssertEqual(raw.codeUnits, Array("/rv staged".utf16))
             XCTAssertEqual(turnId, token.clientTurnId)
             XCTAssertTrue(source.model.slashCommandPending)
             XCTAssertFalse(source.model.streaming)
@@ -461,7 +461,7 @@ import XCTest
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
             XCTAssertFalse(source.model.slashCommandPending)
             XCTAssertTrue(source.model.streaming)
-            source.applyForTesting(.textDelta(text: "review result"))
+            source.applyForTesting(.textDelta(text: "review result".clientTextDto))
             source.applyForTesting(.turnEnded(
                 outcome: .endTurn,
                 stopReason: "end_turn",
@@ -477,6 +477,35 @@ import XCTest
 
             XCTAssertEqual(source.model.messages.last?.text, "review result")
             XCTAssertEqual(source.model.turnCompletion?.outcome, .completed)
+        }
+
+        func testSelectedSlashCommandSendsOriginalUtf16Identity() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.slashCommandCatalog(commands: [
+                SlashCommandDto(
+                    name: ClientTextDto(codeUnits: [0xD800]),
+                    description: "Custom skill".clientTextDto,
+                    source: "user",
+                    aliases: [],
+                    argumentHint: nil,
+                    argumentNames: [],
+                    menuDescription: nil,
+                    hidden: false
+                ),
+            ]))
+            let selected = try XCTUnwrap(source.model.slashCommands.first { $0.sourceNameCodeUnits == [0xD800] })
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+
+            let token = try XCTUnwrap(source.send("/� argument", images: [], selectedSlashCommand: selected))
+            await flushTasks()
+
+            guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
+                return XCTFail("expected exact selected slash command")
+            }
+            XCTAssertEqual(raw.codeUnits, [0x002F, 0xD800] + Array(" argument".utf16))
+            XCTAssertEqual(turnId, token.clientTurnId)
         }
     }
 

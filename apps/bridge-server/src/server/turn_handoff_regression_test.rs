@@ -64,25 +64,25 @@ impl ClientEventSink for GateDrainBarrier {
 }
 
 struct CancelBoundaryDriver {
-    entries: mpsc::UnboundedSender<(String, CancellationToken)>,
+    entries: mpsc::UnboundedSender<(Utf16JsonProjection, CancellationToken)>,
     seed_returned: Notify,
     question_tx: mpsc::Sender<AskUserQuestionExchange>,
 }
 
 #[async_trait]
 impl TurnDriver for CancelBoundaryDriver {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: Utf16JsonProjection) {
         panic!("connection must use cancellation-aware input");
     }
 
     async fn run_turn_with_images_and_cancel(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         _: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
         self.entries.send((text.clone(), cancel.clone())).unwrap();
-        if text == "seed" {
+        if text.string_units("") == Some("seed".encode_utf16().collect()) {
             cancel.cancelled().await;
             self.seed_returned.notify_one();
         } else {
@@ -134,7 +134,10 @@ async fn cancellation_cleanup_fences_successor_question_admission() {
     let checking = tokio::spawn(async move {
         gate.check(
             "Write",
-            &serde_json::json!({"file_path":"/tmp/bridge-handoff"}),
+            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"file_path":"/tmp/bridge-handoff"}),
+            )
+            .unwrap(),
         )
         .await
     });
@@ -158,7 +161,10 @@ async fn cancellation_cleanup_fences_successor_question_admission() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(text, "successor");
+    assert_eq!(
+        text.string_units(""),
+        Some("successor".encode_utf16().collect())
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while broker.pending_count().await == 0 {
             tokio::task::yield_now().await;
@@ -243,17 +249,18 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
                 message_stop()
             ],
         ]));
-        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            streaming.clone(),
-            Arc::new(tool_api::registry::ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(output.clone()),
-            Arc::new(StaticMemoryProvider::empty()),
-            "/tmp".into(),
-        ));
+        let orchestrator =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(output.clone()),
+                Arc::new(StaticMemoryProvider::empty()),
+                "/tmp".into(),
+            ));
         let driver = Arc::new(
             crate::driver::OrchestratorTurnDriver::new(orchestrator).with_message_output(output),
         );
@@ -305,7 +312,7 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
         let queued_output = events
             .iter()
             .position(
-                |event| matches!(event, ClientEvent::TextDelta { text } if text == "queued output"),
+                |event| matches!(event, ClientEvent::TextDelta { text } if text.display() == "queued output"),
             )
             .unwrap();
         assert!(starts[0].0 < queued_output);
@@ -327,9 +334,24 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
     }
 }
 
-#[derive(Default)]
 struct ReplacementRouter {
     calls: AtomicUsize,
+    slash_registry: command_api::registry::CommandRegistry,
+}
+
+impl Default for ReplacementRouter {
+    fn default() -> Self {
+        let mut slash_registry = command_api::registry::CommandRegistry::new();
+        let mut clear = command_api::model::SlashCommand::default();
+        clear.name = "clear".into();
+        clear.source = command_api::model::CommandSource::Builtin;
+        clear.aliases = vec!["reset".into(), "new".into()];
+        slash_registry.register_command(clear);
+        Self {
+            calls: AtomicUsize::new(0),
+            slash_registry,
+        }
+    }
 }
 
 #[async_trait]
@@ -338,10 +360,25 @@ impl CommandRouter for ReplacementRouter {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::future::pending::<()>().await;
     }
-    async fn dispatch_slash(&self, _: &str) -> Option<crate::router::SlashDispatchOutcome> {
+    async fn dispatch_slash(
+        &self,
+        _: Utf16JsonProjection,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Option<crate::router::SlashDispatchOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::future::pending().await
     }
+
+    async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
+        crate::router::requires_idle_turn_for_slash(&self.slash_registry, raw)
+    }
+}
+
+struct IdleTurnDriver;
+
+#[async_trait]
+impl TurnDriver for IdleTurnDriver {
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
 }
 
 struct WaitingQuestionDriver {
@@ -351,7 +388,7 @@ struct WaitingQuestionDriver {
 
 #[async_trait]
 impl TurnDriver for WaitingQuestionDriver {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: Utf16JsonProjection) {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.question_tx
             .send(AskUserQuestionExchange {
@@ -368,7 +405,8 @@ impl TurnDriver for WaitingQuestionDriver {
     }
 }
 
-async fn send_request(socket: &mut Socket, id: u64, method: &str, params: serde_json::Value) {
+async fn send_request<P: serde::Serialize>(socket: &mut Socket, id: u64, method: &str, params: P) {
+    let params = serialize_source(&params).expect("test request params serialize as source JSON");
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Request(BridgeRequest {
@@ -404,13 +442,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         .unwrap();
     endpoint.set_auth_token("connection-regression-token".into());
     let mut socket = connect_authenticated(&endpoint).await;
-    send_request(
-        &mut socket,
-        1,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut socket, 1, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Response(BridgeResponse { error: None, .. })
@@ -419,14 +451,13 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         &mut socket,
         2,
         "send_prompt",
-        serde_json::to_value(ClientCommand::SendPrompt {
+        ClientCommand::SendPrompt {
             text: "ask".into(),
             prompt_mode: None,
             images: Vec::new(),
             turn_id: Some(1),
             visualization_context: None,
-        })
-        .unwrap(),
+        },
     )
     .await;
     assert!(matches!(
@@ -448,7 +479,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
             turn_id: Some(11),
         },
         ClientCommand::RunSlashCommand {
-            raw: "/NEW title".into(),
+            raw: "/new title".into(),
             turn_id: Some(12),
         },
         ClientCommand::RunSlashCommand {
@@ -457,13 +488,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         },
     ];
     for (index, command) in commands.into_iter().enumerate() {
-        send_request(
-            &mut socket,
-            index as u64 + 3,
-            "command",
-            serde_json::to_value(command).unwrap(),
-        )
-        .await;
+        send_request(&mut socket, index as u64 + 3, "command", command).await;
         assert!(matches!(
             next_frame(&mut socket).await,
             Frame::Event(ClientEvent::Error {
@@ -488,13 +513,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
     .await
     .expect("socket close must reach abort/drain after rejected controls");
     let mut reconnected = connect_authenticated(&endpoint).await;
-    send_request(
-        &mut reconnected,
-        100,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut reconnected, 100, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut reconnected).await,
         Frame::Response(BridgeResponse { error: None, .. })
@@ -522,7 +541,19 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
         },
     ] {
         let router = Arc::new(ReplacementRouter::default());
-        let connection = BridgeConnection::new().bind_router(router.clone());
+        let mut connection = BridgeConnection::new().bind_router(router.clone());
+        // A raw slash command is rejected before dispatch only on a connection
+        // with the session driver's command path bound.
+        connection.driver = Some(Arc::new(IdleTurnDriver));
+        let is_slash = matches!(&command, ClientCommand::RunSlashCommand { .. });
+        let mut captured = if is_slash {
+            Some(captured_sink().await)
+        } else {
+            None
+        };
+        if let Some((_, _, sink)) = captured.as_ref() {
+            assert!(connection.claim_outbound(sink).await);
+        }
         let handoff = connection.turn_handoff.lock().await;
         // Drain ownership is temporarily false while queued work is inspected.
         connection.turn_running.store(false, Ordering::SeqCst);
@@ -538,6 +569,29 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
             .await
             .unwrap();
         assert_eq!(router.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            connection.queue.is_empty().await,
+            "busy session transitions must be refused, not queued"
+        );
+        if let Some((endpoint, mut socket, _)) = captured.take() {
+            match next_frame(&mut socket).await {
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id: None,
+                    is_error: true,
+                    display,
+                }) => assert_eq!(
+                    display.code_units,
+                    "this command requires an idle session"
+                        .encode_utf16()
+                        .collect::<Vec<_>>()
+                ),
+                frame => {
+                    panic!("busy slash transition must report an idle-session error, got {frame:?}")
+                }
+            }
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+        }
     }
 }
 
@@ -600,13 +654,7 @@ async fn runtime_snapshot_requires_hello_and_replies_as_one_correlated_frame() {
         })
     ));
     assert_eq!(router.calls.load(Ordering::SeqCst), 0);
-    send_request(
-        &mut socket,
-        42,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut socket, 42, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Response(BridgeResponse {
@@ -624,7 +672,14 @@ async fn runtime_snapshot_requires_hello_and_replies_as_one_correlated_frame() {
     else {
         panic!("snapshot must be one correlated response, never incremental push frames");
     };
-    let events: Vec<ClientEvent> = serde_json::from_value(result["events"].clone()).unwrap();
+    #[derive(serde::Deserialize)]
+    struct SnapshotResult {
+        events: Vec<ClientEvent>,
+    }
+    let result_json = result.to_json_string().unwrap();
+    let events = serde_json::from_str::<SnapshotResult>(&result_json)
+        .unwrap()
+        .events;
     assert_eq!(events, snapshot_events());
     assert_eq!(router.calls.load(Ordering::SeqCst), 1);
     send_request(
@@ -690,13 +745,7 @@ async fn runtime_snapshot_read_fences_live_worker_delivery_until_after_reply() {
         .unwrap();
     endpoint.set_auth_token("connection-regression-token".into());
     let mut socket = connect_authenticated(&endpoint).await;
-    send_request(
-        &mut socket,
-        1,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut socket, 1, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Response(BridgeResponse { error: None, .. })

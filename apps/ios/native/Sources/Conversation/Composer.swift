@@ -20,6 +20,7 @@ struct Composer: View {
     var availableModelDetails: [String: ModelRuntimeDetails] = [:]
     var contextUsage: ConversationUsageSnapshot? = nil
     var activeModelId: String = ""
+    var activeModelDisplay: String? = nil
     var providerConfigured: Bool
     var onSelectModel: (String) -> Void = { _ in }
     var reasoningModelId: String? = nil
@@ -50,7 +51,8 @@ struct Composer: View {
     /// hold-to-talk STT fills it with the recognized utterance (mirrors Android
     /// `onTranscript` → draft). The caller owns it (see ChatView).
     @Binding var draft: String
-    let onSend: (String) -> Void
+    let onSend: (String, ConversationSlashCommand?) -> Void
+    @State private var selectedSlashCommand: ConversationSlashCommand? = nil
     var clearsDraftOnSend = true
     var promptSuggestion: String? = nil
     var promptSuggestionNotice: String? = nil
@@ -119,6 +121,7 @@ struct Composer: View {
         availableModels: [String] = [],
         availableModelDetails: [String: ModelRuntimeDetails] = [:],
         activeModelId: String = "",
+        activeModelDisplay: String? = nil,
         contextUsage: ConversationUsageSnapshot? = nil,
         providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
@@ -144,7 +147,7 @@ struct Composer: View {
         onConfirmBypassPermissions: @escaping (Bool) -> Void = { _ in },
         recentModels: [String] = [],
         draft: Binding<String>,
-        onSend: @escaping (String) -> Void,
+        onSend: @escaping (String, ConversationSlashCommand?) -> Void,
         promptSuggestion: String? = nil,
         promptSuggestionNotice: String? = nil,
         suggestionTurnKey: String = "",
@@ -179,6 +182,7 @@ struct Composer: View {
         self.availableModels = availableModels
         self.availableModelDetails = availableModelDetails
         self.activeModelId = activeModelId
+        self.activeModelDisplay = activeModelDisplay
         self.contextUsage = contextUsage
         self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
@@ -538,21 +542,23 @@ struct Composer: View {
         Self.modelChipLabel(
             providerConfigured: providerConfigured,
             availableModels: availableModels,
-            activeModelId: activeModelId
+            activeModelId: activeModelId,
+            activeModelDisplay: activeModelDisplay
         )
     }
 
     static func modelChipLabel(
         providerConfigured: Bool,
         availableModels: [String],
-        activeModelId: String
+        activeModelId: String,
+        activeModelDisplay: String? = nil
     ) -> String {
         guard providerConfigured else {
             return String(localized: "settings_provider_unconfigured")
         }
         return availableModels.isEmpty
             ? String(localized: "composer_loading_model")
-            : ModelDisplay.shortName(for: activeModelId)
+            : activeModelDisplay ?? ModelDisplay.shortName(for: activeModelId)
     }
 
     private var attachmentButton: some View {
@@ -640,8 +646,8 @@ struct Composer: View {
 
     @ViewBuilder
     private var contextWindow: some View {
-        if let snapshot = ComposerContextUsage(usage: contextUsage, capacity: availableModelDetails[activeModelId]?.contextWindowTokens) {
-            ComposerContextWindow(snapshot: snapshot)
+        if let snapshot = ComposerContextUsage(usage: contextUsage, capacity: availableModelDetails[activeModelId]?.contextBudget?.effectiveInputBudget) {
+            ComposerContextWindow(snapshot: snapshot, details: availableModelDetails[activeModelId])
         }
     }
 
@@ -731,8 +737,17 @@ struct Composer: View {
             && !showDiscardRecovery
     }
 
+    private var selectedSlashCommandForDraft: ConversationSlashCommand? {
+        guard let selectedSlashCommand,
+              let token = SlashCommandMatcher.commandToken(in: draft),
+              selectedSlashCommand.matchesExactToken(token)
+        else { return nil }
+        return selectedSlashCommand
+    }
+
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
         let accepted = SlashCommandMatcher.completedInput(for: command, in: draft)
+        selectedSlashCommand = command
         draft = accepted
         dismissedSlashDraft = accepted
         inputFocused = true
@@ -777,7 +792,8 @@ struct Composer: View {
             acceptSlashCommand(suggestion.command)
             return
         }
-        onSend(draft)
+        onSend(draft, selectedSlashCommandForDraft)
+        selectedSlashCommand = nil
         if clearsDraftOnSend { draft = "" }
         dismissedSlashDraft = nil
     }
@@ -887,6 +903,7 @@ struct ComposerContextUsage: Equatable {
 private struct ComposerContextWindow: View {
     @Environment(\.theme) private var t
     let snapshot: ComposerContextUsage
+    let details: ModelRuntimeDetails?
     @State private var showsDetails = false
 
     private var summary: String {
@@ -919,6 +936,16 @@ private struct ComposerContextWindow: View {
                 Text("Context window:").fontWeight(.semibold)
                 Text(summary)
                 Text(tokens)
+                Text("最近一次请求的输入用量 / 应用输入预算")
+                if let policy = details?.contextBudget?.policy {
+                    Text("应用策略：\(policy == "long" ? "长上下文" : policy == "custom" ? "自定义" : "自动")")
+                }
+                if let maximum = details?.contextWindowTokens {
+                    Text("模型最大上下文：\(ModelDetailFormat.tokenCount(maximum))")
+                }
+                if let boundary = details?.contextBudget?.standardPriceInputTokens {
+                    Text("输入超过 \(boundary.formatted()) tokens 后，整次请求适用长上下文价格。")
+                }
             }
             .font(.callout)
             .padding()

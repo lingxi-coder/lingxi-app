@@ -108,7 +108,7 @@ impl CliBgSessionForker {
             None => {
                 return Err(BgForkError::Dispatch(
                     "foreground runtime authority is not bound".into(),
-                ))
+                ));
             }
         };
         Ok((cwd, self.launch_context(mode)))
@@ -128,11 +128,11 @@ impl CliBgSessionForker {
     async fn fork_with_handoff(
         &self,
         conversation: &BgSessionSnapshot,
-        system_prompt: Option<Arc<str>>,
-        prompt: &str,
+        system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
         handoff: Option<&lingxi_core::host::BackgroundingSnapshot>,
-    ) -> Result<String, BgForkError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
         // Capture current permissions and the live tool cwd at the dispatch
         // boundary; /cd and mode changes never mutate the process cwd/argv.
         let (cwd_pb, mut launch_context) = self.launch_identity()?;
@@ -159,7 +159,6 @@ impl CliBgSessionForker {
                 .await
                 .map_err(|e| BgForkError::Snapshot(e.to_string()))?;
         }
-
         // 3. Dispatch a detached daemon worker that resumes the copied session.
         launch_context.model = Some(model.to_string());
         launch_context.handoff = handoff.cloned();
@@ -177,7 +176,7 @@ impl CliBgSessionForker {
             }
         }
         if let Some(system_prompt) = system_prompt {
-            launch_context.system_prompt = Some(system_prompt.to_string());
+            launch_context.system_prompt = Some(system_prompt.as_ref().clone());
         }
         let short = crate::background_dispatch::dispatch_forked_session_with_context(
             &self.config_home,
@@ -222,9 +221,7 @@ impl CliBgSessionForker {
         //    2.1.212 `vAd` command has no `load` handler (the TUI special
         //    dispatcher renders this), so this is grounded on the minted short id,
         //    NOT byte-verified.
-        Ok(format!(
-            "Copied conversation into a new background session ({short})."
-        ))
+        Ok(format!("Copied conversation into a new background session ({short}).").into())
     }
 }
 
@@ -243,10 +240,10 @@ impl BgSessionForker for CliBgSessionForker {
     async fn fork_to_background(
         &self,
         conversation: &BgSessionSnapshot,
-        system_prompt: Option<Arc<str>>,
-        prompt: &str,
+        system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
-    ) -> Result<String, BgForkError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
         self.fork_with_handoff(conversation, system_prompt, prompt, model, None)
             .await
     }
@@ -254,11 +251,11 @@ impl BgSessionForker for CliBgSessionForker {
     async fn background_conversation(
         &self,
         conversation: &BgSessionSnapshot,
-        system_prompt: Option<Arc<str>>,
-        prompt: &str,
+        system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
         snapshot: &lingxi_core::host::BackgroundingSnapshot,
-    ) -> Result<String, BgForkError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
         self.fork_with_handoff(conversation, system_prompt, prompt, model, Some(snapshot))
             .await
     }

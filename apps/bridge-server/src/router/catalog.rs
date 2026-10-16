@@ -14,17 +14,20 @@ use client::protocol::commands::ListingKindDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::AuthStateDto;
 use client::protocol::listings::SlashCommandDto;
+use client::protocol::text::ClientTextDto;
 use command_api::builtin_support::names::core_description;
 use command_api::builtin_support::names::is_palette_hidden;
 use command_api::registry::CommandRegistry;
 use futures_util::future::join_all;
 use lingxi_core::host::task_registry::TaskListFilter;
-use serde_json::{json, Value};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SlashAuthoritySnapshot {
     pub(super) session_id: String,
     pub(super) model: String,
+    pub(super) model_source: Option<ClientTextDto>,
     pub(super) permission_mode: Option<String>,
     pub(super) auth: AuthStateDto,
     pub(super) catalog: Option<Vec<SlashCommandDto>>,
@@ -41,21 +44,41 @@ impl EngineCommandRouter {
         let inputs = commands
             .iter()
             .map(|command| {
-                let provider = reg.resolve(&command.name).map_or_else(
-                    || json!({"plugin": "engine", "tier": "core"}),
+                let name = command.name.clone().into_projection();
+                let provider = reg.resolve(&name).map_or_else(
+                    || {
+                        Utf16JsonProjection::object(vec![
+                            ("plugin".into(), "engine".into()),
+                            ("tier".into(), "core".into()),
+                        ])
+                        .expect("provider object")
+                    },
                     |source| reg.mod_describe_provider(source),
                 );
-                let mut input = json!({
-                    "command": command.name,
-                    "description": command.description,
-                    "isHidden": command.hidden,
-                    "immediate": reg.mod_immediate_of(&command.name).unwrap_or(false),
-                    "provider": provider,
-                });
+                let mut fields = vec![
+                    ("command".into(), name.clone()),
+                    (
+                        "description".into(),
+                        command.description.clone().into_projection(),
+                    ),
+                    (
+                        "isHidden".into(),
+                        Utf16JsonProjection::from_serde_value(&Value::Bool(command.hidden))
+                            .expect("boolean"),
+                    ),
+                    (
+                        "immediate".into(),
+                        Utf16JsonProjection::from_serde_value(&Value::Bool(
+                            reg.mod_immediate_of(&name).unwrap_or(false),
+                        ))
+                        .expect("boolean"),
+                    ),
+                    ("provider".into(), provider),
+                ];
                 if let Some(hint) = &command.argument_hint {
-                    input["argumentHint"] = Value::String(hint.clone());
+                    fields.push(("argumentHint".into(), hint.clone().into_projection()));
                 }
-                input
+                Utf16JsonProjection::object(fields).expect("command description input")
             })
             .collect::<Vec<_>>();
         drop(reg);
@@ -66,15 +89,20 @@ impl EngineCommandRouter {
         .await;
         for (command, answer) in commands.iter_mut().zip(described) {
             if let (Some(description), Some(hidden)) = (
-                answer.get("description").and_then(Value::as_str),
-                answer.get("isHidden").and_then(Value::as_bool),
+                answer
+                    .subprojection("/description")
+                    .ok()
+                    .and_then(|source| ClientTextDto::from_projection(&source).ok()),
+                answer
+                    .get_property("isHidden")
+                    .and_then(|value| value.as_bool()),
             ) {
-                command.description = description.to_owned();
+                command.description = description;
                 command.hidden = hidden;
                 command.argument_hint = answer
-                    .get("argumentHint")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                    .subprojection("/argumentHint")
+                    .ok()
+                    .and_then(|source| ClientTextDto::from_projection(&source).ok());
             }
         }
         Some(commands)
@@ -87,29 +115,47 @@ impl EngineCommandRouter {
             .palette_commands()
             .into_iter()
             .map(|cmd| SlashCommandDto {
-                hidden: is_palette_hidden(&cmd.name),
+                hidden: is_palette_hidden(cmd.name.string_at("").expect("command name is text")),
                 source: command_source_string(cmd.source).to_string(),
-                name: cmd.name,
-                description: cmd.description,
-                aliases: cmd.aliases,
-                argument_hint: cmd.argument_hint,
+                name: ClientTextDto::from_projection(&cmd.name).expect("command name is text"),
+                description: ClientTextDto::from_projection(&cmd.description)
+                    .expect("command description is text"),
+                aliases: cmd
+                    .aliases
+                    .iter()
+                    .map(|alias| ClientTextDto::from_projection(alias).expect("alias is text"))
+                    .collect(),
+                argument_hint: cmd
+                    .argument_hint
+                    .as_ref()
+                    .map(|hint| ClientTextDto::from_projection(hint).expect("hint is text")),
                 argument_names: if matches!(
-                    cmd.kind,
+                    &cmd.kind,
                     command_api::SlashCommandKind::Builtin { .. }
                 ) {
                     Vec::new()
                 } else {
                     cmd.argument_names
+                        .iter()
+                        .map(|name| {
+                            ClientTextDto::from_projection(name).expect("argument name is text")
+                        })
+                        .collect()
                 },
                 menu_description: cmd.menu_description,
             })
             .collect();
-        if !commands.iter().any(|cmd| cmd.name == "reload-plugins")
-            && !is_palette_hidden("reload-plugins")
+        if !commands.iter().any(|cmd| {
+            cmd.name
+                .code_units
+                .iter()
+                .copied()
+                .eq("reload-plugins".encode_utf16())
+        }) && !is_palette_hidden("reload-plugins")
         {
             commands.push(SlashCommandDto {
-                name: "reload-plugins".to_string(),
-                description: core_description("reload-plugins").to_string(),
+                name: "reload-plugins".into(),
+                description: core_description("reload-plugins").into(),
                 source: "builtin".to_string(),
                 aliases: Vec::new(),
                 argument_hint: None,
@@ -118,7 +164,7 @@ impl EngineCommandRouter {
                 hidden: false,
             });
         }
-        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands.sort_by(|a, b| a.name.code_units.cmp(&b.name.code_units));
         commands
     }
     pub(super) async fn capture_slash_authority(&self) -> SlashAuthoritySnapshot {
@@ -129,6 +175,10 @@ impl EngineCommandRouter {
                 &snapshot.model,
                 snapshot.model_profile.as_deref(),
             ),
+            model_source: snapshot
+                .model_source
+                .as_ref()
+                .and_then(|source| ClientTextDto::from_projection(source).ok()),
             permission_mode: self.handle.permission_mode().await,
             auth: lower_auth_state(self.auth.current_user().await),
             catalog: self.slash_command_catalog().await,
@@ -152,9 +202,10 @@ impl EngineCommandRouter {
         if before.session_id != after.session_id {
             events.push(ClientEvent::SessionEnded);
         }
-        if before.model != after.model {
+        if before.model != after.model || before.model_source != after.model_source {
             events.push(ClientEvent::ModelChanged {
                 model: after.model.clone(),
+                model_source: after.model_source.clone(),
             });
         }
         if before.permission_mode != after.permission_mode {
@@ -219,6 +270,10 @@ impl EngineCommandRouter {
                 sink.emit(ClientEvent::ModelList {
                     models,
                     current,
+                    current_model_source: snapshot
+                        .model_source
+                        .as_ref()
+                        .and_then(|source| ClientTextDto::from_projection(source).ok()),
                     details: curated
                         .iter()
                         .map(client::adapter::lowering::lower_model_details)

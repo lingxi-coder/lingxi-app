@@ -428,7 +428,7 @@ fun Composer(
             }
             val configuration: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
                 ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
-                ComposerContextWindow(contextUsage, model.details?.contextWindowTokens)
+                ComposerContextWindow(contextUsage, model.details?.contextBudget?.effectiveInputBudget, model.details)
                 Box(Modifier.weight(1f)) {
                     ModelChip(
                         model = model, models = availableModels, modelSetupRequired = modelSetupRequired,

@@ -387,7 +387,7 @@ function validateParentNode(
     throw new TypeError('A hidden keyed Box must become visible while its hover scope is active');
   }
 
-  const childTypes = structural || type === 'Link';
+  const childTypes = structural || type === 'Link' || type === 'Button';
   if (node.children !== undefined) {
     if (!childTypes || !Array.isArray(node.children)) throw new TypeError(`${type} does not accept children`);
     for (const child of node.children) {
@@ -415,7 +415,7 @@ function validateParentNode(
       if (node.group !== undefined) validateParentGroup(node.group);
       break;
     case 'Button': {
-      assertKeys(node, ['type', 'props', 'press', 'hover'], type);
+      assertKeys(node, ['type', 'props', 'children', 'press', 'hover'], type);
       assertKeys(props, ['key', 'label', 'hotkey', 'action', 'plain', 'dimColor', 'variant', 'role', 'autoFocus'], `${type}.props`);
       nonEmptyString(props.key, `${type}.props.key`);
       requiredString(props.label, `${type}.props.label`);
@@ -848,7 +848,7 @@ function ParentNodeView({
         className="mod-ui-parent-button"
         style={style}
         aria-keyshortcuts={typeof props.hotkey === 'string' ? props.hotkey : undefined}
-        aria-label={props.role === 'dismiss' ? String(props.label) : undefined}
+        aria-label={String(props.label)}
         autoFocus={props.autoFocus === true}
         data-action={props.action}
         data-role={props.role}
@@ -858,7 +858,7 @@ function ParentNodeView({
         onFocus={onPointerEnter}
         onBlur={() => { if (hoverContext.activeGroup === hoverKey) hoverContext.setActiveGroup(null); }}
         onClick={() => sendControl(onParentControl, request)}
-      >{String(props.label)}</button>;
+      >{children.length > 0 ? childNodes() : String(props.label)}</button>;
     }
     case 'Input':
       return <ParentInput key={path} node={node} site={site} onParentControl={onParentControl} />;

@@ -142,7 +142,7 @@ class SessionStateTest {
     fun nonSessionEvent_returnsPrevUnchanged_identity() {
         val prev = EngineSessionState.ready(rows = listOf(SessionRow("u", "T", 3, "刚刚")))
         // TextDelta / Error / lifecycle events must NOT disturb the catalog.
-        assertSame(prev, reduceSessionEvent(prev, ClientEvent.TextDelta("hi"), now))
+        assertSame(prev, reduceSessionEvent(prev, ClientEvent.TextDelta("hi".toClientTextDto()), now))
         assertSame(
             prev,
             reduceSessionEvent(prev, ClientEvent.SessionStarted(sessionId = "x", mode = SessionModeDto.CODE), now),
@@ -158,7 +158,7 @@ class SessionStateTest {
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionEnded, now))
         assertSame(
             prev,
-            reduceSessionEvent(prev, ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "x"), now),
+            reduceSessionEvent(prev, ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "x".toClientTextDto()), now),
         )
     }
 
@@ -238,7 +238,7 @@ class SessionStateTest {
     // --- sessionActivationFrom: the out-of-band session activation path -------
 
     private fun userDto(text: String) =
-        MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text(text)))
+        MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text(text.toClientTextDto())))
 
     private fun assistantDto(vararg blocks: MessageBlockDto) =
         MessageDto(role = "assistant", blocks = blocks.toList())
@@ -253,7 +253,7 @@ class SessionStateTest {
                     userDto("第一条问题"),
                     assistantDto(
                         MessageBlockDto.Thinking(thinking = "推理…", signature = null),
-                        MessageBlockDto.Text("第一条回答"),
+                        MessageBlockDto.Text("第一条回答".toClientTextDto()),
                     ),
                 ),
             ),
@@ -330,7 +330,7 @@ class SessionStateTest {
 
     @Test
     fun sessionActivationFrom_nonActivationEvent_isNull() {
-        assertNull(sessionActivationFrom(ClientEvent.TextDelta("hi")))
+        assertNull(sessionActivationFrom(ClientEvent.TextDelta("hi".toClientTextDto())))
         assertNull(sessionActivationFrom(ClientEvent.SessionList(sessions = emptyList())))
     }
 
@@ -338,8 +338,8 @@ class SessionStateTest {
     fun messageDtoText_foldsEveryBlockKind_droppingBlanks() {
         val text = messageDtoText(
             listOf(
-                MessageBlockDto.Text("正文"),
-                MessageBlockDto.Text("   "), // blank → dropped
+                MessageBlockDto.Text("正文".toClientTextDto()),
+                MessageBlockDto.Text("   ".toClientTextDto()), // blank → dropped
                 MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}", header = null),
                 MessageBlockDto.ToolResult(
                     id = "t1", tool = "bash", resultJson = "ok", isError = false,

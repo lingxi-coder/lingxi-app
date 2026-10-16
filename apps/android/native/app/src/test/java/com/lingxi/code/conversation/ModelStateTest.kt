@@ -65,7 +65,7 @@ class ModelStateTest {
     fun modelList_replacesCatalog_andAdoptsCurrent() {
         val next = reduceModelEvent(
             EngineModelState(),
-            ClientEvent.ModelList(
+            ClientEvent.ModelList(currentModelSource = null,
                 models = listOf("claude-opus-4-20250514", "claude-sonnet-4-20250514"),
                 current = "claude-sonnet-4-20250514",
                 details = emptyList(),
@@ -84,7 +84,7 @@ class ModelStateTest {
         )
         val next = reduceModelEvent(
             prev,
-            ClientEvent.ModelList(
+            ClientEvent.ModelList(currentModelSource = null,
                 models = listOf("claude-haiku-4"),
                 current = "claude-haiku-4",
                 details = emptyList(),
@@ -123,10 +123,10 @@ class ModelStateTest {
         )
         val relisted = reduceModelEvent(
             withEffort,
-            ClientEvent.ModelList(models = listOf("a/opus", "a/haiku"), current = "a/opus", details = emptyList()),
+            ClientEvent.ModelList(currentModelSource = null, models = listOf("a/opus", "a/haiku"), current = "a/opus", details = emptyList()),
         )
         assertEquals(withEffort.reasoning, relisted.reasoning)
-        val switched = reduceModelEvent(relisted, ClientEvent.ModelChanged(model = "a/haiku"))
+        val switched = reduceModelEvent(relisted, ClientEvent.ModelChanged(modelSource = null, model = "a/haiku"))
         assertEquals(null, switched.reasoning)
     }
 
@@ -162,14 +162,14 @@ class ModelStateTest {
             available = listOf("claude-opus-4", "claude-sonnet-4"),
             active = "claude-opus-4",
         )
-        val next = reduceModelEvent(prev, ClientEvent.ModelChanged(model = "claude-sonnet-4"))
+        val next = reduceModelEvent(prev, ClientEvent.ModelChanged(modelSource = null, model = "claude-sonnet-4"))
         assertEquals(prev.available, next.available) // catalog untouched
         assertEquals("claude-sonnet-4", next.active)
     }
 
     @Test
     fun modelChanged_beforeAnyList_leavesCatalogEmpty() {
-        val next = reduceModelEvent(EngineModelState(), ClientEvent.ModelChanged(model = "claude-opus-4"))
+        val next = reduceModelEvent(EngineModelState(), ClientEvent.ModelChanged(modelSource = null, model = "claude-opus-4"))
         assertEquals("claude-opus-4", next.active)
         assertFalse(next.hasCatalog) // a changed-without-list still has no catalog
     }
@@ -180,11 +180,11 @@ class ModelStateTest {
     fun nonModelEvent_returnsPrevUnchanged_identity() {
         val prev = EngineModelState(available = listOf("claude-opus-4"), active = "claude-opus-4")
         // TextDelta / Error / TurnStarted must NOT disturb the model state.
-        assertSame(prev, reduceModelEvent(prev, ClientEvent.TextDelta("hi")))
+        assertSame(prev, reduceModelEvent(prev, ClientEvent.TextDelta("hi".toClientTextDto())))
         assertSame(prev, reduceModelEvent(prev, ClientEvent.TurnStarted(turnId = null)))
         assertSame(
             prev,
-            reduceModelEvent(prev, ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "x")),
+            reduceModelEvent(prev, ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "x".toClientTextDto())),
         )
     }
 
@@ -637,7 +637,7 @@ class ModelStateTest {
         editable: Boolean = true,
         disabledReason: ControlDisabledReasonDto? = null,
     ) = ClientEvent.ConversationControlsChanged(
-        controls = ConversationControlsDto(
+        controls = ConversationControlsDto(proactivity = null,
             qualifiedModel = model,
             permission = PermissionControlStateDto(requested = "auto", effective = "auto", options = emptyList()),
             reasoning = ReasoningControlStateDto(

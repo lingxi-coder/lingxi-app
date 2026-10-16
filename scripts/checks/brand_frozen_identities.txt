@@ -78,4 +78,6 @@ apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-null
 apps/electron/src/renderer/components/VisualizationCard.tsx:window.lingxi  # Existing Electron preload bridge property identity, not a persisted filesystem path.
 apps/electron/src/renderer/components/modUiAbovePrompt.tsx:window.lingxi  # Existing Electron preload bridge property identity, not a persisted filesystem path.
 apps/electron/src/renderer/components/settings/pages/LingxiAccount.tsx:window.lingxi  # Existing Electron preload bridge property identity, not a persisted filesystem path.
+apps/electron/src/renderer/bridge/useSideChats.ts:window.lingxi  # Existing Electron preload bridge property identity used by side-chat commands and events; preserve the API name.
+apps/electron/test/fixtures/side-chat-main.tsx:window.lingxi  # Test fixture implements the current Electron preload API namespace; preserve it with production.
 firebase.json:LingXi  # Intentional product OAuth display name; product branding is an explicitly retained alignment difference.

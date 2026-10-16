@@ -76,6 +76,11 @@ KEEP_CLAUDE_ENV = {
     "CLAUDE_AGENT_SDK_MCP_NO_PREFIX",
     "CLAUDE_AGENT_SDK_VERSION",
     "CLAUDE_CODE_ENTRYPOINT",
+    # Native 2.1.295 logging constructor reads this exact env key and normalizes
+    # the selected level (binary SHA-256 0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70;
+    # src_186240709.js at byte 186287310, chunk SHA-256
+    # e3196d36258c99d66c4d3ea2401745eae6e9a94e148380f6ff0fe1f4723043bf).
+    "CLAUDE_CODE_DEBUG_LOG_LEVEL",
     "CLAUDE_CODE_EXTRA_BODY",
     "CLAUDE_CODE_EXTRA_METADATA",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -126,10 +131,11 @@ KEEP_CLAUDE_ENV = {
 #
 # 必须用带边界的正则而不是子串匹配：裸的 `".lingxi" in line` 会命中 132 处
 # `.lingxi_home` 字段访问，把 G3 淹没成噪声。负向 lookahead 排除标识符字符、
-# 点、连字符，于是 `.lingxi_home`、`com.lingxi.code`、`.lingxi-plugin`
-# （单列）都不会误伤，而 `.lingxi/`、`.lingxi"`、`.lingxi'` 照常命中。
+# 点、连字符和邮件分隔符 `@`，于是 `.lingxi_home`、`com.lingxi.code`、
+# `support.lingxi@gmail.com`、`.lingxi-plugin`（单列）都不会误伤，而
+# `.lingxi/`、`.lingxi"`、`.lingxi'` 照常命中。
 L1_PATTERNS = [
-    (r"\.lingxi(?![A-Za-z0-9_.\-])", ".lingxi"),
+    (r"\.lingxi(?![A-Za-z0-9_.\-@])", ".lingxi"),
     (r"\.lingxi\.json", ".lingxi.json"),
     (r"\.lingxi-plugin", ".lingxi-plugin"),
     (r"LINGXI\.local\.md", "LINGXI.local.md"),
@@ -159,7 +165,7 @@ L1_COMPILED = [(re.compile(p), label) for p, label in L1_PATTERNS]
 # 第三个元素是**规范拼写**：命中恰好等于它时跳过，因为那一处已经由
 # 大小写敏感的那条报过了。没有这一步，每一处正常拼写都会被报两次。
 L1_CASE_PATTERNS = [
-    (r"\.lingxi(?![A-Za-z0-9_.\-])", ".lingxi (case)", ".lingxi"),
+    (r"\.lingxi(?![A-Za-z0-9_.\-@])", ".lingxi (case)", ".lingxi"),
     (r"LINGXI\.local\.md", "LINGXI.local.md (case)", "LINGXI.local.md"),
     (r"LINGXI\.md", "LINGXI.md (case)", "LINGXI.md"),
     (r"LINGXI_CONFIG_DIR", "LINGXI_CONFIG_DIR (case)", "LINGXI_CONFIG_DIR"),
@@ -765,9 +771,16 @@ SELFTEST_FILES = {
     "crates/st/g1.rs": 'fn f() { let p = ".claude"; }\n',
     "crates/st/g2.rs": (
         'fn f() { let a = std::env::var("CLAUDE_CODE_UNKEPT_NAME");\n'
-        '         let b = std::env::var("CLAUDE_CODE_ENTRYPOINT"); }\n'
+        '         let b = std::env::var("CLAUDE_CODE_ENTRYPOINT");\n'
+        '         let c = std::env::var("CLAUDE_CODE_DEBUG_LOG_LEVEL"); }\n'
     ),
     "crates/st/g3.rs": 'fn f() { let p = ".lingxi/state"; }\n',
+    "crates/st/g3-email.rs": (
+        'fn f() { let email = "support.lingxi@gmail.com";\n'
+        '         let case_variant = "support.LingXi@gmail.com"; }\n'
+    ),
+    "crates/st/g3-window.rs": 'fn f() { let api = window.lingxi; }\n',
+    "crates/st/g3-window-unfrozen.rs": 'fn f() { let api = window.lingxi; }\n',
     "crates/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
     "crates/branding/src/lib.rs": (
         'pub const ST_UNLISTED: &str = "x";\n'
@@ -811,9 +824,17 @@ SELFTEST_CASES = [
      [("G1", "crates/st/g1.rs", r"\.claude(?!")], []),
     ("G2 fires on a non-KEEP CLAUDE_* read, and KEEP is honoured",
      [("G2", "crates/st/g2.rs", "CLAUDE_CODE_UNKEPT_NAME")],
-     [("G2", "crates/st/g2.rs", "CLAUDE_CODE_ENTRYPOINT")]),
+     [("G2", "crates/st/g2.rs", "CLAUDE_CODE_ENTRYPOINT"),
+      ("G2", "crates/st/g2.rs", "CLAUDE_CODE_DEBUG_LOG_LEVEL")]),
     ("G3 fires on a LingXi namespace value outside branding",
      [("G3", "crates/st/g3.rs", ".lingxi")], []),
+    ("G1 keeps branded email text while G3 does not treat it as a path",
+     [("G1", "crates/st/g3-email.rs", r"\.lingxi")],
+     [("G3", "crates/st/g3-email.rs", ".lingxi")]),
+    ("G3 still detects an unfrozen window.lingxi occurrence",
+     [("G3", "crates/st/g3-window-unfrozen.rs", ".lingxi")], []),
+    ("G3 honors the exact frozen window.lingxi bridge identity",
+     [], [("G3", "crates/st/g3-window.rs", ".lingxi")]),
     ("G4 fires on a fake oracle citation",
      [("G4", "crates/st/g4.rs", "LINGXI_FAKE_CITATION")], []),
     ("G6 fires on a branding const missing from NAMESPACE_VALUES",
@@ -871,6 +892,10 @@ def run_selftest():
         frozen = os.path.join(tmp, "frozen.txt")
         with open(frozen, "w", encoding="utf-8") as fh:
             fh.write("crates/st/vanished.rs:.lingxi  # 目标文件不存在 => G5\n")
+            fh.write(
+                "crates/st/g3-window.rs:window.lingxi  "
+                "# 受支持的 Electron preload API 命名空间\n"
+            )
 
         for cmd in (["init", "-q"], ["add", "-A"]):
             subprocess.run(["git", "-C", tmp] + cmd, check=True,

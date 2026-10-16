@@ -100,7 +100,8 @@ Add those public fingerprints in Firebase and download updated Android config.
 Do not reuse debug fingerprints as release credentials.
 
 Apple **is not enabled on the server yet**, at the user's direction. The code is
-present, but live Apple sign-in needs the following configuration:
+present; its login button is hidden while the provider is disabled. Live Apple
+sign-in needs the following configuration:
 
 1. Enable Sign in with Apple for both iOS App IDs on team `AZ4AX7J833` and refresh
    their provisioning profiles. `Account.entitlements` declares this capability
@@ -237,6 +238,72 @@ they do not establish live login acceptance for this project. Android debug Goog
 OAuth clients are registered with the project-specific key described above; release
 signing fingerprints and Apple provider credentials are still required. Switching projects does not
 migrate existing Firebase users or their sessions.
+
+## iOS validation and Google artwork (2026-10-16)
+
+Firebase MCP confirmed both iOS registrations, OAuth client IDs and reversed
+callback schemes against `lingxi-5e4b2`. StoreDebug and FullDebug builds passed
+for the arm64 iOS simulator. The Xcode build now rejects a selected
+Firebase plist whose bundle ID or callback differs from the Store / Full build.
+An empty provider display name falls back to the account email.
+
+FullDebug's production Account UI passed both existing opt-in live tests against
+this project on the iPhone 17 Pro / iOS 26.3 simulator: email registration,
+wrong-password rejection, sign-in/out, and session restoration after terminating
+and relaunching the application; Google authorization loaded the real account
+entry page and cancellation returned to the app. Synthetic users were deleted
+by test teardown. Results: `/private/tmp/lingxi-ios-firebase-live-20261016.xcresult`.
+This does not establish completed Google consent or Google session restoration
+on a physical iPhone. Apple remains disabled as requested.
+
+A subsequent physical-device attempt on the connected iPhone 11 / iOS 18.6.2
+built and updated FullDebug (`com.lingxi.code.full`) in place successfully,
+without uninstalling the app. The normal Account page showed the official G
+artwork and opened the system Google authorization session. The phone's
+`accounts.google.com` request timed out with Safari's "server stopped responding"
+message before account selection. The owner later reported that iOS Google
+login worked; Firebase MCP recorded a newer Google sign-in for the approved
+LingXi account. The production FullDebug Account page subsequently confirmed the same
+verified Google identity on the iPhone after in-place updates, with account
+refresh succeeding. A forced process restart (PID 7233 terminated and confirmed
+absent; new PID 7237 launched) is recorded, but its final UI confirmation is
+pending: after the owner locked the phone, mirroring reconnected and PID 7237
+was confirmed running, but coordinate input failed with `noWindowsAvailable`
+even after rebinding and resetting the UI controller. The app was brought back
+to the foreground without another sign-in. Account-page and refresh confirmation
+after this forced restart remain unverified. The initial
+network-failure evidence remains at
+`/private/tmp/lingxi-ios-google-network-pending.png`.
+
+Google login buttons on iOS, Android, Desktop, the model admin site, and the
+marketplace use the unmodified official gradient G artwork with a visible action
+label. The website and marketplace Hosting releases were updated. Source and
+usage notes: [Google sign-in artwork](google-signin-artwork.md).
+
+## Native iOS account and settings interface
+
+The iOS account page owns a grouped `Form`, with the official Google button,
+email/password fields, registration/reset actions, account status and privacy
+information. It contains only LingXi Authentication; model-provider credentials
+and engine connection state stay in their respective settings pages. The
+currently disabled Apple provider has no visible login button. Labels and
+account messages follow the app's five supported locales.
+
+The settings home and group pages use inset-grouped `List` views, native search,
+SF Symbols, system label/background colors and the system navigation stack.
+The Done action dismisses settings. Common settings rows retain Dynamic Type,
+44-point interaction targets, accessibility identifiers, and the selected accent.
+
+Native UI validation passed on the iPhone 17 Pro / iOS 26.3 simulator:
+light/dark settings, native settings search, account forms in light/dark and
+Accessibility XXXL text sizes, keyboard entry and Done dismissal, and the real
+Google authorization page/cancellation. Final result bundle:
+`/private/tmp/lingxi-ios-native-ui-final-20261016.xcresult` (4 tests passed).
+Email registration/login/logout and process-restored sessions also passed on the
+new Form in `/private/tmp/lingxi-ios-native-ui-20261016-v3.xcresult`.
+The last long-email row adjustment was built and visually accepted on the
+connected iPhone 11 / iOS 18.6.2; the app was updated without uninstalling it.
+Preview screenshots are in `/private/tmp/lingxi-ios-native-ui-final-evidence/`.
 
 ## Build outputs
 

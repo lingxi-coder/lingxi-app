@@ -99,24 +99,7 @@ struct DesktopGeneralPage: View {
 
 struct DesktopAccountPage: View {
     let host: SettingsHost
-    @State private var repository = DesktopSettingsRepository.shared
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            LingxiAccountSection()
-            SettingsConnectionStatus()
-            if let auth = repository.auth {
-                switch auth {
-                case .signedOut: Label("Signed out", systemImage: "person.crop.circle")
-                case let .signedIn(email, orgId):
-                    LabeledContent("Account", value: email)
-                    LabeledContent("Organization", value: orgId)
-                }
-            }
-            Text("Manage provider sign-in and secure credentials in Provider credentials.")
-                .font(.footnote).foregroundStyle(.secondary)
-            Button("settings_parity_manage_credentials") { host.push(.providerList(.init(.llm))) }
-        }
-    }
+    var body: some View { LingxiAccountSection() }
 }
 
 struct DesktopDiagnosticsPage: View {

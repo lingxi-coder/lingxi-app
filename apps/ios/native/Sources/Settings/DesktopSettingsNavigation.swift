@@ -83,63 +83,59 @@ struct DesktopSettingsEntry: Identifiable {
 }
 
 struct MainSettingsPage: View {
-    @Environment(\.theme) private var theme
     @Bindable var store: SettingsStore
     let host: SettingsHost
     @State private var query = ""
+    @State private var repository = DesktopSettingsRepository.shared
+    @State private var secrets = PluginSecretRepository.shared
 
-    private var searching: Bool {
-        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    private var searching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            TextField("settings_parity_search", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("settings.search")
+        List {
             if searching {
-                results
+                let matches = DesktopSettingsEntry.search(query)
+                if matches.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                        .listRowBackground(Color.clear)
+                } else {
+                    Section {
+                        ForEach(matches) { entry in
+                            SettingsNavigationRow(title: entry.title, symbol: entry.systemImage,
+                                                  color: entry.mobileGroup?.symbolColor ?? .gray) {
+                                host.push(entry.page)
+                            }
+                            .accessibilityIdentifier(entry.accessibilityID)
+                        }
+                    }
+                }
             } else {
-                SettingsAccountCard { host.push(.account) }
-                SettingsSection {
+                Section {
+                    SettingsAccountCard { host.push(.account) }
+                }
+                if repository.connected && (repository.needsReconnect || secrets.needsReconnect) {
+                    Section {
+                        SettingsApplyChangesBanner(reconnect: host.onReconnectAfterSecretChange)
+                    }
+                }
+                Section {
                     ForEach(SettingsGroup.allCases) { group in
-                        SettingsRow(
-                            icon: group.icon,
-                            label: group.title,
-                            sub: group.summary,
-                            isLast: group == SettingsGroup.allCases.last,
-                            onTap: { host.push(group.directPage ?? .group(group)) }
-                        )
+                        SettingsNavigationRow(title: group.title, symbol: group.systemImage,
+                                              color: group.symbolColor) {
+                            host.push(group.directPage ?? .group(group))
+                        }
                         .accessibilityIdentifier("settings.group.\(group.rawValue)")
                     }
                 }
             }
         }
-    }
-
-    @ViewBuilder
-    private var results: some View {
-        let matches = DesktopSettingsEntry.search(query)
-        if matches.isEmpty {
-            ContentUnavailableView.search(text: query)
-        } else {
-            SettingsSection {
-                ForEach(matches) { entry in
-                    SettingsRow(
-                        icon: entry.icon,
-                        label: entry.title,
-                        sub: entry.mobileGroup?.title,
-                        isLast: entry.id == matches.last?.id,
-                        onTap: { host.push(entry.page) }
-                    )
-                    .accessibilityIdentifier(entry.accessibilityID)
-                }
-            }
-        }
+        .listStyle(.insetGrouped)
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: Text("settings_parity_search"))
+        .scrollDismissesKeyboard(.interactively)
     }
 }
 
-/// One group's pages, each opening the existing settings page unchanged.
 struct SettingsGroupPage: View {
     let group: SettingsGroup
     let host: SettingsHost
@@ -149,64 +145,135 @@ struct SettingsGroupPage: View {
     }
 
     var body: some View {
-        SettingsSection {
-            ForEach(entries) { entry in
-                SettingsRow(
-                    icon: entry.icon,
-                    label: entry.title,
-                    isLast: entry.id == entries.last?.id,
-                    onTap: { host.push(entry.page) }
-                )
-                .accessibilityIdentifier(entry.accessibilityID)
+        List {
+            Section {
+                ForEach(entries) { entry in
+                    SettingsNavigationRow(title: entry.title, symbol: entry.systemImage, color: group.symbolColor) {
+                        host.push(entry.page)
+                    }
+                    .accessibilityIdentifier(entry.accessibilityID)
+                }
+            } footer: {
+                Text(group.summary)
             }
         }
+        .listStyle(.insetGrouped)
     }
 }
 
-/// The signed-in profile (or a sign-in prompt) — tapping opens the account page.
+private struct SettingsNavigationRow: View {
+    let title: String
+    let symbol: String
+    let color: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 29, height: 29)
+                    .background(color, in: RoundedRectangle(cornerRadius: 7))
+                    .accessibilityHidden(true)
+                Text(title).foregroundStyle(Color.primary).frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(Color(uiColor: .tertiaryLabel))
+                    .accessibilityHidden(true)
+            }
+            .frame(minHeight: 32)
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.automatic)
+    }
+}
+
 private struct SettingsAccountCard: View {
-    @Environment(\.theme) private var t
     let onOpen: () -> Void
 
     var body: some View {
         let user = FirebaseAccount.shared.user
-        let name = user.flatMap { $0.displayName?.trimmingCharacters(in: .whitespaces).isEmpty == false ? $0.displayName : $0.email }
-        let subtitle = user == nil
-            ? String(localized: "drawer_account_signed_out_subtitle")
-            : (user?.displayName?.isEmpty == false ? user?.email : nil)
         Button(action: onOpen) {
-            HStack(spacing: 12) {
-                Circle()
-                    .fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 44, height: 44)
-                    .overlay {
-                        if let initial = name?.first {
-                            Text(String(initial).uppercased())
-                                .font(.body.weight(.semibold))
-                                .foregroundColor(.white)
-                        } else {
-                            LXIcon(name: .sparkle, size: 18, color: .white, stroke: 1.8)
-                        }
-                    }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name ?? String(localized: "drawer_account_signed_out_title"))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(t.text)
-                        .lineLimit(1)
-                    if let subtitle {
-                        Text(subtitle).font(.caption).foregroundColor(t.text4).lineLimit(1)
-                    }
+            HStack(spacing: 14) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 52)).foregroundStyle(Color.secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(user?.displayName ?? user?.email ?? String(localized: "account_sign_in_title"))
+                        .font(.headline).foregroundStyle(Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(user?.email ?? String(localized: "account_sign_in_subtitle"))
+                        .font(.subheadline).foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 8)
-                LXIcon(name: .chevronR, size: 13, color: t.text4, stroke: 1.7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(Color(uiColor: .tertiaryLabel))
+                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(t.surface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(t.border, lineWidth: 0.5))
+            .padding(.vertical, 8)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.automatic)
         .accessibilityIdentifier("settings.page.account")
+    }
+}
+
+private extension SettingsGroup {
+    var systemImage: String {
+        switch self {
+        case .models: "sparkles"
+        case .voice: "waveform"
+        case .modes: "slider.horizontal.3"
+        case .phone: "iphone"
+        case .general: "gearshape.fill"
+        case .data: "folder.fill"
+        case .about: "info.circle.fill"
+        }
+    }
+    var symbolColor: Color {
+        switch self {
+        case .models: .indigo
+        case .voice: .pink
+        case .modes: .orange
+        case .phone: .green
+        case .general: .gray
+        case .data: .blue
+        case .about: .gray
+        }
+    }
+}
+
+private extension DesktopSettingsEntry {
+    var systemImage: String {
+        switch id {
+        case "account": "person.crop.circle"
+        case "appearance": "paintpalette.fill"
+        case "voice": "waveform"
+        case "language": "globe"
+        case "notifications": "bell.fill"
+        case "input": "keyboard"
+        case "provider-credentials": "key.fill"
+        case "custom-providers", "fusion": "sparkles"
+        case "web-search": "magnifyingglass"
+        case "web-fetch": "globe"
+        case "permissions", "permission-mode": "checkmark.shield.fill"
+        case "tools-agent": "wrench.and.screwdriver.fill"
+        case "skills": "square.stack.3d.up.fill"
+        case "hooks": "arrow.triangle.branch"
+        case "plugins", "mcp": "puzzlepiece.extension.fill"
+        case "linux-runtime": "terminal.fill"
+        case "typescript-lsp": "curlybraces"
+        case "app-integration": "link"
+        case "dream": "moon.stars.fill"
+        case "privacy": "hand.raised.fill"
+        case "diagnostics": "stethoscope"
+        case "archived-chats": "archivebox.fill"
+        case "projects": "folder.fill"
+        case "about": "info.circle.fill"
+        default: "gearshape.fill"
+        }
     }
 }

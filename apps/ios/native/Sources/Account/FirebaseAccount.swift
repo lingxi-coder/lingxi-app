@@ -14,7 +14,8 @@ struct LingxiAccountProfile: Equatable {
     init(_ user: FirebaseAuth.User) {
         uid = user.uid
         email = user.email
-        displayName = user.displayName
+        let name = user.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        displayName = name?.isEmpty == false ? name : nil
         isEmailVerified = user.isEmailVerified
     }
 }
@@ -102,14 +103,14 @@ final class FirebaseAccount {
     func resetPassword(email: String) {
         perform {
             try await Auth.auth().sendPasswordReset(withEmail: email.trimmingCharacters(in: .whitespacesAndNewlines))
-            self.message = "如果此邮箱已注册，将收到密码重置邮件。"
+            self.message = String(localized: "account_reset_sent")
         }
     }
     func verifyEmail() {
         perform {
             guard let user = Auth.auth().currentUser else { throw AccountError.unavailable }
             try await user.sendEmailVerification()
-            self.message = "验证邮件已发送，请检查收件箱。"
+            self.message = String(localized: "account_verification_sent")
         }
     }
     func reload() {
@@ -125,17 +126,17 @@ final class FirebaseAccount {
     private enum AccountError: Error { case unavailable }
     private static func errorMessage(_ error: Error) -> String {
         let error = error as NSError
-        if error.domain == ASAuthorizationError.errorDomain && error.code == ASAuthorizationError.canceled.rawValue { return "登录已取消。" }
-        if error.domain == kGIDSignInErrorDomain && error.code == GIDSignInError.canceled.rawValue { return "登录已取消。" }
-        guard error.domain == AuthErrorDomain else { return "操作未完成，请检查网络或登录服务配置后重试。" }
+        if error.domain == ASAuthorizationError.errorDomain && error.code == ASAuthorizationError.canceled.rawValue { return String(localized: "account_error_cancelled") }
+        if error.domain == kGIDSignInErrorDomain && error.code == GIDSignInError.canceled.rawValue { return String(localized: "account_error_cancelled") }
+        guard error.domain == AuthErrorDomain else { return String(localized: "account_error_configuration") }
         switch error.code {
-        case AuthErrorCode.wrongPassword.rawValue, AuthErrorCode.invalidCredential.rawValue, AuthErrorCode.userNotFound.rawValue: return "邮箱或密码不正确。"
-        case AuthErrorCode.emailAlreadyInUse.rawValue: return "此邮箱已注册，请登录或重置密码。"
-        case AuthErrorCode.weakPassword.rawValue: return "密码强度不足，请使用更长的密码。"
-        case AuthErrorCode.operationNotAllowed.rawValue: return "此登录方式尚未启用。"
-        case AuthErrorCode.accountExistsWithDifferentCredential.rawValue: return "请先使用原有登录方式登录此邮箱。"
-        case AuthErrorCode.userDisabled.rawValue: return "此账号已停用。"
-        default: return "操作未完成，请检查网络后重试。"
+        case AuthErrorCode.wrongPassword.rawValue, AuthErrorCode.invalidCredential.rawValue, AuthErrorCode.userNotFound.rawValue: return String(localized: "account_error_credentials")
+        case AuthErrorCode.emailAlreadyInUse.rawValue: return String(localized: "account_error_existing")
+        case AuthErrorCode.weakPassword.rawValue: return String(localized: "account_error_weak_password")
+        case AuthErrorCode.operationNotAllowed.rawValue: return String(localized: "account_error_provider_disabled")
+        case AuthErrorCode.accountExistsWithDifferentCredential.rawValue: return String(localized: "account_error_other_provider")
+        case AuthErrorCode.userDisabled.rawValue: return String(localized: "account_error_disabled")
+        default: return String(localized: "account_error_network")
         }
     }
 }

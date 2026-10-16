@@ -21,8 +21,7 @@ extension SettingsPage {
     /// ScrollView-and-padding wrapper would collapse them to zero height.
     var ownsScrolling: Bool {
         switch self {
-        case .voice: true
-        case .group(let group): group == .models || group == .voice
+        case .main, .account, .voice, .group: true
         case .providerList(let box), .providerPicker(let box), .providerEdit(let box, _): box.kind == .llm
         default: false
         }
@@ -75,13 +74,13 @@ struct SettingsHost: View {
     @Bindable var navigation: AppNavigationModel
 
     func push(_ page: SettingsPage) {
-        withAnimation(.easeOut(duration: 0.22)) { navigation.pushSettings(page) }
+        navigation.pushSettings(page)
     }
     func pop() {
-        withAnimation(.easeOut(duration: 0.22)) { navigation.popSettings() }
+        navigation.popSettings()
     }
     func reset() {
-        withAnimation(.easeOut(duration: 0.22)) { navigation.resetSettings() }
+        navigation.resetSettings()
     }
     /// Replaces the top two pages (used by the picker → edit flow).
     func replaceTopTwo(with pages: [SettingsPage]) {
@@ -149,7 +148,8 @@ struct SettingsHost: View {
             activeProjectID: projectStore?.activeProjectId,
             switchTo: onSwitchProject
         ))
-        .background(t.windowBg)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .tint(t.accent)
         // Pull the real MCP listing when the sheet opens; mirror it into the store
         // (so the existing MCP page renders real servers) once it arrives.
         .onAppear {
@@ -248,7 +248,6 @@ struct SettingsHost: View {
         if page.ownsScrolling {
             SettingsPages(store: store, host: self, page: page)
                 .id(pageKey(for: page))
-                .transition(.opacity)
         } else {
             scrollingPageContent(for: page)
         }
@@ -266,13 +265,12 @@ struct SettingsHost: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .id(pageKey(for: page))
-        .transition(.opacity)
     }
 
     private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
         switch page {
-        case .main, .group, .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
-             .pluginsAdvanced, .diagnostics, .projectsTrust, .account:
+        case .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
+             .pluginsAdvanced, .diagnostics, .projectsTrust:
             true
         case .providerList(let kind): kind.kind == .llm
         default: false
@@ -281,16 +279,13 @@ struct SettingsHost: View {
 
     private func navigationPage(for page: SettingsPage) -> some View {
         pageContent(for: page)
-            .background(t.windowBg.ignoresSafeArea())
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .navigationTitle(title(of: page))
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(page == .main ? .large : .inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     if page == .main {
-                        Button(action: onClose) {
-                            LXIcon(name: .x, size: 18, color: t.text3, stroke: 1.8)
-                                .frame(minWidth: 44, minHeight: 44)
-                        }
+                        Button("settings_done", action: onClose)
                         .accessibilityLabel(String(localized: "settings_close_accessibility"))
                         .accessibilityIdentifier("settings.close")
                     } else if case .providerEdit(let box, _) = page,
@@ -306,6 +301,7 @@ struct SettingsHost: View {
                         Button("settings_done") { handleDone(for: page) }
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(t.accent)
+                            .accessibilityIdentifier("settings.done")
                     }
                 }
             }
@@ -316,7 +312,7 @@ struct SettingsHost: View {
     }
 
     private func handleDone(for page: SettingsPage) {
-        reset()
+        onClose()
     }
 
     func addMcpServer() {

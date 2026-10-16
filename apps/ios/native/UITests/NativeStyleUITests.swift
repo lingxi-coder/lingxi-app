@@ -26,7 +26,7 @@ final class NativeStyleUITests: XCTestCase {
                 ("drawer.terminal", "terminal.root"),
             ] {
                 if !app.buttons[entry].isHittable {
-                    app.navigationBars.allElementsBoundByIndex.last!.buttons.element(boundBy: 0).tap()
+                    app.buttons["drawer.open"].tap()
                 }
                 XCTAssertTrue(app.buttons[entry].waitForExistence(timeout: 8), app.debugDescription)
                 capture(app, "Sidebar-\(theme)")
@@ -52,13 +52,13 @@ final class NativeStyleUITests: XCTestCase {
         defer { app.terminate() }
         let settings = app.buttons["drawer.settings"]
         if !settings.isHittable {
-            let drawer = app.navigationBars.allElementsBoundByIndex.last!.buttons.element(boundBy: 0)
+            let drawer = app.buttons["drawer.open"]
             XCTAssertTrue(drawer.waitForExistence(timeout: 15), app.debugDescription)
             drawer.tap()
         }
         XCTAssertTrue(settings.waitForExistence(timeout: 8), app.debugDescription)
         settings.tap()
-        let search = app.textFields["settings.search"]
+        let search = app.searchFields.firstMatch
         XCTAssertTrue(search.exists || search.waitForExistence(timeout: 8), app.debugDescription)
         capture(app, "Settings-home-\(theme)")
 

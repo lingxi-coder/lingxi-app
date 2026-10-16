@@ -29,7 +29,7 @@ Router 规范路径大小写与分隔符，准入固定公开／控制台路由�
 
 ## 构建、预览与静态托管
 
-Build 运行 Vite 并写入 dist。已检入的 Cloudflare 配置把 dist 作为 SPA assets 服务并声明路由，没有账号、计费或 Agent 执行 worker 入口。静态页面响应成功只证明前端服务可用；发布及后端连接需要独立授权工作与验收。
+Build 运行 Vite 并写入 dist。仓库根目录 Firebase Hosting 配置提供 apps/web/dist，以 index.html 回退处理 SPA 路由，并将 /v1/** 转发到 catalogApi。模型管理页面为 /admin/models。静态页面响应成功只证明前端服务可用；目录／后端运行及运行时 Agent 执行需要各自验收。
 
 刷新源码身份时，在完整本地工作区运行文档同步。纯文档 CI 可在没有相邻 SDK checkout 时检查保存内容／输出一致性。API 索引过期属于文档生成故障，不能解释成 provider／网络故障。Schema 新增期间保留当前语言／主题行为。
 
@@ -62,17 +62,17 @@ npm --prefix apps/web run dev -- --host 127.0.0.1
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/web/src/app/App.tsx)
 
-- [lingxi-app/apps/web/src/app/App.tsx](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/app/App.tsx) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/app/router.ts](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/app/router.ts) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/app/usePersistentState.ts](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/app/usePersistentState.ts) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/pages/DocsPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/pages/DocsPage.tsx) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/pages/LoginPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/pages/LoginPage.tsx) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/pages/ConsolePages.tsx](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/pages/ConsolePages.tsx) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/data/mockData.ts) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/src/utils/apiKeys.ts](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/src/utils/apiKeys.ts) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/package.json](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/package.json) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
-- [lingxi-app/apps/web/wrangler.jsonc](https://github.com/lingxi-coder/lingxi-app/blob/e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8/apps/web/wrangler.jsonc) — 已提交源码 (e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8)
+- [lingxi-app/apps/web/src/app/App.tsx](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/app/App.tsx) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/app/router.ts](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/app/router.ts) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/app/usePersistentState.ts](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/app/usePersistentState.ts) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/pages/DocsPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/pages/DocsPage.tsx) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/pages/LoginPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/pages/LoginPage.tsx) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/pages/ConsolePages.tsx](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/pages/ConsolePages.tsx) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/data/mockData.ts) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/src/utils/apiKeys.ts](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/src/utils/apiKeys.ts) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/apps/web/package.json](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/apps/web/package.json) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
+- [lingxi-app/firebase.json](https://github.com/lingxi-coder/lingxi-app/blob/86b0c95bccdf6182701d5c0a63c8cede93f2fd6a/firebase.json) — 已提交源码 (86b0c95bccdf6182701d5c0a63c8cede93f2fd6a)
 
-- lingxi-app: HEAD e5da91ebeb7a1be1e32573f4146b8daa81c5d0d8; 所据文件指纹 sha256:cf0546eb6dba7771c4ba40a74eae1e2bd3d408fcccd3be618eb4d7848814bd9f
+- lingxi-app: HEAD 86b0c95bccdf6182701d5c0a63c8cede93f2fd6a; 所据文件指纹 sha256:a43c7b53f8204a3396d3fd5d52d7942bac36d65bd885d68ea36c4987bf75758c
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

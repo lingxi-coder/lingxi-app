@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseProviderImport, mergeProviderImport, validateCustomProvider, validateImportEntry, validateProfileName } from '../src/renderer/components/settings/pages/customProviderImport';
 const native = { type: 'openai', baseUrl: 'https://example.com/v1', apiKeyEnv: 'EXAMPLE_KEY', models: [{ id: 'm', aliases: ['alias'], capabilities: { vision: true } }], supportsWebsockets: false };
+test('application output defaults require positive u32 values and may exceed the declared ceiling', () => {
+  const draft = (value: unknown) => ({ ...native, models: [{ id: 'm', metadata: { maxOutputTokens: 8192, applicationOutputTokens: value } }] });
+  for (const value of [1, 32768, 0xffffffff, null]) assert.equal(validateCustomProvider(draft(value) as never), null);
+  for (const value of [0, -1, 1.5, '32768', true, {}, 0x100000000]) assert.ok(validateCustomProvider(draft(value) as never));
+  const entry = parseProviderImport(JSON.stringify({ providers: { custom: draft(32768) } })).entries[0];
+  assert.equal(validateImportEntry(entry), null);
+  assert.deepEqual(mergeProviderImport({}, [entry]).providers.custom, draft(32768));
+});
 test('LingXi wrappers and native maps preserve supported advanced fields', () => {
   for (const input of [{ providers: { custom: native } }, { custom: native }]) {
     const result = parseProviderImport(JSON.stringify(input));

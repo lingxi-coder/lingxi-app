@@ -167,6 +167,7 @@ function validMetadata(value: unknown): boolean {
   for (const [key, v] of Object.entries(value)) {
     if (['family','status','releaseDate','lastUpdated','knowledgeCutoff'].includes(key) && v !== null && typeof v !== 'string') return false;
     if (['contextWindowTokens','maxInputTokens','maxOutputTokens'].includes(key) && v !== null && !integer(v)) return false;
+    if (key === 'applicationOutputTokens' && v !== null && (!integer(v) || Number(v) === 0 || Number(v) > 0xffffffff)) return false;
     if (['openWeights','attachments','temperatureControl'].includes(key) && v !== null && typeof v !== 'boolean') return false;
     if (['inputModalities','outputModalities'].includes(key) && (!Array.isArray(v) || v.some(item => typeof item !== 'string'))) return false;
     if (key === 'pricing' && v !== null && !validModelPricing(v)) return false;

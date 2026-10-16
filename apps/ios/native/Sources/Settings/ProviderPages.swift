@@ -23,7 +23,7 @@ struct ModelsSettingsPage: View {
                 Section {
                     SettingsApplyChangesBanner(reconnect: host.onReconnectAfterSecretChange)
                 }
-                .listRowBackground(t.surface)
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             }
             defaultModelSection
             providersSection
@@ -33,7 +33,7 @@ struct ModelsSettingsPage: View {
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(t.windowBg)
+        .background(Color(uiColor: .systemGroupedBackground))
         .sheet(isPresented: $addingProvider) {
             ProviderAddSheet { addingProvider = false }
                 .presentationDragIndicator(.visible)
@@ -62,9 +62,7 @@ struct ModelsSettingsPage: View {
     /// pending change; keep the empty row out of the list in that case.
     private var showsApplyBanner: Bool {
         desktop.connected
-            && (host.onReconnectAfterSecretChange != nil
-                || desktop.needsReconnect
-                || PluginSecretRepository.shared.needsReconnect)
+            && (desktop.needsReconnect || PluginSecretRepository.shared.needsReconnect)
     }
 
     // MARK: Default model
@@ -72,29 +70,26 @@ struct ModelsSettingsPage: View {
     private var defaultModelSection: some View {
         let summary = repository.settingsSummary
         return Section {
-            HStack(spacing: 12) {
-                Circle()
-                    .fill(summary.defaultProfile == nil ? t.text4 : t.accent)
-                    .frame(width: 10, height: 10)
-                VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.title2).foregroundStyle(t.accent)
+                    .frame(width: 36, height: 36)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
                     Text(summary.defaultProfile?.name ?? String(localized: "settings_provider_unconfigured"))
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(t.text)
+                        .font(.headline).foregroundStyle(Color.primary)
                     Text(summary.defaultModelID.flatMap { $0.isEmpty ? nil : $0 } ?? "—")
-                        .font(.footnote.monospaced())
-                        .foregroundStyle(t.text4)
-                        .lineLimit(1)
+                        .font(.subheadline).foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 8)
-                Text(String(localized: "settings_providers_enabled_count \(summary.enabledCount)"))
-                    .font(.footnote)
-                    .foregroundStyle(t.text3)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 6)
         } header: {
             Text(String(localized: "settings_provider_default_model"))
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings_providers_enabled_count \(summary.enabledCount)"))
                 if let active = summary.runtime.activeModelID, !summary.runtimeMatchesDefault, !active.isEmpty {
                     Text(String(localized: "settings_provider_runtime_active \(active)"))
                 }
@@ -103,7 +98,7 @@ struct ModelsSettingsPage: View {
                 }
             }
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     // MARK: Providers
@@ -113,7 +108,7 @@ struct ModelsSettingsPage: View {
             if repository.profiles.isEmpty {
                 Text(String(localized: "provider_no_providers_added"))
                     .font(.subheadline)
-                    .foregroundStyle(t.text4)
+                    .foregroundStyle(Color.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
             }
@@ -127,6 +122,7 @@ struct ModelsSettingsPage: View {
                         .foregroundStyle(t.accent)
                     Text(String(localized: "settings_provider_add_row"))
                         .foregroundStyle(t.accent)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
@@ -138,30 +134,40 @@ struct ModelsSettingsPage: View {
         } footer: {
             Text(String(localized: "provider_llm_blurb"))
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     private func providerRow(_ state: ProviderProfileState) -> some View {
         let preset = repository.preset(for: state.profile.presetID)
-        return SettingsRow(
-            labelView: AnyView(HStack(spacing: 6) {
-                Text(state.profile.name).font(.subheadline.weight(.medium)).foregroundColor(t.text)
-                if state.profile.isDefault { badge(String(localized: "settings_badge_default"), t.accent) }
-                if !state.profile.enabled { badge(String(localized: "settings_badge_disabled"), t.text4) }
-                if state.oauthState?.signedIn == true { badge(String(localized: "settings_provider_status_oauth"), t.ok) }
-            }),
-            subView: AnyView(HStack(spacing: 5) {
-                Circle().fill(state.legacyStatus.dot(t)).frame(width: 6, height: 6)
-                Text("\(state.statusLabel) · \(state.profile.modelID.isEmpty ? "—" : state.profile.modelID)")
-                    .font(.system(.caption, design: .monospaced)).foregroundColor(t.text4).lineLimit(1)
-            }),
-            chevron: true,
-            isLast: true,
-            onTap: { host.push(.providerEdit(.init(.llm), state.id)) }
-        ) {
-            ProviderTile(preset: preset, name: state.profile.name)
+        return Button { host.push(.providerEdit(.init(.llm), state.id)) } label: {
+            HStack(spacing: 12) {
+                ProviderTile(preset: preset, name: state.profile.name)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(state.profile.modelID.isEmpty ? "—" : state.profile.modelID)
+                        .font(.subheadline).foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(state.profile.enabled ? state.statusLabel : String(localized: "settings_badge_disabled"))
+                        .font(.caption).foregroundStyle(Color.secondary)
+                    if state.oauthState?.signedIn == true {
+                        Label(String(localized: "settings_provider_status_oauth"), systemImage: "person.crop.circle.badge.checkmark")
+                            .font(.caption).foregroundStyle(Color.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if state.profile.isDefault {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(t.accent)
+                        .accessibilityLabel(String(localized: "settings_badge_default"))
+                }
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(Color(uiColor: .tertiaryLabel))
+                    .accessibilityHidden(true)
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
-        .listRowInsets(EdgeInsets())
+        .buttonStyle(.automatic)
         .accessibilityIdentifier("provider.row.\(state.id)")
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
@@ -172,15 +178,9 @@ struct ModelsSettingsPage: View {
                     }
                 }
             } label: {
-                Text(String(localized: "common_removed"))
+                Label(String(localized: "common_removed"), systemImage: "trash")
             }
         }
-    }
-
-    private func badge(_ text: String, _ color: Color) -> some View {
-        Text(text).font(.caption.weight(.medium)).foregroundColor(color)
-            .padding(.horizontal, 6).padding(.vertical, 1)
-            .background(color.tint(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
     }
 
     // MARK: Routing
@@ -193,10 +193,10 @@ struct ModelsSettingsPage: View {
             )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(String(localized: "settings_provider_vision_delegation"))
-                        .foregroundStyle(t.text)
+                        .foregroundStyle(Color.primary)
                     Text(String(localized: "settings_provider_vision_delegation_hint"))
                         .font(.footnote)
-                        .foregroundStyle(t.text4)
+                        .foregroundStyle(Color.secondary)
                 }
             }
             .tint(t.accent)
@@ -227,7 +227,7 @@ struct ModelsSettingsPage: View {
         } footer: {
             if let message = repository.routingMessage { Text(message) }
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     private var fallbackSection: some View {
@@ -236,17 +236,17 @@ struct ModelsSettingsPage: View {
             if candidates.isEmpty {
                 Text(String(localized: "settings_provider_fallback_hint"))
                     .font(.footnote)
-                    .foregroundStyle(t.text4)
+                    .foregroundStyle(Color.secondary)
             } else {
                 ForEach(candidates) { candidate in
                     Button { repository.toggleFallbackProfile(candidate.profileID) } label: {
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(candidate.name).foregroundStyle(t.text)
+                                Text(candidate.name).foregroundStyle(Color.primary)
                                 Text(candidate.modelID)
                                     .font(.footnote.monospaced())
-                                    .foregroundStyle(t.text4)
-                                    .lineLimit(1)
+                                    .foregroundStyle(Color.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 8)
                             if candidate.selected {
@@ -263,7 +263,7 @@ struct ModelsSettingsPage: View {
         } header: {
             Text(String(localized: "settings_provider_fallback_order"))
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     private var hasPendingRoutingChanges: Bool {
@@ -277,9 +277,9 @@ struct ModelsSettingsPage: View {
             TextField("", text: text)
                 .keyboardType(.numberPad)
                 .multilineTextAlignment(.trailing)
-                .foregroundStyle(t.text3)
+                .foregroundStyle(Color.secondary)
         } label: {
-            Text(label).foregroundStyle(t.text)
+            Text(label).foregroundStyle(Color.primary)
         }
     }
 
@@ -291,18 +291,26 @@ struct ModelsSettingsPage: View {
         }
         return Section {
             ForEach(entries) { entry in
-                SettingsRow(icon: entry.icon, label: entry.title, isLast: true, onTap: { host.push(entry.page) })
-                    .listRowInsets(EdgeInsets())
-                    .accessibilityIdentifier(entry.accessibilityID)
+                Button { host.push(entry.page) } label: {
+                    HStack {
+                        Text(entry.title).foregroundStyle(Color.primary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold)).foregroundStyle(Color(uiColor: .tertiaryLabel))
+                            .accessibilityHidden(true)
+                    }
+                    .frame(minHeight: 28)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityIdentifier(entry.accessibilityID)
             }
             NavigationLink {
                 EngineCredentialsPage()
             } label: {
-                SettingsRow(icon: .pin, label: String(localized: "settings_parity_credentials"), chevron: false, isLast: true)
+                Text("settings_parity_credentials")
             }
-            .listRowInsets(EdgeInsets())
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 }
 
@@ -316,8 +324,8 @@ private struct ProviderTile: View {
         Text(String(name.prefix(1)))
             .font(.footnote.weight(.bold))
             .foregroundStyle(preset.color)
-            .frame(width: 28, height: 28)
-            .background(preset.color.mix(with: t.surface, amount: 0.18))
+            .frame(width: 36, height: 36)
+            .background(preset.color.opacity(0.12))
             .clipShape(.rect(cornerRadius: 7))
             .overlay {
                 RoundedRectangle(cornerRadius: 7)
@@ -335,7 +343,7 @@ private struct EngineCredentialsPage: View {
         ScrollView {
             EngineProfileCredentialsEditor().padding(16)
         }
-        .background(t.windowBg)
+        .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle(String(localized: "settings_parity_credentials"))
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -361,8 +369,8 @@ struct ProviderListPage: View {
 
     private var unsupportedProviderNotice: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(String(localized: "settings_provider_not_connected")).font(.footnote.weight(.semibold)).foregroundColor(t.text)
-            Text(String(localized: "settings_provider_unsupported_notice \(kind.title)")) .font(.caption).foregroundColor(t.text4).lineSpacing(4)
+            Text(String(localized: "settings_provider_not_connected")).font(.footnote.weight(.semibold)).foregroundStyle(Color.primary)
+            Text(String(localized: "settings_provider_unsupported_notice \(kind.title)")) .font(.caption).foregroundStyle(Color.secondary).lineSpacing(4)
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(14).background(t.surface).clipShape(RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
     }
@@ -377,24 +385,33 @@ struct ProviderAddSheet: View {
     @Environment(\.theme) private var t
     @State private var repository = ProviderRepository.shared
     @State private var path: [String] = []
+    @State private var query = ""
+
+    private var presets: [ProviderPreset] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? repository.catalogPresets : repository.catalogPresets.filter {
+            $0.name.localizedStandardContains(query) || $0.sub.localizedStandardContains(query)
+        }
+    }
+
     let onDone: () -> Void
 
     var body: some View {
         NavigationStack(path: $path) {
             List {
                 Section {
-                    ForEach(repository.catalogPresets) { preset in
+                    ForEach(presets) { preset in
                         Button { path.append(preset.id) } label: {
                             HStack(spacing: 12) {
                                 ProviderTile(preset: preset, name: preset.name)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(preset.name).foregroundStyle(t.text)
-                                    Text(preset.sub).font(.footnote).foregroundStyle(t.text4)
+                                    Text(preset.name).foregroundStyle(Color.primary)
+                                    Text(preset.sub).font(.footnote).foregroundStyle(Color.secondary)
                                 }
                                 Spacer(minLength: 8)
                                 Image(systemName: "chevron.right")
                                     .font(.footnote.weight(.semibold))
-                                    .foregroundStyle(t.text4.opacity(0.7))
+                                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
                             }
                             .contentShape(Rectangle())
                         }
@@ -404,11 +421,15 @@ struct ProviderAddSheet: View {
                 } footer: {
                     Text(String(localized: "settings_provider_picker_intro"))
                 }
-                .listRowBackground(t.surface)
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            .background(t.windowBg)
+            .background(Color(uiColor: .systemGroupedBackground))
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("settings_parity_search"))
+            .overlay {
+                if presets.isEmpty { ContentUnavailableView.search(text: query) }
+            }
             .navigationTitle(String(localized: "settings_title_add_llm"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -498,8 +519,9 @@ struct ProviderEditorForm: View {
             connectionsSection
             removeSection
         }
-        .scrollContentBackground(.hidden)
-        .background(t.windowBg)
+        .formStyle(.grouped)
+        .scrollDismissesKeyboard(.interactively)
+        .background(Color(uiColor: .systemGroupedBackground))
         .disabled(busy)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -531,24 +553,22 @@ struct ProviderEditorForm: View {
         Section {
             HStack(spacing: 10) {
                 Circle().fill(statusColor).frame(width: 8, height: 8)
-                Text(statusLabel).foregroundStyle(t.text)
+                Text(statusLabel).foregroundStyle(Color.primary)
                 Spacer(minLength: 8)
-                if draft.connectionState == .testing {
-                    ProgressView()
-                } else {
-                    Button(String(localized: "settings_provider_test_connection")) { testConnection() }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(t.accent)
-                        .disabled(draft.operationInFlight)
-                }
+                if draft.connectionState == .testing { ProgressView() }
             }
+            Button(action: testConnection) {
+                Label(String(localized: "settings_provider_test_connection"), systemImage: "network")
+            }
+            .accessibilityIdentifier("provider.test")
+            .disabled(draft.operationInFlight)
         } footer: {
             if let detail = draft.validationMessage ?? draft.detailMessage ?? actionError {
                 Text(detail)
                     .foregroundStyle(draft.connectionState == .failed || draft.validationMessage != nil || actionError != nil ? t.danger : t.text3)
             }
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     // MARK: Name and endpoint
@@ -558,16 +578,16 @@ struct ProviderEditorForm: View {
             LabeledContent {
                 TextField("", text: textBinding(\.name))
                     .multilineTextAlignment(.trailing)
-                    .foregroundStyle(t.text3)
+                    .foregroundStyle(Color.secondary)
             } label: {
-                Text(String(localized: "settings_display_name")).foregroundStyle(t.text)
+                Text(String(localized: "settings_display_name")).foregroundStyle(Color.primary)
             }
             if repository.isOfficialEndpoint(for: draft.profile) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "settings_api_url")).font(.footnote).foregroundStyle(t.text3)
+                    Text(String(localized: "settings_api_url")).font(.footnote).foregroundStyle(Color.secondary)
                     Text(draft.profile.baseURL)
                         .font(.callout.monospaced())
-                        .foregroundStyle(t.text4)
+                        .foregroundStyle(Color.secondary)
                         .textSelection(.enabled)
                 }
             } else {
@@ -584,17 +604,17 @@ struct ProviderEditorForm: View {
                 Text(String(localized: "settings_provider_custom_url_hint"))
             }
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     /// A caption over a full-width field: URLs and ids are too long for a
     /// trailing value.
     private func fieldRow(_ label: String, text: Binding<String>, placeholder: String = "") -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.footnote).foregroundStyle(t.text3)
+            Text(label).font(.footnote).foregroundStyle(Color.secondary)
             TextField(placeholder, text: text)
                 .font(.callout.monospaced())
-                .foregroundStyle(t.text)
+                .foregroundStyle(Color.primary)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
         }
@@ -625,17 +645,17 @@ struct ProviderEditorForm: View {
                 Section {
                     Text(String(localized: "settings_provider_oauth_only"))
                         .font(.footnote)
-                        .foregroundStyle(t.text3)
+                        .foregroundStyle(Color.secondary)
                 }
-                .listRowBackground(t.surface)
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             }
         } else {
             Section {
                 if storedKeyCollapsed {
                     LabeledContent {
-                        Text("••••••••••••").font(.callout.monospaced()).foregroundStyle(t.text3)
+                        Text("••••••••••••").font(.callout.monospaced()).foregroundStyle(Color.secondary)
                     } label: {
-                        Text(String(localized: "settings_provider_api_key")).foregroundStyle(t.text)
+                        Text(String(localized: "settings_provider_api_key")).foregroundStyle(Color.primary)
                     }
                     Button(String(localized: "settings_provider_replace_key")) {
                         editingStoredCredential = true
@@ -656,11 +676,13 @@ struct ProviderEditorForm: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("provider.api-key")
-                        Button(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key")) {
-                            showKey.toggle()
+                        Button { showKey.toggle() } label: {
+                            Image(systemName: showKey ? "eye.slash" : "eye")
+                                .frame(minWidth: 44, minHeight: 44)
                         }
-                        .buttonStyle(.plain)
-                        .font(.subheadline)
+                        .accessibilityLabel(showKey ? String(localized: "settings_provider_hide_key") : String(localized: "settings_provider_show_key"))
+                        .buttonStyle(.borderless)
+                        .font(.body)
                         .foregroundStyle(t.accent)
                         .accessibilityIdentifier("provider.api-key.visibility")
                     }
@@ -682,7 +704,7 @@ struct ProviderEditorForm: View {
             } header: {
                 Text(String(localized: "settings_provider_api_key"))
             }
-            .listRowBackground(t.surface)
+            .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         }
     }
 
@@ -694,7 +716,7 @@ struct ProviderEditorForm: View {
                         Text(oauth.accountLabel ?? String(localized: "settings_provider_status_configured"))
                             .foregroundStyle(t.ok)
                     } label: {
-                        Text(String(localized: "settings_provider_oauth")).foregroundStyle(t.text)
+                        Text(String(localized: "settings_provider_oauth")).foregroundStyle(Color.primary)
                     }
                     Button(String(localized: "settings_provider_test_connection")) { testConnection() }
                         .buttonStyle(.plain)
@@ -714,7 +736,7 @@ struct ProviderEditorForm: View {
             } footer: {
                 if isOAuthOnly { Text(String(localized: "settings_provider_oauth_only")) }
             }
-            .listRowBackground(t.surface)
+            .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         }
     }
 
@@ -725,18 +747,17 @@ struct ProviderEditorForm: View {
             NavigationLink {
                 ProviderModelsPage(draft: $draft)
             } label: {
-                LabeledContent {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("settings_provider_model_id").foregroundStyle(Color.primary)
                     Text(draft.profile.modelID.isEmpty ? "—" : draft.profile.modelID)
-                        .font(.callout.monospaced())
-                        .foregroundStyle(t.text3)
-                        .lineLimit(1)
-                } label: {
-                    Text(String(localized: "settings_provider_model_id")).foregroundStyle(t.text)
+                        .font(.subheadline).foregroundStyle(Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(.vertical, 2)
             }
             .accessibilityIdentifier("provider.model")
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     // MARK: Enable / default
@@ -750,7 +771,7 @@ struct ProviderEditorForm: View {
                 draft.profile.enabled = true
             } label: {
                 HStack {
-                    Text(String(localized: "settings_provider_set_default")).foregroundStyle(t.text)
+                    Text(String(localized: "settings_provider_set_default")).foregroundStyle(Color.primary)
                     Spacer(minLength: 8)
                     if draft.profile.isDefault {
                         Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(t.accent)
@@ -760,7 +781,7 @@ struct ProviderEditorForm: View {
             }
             .buttonStyle(.plain)
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     // MARK: Extra connections
@@ -779,7 +800,7 @@ struct ProviderEditorForm: View {
                 ? String(localized: "settings_provider_connections_single")
                 : String(localized: "settings_provider_connections_hint"))
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         // Identified by position: ids start empty and stay editable, so an
         // id-keyed ForEach would collapse every new row onto one.
         ForEach(draft.profile.connections.indices, id: \.self) { index in
@@ -812,7 +833,7 @@ struct ProviderEditorForm: View {
         } footer: {
             Text(String(localized: "settings_provider_connection_id_hint"))
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     /// Removing a row shortens the array while SwiftUI still holds bindings for
@@ -862,7 +883,7 @@ struct ProviderEditorForm: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(t.danger)
             }
-            .listRowBackground(t.surface)
+            .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         }
     }
 
@@ -969,6 +990,7 @@ private struct ProviderModelsPage: View {
     @Environment(\.theme) private var t
     @State private var repository = ProviderRepository.shared
     @State private var selectedModelDetails: ModelRuntimeDetails?
+    @State private var query = ""
     @Binding var draft: ProviderEditorDraft
 
     private struct Catalog {
@@ -1020,17 +1042,19 @@ private struct ProviderModelsPage: View {
                 Section {
                     HStack(spacing: 10) {
                         if catalog.isLoading { ProgressView() }
-                        Text(catalog.summary).font(.footnote).foregroundStyle(t.text3)
+                        Text(catalog.summary).font(.footnote).foregroundStyle(Color.secondary)
                     }
                 }
-                .listRowBackground(t.surface)
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             }
             customModelSection(catalog)
             pickerSection(catalog, visible: visible)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
-        .background(t.windowBg)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("composer_search_models_placeholder"))
+        .scrollDismissesKeyboard(.interactively)
         .navigationTitle(String(localized: "settings_provider_model_id"))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $selectedModelDetails) { details in
@@ -1038,24 +1062,34 @@ private struct ProviderModelsPage: View {
         }
     }
 
+    private func matchingModels(_ catalog: Catalog) -> [String] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? catalog.models : catalog.models.filter {
+            $0.localizedStandardContains(query)
+                || (catalog.details[$0]?.preferredDisplayName?.localizedStandardContains(query) ?? false)
+        }
+    }
+
     private func modelListSection(_ catalog: Catalog) -> some View {
-        Section {
-            ForEach(catalog.models, id: \.self) { model in
+        let models = matchingModels(catalog)
+        return Section {
+            if models.isEmpty { ContentUnavailableView.search(text: query) }
+            ForEach(models, id: \.self) { model in
                 let details = catalog.details[model]
                 HStack(spacing: 8) {
                     Button { draft.profile.modelID = model } label: {
                         HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
-                                    .foregroundStyle(t.text)
+                                    .foregroundStyle(Color.primary)
                                 Text(model)
                                     .font(.footnote.monospaced())
-                                    .foregroundStyle(t.text4)
-                                    .lineLimit(1)
+                                    .foregroundStyle(Color.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 if let details, !details.summaryItems.isEmpty {
                                     Text(details.summaryItems.joined(separator: " · "))
                                         .font(.caption)
-                                        .foregroundStyle(t.text4)
+                                        .foregroundStyle(Color.secondary)
                                         .lineLimit(2)
                                 }
                             }
@@ -1066,12 +1100,14 @@ private struct ProviderModelsPage: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("provider.model.select.\(model)")
+                    .accessibilityAddTraits(draft.profile.modelID == model ? [.isSelected] : [])
                     if let details {
                         Button { selectedModelDetails = details } label: {
                             Image(systemName: "info.circle")
                                 .foregroundStyle(t.accent)
-                                .frame(width: 32, height: 32)
+                                .frame(minWidth: 44, minHeight: 44)
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("provider.model.info.\(model)")
@@ -1079,7 +1115,7 @@ private struct ProviderModelsPage: View {
                 }
             }
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     private func customModelSection(_ catalog: Catalog) -> some View {
@@ -1089,15 +1125,16 @@ private struct ProviderModelsPage: View {
                 set: { draft.profile.modelID = $0 }
             ))
             .font(.callout.monospaced())
-            .foregroundStyle(t.text)
+            .foregroundStyle(Color.primary)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
+            .accessibilityIdentifier("provider.model.custom")
         } header: {
             Text(String(localized: "settings_provider_custom_model_id"))
         } footer: {
             Text(String(localized: "settings_provider_custom_model_hint"))
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     @ViewBuilder
@@ -1107,21 +1144,21 @@ private struct ProviderModelsPage: View {
                 get: { draft.profile.showInModelPicker },
                 set: { draft.profile.showInModelPicker = $0 }
             )) {
-                Text(String(localized: "settings_provider_show_in_picker")).foregroundStyle(t.text)
+                Text(String(localized: "settings_provider_show_in_picker")).foregroundStyle(Color.primary)
             }
             .tint(t.accent)
             if catalog.isReady, draft.profile.showInModelPicker {
-                ForEach(catalog.models, id: \.self) { model in
+                ForEach(matchingModels(catalog), id: \.self) { model in
                     Toggle(isOn: Binding(
                         get: { visible.contains(model) },
                         set: { _ in toggleVisibleModel(model, from: catalog.models) }
                     )) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(catalog.details[model]?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
-                                .foregroundStyle(t.text)
+                                .foregroundStyle(Color.primary)
                             Text(model)
                                 .font(.footnote.monospaced())
-                                .foregroundStyle(t.text4)
+                                .foregroundStyle(Color.secondary)
                                 .lineLimit(1)
                         }
                     }
@@ -1136,7 +1173,7 @@ private struct ProviderModelsPage: View {
                 Text(catalog.summary)
             }
         }
-        .listRowBackground(t.surface)
+        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 
     private func toggleVisibleModel(_ modelID: String, from candidates: [String]) {

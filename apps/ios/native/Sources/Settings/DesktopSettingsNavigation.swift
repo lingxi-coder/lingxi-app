@@ -20,7 +20,6 @@ struct DesktopSettingsEntry: Identifiable {
         case "appearance": .sun
         case "voice": .mic
         case "language": .globe
-        case "web-search", "web-fetch": .search
         case "linux-runtime": .terminal
         case "typescript-lsp": .wrench
         case "app-integration": .link
@@ -62,8 +61,6 @@ struct DesktopSettingsEntry: Identifiable {
         .init(id: "language", titleKey: "settings_language_title", group: "个人", page: .language, keys: ["language", "locale"], mobileGroup: .general),
         .init(id: "notifications", titleKey: "settings_notifications", group: "个人", page: .notifications, keys: ["notifications", "background"], mobileGroup: .general),
         .init(id: "input", titleKey: "settings_keyboard_input", group: "个人", page: .input, keys: ["input", "keyboard"], mobileGroup: .general),
-        .init(id: "web-search", titleKey: "settings_web_search", group: "模型与服务", page: .providerList(.init(.search)), keys: ["search", "web"], mobileGroup: .models),
-        .init(id: "web-fetch", titleKey: "settings_web_fetch", group: "模型与服务", page: .providerList(.init(.fetch)), keys: ["fetch", "web"], mobileGroup: .models),
         .init(id: "permission-mode", titleKey: "settings_permission_mode_title", group: "编码", page: .permissionMode, keys: ["permission mode", "ask", "plan", "bypass"], mobileGroup: .modes),
         .init(id: "dream", titleKey: "settings_dream_mode", group: "编码", page: .dream, keys: ["dream", "memory"], mobileGroup: .modes),
         .init(id: "linux-runtime", titleKey: "settings_linux_runtime", group: "高级", page: .linuxRuntime, keys: ["linux", "runtime", "terminal", "shell"], mobileGroup: .phone),
@@ -257,8 +254,6 @@ private extension DesktopSettingsEntry {
         case "input": "keyboard"
         case "provider-credentials": "key.fill"
         case "custom-providers", "fusion": "sparkles"
-        case "web-search": "magnifyingglass"
-        case "web-fetch": "globe"
         case "permissions", "permission-mode": "checkmark.shield.fill"
         case "tools-agent": "wrench.and.screwdriver.fill"
         case "skills": "square.stack.3d.up.fill"

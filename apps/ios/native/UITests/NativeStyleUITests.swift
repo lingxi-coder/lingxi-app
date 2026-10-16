@@ -66,7 +66,7 @@ final class NativeStyleUITests: XCTestCase {
             "account", "appearance", "language", "notifications", "input",
             "archived-chats", "projects", "provider-credentials", "custom-providers",
             "voice", "permissions", "tools-agent", "skills", "mcp", "hooks", "plugins",
-            "web-search", "web-fetch", "permission-mode", "dream", "linux-runtime",
+            "permission-mode", "dream", "linux-runtime",
             "typescript-lsp", "app-integration", "privacy", "diagnostics", "about",
         ]
         var previousQuery = ""

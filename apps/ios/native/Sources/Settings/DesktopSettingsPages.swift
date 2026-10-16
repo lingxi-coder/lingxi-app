@@ -86,8 +86,6 @@ struct DesktopGeneralPage: View {
                     .accessibilityIdentifier("settings.appIntegration")
             }
             SettingsSection(label: String(localized: "settings_parity_mobile_capabilities")) {
-                SettingsRow(label: String(localized: "settings_web_search"), onTap: { host.push(.providerList(.init(.search))) })
-                SettingsRow(label: String(localized: "settings_web_fetch"), onTap: { host.push(.providerList(.init(.fetch))) })
                 SettingsRow(label: String(localized: "settings_linux_runtime"), onTap: { host.push(.linuxRuntime) })
                 SettingsRow(label: String(localized: "settings_dream_mode"), onTap: { host.push(.dream) })
                 SettingsRow(label: "TypeScript LSP", onTap: { host.push(.typescriptLsp) })

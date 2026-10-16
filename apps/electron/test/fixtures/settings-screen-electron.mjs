@@ -123,8 +123,10 @@ async function runNoEngineBannerScenario(webContents) {
 
 async function runMalformedSnapshotScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.setMalformedSnapshot()');
+  await waitFor(webContents, 'Boolean(document.querySelector("[data-testid=settings-snapshot-error]"))');
   const state = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { state };
+  const errorTop = await webContents.executeJavaScript('document.querySelector("[data-testid=settings-snapshot-error]").getBoundingClientRect().top');
+  return { state, errorTop };
 }
 
 async function runSessionLoadingGuardScenario(webContents) {
@@ -918,6 +920,7 @@ async function runCustomizeScenario(window, webContents) {
   const modalCentered = await run('(() => {const rect=document.querySelector(".extension-skill-dialog").getBoundingClientRect();return Math.abs(rect.x + rect.width / 2 - innerWidth / 2) < 2;})()');
   await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
   await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+  await delay(50);
   const trappedFocus = await run('document.querySelector(".extension-skill-dialog").contains(document.activeElement)');
   await click('[aria-label="Skill actions"]');
   await button('Edit skill');
@@ -978,6 +981,144 @@ async function runCustomizeScenario(window, webContents) {
   return { baseline, shell, publicCatalog, twoColumns, inlineDetail, beforeConfirm, afterConfirm, installedPreview, expanded, sourceFilter, emptySearch, renderedMarkdown, modalCentered, trappedFocus, dirtyGuard, retainedDraft, skillNavigationGuard, skillNavigationRetainedDraft, tools, mcpNavigationGuard, mcpNavigationRetainedDraft, mcpNormalNavigationGuard, normalNavigation, personalCatalogDetail, pluginNormalNavigationGuard, pluginNavigationRetainedDraft, pluginDraftGuard, narrow, narrowPlugins };
 }
 
+async function runMacosAudit(window, webContents) {
+  const run = (expression) => webContents.executeJavaScript(expression);
+  const pages = await run('[...document.querySelectorAll("[data-nav-page]")].map(el => el.dataset.navPage)');
+  const results = [];
+  const dir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+  if (dir) mkdirSync(dir, { recursive: true });
+  for (const width of [1000, 760]) {
+    window.setContentSize(width, 720);
+    for (const page of pages) {
+      await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
+      await delay(100);
+      const state = await run(`(() => {
+        const scroll = document.querySelector('.settings-content-scroll');
+        const visible = el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+        const switches = [...document.querySelectorAll('[role="switch"]')].filter(visible);
+        return {
+          overflow: scroll.scrollWidth > scroll.clientWidth + 1,
+          unnamedSwitches: switches.filter(el => !el.getAttribute('aria-label') && !el.getAttribute('aria-labelledby')).length,
+          title: document.querySelector('.settings-page-title').textContent,
+          placeholder: !!document.querySelector('[data-testid="page-placeholder"]'),
+          overflowElements: [...scroll.querySelectorAll('*')].filter(el => visible(el) && el.getBoundingClientRect().right > scroll.getBoundingClientRect().right + 1).slice(0, 8).map(el => el.tagName + '.' + el.className),
+        };
+      })()`);
+      if (dir) {
+        window.showInactive();
+        await delay(60);
+        writeFileSync(join(dir, `${new URL(url).searchParams.get('theme') || 'light'}-${width}-${page}.png`), (await window.capturePage()).toPNG());
+      }
+      const bottomOverflow = await run(`(() => { const scroll = document.querySelector('.settings-content-scroll'); scroll.scrollTop = scroll.scrollHeight; return scroll.scrollWidth > scroll.clientWidth + 1; })()`);
+      results.push({ page, width, ...state, bottomOverflow });
+      if (dir && ['voice', 'tools-agent', 'permissions', 'diagnostics', 'provider-credentials'].includes(page)) {
+        await delay(40);
+        writeFileSync(join(dir, `${new URL(url).searchParams.get('theme') || 'light'}-${width}-${page}-bottom.png`), (await window.capturePage()).toPNG());
+      }
+    }
+  }
+  return results;
+}
+
+async function runMacosControls(window, webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const click = async selector => {
+    await run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    await delay(40);
+  };
+  await run('document.querySelector(\'[aria-label="Back to app"]\').focus()');
+  await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+  await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+  await waitFor(webContents, 'document.activeElement.matches(\'[aria-label="搜索设置"]\')');
+  const searchFocus = await run(`document.activeElement.matches('[aria-label="搜索设置"]') && getComputedStyle(document.querySelector('.settings-search')).outlineStyle === 'solid'`);
+  await run('window.__settingsScreenTest.selectPage("tools-agent")');
+  await delay(50);
+  await run('window.__settingsScreenTest.holdSettingsWrite()');
+  await click('[role="switch"][aria-label="disableArtifact"]');
+  const savingDisabled = await run('document.querySelector(\'[aria-label="disableArtifact"]\').disabled');
+  await run('window.__settingsScreenTest.releaseSettingsWrite()');
+  await waitFor(webContents, '!document.querySelector(\'[aria-label="disableArtifact"]\').disabled');
+  const selectedScope = await run('document.querySelector(\'[data-layer="user"]\').getAttribute("aria-pressed") === "true"');
+  const scheme = await run('getComputedStyle(document.querySelector(".settings-screen")).colorScheme');
+  webContents.debugger.attach('1.3');
+  try {
+    await webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [
+      { name: 'prefers-reduced-motion', value: 'reduce' },
+      { name: 'prefers-contrast', value: 'more' },
+      { name: 'prefers-reduced-transparency', value: 'reduce' },
+    ] });
+    const accessibility = await run(`(() => {
+      const toggle = document.querySelector('.settings-toggle');
+      const card = document.querySelector('.settings-card');
+      return {
+        motion: [getComputedStyle(toggle).transitionDuration, getComputedStyle(toggle.firstElementChild).transitionDuration],
+        border: getComputedStyle(card).borderTopColor,
+        text: getComputedStyle(document.querySelector('.settings-screen')).color,
+        selectedNavOutline: getComputedStyle(document.querySelector('[aria-current="page"]')).outlineStyle,
+      };
+    })()`);
+    await run('window.__settingsScreenTest.selectPage("mcp")');
+    await delay(60);
+    const primaryContrast = await run(`(() => {
+      const button = document.querySelector('.extension-hub-primary');
+      const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+      const ctx = canvas.getContext('2d');
+      const luminance = color => {
+        ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+        const values = [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3).map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; });
+        return values[0] * .2126 + values[1] * .7152 + values[2] * .0722;
+      };
+      const style = getComputedStyle(button), a = luminance(style.color), b = luminance(style.backgroundColor);
+      return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+    })()`);
+    return { searchFocus, savingDisabled, selectedScope, scheme, accessibility, primaryContrast };
+  } finally { webContents.debugger.detach(); }
+}
+
+async function runMacosEditors(window, webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const results = [];
+  const dir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+  const theme = new URL(url).searchParams.get('theme') || 'light';
+  window.setContentSize(760, 600);
+  await run('window.__settingsScreenTest.setHasProject(true)');
+  for (const page of ['custom-providers', 'provider-credentials', 'fusion', 'mcp', 'hooks', 'skills']) {
+    await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
+    await delay(50);
+    await run(`(() => {
+      const page = ${JSON.stringify(page)};
+      const target = page === 'custom-providers' ? [...document.querySelectorAll('button')].find(el => el.textContent.includes('新增 Provider'))
+        : page === 'provider-credentials' ? document.querySelector('.settings-provider-row')
+        : page === 'fusion' ? document.querySelector('.extension-hub-primary')
+        : page === 'mcp' ? document.querySelector('.extension-hub-row-open')
+        : page === 'skills' ? document.querySelector('.extension-hub-row')
+        : [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '添加');
+      if (!target) throw new Error('missing editor ' + page);
+      target.click();
+    })()`);
+    await delay(80);
+    await run(`document.querySelectorAll('.settings-content-inner details:not(.extension-hub-menu)').forEach(el => { el.open = true; })`);
+    const state = await run(`(() => {
+      const scroll = document.querySelector('.settings-content-scroll');
+      const dialog = document.querySelector('.extension-detail-dialog');
+      return { overflow: scroll.scrollWidth > scroll.clientWidth + 1,
+        dialogFits: !dialog || (dialog.getBoundingClientRect().left >= 0 && dialog.getBoundingClientRect().right <= innerWidth && dialog.getBoundingClientRect().bottom <= innerHeight),
+        editor: !!document.querySelector('.configuration-detail, .extension-detail-dialog, .settings-provider-back, [aria-label="Profile 名称"]'),
+        fieldHeights: [...document.querySelectorAll('input[type="password"], input[aria-label="enabledTools"]')].map(el => el.getBoundingClientRect().height),
+      };
+    })()`);
+    results.push({ page, ...state });
+    if (dir) {
+      mkdirSync(dir, { recursive: true }); window.showInactive(); await delay(60);
+      writeFileSync(join(dir, `${theme}-editor-${page}.png`), (await window.capturePage()).toPNG());
+    }
+    if (page === 'skills') {
+      await run('document.querySelector(\'[aria-label="Close details"]\').click()');
+    }
+  }
+  return results;
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -987,7 +1128,10 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'provider-region' ? await runProviderRegionScenario(window, webContents)
+    const result = scenario === 'macos-editors' ? await runMacosEditors(window, webContents)
+      : scenario === 'macos-controls' ? await runMacosControls(window, webContents)
+      : scenario === 'macos-audit' ? await runMacosAudit(window, webContents)
+      : scenario === 'provider-region' ? await runProviderRegionScenario(window, webContents)
       : scenario === 'customize' ? await runCustomizeScenario(window, webContents)
       : scenario === 'configuration-navigation' ? await runConfigurationNavigation(window, webContents)
       : scenario === 'provider-session-isolation' ? await runProviderSessionIsolation(webContents)

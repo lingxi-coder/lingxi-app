@@ -59,11 +59,11 @@ export function provenanceDescription(d: Provenance): string {
 export function Card({ title, children }: { title?: string; children: ReactNode }) {
   const t = useT();
   return (
-    <div style={{ marginBottom: 28 }}>
+    <div className="settings-group" style={{ marginBottom: 28 }}>
       {title && (
         <div style={{ fontSize: 13, fontWeight: 600, color: t.text2, marginBottom: 10 }}>{title}</div>
       )}
-      <div style={{
+      <div className="settings-card" style={{
         border: `0.5px solid ${t.border}`, borderRadius: 12,
         background: t.surface, overflow: 'hidden',
       }}>
@@ -81,12 +81,12 @@ export function Row({
 }) {
   const t = useT();
   return (
-    <div style={{
+    <div className="settings-row" style={{
       display: 'flex', gap: 24, padding: '16px 18px',
       alignItems: align === 'center' ? 'center' : 'flex-start',
       borderTop: `0.5px solid ${t.border}`,
     }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="settings-row-label" style={{ flex: '1 1 180px', minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 14, fontWeight: 500, color: t.text }}>{title}</span>
           {badge}
@@ -97,7 +97,7 @@ export function Row({
           </div>
         )}
       </div>
-      <div style={{ flexShrink: 0 }}>{children}</div>
+      <div className="settings-row-control">{children}</div>
     </div>
   );
 }

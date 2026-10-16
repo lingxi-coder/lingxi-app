@@ -650,7 +650,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
         <Card>
           <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
           <Row title="syncClaudeAiSkills" desc={(catalog.sync_claude_ai_note ?? 'Stored only. Claude.ai cloud sync is not wired on desktop.').replace('Stored only.', '仅保存。').replace('Claude.ai cloud sync is not wired on desktop.', '当前还没有接入 Claude.ai 云端同步。')} align="center">
-            <Toggle value={syncDraft} onChange={savingSync ? () => undefined : setSyncDraft} />
+            <Toggle value={syncDraft} onChange={setSyncDraft} label="syncClaudeAiSkills" disabled={savingSync} />
           </Row>
           <Row title="Save" desc="这是本页唯一按层写入的普通设置项。" align="center">
             <div style={{ display: 'flex', gap: 8 }}>

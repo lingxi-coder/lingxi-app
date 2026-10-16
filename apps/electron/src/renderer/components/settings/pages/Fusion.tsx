@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../../Icon';
 import type { ModelDetailsDto } from '@lingxi/bridge-client';
@@ -166,7 +166,7 @@ export function ChoiceSelect({
         {selected ? `${selected.label} · ${selected.providerLabel}` : current ? `${current} （当前不可达）` : placeholder}
       </span><Icon name="chevron" size={13} />
     </button>
-    {position && createPortal(<div ref={list} id={`${id}-popup`} role="dialog" aria-label={placeholder}
+    {position && createPortal(<div ref={list} id={`${id}-popup`} className="settings-model-popup" role="dialog" aria-label={placeholder}
       onKeyDown={(event) => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
         else if (event.key === 'Tab') close();
@@ -180,7 +180,8 @@ export function ChoiceSelect({
       style={{ position: 'fixed', zIndex: 100, left: position.left, top: position.top, width: position.width,
         maxHeight: position.height, display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
         padding: 4, borderRadius: 9, border: `1px solid ${t.border}`, background: t.surface, color: t.text,
-        boxShadow: '0 8px 28px rgba(0,0,0,.18)' }}>
+        colorScheme: t.dark ? 'dark' : 'light', '--settings-accent': t.accent,
+        boxShadow: '0 8px 28px rgba(0,0,0,.18)' } as CSSProperties}>
       <input ref={search} value={query} placeholder="搜索模型或 Provider…" aria-label="搜索模型"
         role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={id}
         aria-activedescendant={options.length ? `${id}-${Math.min(active, options.length - 1)}` : undefined}

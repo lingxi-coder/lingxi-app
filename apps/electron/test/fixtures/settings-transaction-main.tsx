@@ -1,5 +1,6 @@
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import '../../src/renderer/global.css';
 
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
@@ -39,7 +40,7 @@ const bridge = {
   connection: { status: 'connected' as const },
   running: false,
   sessionLoading: false,
-  settingsSnapshotEvent: null,
+  settingsSnapshotEvent: { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', active_json: '{}', layers_json: '{"user":{},"project":{},"local":{}}' },
   refreshSettingsSnapshot: async () => undefined,
   refreshDiagnostics: async () => [],
   setProviderCredential: async () => {
@@ -93,7 +94,7 @@ function Fixture() {
   }, []);
 
   return (
-    <Theme.Provider value={tokens('light')}>
+    <Theme.Provider value={tokens(false)}>
       {open && (
         <SettingsScreen
           bridge={bridge as never}

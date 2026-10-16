@@ -13,6 +13,8 @@
 }
 .desktop-terminal { position: relative; display: flex; flex-direction: column; min-height: 0; flex: 0 0 auto; overflow: hidden; background: var(--terminal-bg); color: var(--terminal-text); border-top: 1px solid transparent; opacity: 0; transform: translateY(8px); pointer-events: none; transition: height 260ms cubic-bezier(.2, 0, 0, 1), opacity 180ms ease, transform 260ms cubic-bezier(.2, 0, 0, 1), border-color 180ms ease; }
 .desktop-terminal[data-open='true'] { border-top-color: var(--terminal-border); opacity: 1; transform: translateY(0); pointer-events: auto; }
+.desktop-terminal { box-sizing: border-box; }
+.desktop-terminal[data-resizing='true'] { transition: none; }
 .terminal-surface[hidden] { display: none; }
 .terminal-resizer { position: absolute; z-index: 3; top: -4px; left: 0; right: 0; height: 7px; cursor: ns-resize; touch-action: none; }
 .terminal-resizer:hover, .terminal-resizer:focus-visible { background: var(--terminal-hover); outline: none; }

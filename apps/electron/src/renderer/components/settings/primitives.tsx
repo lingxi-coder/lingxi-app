@@ -1,11 +1,13 @@
 import { useT } from '../../theme/ThemeContext';
 
-export function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
+export function Toggle({ value, onChange, label, disabled = false }: { value: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
   const t = useT();
   return (
     <button
       type="button"
       role="switch"
+      className="settings-toggle"
+      disabled={disabled}
       aria-checked={value}
       aria-label={label}
       onClick={() => onChange(!value)}
@@ -17,9 +19,9 @@ export function Toggle({ value, onChange, label }: { value: boolean; onChange: (
     >
       <span
         style={{
-          position: 'absolute', top: 2, left: value ? 18 : 2,
+          position: 'absolute', top: 2, left: 2, transform: `translateX(${value ? 16 : 0}px)`,
           width: 18, height: 18, borderRadius: '50%', background: '#fff',
-          transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+          transition: 'transform 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
         }}
       />
     </button>

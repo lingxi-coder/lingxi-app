@@ -31,6 +31,17 @@ async function main() {
     await wait("Boolean(document.querySelector('.scheduled-suggestion'))");
     await run("[...document.querySelectorAll('.scheduled-suggestion')].find(b => b.textContent.includes('Weekly review')).click()");
     await wait("Boolean(document.querySelector('[aria-label=\"Editable task details\"]'))");
+    // A wide desktop window can still give this page a narrow pane.
+    await run(`document.querySelector('.scheduled-tasks').style.maxWidth = '600px'`);
+    await delay(50);
+    const narrowPane = await run(`(() => {
+      const root = document.querySelector('.scheduled-tasks');
+      const master = root.querySelector('.scheduled-master');
+      const detail = root.querySelector('.scheduled-detail');
+      return getComputedStyle(master).display === 'none' && detail.getBoundingClientRect().right <= root.getBoundingClientRect().right + 1;
+    })()`);
+    if (!narrowPane) throw new Error('Task editor must fit a narrow pane in a wide desktop window');
+    await run(`document.querySelector('.scheduled-tasks').style.maxWidth = ''`);
     const picker = {};
     const clickLabel = async (label) => {
       await run(`document.querySelector('button[aria-label=${JSON.stringify(label)}]').click()`);

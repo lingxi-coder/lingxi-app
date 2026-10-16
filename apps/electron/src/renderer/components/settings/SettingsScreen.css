@@ -1,3 +1,69 @@
+.settings-screen {
+  accent-color: var(--settings-accent);
+}
+
+:is(.settings-screen, .settings-model-popup) :is(button, input, select, textarea, summary, a[href], [tabindex]):focus-visible {
+  outline: 2px solid var(--settings-accent) !important;
+  outline-offset: 2px;
+}
+
+.settings-search:focus-within {
+  outline: 2px solid var(--settings-accent);
+  outline-offset: 2px;
+}
+
+.settings-search input:focus-visible { outline: none !important; }
+
+.settings-screen button:not(:disabled):hover {
+  box-shadow: inset 0 0 0 100vmax rgb(128 128 128 / .08);
+}
+
+.settings-screen button:not(:disabled):active {
+  box-shadow: inset 0 0 0 100vmax rgb(128 128 128 / .16);
+}
+
+.settings-screen button:disabled { cursor: default !important; }
+
+.settings-card > :first-child { border-top: 0 !important; }
+
+.settings-row { flex-wrap: wrap; }
+.settings-row-label { overflow-wrap: anywhere; }
+.settings-row-label > div:first-child { flex-wrap: wrap; }
+.settings-row-control { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.settings-row-control > * { max-width: 100%; }
+.settings-row-control :is(input, select, textarea) { min-width: 0; max-width: 100%; }
+.settings-row-control > div { min-width: 0; }
+.settings-inline-fields { flex-wrap: wrap; }
+.settings-inline-fields > input { flex: 1 1 120px; }
+
+.settings-segmented button[aria-pressed="true"] {
+  box-shadow: 0 1px 3px rgb(0 0 0 / .12);
+}
+
+.settings-toggle:disabled { opacity: .5; }
+.settings-toggle:disabled span { box-shadow: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-screen *, .settings-screen *::before, .settings-screen *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .settings-model-popup, .settings-model-popup input { border-color: currentColor !important; }
+  .settings-screen :is(.settings-card, .settings-search, .settings-segmented, input, select, textarea, button) {
+    border-color: var(--settings-text) !important;
+  }
+  .settings-row { border-color: var(--settings-text) !important; }
+  .settings-toggle { outline: 1px solid var(--settings-text); outline-offset: 1px; }
+  .settings-screen [data-nav-page][aria-current="page"] {
+    outline: 1px solid var(--settings-text);
+    outline-offset: -1px;
+  }
+}
+
 .settings-content-viewport {
   display: flex;
   flex: 1;

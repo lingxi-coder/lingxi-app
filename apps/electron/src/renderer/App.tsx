@@ -4,6 +4,7 @@ import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
 import {
   useEffect,
+  useCallback,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -112,10 +113,20 @@ export function App() {
     setTheme(value);
     void bridge.setThemePreference(value).catch(() => undefined);
   };
-  const openSettings = (route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference'>) => {
+  const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference'>) => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
-  };
+  }, []);
+  useEffect(() => window.lingxi?.onApplicationMenu?.((action) => {
+    if (action === 'settings') {
+      // Preserve the original focus restoration target when already open.
+      if (!settingsRoute) openSettings();
+    } else if (action === 'activity' && !settingsRoute) {
+      setPage('chat');
+      setActivityView(!activityView);
+      bridge.setRuntimeCenterOverviewOpen(!activityView);
+    }
+  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen]);
 
   const emptyMessage = bridge.sessionLoading
     ? 'Loading session…'

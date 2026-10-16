@@ -77,6 +77,8 @@ test('terminal retains shells across hide and session switches, renders output, 
     assert.equal(result.resetAcknowledged, true);
     assert.equal(result.shortcutWorks, true);
     assert.equal(result.resizeWorks, true);
+    assert.equal(result.directResize, true, `terminal must track pointer height without a transition: ${JSON.stringify(result.dragMetrics)}`);
+    assert.equal(result.resizeReleased, true);
     assert.equal(result.inputWorks, true);
     assert.equal(result.restartWorks, true);
     assert.equal(result.heightPersisted, true);

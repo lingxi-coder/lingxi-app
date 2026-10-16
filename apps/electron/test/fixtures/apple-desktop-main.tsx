@@ -19,9 +19,18 @@ const snapshot = {
 };
 (window as any).lingxi = {
   platform: 'darwin', isElectron: true,
+  onApplicationMenu: (listener: (action: string) => void) => {
+    (window as any).applicationMenuAction = listener;
+    return () => { delete (window as any).applicationMenuAction; };
+  },
   onEvent: () => () => {}, onConnectionStateChanged: () => () => {},
   onPermission: () => () => {}, onComputerAccess: () => () => {},
   bootstrap: async () => snapshot, command: async () => {},
+  scheduled: {
+    scopes: async () => [{ id: 'global', label: 'No project' }],
+    context: async () => ({ models: [], currentModel: '', sessions: [] }),
+    manage: async () => [],
+  },
   preflightSessionArchive: async () => [],
   listProjectSessions: async (path: string) => ({ projectPath: path, sessions: path === projectPath ? sessions : [] }),
 };

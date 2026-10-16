@@ -103,12 +103,21 @@ export function TerminalPanel({ controller }: { controller: ReturnType<typeof us
   }, []);
   const saveHeight = (value: number) => { setHeight(value); try { localStorage.setItem(HEIGHT_KEY, String(value)); } catch { /* Storage can be disabled. */ } };
   const resize = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
     event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
-    const start = event.clientY; const initial = clampTerminalHeight(height, available);
+    const start = event.clientY;
+    const initial = clampTerminalHeight(ref.current?.getBoundingClientRect().height ?? height, available);
     const target = event.currentTarget;
+    // Size changes track the pointer directly; only opening/closing animates.
+    if (ref.current) {
+      ref.current.style.height = `${initial}px`;
+      ref.current.setAttribute('data-resizing', 'true');
+    }
+    setHeight(initial);
     const move = (e: globalThis.PointerEvent) => saveHeight(clampTerminalHeight(initial + start - e.clientY, available));
-    const end = () => { target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', end); target.removeEventListener('lostpointercapture', end); };
+    const end = () => { ref.current?.removeAttribute('data-resizing'); target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', end); target.removeEventListener('pointercancel', end); target.removeEventListener('lostpointercapture', end); };
     target.addEventListener('pointermove', move); target.addEventListener('pointerup', end); target.addEventListener('lostpointercapture', end);
+    target.addEventListener('pointercancel', end);
   };
   return <section ref={ref} id="desktop-terminal" aria-label="Terminal" aria-hidden={!controller.open} {...(!controller.open ? { inert: '' } : {})} data-open={controller.open ? 'true' : 'false'} className="desktop-terminal" style={{ height: controller.open ? clampTerminalHeight(height, available) : 0, '--terminal-bg': t.windowBg, '--terminal-text': t.text, '--terminal-muted': t.text3, '--terminal-border': t.border, '--terminal-hover': t.surfaceHover } as CSSProperties}>
     <div role="separator" aria-label="Terminal height" aria-orientation="horizontal" aria-valuemin={100} aria-valuemax={Math.max(100, available - 240)} aria-valuenow={clampTerminalHeight(height, available)} tabIndex={0} className="terminal-resizer" onPointerDown={resize} onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); saveHeight(clampTerminalHeight(height + (event.key === 'ArrowUp' ? 24 : -24), available)); } }} />

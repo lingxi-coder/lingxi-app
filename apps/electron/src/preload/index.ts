@@ -1,4 +1,5 @@
 import type { AccountApi, AccountState } from '../shared/account.js';
+import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
@@ -276,6 +277,7 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<HostPermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  onApplicationMenu(cb: (action: ApplicationMenuAction) => void): Unsubscribe;
   audio: NativeAudioApi;
   visualization: VisualizationApi;
   modUi: ModUiApi;
@@ -381,6 +383,7 @@ const api: LingxiApi = {
   onPermission: (callback) => subscribe(CH_PERMISSION, callback),
   onComputerAccess: (callback) => subscribe(CH_COMPUTER_ACCESS, callback),
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
+  onApplicationMenu: (callback) => subscribe(CH_APPLICATION_MENU, callback),
   modUi: {
     control: <T extends NativeUiControlRequest>(sessionId: string, request: T) =>
       ipcRenderer.invoke(CH_MOD_UI_CONTROL, sessionId, request) as Promise<UiControlCallResultDto<NativeUiControlResponseFor<T>>>,

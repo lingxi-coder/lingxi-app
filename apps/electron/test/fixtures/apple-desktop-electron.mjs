@@ -27,6 +27,14 @@ try {
     await wait(`document.querySelector('[contenteditable]') && document.body.innerText.includes('Refine desktop experience')`);
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 900, y: 120 });
     await delay(250);
+    const chrome = await run(`(() => {
+      const sidebar = document.querySelector('.desktop-sidebar').getBoundingClientRect();
+      const create = document.querySelector('.sidebar-new-chat').getBoundingClientRect();
+      return { brandCount: document.querySelectorAll('.desktop-sidebar-brand').length, createInset: create.top - sidebar.top };
+    })()`);
+    const chromePassed = chrome.brandCount === 1 && chrome.createInset >= 0 && chrome.createInset < 32;
+    checksPassed &&= chromePassed;
+    accessibility.push({ theme, name: 'single-window-toolbar', passed: chromePassed, ...chrome });
     writeFileSync(join(output, `desktop-${theme}.png`), (await window.webContents.capturePage()).toPNG());
     const actionCheck = await run(`(() => {
       const row = document.querySelector('.sidebar-session-row');
@@ -114,10 +122,38 @@ try {
     await delay(250);
     writeFileSync(join(output, `archive-${theme}.png`), (await window.webContents.capturePage()).toPNG());
     await run(`document.querySelector('button[aria-label="Close archive dialog"]').click()`);
-    await run(`document.querySelector('.desktop-rail-settings').click()`);
+    await run(`window.applicationMenuAction('settings')`);
     await wait(`document.querySelector('[data-nav-page="general"]')`);
     await delay(250);
     writeFileSync(join(output, `settings-${theme}.png`), (await window.webContents.capturePage()).toPNG());
+    const menuPassed = await run(`Boolean(document.querySelector('[data-nav-page="general"]')) && Boolean(document.activeElement.closest('[role="dialog"]'))`);
+    checksPassed &&= menuPassed;
+    accessibility.push({ theme, name: 'application-menu-settings', passed: menuPassed });
+    await run(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await wait(`!document.querySelector('[data-nav-page="general"]')`);
+    window.setContentSize(900, 600);
+    await delay(200);
+    const fit = await run(`(() => {
+      const selectors = ['.desktop-window-toolbar', '.desktop-sidebar', '.beta-composer'];
+      return selectors.every(selector => { const r = document.querySelector(selector).getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; });
+    })()`);
+    accessibility.push({ theme, name: 'minimum-window-fit', passed: fit });
+    checksPassed &&= fit;
+    writeFileSync(join(output, `desktop-minimum-${theme}.png`), (await window.webContents.capturePage()).toPNG());
+    await run(`document.querySelector('[aria-label="Scheduled tasks"]').click()`);
+    await wait(`Boolean(document.querySelector('.scheduled-create-button'))`);
+    await run(`document.querySelector('.scheduled-create-button').click()`);
+    await wait(`Boolean(document.querySelector('.scheduled-detail'))`);
+    await delay(200);
+    const taskFit = await run(`(() => {
+      const root = document.querySelector('.scheduled-tasks').getBoundingClientRect();
+      const detail = document.querySelector('.scheduled-detail').getBoundingClientRect();
+      return getComputedStyle(document.querySelector('.scheduled-master')).display === 'none' && detail.left >= root.left && detail.right <= root.right + 1;
+    })()`);
+    accessibility.push({ theme, name: 'task-editor-with-sidebar-fit', passed: taskFit });
+    checksPassed &&= taskFit;
+    writeFileSync(join(output, `scheduled-minimum-${theme}.png`), (await window.webContents.capturePage()).toPNG());
+    window.setContentSize(1280, 850);
   }
   writeFileSync(join(output, 'runtime-errors.json'), JSON.stringify(errors, null, 2));
   writeFileSync(join(output, 'accessibility-checks.json'), JSON.stringify(accessibility, null, 2));

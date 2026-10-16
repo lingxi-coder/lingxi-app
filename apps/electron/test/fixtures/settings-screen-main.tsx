@@ -16,6 +16,12 @@ async function noopAsyncVoid(): Promise<void> {}
 async function noopAsyncNull(): Promise<null> { return null; }
 async function noopAsyncArray(): Promise<never[]> { return []; }
 
+// Exercise the actual account form without contacting an identity provider.
+Object.assign(window, { lingxi: { account: {
+  request: async () => ({ user: null, busy: false, persistence: 'secure', error: null }),
+  onChanged: () => () => {},
+} } });
+
 function Fixture() {
   const fixtureTheme = new URLSearchParams(window.location.search).get('theme') === 'dark' ? 'dark' : 'light';
   const [open, setOpen] = useState(true);
@@ -260,6 +266,11 @@ function Fixture() {
     removeMcpServer: noopAsyncVoid,
     skillAdmin,
     mcpAdmin: noopAsyncVoid,
+    fusionAdmin: noopAsyncVoid,
+    fusionCatalogEvent: { type: 'fusion_catalog' as const, catalog_json: JSON.stringify({
+      scopes: ['user', 'project', 'local'].map(scope => ({ scope, path: `/test/${scope}/settings.json`, revision: 'a'.repeat(64), globals: {}, strategies: [] })),
+      effective_globals: {}, default_strategy: null, diagnostics: [],
+    }) },
     pluginAdmin,
     setPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: true, masked: '••••••••', restartRequired: false }),
     clearPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: false, restartRequired: false }),

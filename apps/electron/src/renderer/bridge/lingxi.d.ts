@@ -216,6 +216,7 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<HostPermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  onApplicationMenu(cb: (action: import('../../shared/applicationMenu').ApplicationMenuAction) => void): Unsubscribe;
   audio: NativeAudioApi;
   visualization: VisualizationApi;
   modUi: ModUiApi;

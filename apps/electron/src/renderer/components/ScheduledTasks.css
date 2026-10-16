@@ -53,7 +53,7 @@
 .scheduled-job-row > button:not(.scheduled-suggestion), .scheduled-job-actions button, .scheduled-list-heading > button { border: 1px solid var(--scheduled-border); background: transparent; color: inherit; padding: 7px 10px; border-radius: 8px; cursor: pointer; }
 .scheduled-job-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .scheduled-tasks button:disabled { opacity: .5; cursor: default; }
-.scheduled-tasks { display: flex; position: relative; overflow: hidden; height: 100%; }
+.scheduled-tasks { display: flex; position: relative; overflow: hidden; height: 100%; container-type: inline-size; }
 .scheduled-master { flex: 1; min-width: 320px; overflow-y: auto; }
 .scheduled-tasks-toolbar { justify-content: space-between; align-items: center; gap: 12px; padding: 12px 20px; }
 .scheduled-tabs { display: flex; gap: 3px; flex-wrap: wrap; }
@@ -77,3 +77,10 @@
 .scheduled-confirm h2 { font-size: 18px; }.scheduled-confirm p { color: var(--scheduled-secondary); line-height: 1.5; }
 .scheduled-confirm button { padding: 8px 12px; margin-right: 8px; border: 1px solid var(--scheduled-border); border-radius: 8px; color: var(--scheduled-text); background: var(--scheduled-hover); cursor: pointer; }
 @media (max-width: 800px) { .scheduled-has-detail .scheduled-master { display: none; }.scheduled-detail { width: 100%; max-width: none; min-width: 0; border-left: 0; }.scheduled-tabs button { font-size: 12px; padding: 8px; }.scheduled-tasks-content { padding-inline: 18px; } }
+/* The sidebar and inspectors consume width even in a large window. */
+@container (max-width: 720px) {
+  .scheduled-has-detail .scheduled-master { display: none; }
+  .scheduled-detail { width: 100%; max-width: none; min-width: 0; border-left: 0; }
+  .scheduled-tabs button { font-size: 12px; padding: 8px; }
+  .scheduled-tasks-content { padding-inline: 18px; }
+}

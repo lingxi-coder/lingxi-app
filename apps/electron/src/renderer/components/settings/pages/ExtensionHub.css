@@ -11,7 +11,7 @@
 .extension-search-field input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; color: var(--hub-text); font: inherit; font-size: 12.5px; }
 .extension-search-field:focus-within { outline: 2px solid var(--hub-accent); outline-offset: 2px; }
 .extension-search-field input::placeholder { color: var(--hub-muted); }
-.extension-hub-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 12px; border: 0; border-radius: 7px; background: var(--hub-accent); color: var(--hub-on-accent); font: inherit; font-size: 12.5px; font-weight: 500; line-height: 1.4; white-space: nowrap; cursor: pointer; list-style: none; }
+.extension-hub-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 12px; border: 0; border-radius: 7px; background: var(--hub-accent-fill); color: var(--hub-on-accent); font: inherit; font-size: 12.5px; font-weight: 500; line-height: 1.4; white-space: nowrap; cursor: pointer; list-style: none; }
 .extension-hub-primary:hover { opacity: .85; }
 .extension-hub-primary::-webkit-details-marker { display: none; }
 .extension-hub-primary:disabled, .extension-hub-danger:disabled, .extension-hub-icon-button:disabled { opacity: .4; cursor: default; }

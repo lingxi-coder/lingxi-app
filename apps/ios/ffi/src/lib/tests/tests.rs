@@ -334,7 +334,7 @@ fn mobile_linux_handle_reuses_one_runtime_instance_for_multiple_calls() {
         .block_on(handle.open_pty(super::MobileLinuxPtyOpenRequestFfi {
             command: "/bin/sh".to_string(),
             args: vec![],
-            cwd: Some("/workspace/default".to_string()),
+            cwd: Some("/home/lingxi/lingxi/default".to_string()),
             env: std::collections::HashMap::new(),
             cols: 80,
             rows: 24,

@@ -85,12 +85,12 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let summary = SessionAgentSummaryDto(
                 agentId: "agent:child-1",
-                name: "researcher",
+                name: "researcher".clientTextDto,
                 agentType: "explorer",
                 model: "deepseek-flash",
                 modelProfile: "deepseek",
                 status: "running",
-                latestActivity: "搜索代码",
+                latestActivity: "搜索代码".clientTextDto,
                 updatedAtMs: 42
             )
 
@@ -118,12 +118,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: ConversationModel.mainAgentID,
-                    name: "Remote main",
+                    name: "Remote main".clientTextDto,
                     agentType: "main",
                     model: nil,
                     modelProfile: nil,
                     status: "idle",
-                    latestActivity: "12 messages · model",
+                    latestActivity: "12 messages · model".clientTextDto,
                     updatedAtMs: nil
                 )
             ))
@@ -143,12 +143,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: "designer".clientTextDto,
                     agentType: "workflow-subagent",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "completed",
-                    latestActivity: "Design complete",
+                    latestActivity: "Design complete".clientTextDto,
                     updatedAtMs: 2_000
                 )
             ))
@@ -156,12 +156,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agents: [SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: "designer".clientTextDto,
                     agentType: "workflow-subagent",
                     model: "claude-opus-4-8",
                     modelProfile: "anthropic",
                     status: "running",
-                    latestActivity: "Starting",
+                    latestActivity: "Starting".clientTextDto,
                     updatedAtMs: 1_000
                 )]
             ))
@@ -184,7 +184,7 @@ visionDelegationEnabled: true)
                         source.applyForTesting(.sessionAgentUpdated(
                             sessionId: "session-a",
                             agent: SessionAgentSummaryDto(
-                                agentId: agentID, name: "preparer", agentType: "workflow-subagent",
+                                agentId: agentID, name: "preparer".clientTextDto, agentType: "workflow-subagent",
                                 model: nil, modelProfile: nil, status: status,
                                 latestActivity: nil, updatedAtMs: timestamp
                             )
@@ -192,7 +192,7 @@ visionDelegationEnabled: true)
                     }
                     func deliverMessage() {
                         source.applyForTesting(.sessionAgentMessage(
-                            sessionId: "session-a", agentId: agentID, row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "Staging failed")]))
+                            sessionId: "session-a", agentId: agentID, row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "Staging failed".clientTextDto)]))
                         ))
                     }
                     update("running", at: 1_000)
@@ -231,12 +231,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: "designer".clientTextDto,
                     agentType: "workflow-subagent",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "completed",
-                    latestActivity: "Design complete",
+                    latestActivity: "Design complete".clientTextDto,
                     updatedAtMs: 1_000
                 )
             ))
@@ -248,12 +248,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: "designer".clientTextDto,
                     agentType: "workflow-subagent",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "running",
-                    latestActivity: "Reviewing feedback",
+                    latestActivity: "Reviewing feedback".clientTextDto,
                     updatedAtMs: 2_000
                 )
             ))
@@ -268,13 +268,13 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: "agent:child-1", name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: "agent:child-1", name: "worker".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent("agent:child-1")
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
-                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "child result")])]),
+                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "child result".clientTextDto)])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -292,7 +292,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -308,7 +308,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")]))
+                row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail".clientTextDto)]))
             ))
             XCTAssertFalse(source.model.agentTranscripts[agentID]?.loaded ?? true)
 
@@ -320,11 +320,11 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
-            let same = MessageDto(role: "assistant", blocks: [.text(text: "same")])
+            let same = MessageDto(role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -358,9 +358,9 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
-            let repeated = MessageDto(role: "assistant", blocks: [.text(text: "same")])
+            let repeated = MessageDto(role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "worker".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -392,7 +392,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -403,7 +403,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let initial = MessageDto(role: "assistant", blocks: [.text(text: "visible")])
+            let initial = MessageDto(role: "assistant", blocks: [.text(text: "visible".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -445,7 +445,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -456,7 +456,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let fresh = MessageDto(role: "assistant", blocks: [.text(text: "fresh")])
+            let fresh = MessageDto(role: "assistant", blocks: [.text(text: "fresh".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -465,7 +465,7 @@ visionDelegationEnabled: true)
                 revision: 20
             ))
 
-            let delayed = MessageDto(role: "assistant", blocks: [.text(text: "delayed stale")])
+            let delayed = MessageDto(role: "assistant", blocks: [.text(text: "delayed stale".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -485,7 +485,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -496,7 +496,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let history = MessageDto(role: "assistant", blocks: [.text(text: "history")])
+            let history = MessageDto(role: "assistant", blocks: [.text(text: "history".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -507,7 +507,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                row: agentRow(index: 1, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")]))
+                row: agentRow(index: 1, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail".clientTextDto)]))
             ))
 
             // A hidden/lifecycle record can advance the raw revision before
@@ -531,7 +531,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "worker".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -577,7 +577,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -622,7 +622,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "worker".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -630,7 +630,7 @@ visionDelegationEnabled: true)
                 source.applyForTesting(.sessionAgentMessage(
                     sessionId: "session-a",
                     agentId: agentID,
-                    row: agentRow(index: UInt64(index), message: MessageDto(role: "assistant", blocks: [.text(text: text)]))
+                    row: agentRow(index: UInt64(index), message: MessageDto(role: "assistant", blocks: [.text(text: text.clientTextDto)]))
                 ))
             }
             let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
@@ -647,8 +647,8 @@ visionDelegationEnabled: true)
             let first = "agent:first"
             let second = "agent:second"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: first, name: "first", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
-                SessionAgentSummaryDto(agentId: second, name: "second", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: first, name: "first".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
+                SessionAgentSummaryDto(agentId: second, name: "second".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(first)
             source.selectAgent(second)
@@ -665,7 +665,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -705,7 +705,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-old"
             let agentID = "agent:old"
             source.applyForTesting(.sessionAgentList(sessionId: "session-old", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "old", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: "old".clientTextDto, agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
             source.model.activeSessionId = "session-new"
@@ -714,7 +714,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-old",
                 agentId: agentID,
-                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "stale")])]),
+                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "stale".clientTextDto)])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -728,7 +728,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: "agent:child-1",
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -739,7 +739,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent("agent:child-1")
 
-            let live = MessageDto(role: "assistant", blocks: [.text(text: "live tail")])
+            let live = MessageDto(role: "assistant", blocks: [.text(text: "live tail".clientTextDto)])
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
@@ -748,7 +748,7 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["live tail"])
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "idle", "transcript delivery must preserve authoritative lifecycle state")
             source.applyForTesting(.sessionAgentUpdated(sessionId: "session-a", agent: SessionAgentSummaryDto(
-                agentId: "agent:child-1", name: "worker", agentType: "general", model: nil,
+                agentId: "agent:child-1", name: "worker".clientTextDto, agentType: "general", model: nil,
                 modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: 1
             )))
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "working")
@@ -757,7 +757,7 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agentId: "agent:child-1",
                 messages: agentRows([
-                    MessageDto(role: "assistant", blocks: [.text(text: "history")]),
+                    MessageDto(role: "assistant", blocks: [.text(text: "history".clientTextDto)]),
                     live
                 ]),
                 nextMessageIndex: 2,
@@ -775,11 +775,11 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
-            let same = MessageDto(role: "assistant", blocks: [.text(text: "same")])
+            let same = MessageDto(role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: "worker".clientTextDto,
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -1067,19 +1067,19 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: sessionID, agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "design",
+                    name: "design".clientTextDto,
                     agentType: "designer",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "running",
-                    latestActivity: "Inspecting layout",
+                    latestActivity: "Inspecting layout".clientTextDto,
                     updatedAtMs: 10
                 )
             ]))
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: sessionID,
                 agentId: agentID,
-                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "Design notes")])]),
+                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "Design notes".clientTextDto)])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -1106,19 +1106,19 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-b",
                 mode: .code,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "B")])]
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "B".clientTextDto)])]
             ))
             source.resumeSession("session-c")
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-c",
                 mode: .code,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "C")])]
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "C".clientTextDto)])]
             ))
 
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-b",
                 mode: .code,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "late B")])]
+                messages: [MessageDto(role: "assistant", blocks: [.text(text: "late B".clientTextDto)])]
             ))
 
             XCTAssertEqual(source.model.activeSessionId, "session-c")
@@ -1197,8 +1197,8 @@ visionDelegationEnabled: true)
             source.model.streaming = true
 
             let messages: [MessageDto] = [
-                MessageDto(role: "user", blocks: [.text(text: "第一条用户消息")]),
-                MessageDto(role: "assistant", blocks: [.text(text: "助手的回复")]),
+                MessageDto(role: "user", blocks: [.text(text: "第一条用户消息".clientTextDto)]),
+                MessageDto(role: "assistant", blocks: [.text(text: "助手的回复".clientTextDto)]),
             ]
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: messages))
@@ -1225,7 +1225,7 @@ visionDelegationEnabled: true)
         func testSessionResumedSplitsRichAssistantBlocks() {
             let source = makeSource()
             let assistant = MessageDto(role: "assistant", blocks: [
-                .text(text: "正文"),
+                .text(text: "正文".clientTextDto),
                 .thinking(thinking: "推理", signature: nil),
                 .compactBoundary(messagesBefore: 8, messagesAfter: 2,
                                  summary: "hidden compact summary"),
@@ -1290,9 +1290,9 @@ visionDelegationEnabled: true)
         func testSessionResumedReconstructsTerminalRunAfterItsFinalAssistantMessage() {
             let source = makeSource()
             let messages: [MessageDto] = [
-                MessageDto(role: "user", blocks: [.text(text: "执行检查")]),
+                MessageDto(role: "user", blocks: [.text(text: "执行检查".clientTextDto)]),
                 MessageDto(role: "assistant", blocks: [
-                    .text(text: "开始"),
+                    .text(text: "开始".clientTextDto),
                     .toolUse(
                         id: "tool-restore",
                         tool: "Read",
@@ -1310,7 +1310,7 @@ visionDelegationEnabled: true)
                         filePath: nil,
                         display: nil),
                 ]),
-                MessageDto(role: "assistant", blocks: [.text(text: "检查完成")]),
+                MessageDto(role: "assistant", blocks: [.text(text: "检查完成".clientTextDto)]),
             ]
 
             source.expectSessionResumeForTesting(uuid())
@@ -1341,13 +1341,13 @@ visionDelegationEnabled: true)
             let source = makeSource()
             let messages: [MessageDto] = [
                 MessageDto(role: "assistant", blocks: [
-                    .text(text: "A"),
+                    .text(text: "A".clientTextDto),
                     .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil),
                     .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"result":"a"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
-                    .text(text: "B"),
+                    .text(text: "B".clientTextDto),
                     .toolUse(id: "tool-2", tool: "Edit", inputJson: #"{"path":"b"}"#, header: nil),
                     .toolResult(id: "tool-2", tool: "Edit", resultJson: #"{"result":"b"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
-                    .text(text: "C"),
+                    .text(text: "C".clientTextDto),
                 ]),
             ]
 
@@ -1375,7 +1375,7 @@ visionDelegationEnabled: true)
         func testSessionResumedDoesNotPromoteAToolOutcomeToTheAgentOutcome() {
             let source = makeSource()
             let messages: [MessageDto] = [
-                MessageDto(role: "user", blocks: [.text(text: "继续尝试")]),
+                MessageDto(role: "user", blocks: [.text(text: "继续尝试".clientTextDto)]),
                 MessageDto(role: "assistant", blocks: [
                     .toolUse(
                         id: "cancelled-tool",
@@ -1394,7 +1394,7 @@ visionDelegationEnabled: true)
                         filePath: nil,
                         display: nil),
                 ]),
-                MessageDto(role: "assistant", blocks: [.text(text: "已改用其他方法")]),
+                MessageDto(role: "assistant", blocks: [.text(text: "已改用其他方法".clientTextDto)]),
             ]
 
             source.expectSessionResumeForTesting(uuid())
@@ -1420,7 +1420,7 @@ visionDelegationEnabled: true)
         func testSessionResumedNeverRendersAToolResultAsAUserBubble() {
             let source = makeSource()
             let assistant = MessageDto(role: "assistant", blocks: [
-                .text(text: "我来读一下"),
+                .text(text: "我来读一下".clientTextDto),
                 .toolUse(id: "t9", tool: "Read", inputJson: "{\"file_path\":\"a.rs\"}", header: nil),
             ])
             let toolTurn = MessageDto(role: "user", blocks: [
@@ -1428,7 +1428,7 @@ visionDelegationEnabled: true)
                             isError: false, oldString: nil, newString: nil, filePath: nil,
                             display: nil),
             ])
-            let followUp = MessageDto(role: "user", blocks: [.text(text: "继续")])
+            let followUp = MessageDto(role: "user", blocks: [.text(text: "继续".clientTextDto)])
 
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(
@@ -1475,7 +1475,7 @@ visionDelegationEnabled: true)
         /// dropped.
         func testSessionResumedSystemRoleRendersAsAi() {
             let source = makeSource()
-            let system = MessageDto(role: "system", blocks: [.text(text: "系统提示")])
+            let system = MessageDto(role: "system", blocks: [.text(text: "系统提示".clientTextDto)])
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [system]))
 
@@ -1722,7 +1722,8 @@ visionDelegationEnabled: true)
         }
     }
 
-    private final class TestMobileEngineHandle: MobileEngineHandle {
+    private final class TestMobileEngineHandle: MobileEngineHandle, @unchecked Sendable {
+        private let apps = TestLocalAppHost(noHandle: .init())
         private let submitHandler: (ClientCommand) async throws -> Void
 
         required init(unsafeFromHandle handle: UInt64) {
@@ -1736,9 +1737,21 @@ visionDelegationEnabled: true)
         }
 
         override func visualizationHost(origin: String) -> VisualizationHost? { nil }
+        override func localAppHost() -> LocalAppHost { apps }
+        override func audioSessionContext() async -> String { "{}" }
+
 
         override func submit(command: ClientCommand) async throws {
             try await submitHandler(command)
+        }
+    }
+
+    private final class TestLocalAppHost: LocalAppHost, @unchecked Sendable {
+        override func list() -> [LocalAppDto] { [] }
+        override func get(id: String) -> LocalAppDto? { nil }
+        override func delete(id: String) -> Bool { false }
+        override func serve(id: String, path: String) -> LocalAppResponseDto {
+            LocalAppResponseDto(status: 404, mimeType: "text/plain", headers: [], body: Data())
         }
     }
 

@@ -79,7 +79,7 @@ final class MockConversationSource: ConversationSource {
                 id: "ui-read",
                 tool: "Read",
                 status: .completed,
-                inputSummary: "/workspace/ui-test/README.md",
+                inputSummary: "/home/lingxi/lingxi/ui-test/README.md",
                 outputSummary: "Read completed",
                 elapsedMs: 18
             )

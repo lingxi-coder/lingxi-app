@@ -23,7 +23,7 @@ class CronNotificationRecoveryTest {
         val posted = mutableListOf<String>()
         try {
             val history = CronRunHistoryStore(root)
-            val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+            val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
             fun terminal(task: String, policy: String, status: CronRunStatus): String {
                 val run = history.enqueue(scope, task, "Saved prompt", 900L)!!
                 history.attachExecution(run.runId, notificationPolicy = policy)

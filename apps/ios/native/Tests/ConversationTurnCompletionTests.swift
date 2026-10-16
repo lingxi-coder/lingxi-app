@@ -86,7 +86,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 return XCTFail("expected a turn token")
             }
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
-            source.applyForTesting(.textDelta(text: "  final answer  \n"))
+            source.applyForTesting(.textDelta(text: "  final answer  \n".clientTextDto))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost)
             )
@@ -135,7 +135,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             guard case let .sendPrompt(text, _, images, _, _) = submitted.last else {
                 return XCTFail("pending send must use SendPrompt")
             }
-            XCTAssertEqual(text, "pending")
+            XCTAssertEqual(text.displayText, "pending")
             XCTAssertTrue(images.isEmpty)
         }
 
@@ -591,14 +591,14 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.beginTurnForTesting(turnId: 900, sessionId: "test-session")
             let listener = source.makeEventListenerForTesting()
 
-            listener.enqueueForTesting(.textDelta(text: "before tool"))
+            listener.enqueueForTesting(.textDelta(text: "before tool".clientTextDto))
             listener.enqueueForTesting(.toolUseStarted(
                 id: "ordered-tool",
                 tool: "Read",
                 inputJson: #"{"path":"a"}"#,
                 header: nil
             ))
-            listener.enqueueForTesting(.textDelta(text: "after tool"))
+            listener.enqueueForTesting(.textDelta(text: "after tool".clientTextDto))
             await listener.waitUntilIdle()
 
             let kinds = source.model.items.map { item -> String in
@@ -621,7 +621,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             let deltas = (0..<8192).map { "\($0)," }
 
             for delta in deltas {
-                listener.enqueueForTesting(.textDelta(text: delta))
+                listener.enqueueForTesting(.textDelta(text: delta.clientTextDto))
             }
             await listener.waitUntilIdle()
 
@@ -639,14 +639,14 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 return XCTFail("expected a turn token")
             }
 
-            source.applyForTesting(.textDelta(text: "same"))
+            source.applyForTesting(.textDelta(text: "same".clientTextDto))
             XCTAssertEqual(updates.last, ConversationTurnSpeechUpdate(
                 token: token,
                 sequence: 1,
                 delta: "same"
             ))
 
-            source.applyForTesting(.textDelta(text: "same"))
+            source.applyForTesting(.textDelta(text: "same".clientTextDto))
             XCTAssertEqual(updates.map(\.sequence), [1, 2])
             XCTAssertEqual(updates.map(\.delta), ["same", "same"])
             withExtendedLifetime(subscription) {}
@@ -657,12 +657,12 @@ final class ConversationTurnCompletionTests: XCTestCase {
             var updates: [ConversationTurnSpeechUpdate] = []
             let subscription = source.model.turnSpeechUpdates.sink { updates.append($0) }
             XCTAssertNotNil(source.send("old question"))
-            source.applyForTesting(.textDelta(text: "old"))
+            source.applyForTesting(.textDelta(text: "old".clientTextDto))
             XCTAssertEqual(updates.count, 1)
 
             source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
-            source.applyForTesting(.textDelta(text: "late"))
+            source.applyForTesting(.textDelta(text: "late".clientTextDto))
             XCTAssertEqual(updates.count, 1)
             withExtendedLifetime(subscription) {}
         }
@@ -679,7 +679,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     message: MessageDto(role: "assistant", blocks: [
                         .thinking(thinking: "private reasoning", signature: nil),
                         .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: nil),
-                        .text(text: "  spoken answer  "),
+                        .text(text: "  spoken answer  ".clientTextDto),
                         .toolResult(
                             id: "tool-1",
                             tool: "Read",
@@ -708,8 +708,8 @@ final class ConversationTurnCompletionTests: XCTestCase {
             guard let token = source.send("question") else {
                 return XCTFail("expected a turn token")
             }
-            source.applyForTesting(.textDelta(text: "partial response"))
-            source.applyForTesting(.error(kind: .transport, message: "offline"))
+            source.applyForTesting(.textDelta(text: "partial response".clientTextDto))
+            source.applyForTesting(.error(kind: .transport, message: "offline".clientTextDto))
 
             XCTAssertEqual(source.model.turnCompletion?.token, token)
             XCTAssertEqual(source.model.turnCompletion?.outcome, .failed)
@@ -722,7 +722,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             guard let oldToken = source.send("old question") else {
                 return XCTFail("expected a turn token")
             }
-            source.applyForTesting(.textDelta(text: "stale answer"))
+            source.applyForTesting(.textDelta(text: "stale answer".clientTextDto))
             source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
             source.applyForTesting(
@@ -745,7 +745,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             guard let token = source.send("question") else {
                 return XCTFail("expected a turn token")
             }
-            source.applyForTesting(.textDelta(text: "partial response"))
+            source.applyForTesting(.textDelta(text: "partial response".clientTextDto))
             source.applyForTesting(
                 .turnEnded(outcome: .cancelled, stopReason: "cancelled", cost: zeroCost)
             )

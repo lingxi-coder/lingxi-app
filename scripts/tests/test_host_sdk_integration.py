@@ -157,14 +157,14 @@ class ActiveRootfsEvidenceTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.sdk, self.input = self.root / "sdk", self.root / "input"
-        self.pinned = self.sdk / "docs/mobile-linux/releases/3.24.2/arm64-v8a"
+        self.pinned = self.sdk / "docs/mobile-linux/releases/3.24.2-user1/arm64-v8a"
         self.supplied = self.input / "arm64-v8a"
         self.pinned.mkdir(parents=True)
         self.supplied.mkdir(parents=True)
         self.archive = self.supplied / "rootfs.tar.gz"
         self.archive.write_bytes(b"actual release payload")
         self.manifest = {
-            "rootfs_version": "3.24.2", "runtime": "android-proot", "platform": "android", "abi": "arm64",
+            "rootfs_version": "3.24.2-user1", "runtime": "android-proot", "platform": "android", "abi": "arm64",
             "archive": {"filename": self.archive.name, "sha256": assets.sha256(self.archive), "size_bytes": self.archive.stat().st_size},
         }
         self.node = {"version": "26.9.0", "url": "https://example.invalid/node.tar.xz", "sha256": "b" * 64,
@@ -180,11 +180,11 @@ class ActiveRootfsEvidenceTests(unittest.TestCase):
             shutil.copy2(self.pinned / name, self.supplied / name)
 
     def inspect(self):
-        return assets.inspect_release(self.sdk, self.input, "arm64-v8a", "3.24.2", self.pins)
+        return assets.inspect_release(self.sdk, self.input, "arm64-v8a", "3.24.2-user1", self.pins)
 
     def test_pinned_release_identity(self):
         manifest, archive = self.inspect()
-        self.assertEqual(manifest["rootfs_version"], "3.24.2")
+        self.assertEqual(manifest["rootfs_version"], "3.24.2-user1")
         self.assertEqual(archive, self.archive)
 
     def test_caller_cannot_substitute_min_rootfs_identity(self):

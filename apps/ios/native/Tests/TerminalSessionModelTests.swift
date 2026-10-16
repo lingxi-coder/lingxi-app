@@ -28,14 +28,14 @@ final class TerminalSessionModelTests: XCTestCase {
                 stagedRoot: nil,
                 archiveSha256: nil,
                 installedSizeBytes: nil,
-                writableGuestPaths: ["/workspace/other"],
+                writableGuestPaths: ["/home/lingxi/lingxi/other"],
                 lastError: nil
             )
         )
         let model = TerminalSessionModel(
             descriptor: TerminalRuntimeDescriptor(
                 config: nil,
-                workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/workspace/project", displayName: "Project")
+                workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/home/lingxi/lingxi/project", displayName: "Project")
             ),
             client: client
         )
@@ -73,7 +73,7 @@ final class TerminalSessionModelTests: XCTestCase {
                 stagedRoot: nil,
                 archiveSha256: nil,
                 installedSizeBytes: nil,
-                writableGuestPaths: ["/workspace/project"],
+                writableGuestPaths: ["/home/lingxi/lingxi/project"],
                 lastError: nil
             ),
             tasks: [TerminalTaskSnapshot(id: "t1", title: "shell", state: .running, detail: nil)],
@@ -106,7 +106,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let model = TerminalSessionModel(
             descriptor: TerminalRuntimeDescriptor(
                 config: nil,
-                workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/workspace/project", displayName: "Project"),
+                workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/home/lingxi/lingxi/project", displayName: "Project"),
                 pollInterval: .milliseconds(1),
                 taskRefreshInterval: 1
             ),
@@ -180,7 +180,7 @@ final class TerminalSessionModelTests: XCTestCase {
                 stagedRoot: nil,
                 archiveSha256: nil,
                 installedSizeBytes: nil,
-                writableGuestPaths: ["/workspace/project"],
+                writableGuestPaths: ["/home/lingxi/lingxi/project"],
                 lastError: nil
             ),
             openSession: TerminalPtySession(id: "pty-current", available: true, detail: nil),
@@ -229,7 +229,7 @@ final class TerminalSessionModelTests: XCTestCase {
                 config: nil,
                 workspace: TerminalWorkspaceDescriptor(
                     hostPath: nil,
-                    guestPath: "/workspace/project",
+                    guestPath: "/home/lingxi/lingxi/project",
                     displayName: "Project"
                 ),
                 pollInterval: .milliseconds(1)
@@ -273,7 +273,7 @@ final class TerminalSessionModelTests: XCTestCase {
                 stagedRoot: nil,
                 archiveSha256: nil,
                 installedSizeBytes: nil,
-                writableGuestPaths: ["/workspace/project"],
+                writableGuestPaths: ["/home/lingxi/lingxi/project"],
                 lastError: nil
             ),
             openSession: TerminalPtySession(id: "pty-dup", available: true, detail: nil),
@@ -294,7 +294,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let model = TerminalSessionModel(
             descriptor: TerminalRuntimeDescriptor(
                 config: nil,
-                workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/workspace/project", displayName: "Project"),
+                workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/home/lingxi/lingxi/project", displayName: "Project"),
                 pollInterval: .milliseconds(1)
             ),
             client: client
@@ -331,13 +331,13 @@ final class TerminalSessionModelTests: XCTestCase {
                 stagedRoot: nil,
                 archiveSha256: nil,
                 installedSizeBytes: nil,
-                writableGuestPaths: ["/workspace/project"],
+                writableGuestPaths: ["/home/lingxi/lingxi/project"],
                 lastError: nil
             )
         )
         let descriptor = TerminalRuntimeDescriptor(
             config: nil,
-            workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/workspace/project", displayName: "Project"),
+            workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/home/lingxi/lingxi/project", displayName: "Project"),
             launchCwd: nil,
             invalidRequestedCwdMessage: "请求的 cwd 超出 workspace：/tmp"
         )
@@ -806,7 +806,7 @@ final class TerminalSessionModelTests: XCTestCase {
             config: nil,
             workspace: TerminalWorkspaceDescriptor(
                 hostPath: nil,
-                guestPath: "/workspace/project",
+                guestPath: "/home/lingxi/lingxi/project",
                 displayName: "Project"
             ),
             pollInterval: .milliseconds(1),
@@ -842,7 +842,7 @@ final class TerminalSessionModelTests: XCTestCase {
                 stagedRoot: nil,
                 archiveSha256: nil,
                 installedSizeBytes: nil,
-                writableGuestPaths: ["/workspace/project"],
+                writableGuestPaths: ["/home/lingxi/lingxi/project"],
                 lastError: nil
             ),
             tasks: [TerminalTaskSnapshot(id: "t1", title: "shell", state: .running, detail: nil)],

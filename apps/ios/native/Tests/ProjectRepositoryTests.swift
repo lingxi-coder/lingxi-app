@@ -29,7 +29,7 @@ final class ProjectRepositoryTests: XCTestCase {
             projectDirectory.appendingPathComponent(projectWorkspaceDirectoryName, isDirectory: true).resolvingSymlinksInPath(),
             created.workspace.hostURL
         )
-        XCTAssertEqual("/workspace/\(created.record.id)", created.workspace.guestPath)
+        XCTAssertEqual("/home/lingxi/lingxi/\(created.record.id)", created.workspace.guestPath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectManifestFileName).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectSessionIndexFileName).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectSyncBaselineFileName).path))

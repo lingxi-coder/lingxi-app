@@ -102,7 +102,7 @@ class ClientEventMapperTest {
             ClientEvent.ToolUseStarted(
                 id = "t1",
                 tool = "bash",
-                inputJson = """{"command":"echo ok","cwd":"/workspace"}""",
+                inputJson = """{"command":"echo ok","cwd":"/home/lingxi/lingxi"}""",
                 header = null,
             ),
         )
@@ -110,7 +110,7 @@ class ClientEventMapperTest {
         val started = (r as ReplyEvent.ShellTool).update as ShellToolUpdate.Started
         assertEquals("t1", started.taskId)
         assertEquals("echo ok", started.command)
-        assertEquals("/workspace", started.cwd)
+        assertEquals("/home/lingxi/lingxi", started.cwd)
     }
 
     @Test
@@ -149,7 +149,7 @@ class ClientEventMapperTest {
             ClientEvent.ToolUseStarted(
                 id = "read-1",
                 tool = "Read",
-                inputJson = """{"path":"/workspace/index.html","api_key":"secret"}""",
+                inputJson = """{"path":"/home/lingxi/lingxi/index.html","api_key":"secret"}""",
                 header = null, // older engine: the legacy scrape is the only source
             ),
         ) as ReplyEvent.ToolActivity
@@ -157,7 +157,7 @@ class ClientEventMapperTest {
         assertEquals("read-1", r.id)
         assertEquals("Read", r.tool)
         assertEquals(AgentToolStatus.Running, r.status)
-        assertEquals("/workspace/index.html", r.inputSummary)
+        assertEquals("/home/lingxi/lingxi/index.html", r.inputSummary)
     }
 
     // --- terminal events --------------------------------------------------

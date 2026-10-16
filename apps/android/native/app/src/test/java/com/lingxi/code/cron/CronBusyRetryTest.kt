@@ -19,7 +19,7 @@ class CronBusyRetryTest {
     fun setUp() {
         root = java.nio.file.Files.createTempDirectory("cron-busy-").toFile()
         history = CronRunHistoryStore(root, now = { 2000L }, newId = { "run-${sequence++}" })
-        scope = CronScope("project-a", "project-a", "Project A", root.path, "/workspace/a")
+        scope = CronScope("project-a", "project-a", "Project A", root.path, "/home/lingxi/lingxi/a")
     }
 
     @After

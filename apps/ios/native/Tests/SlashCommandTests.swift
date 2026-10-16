@@ -237,7 +237,7 @@ import XCTest
             ]))
 
             XCTAssertTrue(source.model.slashCommandsLoaded)
-            XCTAssertEqual(source.model.slashCommands.map(\.name), ["help"])
+            XCTAssertEqual(source.model.slashCommands.map(\.name), ["help", "side"])
             XCTAssertEqual(source.model.slashCommands.first?.aliases, ["h"])
             XCTAssertEqual(source.model.slashCommands.first?.argumentHint, "[topic]")
             XCTAssertEqual(source.model.slashCommands.first?.argumentNames, ["topic"])
@@ -254,7 +254,7 @@ import XCTest
                 ),
             ]))
 
-            XCTAssertEqual(source.model.slashCommands.map(\.name), ["review"])
+            XCTAssertEqual(source.model.slashCommands.map(\.name), ["review", "side"])
             XCTAssertEqual(source.model.skills.map(\.name), ["review"])
         }
 

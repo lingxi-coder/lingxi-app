@@ -10,7 +10,7 @@ class ShellStateTest {
         sessionId = "session-a",
         taskId = "task-a",
         command = "echo hi",
-        cwd = "/workspace",
+        cwd = "/home/lingxi/lingxi",
     )
 
     @Test

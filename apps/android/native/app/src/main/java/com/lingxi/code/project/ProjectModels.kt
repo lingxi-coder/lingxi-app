@@ -1,5 +1,6 @@
 package com.lingxi.code.project
 
+import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import com.lingxi.code.model.SessionMode
 import java.io.File
 
@@ -45,7 +46,7 @@ data class ProjectRecord(
 data class ProjectWorkspace(
     val projectId: String,
     val hostPath: String,
-    val guestPath: String = "/workspace/$projectId",
+    val guestPath: String = MobileLinuxGuestPaths.workspace(projectId),
 ) {
     val hostDirectory: File get() = File(hostPath)
 }

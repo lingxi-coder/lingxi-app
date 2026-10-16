@@ -73,7 +73,7 @@ def stage(source, output, sdk, runtime, native):
             raise ValueError(f"output overlaps immutable inputs: {protected}")
     pins_path = checked_file(sdk / "docs/toolchains/runtime-pins.json")
     pins = json.loads(pins_path.read_text())
-    version = pins["alpine"]["version"]
+    version = pins["rootfs_version"]
     if not isinstance(version, str) or Path(version).name != version or version in ("", ".", ".."):
         raise ValueError("invalid active SDK rootfs version")
     digest = sha256(pins_path)

@@ -323,7 +323,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
               "packages": $packagesJson,
               "executable_allowlist": $allowlistJson,
               "immutable_files": $immutableJson,
-              "writable_paths": ["/root", "/tmp", "/var/tmp", "/workspace"]
+              "writable_paths": ["/home/lingxi", "/root", "/tmp", "/var/tmp", "/home/lingxi/lingxi"]
             }
         """.trimIndent()
     }

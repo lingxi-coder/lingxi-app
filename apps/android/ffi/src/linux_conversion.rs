@@ -57,7 +57,7 @@ pub(super) fn configured_workspace_guest_path(cfg: &AndroidMobileLinuxConfigFfi)
     } else {
         workspace_id
     };
-    format!("/workspace/{workspace_id}")
+    mobile_linux_api::guest_paths::workspace(&workspace_id)
 }
 
 #[cfg(feature = "uniffi")]

@@ -104,12 +104,9 @@ pub(super) fn ios_mobile_linux_status_from_config(
                 staged_root: None,
                 archive_sha256: cfg.archive_sha256.clone(),
                 installed_size_bytes: None,
-                writable_guest_paths: vec![
-                    "/root".to_string(),
-                    "/tmp".to_string(),
-                    "/var/tmp".to_string(),
-                    "/workspace".to_string(),
-                ],
+                writable_guest_paths: mobile_linux_api::guest_paths::writable_roots()
+                    .map(str::to_string)
+                    .to_vec(),
                 last_error: Some("legacy unavailable backend selected".to_string()),
             }
         }
@@ -158,12 +155,9 @@ pub(super) fn fallback_ios_mobile_linux_status(
         staged_root: None,
         archive_sha256: cfg.archive_sha256.clone(),
         installed_size_bytes: None,
-        writable_guest_paths: vec![
-            "/root".to_string(),
-            "/tmp".to_string(),
-            "/var/tmp".to_string(),
-            "/workspace".to_string(),
-        ],
+        writable_guest_paths: mobile_linux_api::guest_paths::writable_roots()
+            .map(str::to_string)
+            .to_vec(),
         last_error: Some(override_error.unwrap_or_else(|| message.to_string())),
     }
 }

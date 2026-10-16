@@ -386,7 +386,6 @@ G3	apps/android/native/app/src/test/java/com/lingxi/code/plugins/PluginDetailsTe
 G3	apps/bridge-server/src/router/configuration.rs	.lingxi
 G3	apps/cli/host/tests/common/native_fallback.rs	LINGXI_CONFIG_DIR
 G3	apps/electron/scripts/package-support.mjs	.lingxi-*
-G3	apps/electron/src/renderer/components/settings/pages/About.tsx	.lingxi
 G3	apps/ios/native/Sources/Plugins/PluginDetails.swift	.lingxi-plugin
 G3	apps/ios/native/Tests/MobileLinuxProductAcceptanceTests.swift	.lingxi-*
 G3	apps/ios/native/Tests/PluginCatalogTests.swift	.lingxi

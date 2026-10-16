@@ -51,6 +51,73 @@ final class DesktopSettingsUITests: XCTestCase {
         }
     }
 
+    func testNativeModelConfigurationInLightDarkAndLargeText() {
+        for (theme, largeText) in [("light", false), ("dark", false), ("light", true)] {
+            let app = launch(theme: theme, largeText: largeText)
+            app.buttons["settings.group.models"].tap()
+            let addProvider = app.buttons["provider.add"]
+            XCTAssertTrue(addProvider.waitForExistence(timeout: 8), app.debugDescription)
+            XCTAssertFalse(app.buttons["settings.page.web-search"].exists)
+            XCTAssertFalse(app.buttons["settings.page.web-fetch"].exists)
+            attach("Models-\(theme)-\(largeText ? "large" : "standard")")
+            if !addProvider.isHittable { app.collectionViews.firstMatch.swipeUp() }
+            addProvider.tap()
+            let preset = app.buttons["provider.preset.deepseek"]
+            XCTAssertTrue(preset.waitForExistence(timeout: 8), app.debugDescription)
+            if !preset.isHittable { app.collectionViews.firstMatch.swipeUp() }
+            attach("Providers-\(theme)-\(largeText ? "large" : "standard")")
+            let presetSearch = app.searchFields.firstMatch
+            presetSearch.tap()
+            presetSearch.typeText("DeepSeek")
+            XCTAssertTrue(preset.exists)
+            XCTAssertFalse(app.buttons["provider.preset.anthropic"].exists)
+            preset.tap()
+            let key = app.secureTextFields["provider.api-key"]
+            for _ in 0..<8 {
+                if key.isHittable { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
+            }
+            XCTAssertTrue(key.exists, app.debugDescription)
+            let visibility = app.buttons["provider.api-key.visibility"]
+            XCTAssertGreaterThanOrEqual(visibility.frame.height, 44)
+            attach("Provider-editor-\(theme)-\(largeText ? "large" : "standard")")
+            visibility.tap()
+            XCTAssertTrue(app.textFields["provider.api-key"].exists)
+            visibility.tap()
+            XCTAssertTrue(app.secureTextFields["provider.api-key"].exists)
+            let model = app.buttons["provider.model"]
+            for _ in 0..<8 {
+                if model.isHittable { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
+            }
+            model.tap()
+            XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5))
+            let custom = app.textFields["provider.model.custom"]
+            for _ in 0..<8 {
+                if custom.exists { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
+            }
+            XCTAssertTrue(custom.exists, app.debugDescription)
+            attach("Model-selection-\(theme)-\(largeText ? "large" : "standard")")
+            let modelSearch = app.searchFields.firstMatch
+            modelSearch.tap()
+            modelSearch.typeText("no-such-model-native-ui")
+            XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "provider.model.select.")).firstMatch.exists)
+            XCTAssertTrue(custom.exists)
+            app.terminate()
+        }
+    }
+
+    func testRemovedWebProviderSettingsAreNotSearchable() {
+        let app = launch()
+        let search = app.searchFields.firstMatch
+        search.tap()
+        search.typeText("web")
+        XCTAssertFalse(app.buttons["settings.page.web-search"].exists)
+        XCTAssertFalse(app.buttons["settings.page.web-fetch"].exists)
+        app.terminate()
+    }
+
     func testNativeAccountFormInLightDarkAndLargeText() {
         for (theme, largeText) in [("light", false), ("dark", false), ("light", true)] {
             let app = launch(theme: theme, largeText: largeText)

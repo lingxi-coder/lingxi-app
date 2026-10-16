@@ -63,8 +63,8 @@ export class SettingsStore {
       const raw: unknown = JSON.parse(contents);
       const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
       const settings = parseSettings(raw);
-      // Decode the managed scope separately so the Project limit and legacy
-      // project migration cannot discard either user projects or generic chats.
+      // Decode the managed scope separately so the Project limit cannot discard
+      // sessions belonging to the app's scheduled workspace or user projects.
       const managed = parseSettings({ ...input, projects: [this.scheduledWorkspace] });
       if (input['activeProject'] === this.scheduledWorkspace) settings.activeProject = this.scheduledWorkspace;
       if (managed.activeSession) settings.activeSession = managed.activeSession;

@@ -144,20 +144,12 @@ test('Fusion only offers configured providers including custom profiles and buil
 });
 
 
-import { copiedFusionStrategy, fusionNameError, fusionNeedsLegacyReplacement, fusionStrategyKey, parseFusionCatalog, type FusionCatalogScope } from '../src/renderer/components/settings/pages/FusionCatalog';
+import { copiedFusionStrategy, fusionNameError, fusionStrategyKey, parseFusionCatalog, type FusionCatalogScope } from '../src/renderer/components/settings/pages/FusionCatalog';
 
 function catalogScope(scope: FusionCatalogScope['scope'], name = 'Review'): FusionCatalogScope {
   return { scope, admitted: true, path: '/fixture/settings.json', revision: 'r1', strategies: [{ id: 'stable-id', name, config: { panelModels: [{ profile: 'test', model: 'model' }] } }], default_strategy_id: null, globals: {}, diagnostic: null };
 }
 
-test('invalid named strategies are repaired without requesting replacement of the scope', () => {
-  const scope = catalogScope('user');
-  scope.diagnostic = 'fusion.maxPanel must be 2..=8';
-  scope.strategies[0]!.config.maxPanel = 9;
-  assert.equal(fusionNeedsLegacyReplacement(scope), false);
-  assert.equal(fusionNeedsLegacyReplacement({ ...scope, strategies: [] }), true);
-  assert.equal(fusionNeedsLegacyReplacement(undefined), false);
-});
 test('strategy identities include scope, and duplicate names are rejected only inside the selected scope', () => {
   const user = catalogScope('user');
   const project = catalogScope('project', 'Project review');

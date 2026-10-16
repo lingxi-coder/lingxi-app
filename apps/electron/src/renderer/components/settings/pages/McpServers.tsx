@@ -75,7 +75,6 @@ interface McpSnapshotEnvelope {
     enabled_servers?: string[];
     disabled_servers?: string[];
     enable_all_project_servers?: boolean;
-    legacy_source_present?: boolean;
     revision_sha256?: string;
   };
 }
@@ -576,7 +575,6 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: 
               <div style={secondaryMetaStyle(t)}>批准：{asStringArray(approval.enabled_servers).join(', ') || '无'}</div>
               <div style={secondaryMetaStyle(t)}>拒绝：{asStringArray(approval.disabled_servers).join(', ') || '无'}</div>
               <div style={secondaryMetaStyle(t)}>批准全部：{approval.enable_all_project_servers ? '开启' : '关闭'}</div>
-              {approval.legacy_source_present && <div style={secondaryMetaStyle(t)}>检测到旧 ~/.lingxi.json 审批来源。</div>}
             </div>
           </div>}
         </div>

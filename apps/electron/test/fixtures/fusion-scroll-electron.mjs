@@ -155,7 +155,8 @@ async function main() {
       const scope = window.fusionFixture.catalog.scopes[0];
       const write = window.fusionFixture.commands.filter(command => command.action === 'save').at(-1);
       return scope.strategies.length === 2 && scope.default_strategy_id === scope.strategies.find(strategy => strategy.name === 'Review renamed').id
-        && scope.strategies.find(strategy => strategy.name === 'Review renamed').config.maxPanel === 4 && !JSON.parse(write.payload_json).replace_legacy;
+        && scope.strategies.find(strategy => strategy.name === 'Review renamed').config.maxPanel === 4
+        && !Object.hasOwn(JSON.parse(write.payload_json), 'replace_legacy');
     })()`);
     await openNamed('Review renamed');
     await run(`document.querySelector('.settings-content-scroll').scrollTop = 0`); await delay(70);

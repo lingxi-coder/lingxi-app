@@ -18,9 +18,6 @@ export function parseFusionCatalog(raw: string | null | undefined): FusionCatalo
   } catch { return { ...EMPTY_CATALOG, diagnostics: ['无法读取 Fusion 策略目录，请刷新后重试。'] }; }
 }
 export function fusionStrategyKey(scope: FusionScope, id: string): string { return `${scope}:${id}`; }
-export function fusionNeedsLegacyReplacement(scope: FusionCatalogScope | undefined): boolean {
-  return Boolean(scope?.diagnostic && scope.strategies.length === 0);
-}
 export function fusionNameError(name: string, scope: FusionCatalogScope | undefined, id: string): string | null {
   if (!name.trim()) return '请输入策略名称。';
   if (scope?.strategies.some((entry) => entry.id !== id && entry.name.trim() === name.trim())) return '该作用域中已有同名策略，请使用其他名称。';

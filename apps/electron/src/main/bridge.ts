@@ -1657,12 +1657,13 @@ export class SessionRuntime {
         return;
       }
       if (event.type === 'cron_run_requested') {
-        const runIdentity = scheduledRunIdentity(event.run_id, event.task);
         this.activeCronExecutions++;
         this.notifyActivityChanged();
         void (async () => {
           let response: Extract<ClientCommand, { type: 'cron_run_completed' }>;
+          let runIdentity: ReturnType<typeof scheduledRunIdentity> | undefined;
           try {
+            runIdentity = scheduledRunIdentity(event.run_id, event.task);
             if (!this.opts.onCronRunRequested) throw new Error('Scheduled execution is unavailable');
             const result = await this.opts.onCronRunRequested(this, event);
             response = { type: 'cron_run_completed', run_id: event.run_id, session_id: result.sessionId, summary: result.summary };
@@ -1672,6 +1673,7 @@ export class SessionRuntime {
           if (generation !== this.generation || client !== this.client) return;
           try {
             client.sendCommand(response);
+            if (!runIdentity) return;
             // Keep the controller leased until the scheduler has committed the
             // result, including when the user paused the schedule mid-run.
             const deadline = Date.now() + 15_000;
@@ -1679,7 +1681,7 @@ export class SessionRuntime {
               const jobs = await this.manageCron({ action: 'history', id: event.task.id });
               const run = jobs.find((job) => job.id === event.task.id)?.automation?.runs?.find((item) => item.id === runIdentity.occurrenceId);
               if (!run || run.status !== 'running'
-                || (runIdentity.claimGeneration !== null && run.claimGeneration !== runIdentity.claimGeneration)) break;
+                || run.claimGeneration !== runIdentity.claimGeneration) break;
               await new Promise((resolve) => setTimeout(resolve, 50));
             }
           } catch { this.diagnostics.add('warn', 'bridge', 'Scheduled result connection closed before acknowledgement.'); }

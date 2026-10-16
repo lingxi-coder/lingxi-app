@@ -38,6 +38,27 @@ function claimedTask(runId: string, claimGeneration: number, patch: Partial<Cron
   });
 }
 
+function taskForClaim(saved: CronJobDto, occurrenceId: string, claimGeneration: number): CronJobDto {
+  const automation = saved.automation;
+  assert.ok(automation);
+  return {
+    ...saved,
+    automation: {
+      ...automation,
+      runs: [{
+        id: occurrenceId, taskId: saved.id, claimGeneration, scheduledAt: 1, status: 'running',
+        model: automation.model, reasoning: automation.reasoning,
+      }],
+    },
+  };
+}
+
+function runClaim(
+  h: ReturnType<typeof harness>, source: SessionRuntime, occurrenceId: string, saved: CronJobDto, claimGeneration = 1,
+ ) {
+  return h.service.run(source, claimWireId(occurrenceId, claimGeneration), taskForClaim(saved, occurrenceId, claimGeneration));
+}
+
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((complete) => { resolve = complete; });
@@ -151,18 +172,21 @@ test('concurrent new-chat replay shares one promise, session, execution and noti
   const finish = deferred<string>();
   h.setExecute(async () => { entered.resolve(); return finish.promise; });
   const saved = task();
-  const first = h.service.run(h.source, 'same-occurrence', saved);
-  const replay = h.service.run(h.source, 'same-occurrence', { ...saved, prompt: 'Later redelivery payload' });
+  const wireId = claimWireId('same-occurrence', 1);
+  const firstTask = taskForClaim(saved, 'same-occurrence', 1);
+  const first = h.service.run(h.source, wireId, firstTask);
+  const replayTask = taskForClaim({ ...saved, prompt: 'Later redelivery payload' }, 'same-occurrence', 1);
+  const replay = h.service.run(h.source, wireId, replayTask);
   assert.strictEqual(replay, first, 'admission must share the exact in-flight promise');
   await entered.promise;
   assert.equal(h.background.length, 1);
   assert.equal(h.turns.length, 1);
-  assert.strictEqual(h.turns[0]!.task, saved, 'the first admitted task snapshot wins');
+  assert.strictEqual(h.turns[0]!.task, firstTask, 'the first admitted claim snapshot wins');
   finish.resolve('First execution summary');
   const [result, duplicate] = await Promise.all([first, replay]);
   assert.strictEqual(duplicate, result);
-  assert.strictEqual(h.service.run(h.source, 'same-occurrence', task()), first);
-  assert.deepEqual(h.bindings, [{ projectPath: h.source.projectPath, runId: 'same-occurrence', sessionId: result.sessionId }]);
+  assert.strictEqual(runClaim(h, h.source, 'same-occurrence', task()), first);
+  assert.deepEqual(h.bindings, [{ projectPath: h.source.projectPath, runId: wireId, sessionId: result.sessionId }]);
   assert.equal(h.notifications.length, 1);
   assert.equal(h.notifications[0]!.ref?.sessionId, result.sessionId);
   assert.equal(h.background.length, 1, 'terminal replay must not create another chat');
@@ -174,10 +198,10 @@ for (const message of ['model request failed', 'busy: selected chat is active', 
     const h = harness(t);
     const failure = new Error(message);
     h.setExecute(async () => { throw failure; });
-    const first = h.service.run(h.source, 'failed-occurrence', task());
+    const first = runClaim(h, h.source, 'failed-occurrence', task());
     await assert.rejects(first, (error) => error === failure);
     h.setExecute(async () => assert.fail('the same claim generation must not execute again'));
-    const replay = h.service.run(h.source, 'failed-occurrence', task());
+    const replay = runClaim(h, h.source, 'failed-occurrence', task());
     assert.strictEqual(replay, first);
     await assert.rejects(replay, (error) => error === failure);
     assert.equal(h.background.length, 1);
@@ -251,17 +275,13 @@ for (const rawId of [
   'lingxi-cron-claim-v1:["canonical-occurrence",-1]',
   'lingxi-cron-claim-v1:["canonical-occurrence",1,"extra"]',
 ]) {
-  test(`unrelated or invalid claim-looking IDs remain unchanged: ${rawId}`, async (t) => {
+  test(`non-current or invalid scheduled claim IDs are rejected: ${rawId}`, async (t) => {
     const h = harness(t);
     const saved = claimedTask('canonical-occurrence', 1, { notificationPolicy: 'none' });
-    const first = h.service.run(h.source, rawId, saved);
-    await first;
-    assert.strictEqual(h.service.run(h.source, rawId, saved), first);
-    const canonical = h.service.run(h.source, 'canonical-occurrence', saved);
-    assert.notStrictEqual(canonical, first);
-    await canonical;
-    assert.deepEqual(h.bindings.map((binding) => binding.runId), [rawId, 'canonical-occurrence']);
-    assert.equal(h.turns.length, 2);
+    assert.throws(() => h.service.run(h.source, rawId, saved), /invalid scheduled claim identity/);
+    assert.equal(h.background.length, 0);
+    assert.equal(h.turns.length, 0);
+    assert.equal(h.bindings.length, 0);
   });
 }
 
@@ -269,31 +289,24 @@ test('claim metadata must match both canonical ID and generation before decoding
   const h = harness(t);
   const wireId = claimWireId('canonical-occurrence', 1);
   const mismatchedGeneration = claimedTask('canonical-occurrence', 2, { notificationPolicy: 'none' });
-  const raw = h.service.run(h.source, wireId, mismatchedGeneration);
-  await raw;
-  assert.strictEqual(h.service.run(h.source, wireId, mismatchedGeneration), raw);
+  assert.throws(() => h.service.run(h.source, wireId, mismatchedGeneration), /metadata does not match/);
   const mismatchedOccurrence = claimedTask('another-occurrence', 1, { notificationPolicy: 'none' });
-  assert.strictEqual(h.service.run(h.source, wireId, mismatchedOccurrence), raw, 'matching generation alone cannot decode another occurrence');
+  assert.throws(() => h.service.run(h.source, wireId, mismatchedOccurrence), /metadata does not match/);
   const matching = claimedTask('canonical-occurrence', 1, { notificationPolicy: 'none' });
   const decoded = h.service.run(h.source, wireId, matching);
-  assert.notStrictEqual(decoded, raw);
   await decoded;
-  const legacyCanonical = h.service.run(h.source, 'canonical-occurrence', matching);
-  assert.strictEqual(legacyCanonical, decoded, 'matching metadata identifies the canonical occurrence');
-  assert.equal(h.turns.length, 2);
-  assert.deepEqual(h.bindings.map((binding) => binding.runId), [wireId, wireId]);
+  assert.strictEqual(h.service.run(h.source, wireId, matching), decoded);
+  assert.equal(h.turns.length, 1);
+  assert.deepEqual(h.bindings.map((binding) => binding.runId), [wireId]);
 });
 
-test('a claim wire ID without run metadata stays stable as a legacy opaque ID', async (t) => {
+test('a claim wire ID without matching run metadata is rejected before admission', async (t) => {
   const h = harness(t);
   const wireId = claimWireId('missing-metadata', 1);
-  const first = h.service.run(h.source, wireId, task({ notificationPolicy: 'none' }));
-  await first;
-  assert.strictEqual(h.service.run(h.source, wireId, task({ notificationPolicy: 'none' })), first);
-  const canonical = h.service.run(h.source, 'missing-metadata', task({ notificationPolicy: 'none' }));
-  assert.notStrictEqual(canonical, first);
-  await canonical;
-  assert.deepEqual(h.bindings.map((binding) => binding.runId), [wireId, 'missing-metadata']);
+  assert.throws(() => h.service.run(h.source, wireId, task({ notificationPolicy: 'none' })), /metadata does not match/);
+  assert.equal(h.background.length, 0);
+  assert.equal(h.turns.length, 0);
+  assert.equal(h.bindings.length, 0);
 });
 
 for (const cancellationMarked of [false, true]) {
@@ -365,45 +378,40 @@ test('cancellation recovery markers require an exact verified claim identity', (
     [wireId, claimedTask('cancelled-occurrence', 2, { runs: [{ ...marked.automation!.runs![0]!, claimGeneration: 2 }] })],
     [wireId, task()],
   ] as const) {
-    assert.equal(scheduledRunIdentity(rawId, saved).hostAdmitted, false);
-    assert.equal(scheduledRunIdentity(rawId, saved).occurrenceId, rawId);
+    assert.throws(() => scheduledRunIdentity(rawId, saved), /invalid scheduled claim identity|metadata does not match/);
   }
 });
 
-test('legacy IDs with pre-existing SDK session and start fields are not treated as host admission', async (t) => {
+test('unprefixed scheduled IDs are rejected even when persisted metadata looks admitted', async (t) => {
   const h = harness(t);
-  const saved = claimedTask('legacy-occurrence', 1);
-  const legacy = claimedTask('legacy-occurrence', 1, {
-    runs: saved.automation!.runs!.map((run) => ({ ...run, startedAt: 123, sessionId: targetSessionId })),
+  const saved = claimedTask('legacy-occurrence', 1, {
+    runs: [{ id: 'legacy-occurrence', taskId: 'task-1', claimGeneration: 1, scheduledAt: 1,
+      status: 'running', model: 'openai/test-model', reasoning: { type: 'automatic' }, startedAt: 123, sessionId: targetSessionId }],
   });
-  const first = h.service.run(h.source, 'legacy-occurrence', legacy);
-  const result = await first;
-  assert.equal(result.summary, 'Completed summary');
-  assert.strictEqual(h.service.run(h.source, 'legacy-occurrence', legacy), first);
-  assert.equal(h.background.length, 1);
-  assert.deepEqual(h.bindings.map((binding) => binding.runId), ['legacy-occurrence']);
+  assert.throws(() => h.service.run(h.source, 'legacy-occurrence', saved), /invalid scheduled claim identity/);
+  assert.equal(h.background.length, 0);
 });
 
 test('the same run ID in different projects executes independently', async (t) => {
   const h = harness(t);
   const secondSource = h.sourceFor('/project-b');
-  const first = h.service.run(h.source, 'shared-run-id', task());
-  const second = h.service.run(secondSource, 'shared-run-id', task());
+  const first = runClaim(h, h.source, 'shared-run-id', task());
+  const second = runClaim(h, secondSource, 'shared-run-id', task());
   assert.notStrictEqual(second, first);
   const [a, b] = await Promise.all([first, second]);
   assert.notEqual(a.sessionId, b.sessionId);
   assert.deepEqual(h.background.map((ref) => ref.projectPath).sort(), ['/project-a', '/project-b']);
   assert.equal(h.notifications.length, 2);
-  assert.strictEqual(h.service.run(h.source, 'shared-run-id', task()), first);
-  assert.strictEqual(h.service.run(secondSource, 'shared-run-id', task()), second);
+  assert.strictEqual(runClaim(h, h.source, 'shared-run-id', task()), first);
+  assert.strictEqual(runClaim(h, secondSource, 'shared-run-id', task()), second);
 });
 
 test('disposed service rejects and replays first-time admission without opening a runtime', async (t) => {
   const h = harness(t);
   h.service.dispose();
-  const first = h.service.run(h.source, 'after-shutdown', task());
+  const first = runClaim(h, h.source, 'after-shutdown', task());
   await assert.rejects(first, /^Error: cancelled:.*closed/);
-  assert.strictEqual(h.service.run(h.source, 'after-shutdown', task()), first);
+  assert.strictEqual(runClaim(h, h.source, 'after-shutdown', task()), first);
   await assert.rejects(first, /^Error: cancelled:/);
   assert.equal(h.background.length, 0);
   assert.equal(h.bindings.length, 0);
@@ -417,9 +425,9 @@ test('shutdown prevents a selected-session run from starting after its queue dra
   const finish = deferred<string>();
   h.setExecute(async () => { entered.resolve(); return finish.promise; });
   const saved = task({ runMode: 'selected_session', targetSessionId: targetSessionId, notificationPolicy: 'none' });
-  const first = h.service.run(h.source, 'running', saved);
+  const first = runClaim(h, h.source, 'running', saved);
   await entered.promise;
-  const queued = h.service.run(h.source, 'queued', saved);
+  const queued = runClaim(h, h.source, 'queued', saved);
   const rejected = assert.rejects(queued, /^Error: cancelled:/);
   await new Promise<void>((resolve) => setImmediate(resolve));
   h.service.dispose();
@@ -428,7 +436,7 @@ test('shutdown prevents a selected-session run from starting after its queue dra
   await rejected;
   assert.equal(h.background.length, 1);
   assert.equal(h.turns.length, 1);
-  assert.strictEqual(h.service.run(h.source, 'queued', saved), queued);
+  assert.strictEqual(runClaim(h, h.source, 'queued', saved), queued);
 });
 
 test('shutdown during target validation does not acquire an execution runtime', async (t) => {
@@ -436,7 +444,7 @@ test('shutdown during target validation does not acquire an execution runtime', 
   const entered = deferred();
   const finish = deferred<{ sessions: { uuid: string }[] }>();
   h.setListCatalog(async () => { entered.resolve(); return finish.promise; });
-  const run = h.service.run(h.source, 'validating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
+  const run = runClaim(h, h.source, 'validating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
@@ -457,7 +465,7 @@ test('shutdown during queued target revalidation does not acquire an execution r
     if (validations === 2) { entered.resolve(); return finish.promise; }
     return { sessions: [{ uuid: targetSessionId }] };
   });
-  const run = h.service.run(h.source, 'revalidating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
+  const run = runClaim(h, h.source, 'revalidating', task({ runMode: 'selected_session', targetSessionId: targetSessionId }));
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
@@ -475,7 +483,7 @@ test('shutdown while the runtime opens prevents turn dispatch and run binding', 
   const entered = deferred();
   const finish = deferred<SessionRuntime>();
   h.setOpenRuntime(async () => { entered.resolve(); return finish.promise; });
-  const run = h.service.run(h.source, 'opening', task());
+  const run = runClaim(h, h.source, 'opening', task());
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
@@ -491,7 +499,7 @@ test('shutdown while a runtime prepares its turn prevents the binding callback',
   const entered = deferred();
   const finish = deferred();
   h.setBeforeBinding(async () => { entered.resolve(); await finish.promise; });
-  const run = h.service.run(h.source, 'preparing', task());
+  const run = runClaim(h, h.source, 'preparing', task());
   const rejected = assert.rejects(run, /^Error: cancelled:/);
   await entered.promise;
   h.service.dispose();
@@ -507,26 +515,26 @@ test('terminal history is bounded while in-flight replay survives terminal cache
   const entered = deferred();
   const finish = deferred<string>();
   h.setExecute(async (_ref, runId) => {
-    if (runId === 'in-flight') { entered.resolve(); return finish.promise; }
+    if (runId === claimWireId('in-flight', 1)) { entered.resolve(); return finish.promise; }
     return runId;
   });
   const silent = task({ notificationPolicy: 'none' });
-  const pending = h.service.run(h.source, 'in-flight', silent);
+  const pending = runClaim(h, h.source, 'in-flight', silent);
   await entered.promise;
-  const oldest = h.service.run(h.source, 'terminal-0', silent);
+  const oldest = runClaim(h, h.source, 'terminal-0', silent);
   await oldest;
   let newest = oldest;
   for (let index = 1; index <= 500; index += 1) {
-    newest = h.service.run(h.source, `terminal-${index}`, silent);
+    newest = runClaim(h, h.source, `terminal-${index}`, silent);
     await newest;
   }
-  assert.strictEqual(h.service.run(h.source, 'in-flight', silent), pending, 'terminal eviction must never evict active work');
-  assert.strictEqual(h.service.run(h.source, 'terminal-500', silent), newest);
-  const admittedAfterEviction = h.service.run(h.source, 'terminal-0', silent);
+  assert.strictEqual(runClaim(h, h.source, 'in-flight', silent), pending, 'terminal eviction must never evict active work');
+  assert.strictEqual(runClaim(h, h.source, 'terminal-500', silent), newest);
+  const admittedAfterEviction = runClaim(h, h.source, 'terminal-0', silent);
   assert.notStrictEqual(admittedAfterEviction, oldest, 'the oldest terminal entry must leave the bounded history');
   await admittedAfterEviction;
-  assert.equal(h.turns.filter((turn) => turn.runId === 'in-flight').length, 1);
+  assert.equal(h.turns.filter((turn) => turn.runId === claimWireId('in-flight', 1)).length, 1);
   finish.resolve('Completed long run');
   await pending;
-  assert.strictEqual(h.service.run(h.source, 'in-flight', silent), pending);
+  assert.strictEqual(runClaim(h, h.source, 'in-flight', silent), pending);
 });

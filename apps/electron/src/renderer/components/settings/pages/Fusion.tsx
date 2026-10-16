@@ -10,7 +10,7 @@ import { ExtensionHubLayout, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { adminRecordCommand, nextConfigurationOperationId, noteStyle } from './configurationAdmin';
 import {
-  FUSION_SCOPES, FUSION_SCOPE_LABELS, copiedFusionStrategy, fusionNameError, fusionNeedsLegacyReplacement, fusionStrategyKey, parseFusionCatalog,
+  FUSION_SCOPES, FUSION_SCOPE_LABELS, copiedFusionStrategy, fusionNameError, fusionStrategyKey, parseFusionCatalog,
   type FusionCatalogScope, type FusionGlobals, type FusionScope, type FusionStrategyEntry,
 } from './FusionCatalog';
 
@@ -212,7 +212,7 @@ function Row({ title, desc, align = 'start', children }: { title: ReactNode; des
 
 type StrategyDraft = {
   kind: 'strategy'; scope: FusionScope; path: string; revision: string; existing: boolean;
-  value: FusionStrategyEntry; original: string; replaceLegacy: boolean;
+  value: FusionStrategyEntry; original: string;
 };
 type GlobalsDraft = { kind: 'globals'; scope: FusionScope; path: string; revision: string; value: FusionGlobals; original: string };
 type Draft = StrategyDraft | GlobalsDraft;
@@ -283,7 +283,7 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
   const currentContext = useRef({ catalog, sessionId: bridge.activeSession?.sessionId });
   currentContext.current = { catalog, sessionId: bridge.activeSession?.sessionId };
   const busy = pendingWrite !== null;
-  const dirty = draft !== null && (JSON.stringify(draft.value) !== draft.original || (draft.kind === 'strategy' && draft.replaceLegacy));
+  const dirty = draft !== null && JSON.stringify(draft.value) !== draft.original;
   const candidates = useMemo(() => configuredCandidates(candidatesFromCatalog(bridge.desktop.providerModelCatalog ?? []), bridge.bootstrap?.providerCredentials),
     [bridge.desktop.providerModelCatalog, bridge.bootstrap?.providerCredentials]);
   const analystCandidates = useMemo(() => candidates.filter((row) => row.analystCapable), [candidates]);
@@ -337,7 +337,7 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
   const scopeFor = (scope: FusionScope) => catalog.scopes.find((entry) => entry.scope === scope);
   const openStrategy = (scope: FusionCatalogScope, value: FusionStrategyEntry, existing: boolean) => {
     setDraft({ kind: 'strategy', scope: scope.scope, path: scope.path, revision: scope.revision, existing, value: structuredClone(value),
-      original: JSON.stringify(existing ? value : { ...value, name: '', config: {} }), replaceLegacy: false });
+      original: JSON.stringify(existing ? value : { ...value, name: '', config: {} }) });
     setPendingPanel(null); setCopyScope(scope.scope === 'user' ? 'project' : 'user'); setError(null); setNotice(null); setConfirmDelete(false);
   };
   const create = () => {
@@ -378,14 +378,12 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
     [next[index], next[target]] = [next[target]!, next[index]!]; updateConfig('panelModels', next);
   };
   const scope = draft ? scopeFor(draft.scope) : filter === 'all' ? undefined : scopeFor(filter);
-  const needsLegacyReplacement = fusionNeedsLegacyReplacement(scope);
   const nameError = strategyDraft ? fusionNameError(strategyDraft.value.name, scope, strategyDraft.value.id) : null;
   const save = () => {
     if (!draft) return;
     if (draft.kind === 'globals') { write('set_globals', draft.scope, draft.revision, undefined, { ...draft.value, ...(draft.value.allowed_profiles ? { allowed_profiles: draft.value.allowed_profiles.map((profile) => profile.trim()).filter(Boolean) } : {}) }, true); return; }
     if (nameError) { setError(nameError); return; }
-    write('save', draft.scope, draft.revision, undefined, { ...draft.value, name: draft.value.name.trim(),
-      ...(draft.replaceLegacy ? { replace_legacy: true } : {}) }, true);
+    write('save', draft.scope, draft.revision, undefined, { ...draft.value, name: draft.value.name.trim() }, true);
   };
   const readiness = (value: FusionStrategyEntry): string => {
     const valueRoles = rolesFromFusionObject(value.config);
@@ -429,11 +427,11 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
       <div style={{ ...noteStyle(t), margin: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <span>{filter === 'all' ? '最终生效设置' : `${FUSION_SCOPE_LABELS[filter]}范围的全局设置`} · Agent 合议 {globals.enabled === undefined ? '未指定' : globals.enabled ? '开启' : '关闭'} · 主动合议 {globals.proactive === undefined ? '未指定' : globals.proactive ? '开启' : '关闭'}</span>
-          {scope && <button type="button" disabled={busy || fusionNeedsLegacyReplacement(scope)} style={ghostButtonStyle(t, busy || fusionNeedsLegacyReplacement(scope))} onClick={() => setDraft({ kind: 'globals', scope: scope.scope, path: scope.path, revision: scope.revision, value: structuredClone(scope.globals), original: JSON.stringify(scope.globals) })}>编辑全局设置</button>}
+          {scope && <button type="button" disabled={busy} style={ghostButtonStyle(t, busy)} onClick={() => setDraft({ kind: 'globals', scope: scope.scope, path: scope.path, revision: scope.revision, value: structuredClone(scope.globals), original: JSON.stringify(scope.globals) })}>编辑全局设置</button>}
         </div>
         <div style={{ marginTop: 6 }}>{filter === 'all' ? '全局限制适用于每个策略；选择具体作用域后可以编辑。' : SCOPE_DESCRIPTION[filter]}</div>
         <div style={{ marginTop: 6 }}>当前默认：{effectiveDefault ? `${effectiveDefault.strategy.name} · ${FUSION_SCOPE_LABELS[effectiveDefault.scope.scope]}` : '未设置，运行前需要选择策略'}。默认优先级：本地 → 项目 → 用户。</div>
-        {scope?.default_strategy_id && <button type="button" disabled={busy || fusionNeedsLegacyReplacement(scope)} style={{ ...ghostButtonStyle(t), marginTop: 8 }} onClick={() => write('set_default', scope.scope, scope.revision)}>清除此作用域默认</button>}
+        {scope?.default_strategy_id && <button type="button" disabled={busy} style={{ ...ghostButtonStyle(t), marginTop: 8 }} onClick={() => write('set_default', scope.scope, scope.revision)}>清除此作用域默认</button>}
       </div>
       <div className="extension-hub-list" aria-label="Fusion 策略列表" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
         {filtered.map(({ scope: entryScope, strategy }) => <div key={fusionStrategyKey(entryScope.scope, strategy.id)} className="extension-hub-row configuration-entry">
@@ -445,7 +443,7 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
           </button>
           <div className="extension-hub-row-side" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             <span className="extension-hub-row-scope" style={{ display: 'inline', whiteSpace: 'nowrap' }}>{FUSION_SCOPE_LABELS[entryScope.scope]}</span>
-            <button type="button" disabled={busy || fusionNeedsLegacyReplacement(entryScope) || entryScope.default_strategy_id === strategy.id} aria-label={`设为默认 ${strategy.name} ${FUSION_SCOPE_LABELS[entryScope.scope]}`} style={ghostButtonStyle(t, busy || entryScope.default_strategy_id === strategy.id)} onClick={() => write('set_default', entryScope.scope, entryScope.revision, strategy.id)}>{entryScope.default_strategy_id === strategy.id ? '默认' : '设为默认'}</button>
+            <button type="button" disabled={busy || entryScope.default_strategy_id === strategy.id} aria-label={`设为默认 ${strategy.name} ${FUSION_SCOPE_LABELS[entryScope.scope]}`} style={ghostButtonStyle(t, busy || entryScope.default_strategy_id === strategy.id)} onClick={() => write('set_default', entryScope.scope, entryScope.revision, strategy.id)}>{entryScope.default_strategy_id === strategy.id ? '默认' : '设为默认'}</button>
           </div>
         </div>)}
         {!filtered.length && <div role="status" style={{ padding: '32px 18px', color: t.text3, fontSize: 13 }}>{bridge.fusionCatalogEvent ? search ? '没有匹配的策略。' : '还没有策略。新建一个策略，选择 Panel 与 Analyst 模型。' : '正在读取 Fusion 策略…'}</div>}
@@ -462,10 +460,10 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
       </Card> : <>
         <Card title="策略信息">
           <Row title="名称" align="center"><input aria-label="策略名称" value={draft.value.name} placeholder="例如：代码审查" maxLength={120} disabled={busy} onChange={(event) => setDraft({ ...draft, value: { ...draft.value, name: event.target.value } })} style={{ ...inputStyle(t), width: 280, maxWidth: '100%' }} /></Row>
-          <Row title="作用域" desc={draft.existing ? '已保存策略的作用域固定。使用下方复制功能创建独立策略。' : SCOPE_DESCRIPTION[draft.scope]} align="center"><select aria-label="策略作用域" disabled={busy || draft.existing} value={draft.scope} onChange={(event) => { const next = scopeFor(event.target.value as FusionScope); if (next) setDraft({ ...draft, scope: next.scope, path: next.path, revision: next.revision, replaceLegacy: false }); }} style={{ ...inputStyle(t), width: 160 }}>{catalog.scopes.map((entry) => <option key={entry.scope} value={entry.scope}>{FUSION_SCOPE_LABELS[entry.scope]}</option>)}</select></Row>
+          <Row title="作用域" desc={draft.existing ? '已保存策略的作用域固定。使用下方复制功能创建独立策略。' : SCOPE_DESCRIPTION[draft.scope]} align="center"><select aria-label="策略作用域" disabled={busy || draft.existing} value={draft.scope} onChange={(event) => { const next = scopeFor(event.target.value as FusionScope); if (next) setDraft({ ...draft, scope: next.scope, path: next.path, revision: next.revision }); }} style={{ ...inputStyle(t), width: 160 }}>{catalog.scopes.map((entry) => <option key={entry.scope} value={entry.scope}>{FUSION_SCOPE_LABELS[entry.scope]}</option>)}</select></Row>
           <Row title="默认预设" desc="Quality 侧重质量，Fast 侧重速度；均按 Panel 列表顺序选择模型。" align="center"><select aria-label="默认预设" disabled={busy} value={typeof config.preset === 'string' ? config.preset : ''} onChange={(event) => updateConfig('preset', event.target.value || undefined)} style={{ ...inputStyle(t), width: 160 }}><option value="">引擎默认</option><option value="quality">Quality</option><option value="fast">Fast</option></select></Row>
         </Card>
-        {scope?.diagnostic && <div role="alert" style={noteStyle(t, 'warn')}>{scope.diagnostic}{!needsLegacyReplacement && <p style={{ margin: '10px 0 0' }}>修正当前策略后保存，其他策略和此作用域的设置会保留。</p>}{needsLegacyReplacement && <label style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'start' }}><input type="checkbox" checked={draft.replaceLegacy} onChange={(event) => setDraft({ ...draft, replaceLegacy: event.target.checked })} />我确认用此新策略替换该作用域的旧 Fusion 配置（旧单份配置不会迁移）。</label>}</div>}
+        {scope?.diagnostic && <div role="alert" style={noteStyle(t, 'warn')}>{scope.diagnostic}</div>}
         <div role="status" style={noteStyle(t)}>{draft.existing && !scope?.admitted ? '当前会话未启用此作用域；可以编辑，启用该作用域后才能运行' : readiness(draft.value)}。最终回答继续使用当前会话模型，无需另设合成模型。</div>
         <Card title="Panel 模型">
           <Row title="顺序即优先级" desc={`至少 ${FUSION_MIN_PANEL} 个，最多 ${maxPanel} 个模型。预设取列表中的前 N 项。`} align="start">{null}</Row>
@@ -487,7 +485,7 @@ export function Fusion({ bridge, onNavigate, onRegisterNavigationRequest, onRegi
       </>}
       <div style={{ display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, padding: '4px 0 20px' }}>
         <button type="button" disabled={busy} style={ghostButtonStyle(t, busy)} onClick={() => requestAction(() => setDraft(null))}>取消</button>
-        <button type="button" className="extension-hub-primary" disabled={busy || (!dirty && (draft.kind === 'globals' || draft.existing)) || (draft.kind === 'strategy' && (!draft.value.name.trim() || (needsLegacyReplacement && !draft.replaceLegacy)))} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
+        <button type="button" className="extension-hub-primary" disabled={busy || (!dirty && (draft.kind === 'globals' || draft.existing)) || (draft.kind === 'strategy' && !draft.value.name.trim())} onClick={save}>{busy ? '正在保存…' : '保存'}</button>
       </div>
     </div>}
   </ExtensionHubLayout>;

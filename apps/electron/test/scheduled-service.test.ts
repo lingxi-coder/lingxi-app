@@ -12,9 +12,26 @@ import type { ProjectSessionCatalog } from '../src/main/session-catalog';
 import type { SessionRef } from '../src/shared/settings';
 
 const targetId = '11111111-2222-4333-8444-555555555555';
+function claimWireId(occurrenceId: string, generation = 1): string {
+  return `lingxi-cron-claim-v1:${JSON.stringify([occurrenceId, generation])}`;
+}
 function task(patch: Partial<CronAutomationDto> = {}): CronJobDto {
   return { id: 'task-1', cron: '0 9 * * *', prompt: '# Morning brief\n\nSummarize the project.', recurring: true, durable: true, permanent: false, created_at: 1,
     automation: { version: 2, status: 'active', model: 'openai/test-model', reasoning: { type: 'level', id: 'high' }, runMode: 'new_session', notificationPolicy: 'all', ...patch } };
+}
+function taskForClaim(saved: CronJobDto, occurrenceId: string, generation = 1): CronJobDto {
+  const automation = saved.automation!;
+  return {
+    ...saved,
+    automation: {
+      ...automation,
+      runs: [{ id: occurrenceId, taskId: saved.id, claimGeneration: generation, scheduledAt: 1,
+        status: 'running' as const, model: automation.model, reasoning: automation.reasoning }],
+    },
+  };
+}
+function runClaim(service: ScheduledTaskService, source: SessionRuntime, occurrenceId: string, saved: CronJobDto, generation = 1) {
+  return service.run(source, claimWireId(occurrenceId, generation), taskForClaim(saved, occurrenceId, generation));
 }
 async function writeCatalog(workspace: string, tasks: unknown[]): Promise<void> {
   await mkdir(join(workspace, '.lingxi'), { recursive: true });
@@ -126,14 +143,16 @@ test('an emptied catalog retires the cached jobs of that scope', async (t) => {
 test('new-session runs use unique background sessions and forward the fixed model/effort snapshot', async (t) => {
   const h = await harness(t);
   const saved = task();
-  const first = await h.service.run(h.source, 'run-a', saved);
-  const second = await h.service.run(h.source, 'run-b', saved);
+  const firstTask = taskForClaim(saved, 'run-a');
+  const secondTask = taskForClaim(saved, 'run-b');
+  const first = await h.service.run(h.source, claimWireId('run-a'), firstTask);
+  const second = await h.service.run(h.source, claimWireId('run-b'), secondTask);
   assert.notEqual(first.sessionId, second.sessionId);
   assert.deepEqual(h.background.map((item) => [item.ref.projectPath, item.empty, item.model]), [[h.project, true, saved.automation!.model], [h.project, true, saved.automation!.model]]);
-  assert.deepEqual(h.bindings, [{runId: 'run-a', sessionId: first.sessionId}, {runId: 'run-b', sessionId: second.sessionId}]);
-  assert.equal(h.turns[0].task, saved, 'the per-run snapshot is delivered unchanged');
+  assert.deepEqual(h.bindings, [{runId: claimWireId('run-a'), sessionId: first.sessionId}, {runId: claimWireId('run-b'), sessionId: second.sessionId}]);
+  assert.equal(h.turns[0].task, firstTask, 'the per-run claim snapshot is delivered unchanged');
   assert.deepEqual(h.turns[0].task.automation?.reasoning, { type: 'level', id: 'high' });
-  assert.deepEqual(h.turns.map((turn) => turn.runId), ['run-a', 'run-b']);
+  assert.deepEqual(h.turns.map((turn) => turn.runId), [claimWireId('run-a'), claimWireId('run-b')]);
   assert.equal(h.notifications.length, 2);
   assert.equal(h.notifications[0].ref?.sessionId, first.sessionId);
 });
@@ -143,9 +162,9 @@ test('selected-session runs serialize and revalidate a queued target after archi
   const entered = deferred(); const finish = deferred<string>();
   h.setExecute(async () => { entered.resolve(); return finish.promise; });
   const saved = task({ runMode: 'selected_session', targetSessionId: targetId });
-  const first = h.service.run(h.source, 'first', saved);
+  const first = runClaim(h.service, h.source, 'first', saved);
   await entered.promise;
-  const second = h.service.run(h.source, 'second', saved);
+  const second = runClaim(h.service, h.source, 'second', saved);
   const rejected = assert.rejects(second, /archived/);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(h.turns.length, 1, 'second run must not overlap the first');
@@ -168,15 +187,15 @@ test('selected-session creation rejects malformed, missing and archived targets'
 
 test('dedicated task chat reuses persisted ownership and never recreates a missing owner', async (t) => {
   const h = await harness(t);
-  const first = await h.service.run(h.source, 'first', task({ runMode: 'task_session' }));
+  const first = await runClaim(h.service, h.source, 'first', task({ runMode: 'task_session' }));
   h.catalogRows.get(h.project)!.push({ uuid: first.sessionId, title: 'Dedicated task' });
   const saved = task({ runMode: 'task_session', ownedSessionId: first.sessionId });
-  const second = await h.service.run(h.source, 'second', saved);
+  const second = await runClaim(h.service, h.source, 'second', saved);
   assert.equal(second.sessionId, first.sessionId);
   assert.equal(h.background[0].empty, true);
   assert.equal(h.background[1].empty, false);
   h.catalogRows.set(h.project, []);
-  await assert.rejects(h.service.run(h.source, 'third', saved), /unavailable/);
+  await assert.rejects(runClaim(h.service, h.source, 'third', saved), /unavailable/);
   assert.equal(h.background.length, 2);
 });
 
@@ -185,11 +204,11 @@ test('notification policy reports each success/failure once and suppresses disab
   for (const policy of ['all', 'failed', 'none'] as const) {
     h.notifications.length = 0;
     h.setExecute(async () => 'summary');
-    await h.service.run(h.source, `${policy}-success`, task({ notificationPolicy: policy }));
+    await runClaim(h.service, h.source, `${policy}-success`, task({ notificationPolicy: policy }));
     assert.equal(h.notifications.length, policy === 'all' ? 1 : 0);
     h.notifications.length = 0;
     h.setExecute(async () => { throw new Error('model request failed'); });
-    await assert.rejects(h.service.run(h.source, `${policy}-failed`, task({ notificationPolicy: policy })), /model request failed/);
+    await assert.rejects(runClaim(h.service, h.source, `${policy}-failed`, task({ notificationPolicy: policy })), /model request failed/);
     assert.equal(h.notifications.length, policy === 'none' ? 0 : 1);
   }
 });
@@ -197,11 +216,11 @@ test('notification policy reports each success/failure once and suppresses disab
 test('configuration failures notify according to failure policy before execution starts', async (t) => {
   const h = await harness(t);
   h.archived.add(`${h.project}:${targetId}`);
-  await assert.rejects(h.service.run(h.source, 'archived', task({ runMode: 'selected_session', targetSessionId: targetId, notificationPolicy: 'failed' })), /archived/);
+  await assert.rejects(runClaim(h.service, h.source, 'archived', task({ runMode: 'selected_session', targetSessionId: targetId, notificationPolicy: 'failed' })), /archived/);
   assert.equal(h.background.length, 0);
   assert.equal(h.notifications.length, 1);
   h.projects.delete(h.project);
-  await assert.rejects(h.service.run(h.source, 'removed', task({ notificationPolicy: 'none' })), /unavailable/);
+  await assert.rejects(runClaim(h.service, h.source, 'removed', task({ notificationPolicy: 'none' })), /unavailable/);
   assert.equal(h.notifications.length, 1, 'disabled notifications stay silent on configuration failure');
 });
 
@@ -239,15 +258,15 @@ test('failed controller startup releases its lease and disposed services reject 
 
 test('notification delivery suppresses duplicate run IDs across service restarts', async (t) => {
   const h = await harness(t);
-  await h.service.run(h.source, 'same-occurrence', task());
-  await h.service.run(h.source, 'same-occurrence', task());
+  await runClaim(h.service, h.source, 'same-occurrence', task());
+  await runClaim(h.service, h.source, 'same-occurrence', task());
   assert.equal(h.notifications.length, 1);
   h.service.dispose();
   const reopened = h.createService();
   t.after(() => reopened.dispose());
-  await reopened.run(h.source, 'same-occurrence', task());
+  await runClaim(reopened, h.source, 'same-occurrence', task());
   assert.equal(h.notifications.length, 1, 'delivered notification reservation survives restart');
-  await reopened.run(h.source, 'next-occurrence', task());
+  await runClaim(reopened, h.source, 'next-occurrence', task());
   assert.equal(h.notifications.length, 2);
 });
 
@@ -282,8 +301,8 @@ test('selected and task-owned targets beyond the sidebar limit remain valid auth
   })).concat([{ uuid: targetId, title: 'Older persistent target' }]));
   assert.ok(!(await h.service.context(h.project)).sessions.some((session) => session.uuid === targetId));
   await h.service.manage(h.project, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: targetId }).automation });
-  const selected = await h.service.run(h.source, 'old-selected', task({ runMode: 'selected_session', targetSessionId: targetId, notificationPolicy: 'none' }));
-  const owned = await h.service.run(h.source, 'old-task-owner', task({ runMode: 'task_session', ownedSessionId: targetId, notificationPolicy: 'none' }));
+  const selected = await runClaim(h.service, h.source, 'old-selected', task({ runMode: 'selected_session', targetSessionId: targetId, notificationPolicy: 'none' }));
+  const owned = await runClaim(h.service, h.source, 'old-task-owner', task({ runMode: 'task_session', ownedSessionId: targetId, notificationPolicy: 'none' }));
   assert.equal(selected.sessionId, targetId);
   assert.equal(owned.sessionId, targetId);
   assert.equal(h.turns.length, 2);

@@ -149,7 +149,7 @@ pub(super) fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i
 /// Whether `state` is DONE for print mode's purposes — terminal, AND (for a
 /// `Completed` run specifically) its publication attempt has a terminal typed
 /// receipt. `finish_fusion_terminal` flips the task to a terminal state before the
-/// handler awaits `FusionCompletionSink::publish`, so a waiter must remain on
+/// handler records the durable publication receipt, so a waiter must remain on
 /// `Pending`; `Published`, durable `Queued`, and explicit publication failures
 /// are all ready to report with their distinct exit semantics. A failed run
 /// with a retained answer also waits; computation failures and kills do not.

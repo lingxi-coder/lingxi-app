@@ -133,3 +133,39 @@ test(cancelledBeforeBinding
   });
 });
 }
+
+test('a non-current scheduled claim is rejected and acknowledged without invoking the scheduler', async (t) => {
+  let executions = 0;
+  const source = new SessionRuntime({
+    sessionId: sourceId, projectPath: workspace,
+    launchConfig: () => ({ workspace, trusted: true }),
+    onCronRunRequested: async () => { executions++; return { sessionId: sourceId, summary: 'should not run' }; },
+  });
+  t.after(async () => { await source.dispose(); });
+  const client = transport();
+  const replies: ClientCommand[] = [];
+  client.sendCommand = (command) => replies.push(command);
+  const internal = source as any;
+  internal.activeWorkspace = workspace;
+  internal.activeWorkspaceTrusted = true;
+  internal.client = client;
+  internal.wireClient(client, internal.generation);
+  internal.setState({ status: 'connected' });
+
+  client.emit('event', {
+    type: 'cron_run_requested',
+    run_id: 'bare-occurrence',
+    task: {
+      id: 'job', prompt: 'Scheduled task', automation: {
+        model: 'provider/model', reasoning: { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'none',
+        runs: [{ id: 'bare-occurrence', claimGeneration: 1, status: 'running', scheduledAt: 1 }],
+      },
+    },
+  });
+  await until(() => replies.some((command) => command.type === 'cron_run_completed'));
+  assert.equal(executions, 0);
+  assert.deepEqual(replies.filter((command) => command.type === 'cron_run_completed'), [{
+    type: 'cron_run_completed', run_id: 'bare-occurrence', error: 'invalid scheduled claim identity',
+  }]);
+  assert.equal((source as any).activeCronExecutions, 0);
+});

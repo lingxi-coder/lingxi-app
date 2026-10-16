@@ -284,17 +284,6 @@ class ProviderSettingsRepository(
                 },
             )
         }
-        // One-time compatibility migration: early Android builds stored only
-        // the Anthropic key in EncryptedSharedPreferences. Copy it into the
-        // engine's shared SecureStorage so the live multi-provider client and
-        // the settings status query observe the same credential.
-        providers
-            .firstOrNull {
-                it.preset == "anthropic" &&
-                    engineCredentialIdFor(it) == "anthropic" &&
-                    secureKeyStore?.apiKey().orEmpty().isNotBlank()
-            }
-            ?.let { credentialClient.set("anthropic", secureKeyStore?.apiKey().orEmpty()) }
         val snapshot = credentialClient.list(supportedIds)
         return ProviderStatusRefreshResult(
             providers = applyCredentialSnapshot(providers, snapshot),

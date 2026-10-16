@@ -33,9 +33,9 @@ visionDelegationEnabled: true)
         private func request(
             id: UInt64,
             questions: [AskQuestionDto] = [AskQuestionDto(
-                question: "应用主要记录什么？",
-                header: "数据",
-                options: [AskOptionDto(label: "笔记", description: "自由文本", preview: nil)],
+                question: "应用主要记录什么？".clientTextDto,
+                header: "数据".clientTextDto,
+                options: [AskOptionDto(label: "笔记".clientTextDto, description: "自由文本".clientTextDto, preview: nil)],
                 multiSelect: false
             )]
         ) -> AskUserQuestionRequestDto {
@@ -171,46 +171,72 @@ visionDelegationEnabled: true)
         }
 
         func testSingleSelectToggleReplacesAndMultiSelectAccumulates() {
-            XCTAssertEqual(AskUserQuestionCard.toggled("A", in: [], multiSelect: false), ["A"])
-            XCTAssertEqual(AskUserQuestionCard.toggled("B", in: ["A"], multiSelect: false), ["B"])
-            XCTAssertEqual(AskUserQuestionCard.toggled("A", in: ["A"], multiSelect: false), [])
-            XCTAssertEqual(AskUserQuestionCard.toggled("B", in: ["A"], multiSelect: true), ["A", "B"])
-            XCTAssertEqual(AskUserQuestionCard.toggled("A", in: ["A", "B"], multiSelect: true), ["B"])
+            XCTAssertEqual(AskUserQuestionCard.toggled(0, in: [], multiSelect: false), [0])
+            XCTAssertEqual(AskUserQuestionCard.toggled(1, in: [0], multiSelect: false), [1])
+            XCTAssertEqual(AskUserQuestionCard.toggled(0, in: [0], multiSelect: false), [])
+            XCTAssertEqual(AskUserQuestionCard.toggled(1, in: [0], multiSelect: true), [0, 1])
+            XCTAssertEqual(AskUserQuestionCard.toggled(0, in: [0, 1], multiSelect: true), [1])
         }
 
         /// The wire answer map keys on the QUESTION TEXT; labels comma-join;
         /// free text rides as one more value; unanswered questions are
         /// omitted, and completeness requires every question answered.
-        func testAnswersMapKeysOnQuestionTextAndJoinsLabels() {
+        func testAnswersRetainQuestionIdentityAndJoinSelectedLabels() {
             let questions = [
                 askQuestion("记录什么？", multiSelect: true),
                 askQuestion("要提醒吗？"),
             ]
-            let selected = [0: ["笔记", "打卡"], 1: []]
+            let selected = [0: [0, 1], 1: []]
             let custom = [1: " 每天晚上提醒 "]
 
             let answers = AskUserQuestionCard.answers(
                 questions: questions, selected: selected, custom: custom
             )
-            XCTAssertEqual(answers["记录什么？"], "笔记, 打卡")
-            XCTAssertEqual(answers["要提醒吗？"], "每天晚上提醒", "free text is trimmed and used as the answer")
+            XCTAssertEqual(answers.pairs.map(\.question.codeUnits), questions.map { Array($0.question.utf16) })
+            XCTAssertEqual(answers.pairs.map(\.answer.displayText), ["笔记, 打卡", "每天晚上提醒"])
             XCTAssertTrue(AskUserQuestionCard.isComplete(questions: questions, selected: selected, custom: custom))
 
             let incomplete = AskUserQuestionCard.answers(
-                questions: questions, selected: [0: ["笔记"]], custom: [:]
+                questions: questions, selected: [0: [0]], custom: [:]
             )
-            XCTAssertNil(incomplete["要提醒吗？"], "an unanswered question is omitted, not sent empty")
-            XCTAssertFalse(AskUserQuestionCard.isComplete(questions: questions, selected: [0: ["笔记"]], custom: [:]))
+            XCTAssertEqual(incomplete.pairs.count, 1, "an unanswered question is omitted, not sent empty")
+            XCTAssertFalse(AskUserQuestionCard.isComplete(questions: questions, selected: [0: [0]], custom: [:]))
         }
 
         func testFreeTextAppendsToMultiSelectLabels() {
             let questions = [askQuestion("要哪些功能？", multiSelect: true)]
             let answers = AskUserQuestionCard.answers(
                 questions: questions,
-                selected: [0: ["笔记"]],
+                selected: [0: [0]],
                 custom: [0: "语音输入"]
             )
-            XCTAssertEqual(answers["要哪些功能？"], "笔记, 语音输入")
+            XCTAssertEqual(answers.pairs.first?.answer.displayText, "笔记, 语音输入")
+        }
+
+        func testAnswerSummaryMapsIndicesToLabelsInSelectionOrder() {
+            let question = askQuestion("记录什么？", options: ["笔记", "打卡"], multiSelect: true)
+            XCTAssertEqual(
+                AskUserQuestionCard.answerSummary(question: question, selected: [1, 0], custom: "  语音  "),
+                "打卡, 笔记, 语音"
+            )
+            XCTAssertEqual(
+                AskUserQuestionCard.answerSummary(question: question, selected: [-1, 2], custom: "  自定义  "),
+                "自定义"
+            )
+            XCTAssertNil(AskUserQuestionCard.answerSummary(question: question, selected: [-1, 2], custom: " \n "))
+        }
+
+        func testSummaryUsesDisplayLabelsWhileAnswerPreservesSourceUnits() {
+            let question = ConversationAskQuestion(
+                question: "Q�", header: "", options: [
+                    ConversationAskOption(label: "�", description: "", preview: nil, sourceLabelCodeUnits: [0xD800]),
+                    ConversationAskOption(label: "�", description: "", preview: nil, sourceLabelCodeUnits: [0xFFFD]),
+                ], multiSelect: false, sourceQuestionCodeUnits: [0x51, 0xD801]
+            )
+            XCTAssertEqual(AskUserQuestionCard.answerSummary(question: question, selected: [0], custom: ""), "�")
+            let answers = AskUserQuestionCard.answers(questions: [question], selected: [0: [0]], custom: [:])
+            XCTAssertEqual(answers.pairs.first?.question.codeUnits, [0x51, 0xD801])
+            XCTAssertEqual(answers.pairs.first?.answer.codeUnits, [0xD800])
         }
     }
 

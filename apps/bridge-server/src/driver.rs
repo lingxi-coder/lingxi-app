@@ -35,7 +35,9 @@ use async_trait::async_trait;
 use client::adapter::{lowering::lower_cost_snapshot, ClientEventSink};
 use client::protocol::commands::{ImageRefDto, UiSurfaceDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
+use client::protocol::text::ClientTextDto;
 use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 // `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
 // `protocol` shape) so this library code can name it without taking a direct
 // `protocol` dependency.
@@ -104,11 +106,16 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
     async fn has_queued_goal_work(&self) -> bool {
         self.queue.has_main_thread_commands().await
     }
-    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+    async fn enqueue_goal_retry(
+        &self,
+        id: String,
+        body: Utf16JsonProjection,
+        cancel: CancellationToken,
+    ) {
         self.queue.enqueue_goal_retry(id, body, cancel).await;
     }
 
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
         let taken = self.queue.take_mid_turn_prompt().await;
         if taken.is_some() {
             self.foreign_inputs
@@ -119,35 +126,48 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 
     async fn take_mid_turn_batch(
         &self,
-    ) -> Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>> {
-        let batch = self.queue.take_mid_turn_commands().await?;
+    ) -> Result<Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>>, String> {
+        let Some(batch) = self.queue.take_mid_turn_commands().await else {
+            return Ok(None);
+        };
         self.foreign_inputs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(
+        Ok(Some(
             batch
                 .into_iter()
                 .filter_map(|command| {
+                    let text = command.text_projection()?.clone();
                     Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
-                        queue_delivery: None,
-                        text: command.text()?.to_owned(),
+                        text: text.clone(),
+                        // The bridge mid-turn queue stores text-only user
+                        // commands. Image-bearing and turn-correlated prompts
+                        // are held with their separate queued payload and are
+                        // drained as whole turns; this command has no durable
+                        // mobile prompt identity to propagate.
+                        images: Vec::new(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
                             msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
                             msgqueue::QueueSource::Cron => Some("scheduled-trigger"),
                             _ => None,
                         },
-                        projected_content: None,
+                        projected_content: Some(text),
+                        // Bridge prompts have no source transcript UUID or
+                        // SDK delivery receipt; don't invent either from the
+                        // queue's private command id.
                         source_message_uuid: None,
+                        queue_delivery: None,
+                        pending_prompt_identity: None,
                     })
                 })
                 .collect(),
-        )
+        ))
     }
 }
 
 struct PendingWakeup {
     handle: lingxi_core::host::BackgroundTaskHandle,
-    prompt: String,
+    prompt: Utf16JsonProjection,
     command_id: String,
     cancel: CancellationToken,
 }
@@ -246,7 +266,12 @@ impl MsgQueueWakeupScheduler {
 
 #[async_trait]
 impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
-    async fn schedule(&self, delay: std::time::Duration, prompt: String, _reason: String) {
+    async fn schedule(
+        &self,
+        delay: std::time::Duration,
+        prompt: Utf16JsonProjection,
+        _reason: String,
+    ) {
         let queue = self.queue.clone();
         let runtime = self.runtime.clone();
         let pending = self.pending.clone();
@@ -359,7 +384,7 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
         }
     }
 
-    async fn cancel_pending(&self) -> Vec<String> {
+    async fn cancel_pending(&self) -> Vec<Utf16JsonProjection> {
         let armed: Vec<_> =
             std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         // Logical cancellation also covers a timer blocked in persistence, and
@@ -399,11 +424,11 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                 .collect();
             self.queue.remove(&ids, "dynamic loop cancelled").await;
             for command in stranded {
-                if let Some(text) = command.text() {
+                if let Some(text) = command.text_projection() {
                     // One pending wakeup per prompt: count the
                     // enqueue -> pending-retirement handoff once.
                     if !cancelled.iter().any(|prompt| prompt == text) {
-                        cancelled.push(text.to_string());
+                        cancelled.push(text.clone());
                     }
                 }
             }
@@ -663,10 +688,16 @@ impl OrchestratorTurnDriver {
             OrchestratorError::MaxTurnsReached { .. } => ErrorKindDto::MaxTurns,
             _ => ErrorKindDto::Internal,
         };
-        ClientEvent::Error {
-            kind,
-            message: err.to_string(),
-        }
+        let message = match err {
+            OrchestratorError::Settings(settings) => ClientTextDto::from_code_units(
+                settings
+                    .message_projection()
+                    .string_units("")
+                    .expect("settings error message is a root string"),
+            ),
+            _ => ClientTextDto::from_utf8(&err.to_string()),
+        };
+        ClientEvent::Error { kind, message }
     }
 
     /// Convert the wire [`ImageRefDto`]s (uniform inline `{media_type, base64}`,
@@ -713,7 +744,7 @@ impl OrchestratorTurnDriver {
     /// byte-identical to the pre-MULTIMODAL.1 text-only turn.
     async fn drive_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
         notification_registry: Option<
@@ -734,7 +765,7 @@ impl OrchestratorTurnDriver {
 
     async fn drive_turn_with_inputs(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
         notification_registry: Option<
@@ -776,7 +807,7 @@ impl OrchestratorTurnDriver {
                 .await
         } else {
             self.orchestrator
-                .run_turn_streaming_with_origin(&prompt, sources, cancel, None, in_human_turn)
+                .run_turn_streaming_with_origin(prompt, sources, cancel, None, in_human_turn)
                 .await
         };
         // USER ABORT (binary `t3t`): the user interrupted this turn, so every
@@ -919,7 +950,10 @@ impl TurnDriver for OrchestratorTurnDriver {
     }
 
     async fn record_prompt_suggestion_submission(&self, text: &str) {
-        let _ = self.orchestrator.record_prompt_suggestion_submission(text).await;
+        let _ = self
+            .orchestrator
+            .record_prompt_suggestion_submission(text)
+            .await;
     }
 
     async fn ui_attach(&self, client_id: &str, surface: UiSurfaceDto) -> bool {
@@ -940,6 +974,21 @@ impl TurnDriver for OrchestratorTurnDriver {
             .await
     }
 
+    async fn mod_ui_control(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        self.orchestrator.mod_ui_control(request).await
+    }
+
+    async fn mod_ui_client_operation(
+        &self,
+        operation: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::HandleError> {
+        self.orchestrator.mod_ui_client_operation(operation).await
+    }
+
     async fn stop_dynamic_loop(&self) {
         tool_cron::stop_dynamic_loop(self.wakeup_scheduler.as_ref()).await;
         if let Some(runtime) = &self.loop_runtime {
@@ -947,7 +996,10 @@ impl TurnDriver for OrchestratorTurnDriver {
         }
     }
 
-    fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
+    fn resolve_loop_prompt(
+        &self,
+        prompt: &Utf16JsonProjection,
+    ) -> std::io::Result<Utf16JsonProjection> {
         let fallback = tool_cron::LoopRuntime::default();
         let runtime = self.loop_runtime.as_deref().unwrap_or(&fallback);
         runtime.try_resolve_loop_default_fire(
@@ -970,7 +1022,7 @@ impl TurnDriver for OrchestratorTurnDriver {
 
     async fn run_scheduled_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         model: String,
         reasoning: client::protocol::controls::ReasoningSelectionDto,
         cancel: CancellationToken,
@@ -989,7 +1041,7 @@ impl TurnDriver for OrchestratorTurnDriver {
         let cancel_probe = cancel.clone();
         let result = self
             .orchestrator
-            .run_scheduled_turn(&prompt, &model, reasoning, cancel)
+            .run_scheduled_turn(prompt, &model, reasoning, cancel)
             .await;
         if let Some(queue) = &self.queue {
             queue.clear_active_turn().await;
@@ -1046,13 +1098,28 @@ impl TurnDriver for OrchestratorTurnDriver {
     ) {
         let human = inputs.iter().any(|input| !input.is_meta);
         self.announce_engine_initiated_turn().await;
-        self.drive_turn_with_inputs(String::new(), Vec::new(), cancel, None, human, Some(inputs))
+        let run = self.drive_turn_with_inputs(
+            Utf16JsonProjection::from(""),
+            Vec::new(),
+            cancel,
+            None,
+            human,
+            Some(inputs),
+        );
+        if human {
+            orchestrator::native_user_message_source::with_source(
+                orchestrator::native_user_message_source::human(),
+                run,
+            )
             .await;
+        } else {
+            run.await;
+        }
     }
 
     async fn run_queued_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         in_human_turn: bool,
         cancel: CancellationToken,
     ) {
@@ -1063,7 +1130,7 @@ impl TurnDriver for OrchestratorTurnDriver {
 
     async fn run_queued_turn_with_images(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -1077,11 +1144,17 @@ impl TurnDriver for OrchestratorTurnDriver {
         registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         cancel: CancellationToken,
     ) {
-        self.drive_turn(String::new(), Vec::new(), cancel, Some(registry), false)
-            .await;
+        self.drive_turn(
+            Utf16JsonProjection::from(""),
+            Vec::new(),
+            cancel,
+            Some(registry),
+            false,
+        )
+        .await;
     }
 
-    async fn run_turn(&self, prompt: String) {
+    async fn run_turn(&self, prompt: Utf16JsonProjection) {
         // No images: drive with an empty source set — identical to routing through
         // `run_turn_streaming_with_cancel` (which decodes `&[]` to an empty vec).
         self.drive_turn(prompt, Vec::new(), CancellationToken::new(), None, true)
@@ -1092,20 +1165,20 @@ impl TurnDriver for OrchestratorTurnDriver {
     /// dropping them. Each inline `ImageRefDto` becomes an
     /// [`ImageSource::Base64`], which the orchestrator appends to the outgoing
     /// user message via `ConversationMessage::user_with_images`.
-    async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
+    async fn run_turn_with_images(&self, prompt: Utf16JsonProjection, images: Vec<ImageRefDto>) {
         let sources = Self::to_image_sources(images);
         self.drive_turn(prompt, sources, CancellationToken::new(), None, true)
             .await;
     }
 
-    async fn run_turn_with_cancel(&self, prompt: String, cancel: CancellationToken) {
+    async fn run_turn_with_cancel(&self, prompt: Utf16JsonProjection, cancel: CancellationToken) {
         self.drive_turn(prompt, Vec::new(), cancel, None, true)
             .await;
     }
 
     async fn run_turn_with_images_and_cancel(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -1129,6 +1202,7 @@ mod tests {
     use client::protocol::commands::ImageRefDto;
     use client::protocol::events::ClientEvent;
     use lingxi_core::host::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{ContentBlock, ConversationMessage};
     use orchestrator::conversation::ImageSource;
     use orchestrator::test_support::{
@@ -1141,6 +1215,25 @@ mod tests {
 
     use super::OrchestratorTurnDriver;
     use crate::server::TurnDriver;
+
+    #[test]
+    fn settings_turn_error_keeps_exact_source_utf16_message() {
+        let source_message = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let diagnostics = Utf16JsonProjection::object(Vec::new()).unwrap();
+        let error = orchestrator::OrchestratorError::Settings(
+            lingxi_core::settings::SettingsError::source_failure(
+                "managed",
+                source_message,
+                diagnostics,
+                None,
+            ),
+        );
+
+        let ClientEvent::Error { message, .. } = OrchestratorTurnDriver::error_event(&error) else {
+            panic!("settings failure must map to an error event");
+        };
+        assert_eq!(message.code_units, vec![0xd800]);
+    }
 
     /// A mock streaming client scripting ONE minimal turn (assistant text, then
     /// `end_turn`) so a `run_turn*` call drives to completion and captures the
@@ -1159,13 +1252,13 @@ mod tests {
     /// Build a production driver over an orchestrator wired to `streaming` (whose
     /// `captured_calls()` records the outgoing request messages). No network, no
     /// API key — the mock streaming client scripts the whole turn.
-    fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
+    fn build_orchestrator(streaming: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
         let batched = Arc::new(MockApiClient::new(Vec::new()));
         let sink = MockSink::arc();
         let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(AdapterOutputStream::new(sink as Arc<dyn ClientEventSink>));
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
-        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
+        ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig::default(),
             batched,
             streaming,
@@ -1175,8 +1268,13 @@ mod tests {
             output,
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
-        ));
-        OrchestratorTurnDriver::new(orchestrator)
+        )
+    }
+
+    fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
+        OrchestratorTurnDriver::new(ConversationOrchestrator::into_shared(build_orchestrator(
+            streaming,
+        )))
     }
 
     struct RejectingOutputScopes;
@@ -1205,12 +1303,9 @@ mod tests {
     }
 
     fn build_driver_with_rejected_output_scope() -> OrchestratorTurnDriver {
-        let driver = build_driver(streaming_one_turn());
-        let orchestrator = Arc::try_unwrap(driver.orchestrator)
-            .ok()
-            .expect("test driver is the sole orchestrator owner")
+        let orchestrator = build_orchestrator(streaming_one_turn())
             .with_workflow_output_scopes(Arc::new(RejectingOutputScopes));
-        OrchestratorTurnDriver::new(Arc::new(orchestrator))
+        OrchestratorTurnDriver::new(ConversationOrchestrator::into_shared(orchestrator))
     }
 
     #[test]
@@ -1221,23 +1316,23 @@ mod tests {
         tool_cron::reset_autonomous_loop_delivered();
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("loop.md"), "First session task").unwrap();
-        let driver = build_driver(streaming_one_turn());
-        let orchestrator = Arc::try_unwrap(driver.orchestrator)
-            .ok()
-            .unwrap()
-            .with_current_cwd(Arc::new(std::sync::Mutex::new(
-                directory.path().to_path_buf(),
-            )));
-        let driver = OrchestratorTurnDriver::new(Arc::new(orchestrator));
+        let orchestrator = build_orchestrator(streaming_one_turn()).with_current_cwd(Arc::new(
+            std::sync::Mutex::new(directory.path().to_path_buf()),
+        ));
+        let driver =
+            OrchestratorTurnDriver::new(ConversationOrchestrator::into_shared(orchestrator));
+        let prompt = Utf16JsonProjection::from("<<loop.md-dynamic>>");
         assert!(driver
-            .resolve_loop_prompt("<<loop.md-dynamic>>")
+            .resolve_loop_prompt(&prompt)
             .unwrap()
-            .contains("First session task"));
+            .string_at("")
+            .is_some_and(|text| text.contains("First session task")));
         std::fs::write(directory.path().join("loop.md"), "Updated session task").unwrap();
         assert!(driver
-            .resolve_loop_prompt("<<loop.md-dynamic>>")
+            .resolve_loop_prompt(&prompt)
             .unwrap()
-            .contains("Updated session task"));
+            .string_at("")
+            .is_some_and(|text| text.contains("Updated session task")));
         tool_cron::reset_autonomous_loop_delivered();
     }
 
@@ -1315,7 +1410,7 @@ mod tests {
             base64: "iVBORw0KGgoAAAA".to_string(),
         };
         driver
-            .run_turn_with_images("describe this".to_string(), vec![dto])
+            .run_turn_with_images("describe this".into(), vec![dto])
             .await;
 
         let calls = streaming.captured_calls().await;
@@ -1323,9 +1418,10 @@ mod tests {
         let content = first_user_content(&calls[0].messages);
 
         assert!(
-            content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "describe this")),
+            content.iter().any(
+                |b| matches!(b, ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                    if utf16_code_units == &"describe this".encode_utf16().collect::<Vec<_>>())
+            ),
             "the prompt text must precede the image: {content:?}"
         );
         let source = content
@@ -1352,12 +1448,12 @@ mod tests {
     async fn empty_images_matches_text_only_run_turn() {
         let streaming_plain = streaming_one_turn();
         build_driver(streaming_plain.clone())
-            .run_turn("hello".to_string())
+            .run_turn("hello".into())
             .await;
 
         let streaming_empty = streaming_one_turn();
         build_driver(streaming_empty.clone())
-            .run_turn_with_images("hello".to_string(), Vec::new())
+            .run_turn_with_images("hello".into(), Vec::new())
             .await;
 
         let plain = first_user_content(&streaming_plain.captured_calls().await[0].messages);
@@ -1386,17 +1482,18 @@ mod tests {
         let message_output = AdapterOutputStream::new(sink.clone() as Arc<dyn ClientEventSink>);
         let output: Arc<dyn lingxi_core::host::OutputStream> = Arc::new(message_output.clone());
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
-        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched,
-            streaming,
-            tools,
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate) as Arc<dyn PermissionGate>,
-            output,
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        ));
+        let orchestrator =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched,
+                streaming,
+                tools,
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate) as Arc<dyn PermissionGate>,
+                output,
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
         (
             OrchestratorTurnDriver::new(orchestrator).with_message_output(message_output),
             sink,
@@ -1424,7 +1521,7 @@ mod tests {
 
         driver
             .run_queued_turn(
-                "drained from the queue".to_string(),
+                "drained from the queue".into(),
                 false,
                 CancellationToken::new(),
             )
@@ -1468,7 +1565,8 @@ mod tests {
         let calls = streaming.captured_calls().await;
         let content = first_user_content(&calls[0].messages);
         assert!(content.iter().any(
-            |block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")
+            |block| matches!(block, ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units == &"queued image".encode_utf16().collect::<Vec<_>>())
         ));
         assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
@@ -1484,10 +1582,18 @@ mod tests {
                 vec![
                     orchestrator::QueuedPromptInput {
                         goal_retry_id: None,
-                        text: "first".to_string(),
+                        text: "first".into(),
+                        prompt_ingress_kind: Some(orchestrator::PromptIngressKind::RegularUser),
+                        skip_model_query: false,
                         is_meta: false,
+                        turn_companion: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
+                        message_origin: None,
+                        prompt_source: None,
                         message_id: None,
+                        pending_prompt_identity: None,
+                        images: Vec::new(),
+                        trailing_history_rows: Vec::new(),
                         transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
@@ -1495,10 +1601,18 @@ mod tests {
                     },
                     orchestrator::QueuedPromptInput {
                         goal_retry_id: None,
-                        text: "second".to_string(),
+                        text: "second".into(),
+                        prompt_ingress_kind: Some(orchestrator::PromptIngressKind::RegularUser),
+                        skip_model_query: false,
                         is_meta: false,
+                        turn_companion: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
+                        message_origin: None,
+                        prompt_source: None,
                         message_id: None,
+                        pending_prompt_identity: None,
+                        images: Vec::new(),
+                        trailing_history_rows: Vec::new(),
                         transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
@@ -1545,7 +1659,7 @@ mod tests {
             scheduled_fire_id: None,
             uuid: uuid.to_string(),
             content: QueuedCommandContent::UserInput {
-                text: text.to_string(),
+                text: Utf16JsonProjection::from(text),
             },
             priority: prio,
             queued_at: SystemTime::now(),
@@ -1571,10 +1685,42 @@ mod tests {
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
 
         let joined = adapter.take_mid_turn_input().await;
-        assert_eq!(joined.as_deref(), Some("first\nsecond"));
+        assert_eq!(
+            joined.as_ref().and_then(|text| text.string_at("")),
+            Some("first\nsecond")
+        );
         // Consumed — the queue is now empty, so a second drain yields None.
         assert!(queue.is_empty().await);
         assert_eq!(adapter.take_mid_turn_input().await, None);
+    }
+
+    #[tokio::test]
+    async fn mid_turn_batch_preserves_source_units_and_origin_without_fabricated_delivery_ids() {
+        let queue = Arc::new(MessageQueueManager::new());
+        let units = vec![b'x' as u16, 0xd800, b'!' as u16];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let mut command = user_cmd("peer-command", QueuePriority::Next, "placeholder");
+        command.content = QueuedCommandContent::UserInput { text };
+        command.source = QueueSource::AgentSendMessage;
+        queue.enqueue(command).await;
+        let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
+
+        let batch = adapter.take_mid_turn_batch().await.unwrap().unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].text.string_units(""), Some(units.clone()));
+        assert_eq!(
+            batch[0]
+                .projected_content
+                .as_ref()
+                .and_then(|content| content.string_units("")),
+            Some(units)
+        );
+        assert_eq!(batch[0].origin_kind, Some("peer"));
+        assert!(batch[0].source_message_uuid.is_none());
+        assert!(batch[0].queue_delivery.is_none());
+        assert!(queue.is_empty().await);
     }
 
     /// A `Now`-priority command is EXCLUDED from the mid-turn drain: it has
@@ -1595,7 +1741,13 @@ mod tests {
 
         // Only the `Next` prompt is drained mid-turn; the `Now` command is left.
         let joined = adapter.take_mid_turn_input().await;
-        assert_eq!(joined.as_deref(), Some("first"));
+        assert_eq!(
+            joined
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
+            Some("first")
+        );
 
         // The `Now` command survives for the between-turn drain.
         assert_eq!(queue.len().await, 1);
@@ -1729,7 +1881,7 @@ mod tests {
         sched
             .schedule(
                 std::time::Duration::from_millis(0),
-                "<<autonomous-loop-dynamic>>".to_string(),
+                "<<autonomous-loop-dynamic>>".into(),
                 "idle tick".to_string(),
             )
             .await;
@@ -1835,7 +1987,10 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), sink.entered.notified())
             .await
             .unwrap();
-        assert_eq!(scheduler.cancel_pending().await, vec!["stopped prompt"]);
+        assert_eq!(
+            scheduler.cancel_pending().await,
+            vec![Utf16JsonProjection::from("stopped prompt")]
+        );
         sink.release.notify_one();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(
@@ -1856,7 +2011,7 @@ mod tests {
         sched
             .schedule(
                 std::time::Duration::from_millis(0),
-                "5m /babysit-prs".to_string(),
+                "5m /babysit-prs".into(),
                 "repeat loop".to_string(),
             )
             .await;
@@ -1879,7 +2034,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl tool_cron::WakeupScheduler for KaRec {
-        async fn schedule(&self, delay: std::time::Duration, _p: String, _r: String) {
+        async fn schedule(&self, delay: std::time::Duration, _p: Utf16JsonProjection, _r: String) {
             self.calls.lock().unwrap().push(delay);
         }
 
@@ -1900,7 +2055,7 @@ mod tests {
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
         // The drain tags a Cron-sourced command as the in-flight loop tick.
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
 
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
@@ -1909,7 +2064,7 @@ mod tests {
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
         // The scripted turn emits text + end_turn — NO ScheduleWakeup call.
-        driver.run_turn("loop tick".to_string()).await;
+        driver.run_turn("loop tick".into()).await;
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(
@@ -1943,7 +2098,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
 
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
@@ -1957,7 +2112,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         driver
-            .run_turn_with_cancel("loop tick".to_string(), cancel)
+            .run_turn_with_cancel("loop tick".into(), cancel)
             .await;
 
         assert!(
@@ -1981,7 +2136,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
             runtime: loop_runtime.clone(),
@@ -1989,7 +2144,7 @@ mod tests {
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver_with_rejected_output_scope().with_wakeup_scheduler(sched);
 
-        driver.run_turn("loop tick".to_string()).await;
+        driver.run_turn("loop tick".into()).await;
 
         assert!(
             rec.calls.lock().unwrap().is_empty(),
@@ -2020,7 +2175,7 @@ mod tests {
             orchestrator::turn_span::TurnSpanCounts::default(),
             "a fresh orchestrator starts at zero",
         );
-        driver.run_turn("hello".to_string()).await;
+        driver.run_turn("hello".into()).await;
         let span = orchestrator.turn_span().snapshot();
         assert_eq!(
             span.messages, 1,
@@ -2050,7 +2205,7 @@ mod tests {
             "the leftovers are really there"
         );
 
-        driver.run_turn("hello".to_string()).await;
+        driver.run_turn("hello".into()).await;
 
         let span = orchestrator.turn_span().snapshot();
         assert_eq!(
@@ -2072,7 +2227,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
         // What `ScheduleWakeup({noop:true})` records during the tick.
         loop_runtime.mark_noop_reported(true);
 
@@ -2082,7 +2237,7 @@ mod tests {
         });
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
-        driver.run_turn("loop tick".to_string()).await;
+        driver.run_turn("loop tick".into()).await;
 
         let (streak, _) = loop_runtime
             .noop_streak()
@@ -2102,7 +2257,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
         loop_runtime.mark_noop_reported(true);
 
         let rec = Arc::new(KaRec {
@@ -2114,7 +2269,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         driver
-            .run_turn_with_cancel("loop tick".to_string(), cancel)
+            .run_turn_with_cancel("loop tick".into(), cancel)
             .await;
 
         assert_eq!(
@@ -2133,7 +2288,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(tool_cron::LoopRuntime::default());
-        runtime.begin_tick("quiet tick".into());
+        runtime.begin_tick(Utf16JsonProjection::from("quiet tick"));
         runtime.mark_noop_reported(true);
         runtime.settle_tick(
             std::time::SystemTime::now(),
@@ -2174,7 +2329,7 @@ mod tests {
         });
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
-        driver.run_turn("just a normal user turn".to_string()).await;
+        driver.run_turn("just a normal user turn".into()).await;
 
         assert!(
             rec.calls.lock().unwrap().is_empty(),

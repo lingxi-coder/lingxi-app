@@ -45,6 +45,15 @@ async function main() {
     await expectOpen(false, 'initially closed');
     await focus();
     await expectOpen(true, 'keyboard focus opens');
+    const details = await evaluate(`(() => {
+      const tooltip = document.querySelector('[role="tooltip"]');
+      const rect = tooltip.getBoundingClientRect();
+      return { text: tooltip.textContent, top: rect.top, bottom: rect.bottom, height: window.innerHeight };
+    })()`);
+    assert.match(details.text, /79k \/ 475k tokens used/, 'usage uses application input budget');
+    assert.match(details.text, /模型最大上下文：1M/, 'model maximum remains a separate fact');
+    assert.match(details.text, /475,000 tokens/, 'price boundary retains its exact value');
+    assert.ok(details.top >= 0 && details.bottom <= details.height, 'expanded context details fit within the viewport');
     await hover(true);
     await hover(false);
     await expectOpen(true, 'mouse leave preserves keyboard focus');

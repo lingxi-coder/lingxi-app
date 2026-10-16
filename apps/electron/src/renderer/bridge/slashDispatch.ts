@@ -29,6 +29,7 @@ export interface DesktopCommandContext {
   knownModel(model: string): boolean;
   setPermissionMode(mode: PermissionModeId): Promise<void>;
   setReasoningLevel(level: string): Promise<void>;
+  setReasoningAutomatic(): Promise<void>;
   setFastMode(enabled: boolean): Promise<void>;
   fastMode(): boolean;
   setTheme(theme: 'dark' | 'light'): void;

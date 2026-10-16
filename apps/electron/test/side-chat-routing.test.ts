@@ -25,5 +25,5 @@ test('child event envelope keeps side identity without entering parent event typ
   const event = { type: 'side_chat_event', side_id: 'side-1', event_json: JSON.stringify({ type: 'error', message: 'side failure' }) };
   assert.deepEqual(validateClientEvent(event), event);
   assert.deepEqual(validateClientEvent({ type: 'side_chat_submitted', side_id: 'side-1', request_id: 'send-1' }), { type: 'side_chat_submitted', side_id: 'side-1', request_id: 'send-1' });
-  assert.throws(() => validateClientEvent({ ...event, side_id: '' }), /side id/);
+  assert.throws(() => validateClientEvent({ ...event, side_id: '' }), /side chat id/);
 });

@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
+use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -130,16 +131,17 @@ async fn main() -> anyhow::Result<()> {
     // Capture the ordered runtime lifecycle before moving the connection into
     // the endpoint. It outlives the pump and drains all accepted work before
     // the session claim and discovery record are released.
-    let side_chats = bound.side_chats();
     let session_lifecycle = bound.session_lifecycle();
     let requested_exit = bound.wait_for_exit_requested();
+    let semantic_worker_failure = bound.wait_for_policy_semantic_worker_failure();
+    let semantic_failure_sink = bound.connection.policy_semantic_worker_failure_sink();
 
     // (3) Start the loopback WebSocket endpoint on an ephemeral port.
     let endpoint =
         match McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection)).await {
             Ok(endpoint) => endpoint,
             Err(error) => {
-                drain_session_lifecycle(&session_lifecycle, &side_chats).await;
+                drain_session_lifecycle(&session_lifecycle).await;
                 return Err(anyhow::anyhow!("failed to bind loopback endpoint: {error}"));
             }
         };
@@ -157,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
             Some(home) => home.join("bridge"),
             None => {
                 endpoint.shutdown().await;
-                drain_session_lifecycle(&session_lifecycle, &side_chats).await;
+                drain_session_lifecycle(&session_lifecycle).await;
                 return Err(anyhow::anyhow!(
                     "no home directory to root the bridge lockfile"
                 ));
@@ -166,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
     };
     if !bridge_dir.is_absolute() {
         endpoint.shutdown().await;
-        drain_session_lifecycle(&session_lifecycle, &side_chats).await;
+        drain_session_lifecycle(&session_lifecycle).await;
         return Err(anyhow::anyhow!(
             "bridge lockfile directory must be absolute"
         ));
@@ -182,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
         Err(error) => {
             let (error, endpoint) = error.into_parts();
             endpoint.shutdown().await;
-            drain_session_lifecycle(&session_lifecycle, &side_chats).await;
+            drain_session_lifecycle(&session_lifecycle).await;
             return Err(anyhow::anyhow!(
                 "failed to publish bridge lockfile: {error}"
             ));
@@ -200,14 +202,28 @@ async fn main() -> anyhow::Result<()> {
     // Desktop hosts terminate sidecars with SIGTERM on Unix. Listen for both
     // interactive Ctrl-C and host termination so the lockfile guard and socket
     // endpoint always receive a graceful teardown opportunity.
+    let mut policy_refusal = None;
+    let mut semantic_worker_error = None;
     let shutdown_signal = match tokio::select! {
+        biased;
+        failure = semantic_worker_failure => {
+            semantic_failure_sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: failure.to_string().into(),
+            }).await;
+            semantic_worker_error = Some(failure);
+            Ok("policy-semantic-worker-failure")
+        },
         signal = wait_for_shutdown_signal() => signal,
-        () = requested_exit => Ok("request-exit"),
+        refusal = requested_exit => {
+            policy_refusal = refusal;
+            Ok("request-exit")
+        },
     } {
         Ok(signal) => signal,
         Err(error) => {
             endpoint.shutdown().await;
-            drain_session_lifecycle(&session_lifecycle, &side_chats).await;
+            drain_session_lifecycle(&session_lifecycle).await;
             drop(lock_guard);
             return Err(error);
         }
@@ -217,18 +233,18 @@ async fn main() -> anyhow::Result<()> {
     // Explicit teardown: stop accepting, then `lock_guard` drops at end of scope
     // (removing the discovery file).
     endpoint.shutdown().await;
-    drain_session_lifecycle(&session_lifecycle, &side_chats).await;
+    drain_session_lifecycle(&session_lifecycle).await;
     drop(lock_guard);
+    if let Some(refusal) = policy_refusal {
+        return Err(anyhow::Error::new(refusal));
+    }
+    if let Some(failure) = semantic_worker_error {
+        return Err(anyhow::Error::new((*failure).clone()));
+    }
     Ok(())
 }
 
-async fn drain_session_lifecycle(
-    lifecycle: &harness_runtime::desktop::DesktopSessionLifecycle,
-    side_chats: &Arc<harness_runtime::side_chat::SideChatManager>,
-) {
-    if let Err(error) = side_chats.shutdown().await {
-        tracing::error!(%error, "Side Chat cleanup failed");
-    }
+async fn drain_session_lifecycle(lifecycle: &harness_runtime::desktop::DesktopSessionLifecycle) {
     let report = lifecycle.shutdown_and_drain().await;
     for error in report.errors {
         tracing::warn!(%error, "bridge-server session shutdown was not fully durable");

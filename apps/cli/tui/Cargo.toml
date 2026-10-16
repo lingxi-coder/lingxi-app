@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 core = { workspace = true }
+client = { workspace = true }
 tool-api = { workspace = true }
 # The backend-neutral core extracted from `tui` during the iocraft → ratatui
 # migration. `tui` renders it with ratatui; it must never depend on iocraft.

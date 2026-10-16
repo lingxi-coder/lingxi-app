@@ -5,9 +5,8 @@
 //! Its row budget is measured from the live bottom-pane layout, and a session
 //! generation carries `$.ui.invalidate('ui.render')` through the draw loop.
 
-#[cfg(test)]
-use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde_json::{json, Value};
 
 pub(crate) const ABOVE_PROMPT_REQUEST_ID: &str = "above-prompt";
@@ -27,10 +26,11 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AbovePromptButtonAction {
-    pub(crate) plugin: String,
-    pub(crate) key: String,
+    pub(crate) plugin: Utf16JsonProjection,
+    pub(crate) key: Utf16JsonProjection,
+    pub(crate) key_display: String,
     pub(crate) handle: u64,
-    pub(crate) worker_epoch: String,
+    pub(crate) worker_epoch: Utf16JsonProjection,
     pub(crate) render_revision: u64,
     pub(crate) site_revision: u64,
     pub(crate) label: String,
@@ -39,19 +39,22 @@ pub(crate) struct AbovePromptButtonAction {
 }
 
 impl AbovePromptButtonAction {
-    pub(crate) fn press_event(&self) -> Value {
-        json!({
-            "surface":"terminal",
-            "component":"AbovePrompt",
-            "requestId":ABOVE_PROMPT_REQUEST_ID,
-            "plugin":self.plugin,
-            "element":self.key,
-            "press":{
-                "handle":self.handle,
-                "workerEpoch":self.worker_epoch,
-                "renderRevision":self.render_revision,
-            }
-        })
+    pub(crate) fn press_event(&self) -> Utf16JsonProjection {
+        let press = Utf16JsonProjection::object(vec![
+            ("handle".to_string(), json_u64(self.handle)),
+            ("workerEpoch".to_string(), self.worker_epoch.clone()),
+            ("renderRevision".to_string(), json_u64(self.render_revision)),
+        ])
+        .expect("press fields form an object");
+        Utf16JsonProjection::object(vec![
+            ("surface".to_string(), "terminal".into()),
+            ("component".to_string(), "AbovePrompt".into()),
+            ("requestId".to_string(), ABOVE_PROMPT_REQUEST_ID.into()),
+            ("plugin".to_string(), self.plugin.clone()),
+            ("element".to_string(), self.key.clone()),
+            ("press".to_string(), press),
+        ])
+        .expect("press event fields form an object")
     }
 }
 
@@ -61,8 +64,8 @@ pub(crate) fn above_prompt_event(
     is_fullscreen: bool,
     is_working: bool,
     max_rows: u16,
-) -> Value {
-    json!({
+) -> Utf16JsonProjection {
+    let event = json!({
         "surface":"terminal",
         "component":"AbovePrompt",
         "requestId":ABOVE_PROMPT_REQUEST_ID,
@@ -79,107 +82,233 @@ pub(crate) fn above_prompt_event(
             "rows":rows.max(1),
             "isFullscreen":is_fullscreen,
         }
-    })
+    });
+    Utf16JsonProjection::from_serde_value(&event)
+        .expect("generated AbovePrompt render request is valid JSON")
 }
 
 /// Turn the supported JSON tree into a small number of terminal rows.
-pub(crate) fn tree_lines(tree: &Value, max_rows: u16) -> Option<Vec<String>> {
-    let lines = lines_for(tree, 0)?;
+pub(crate) fn tree_lines(tree: &Utf16JsonProjection, max_rows: u16) -> Option<Vec<String>> {
+    tree_buttons(tree, 1)?;
+    let display_tree = display_value(tree.at_pointer("")?, 0)?;
+    let lines = lines_for(&display_tree, 0)?;
     Some(lines.into_iter().take(usize::from(max_rows)).collect())
 }
 
 pub(crate) fn tree_buttons(
-    tree: &Value,
+    tree: &Utf16JsonProjection,
     site_revision: u64,
 ) -> Option<Vec<AbovePromptButtonAction>> {
     if site_revision == 0 {
         return None;
     }
     let mut buttons = Vec::new();
-    collect_buttons(tree, site_revision, &mut buttons)?;
+    collect_buttons(tree, "", site_revision, &mut buttons, 0)?;
     Some(buttons)
 }
 
 fn collect_buttons(
-    tree: &Value,
+    tree: &Utf16JsonProjection,
+    pointer: &str,
     site_revision: u64,
     buttons: &mut Vec<AbovePromptButtonAction>,
+    depth: usize,
 ) -> Option<()> {
-    match tree.get("type")?.as_str()? {
+    if depth > 32 {
+        return None;
+    }
+    let field = |name: &str| format!("{pointer}/{name}");
+    let kind = tree.string_at(&field("type"))?;
+    match kind {
         "Button" => {
-            let props = tree.get("props")?.as_object()?;
-            let press = tree.get("press")?.as_object()?;
-            if props.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "key"
-                        | "label"
-                        | "hotkey"
-                        | "action"
-                        | "plain"
-                        | "dimColor"
-                        | "variant"
-                        | "role"
-                        | "autoFocus"
-                )
-            }) || press.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "plugin" | "handle" | "workerEpoch" | "renderRevision"
-                )
-            }) || !tree.get("children")?.as_array()?.is_empty()
+            let props = field("props");
+            let press = field("press");
+            if !object_has_only_fields(
+                tree,
+                &props,
+                &[
+                    "key",
+                    "label",
+                    "hotkey",
+                    "action",
+                    "plain",
+                    "dimColor",
+                    "variant",
+                    "role",
+                    "autoFocus",
+                ],
+            ) || !object_has_only_fields(
+                tree,
+                &press,
+                &["plugin", "handle", "workerEpoch", "renderRevision"],
+            ) || valid_terminal_button_children(tree, &field("children")).is_none()
             {
                 return None;
             }
-            let key = props.get("key")?.as_str()?.to_owned();
-            let label = props.get("label")?.as_str()?.to_owned();
-            let hotkey = props
-                .get("hotkey")
-                .and_then(Value::as_str)
-                .and_then(|value| value.chars().next());
-            if props.get("hotkey").is_some_and(|value| {
-                value.as_str().is_none_or(|value| {
-                    value.len() != 1
-                        || !value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-                })
-            }) {
-                return None;
-            }
-            let plugin = press.get("plugin")?.as_str()?.to_owned();
-            let worker_epoch = press.get("workerEpoch")?.as_str()?.to_owned();
-            let handle = press.get("handle")?.as_u64().filter(|value| *value > 0)?;
-            let render_revision = press
-                .get("renderRevision")?
-                .as_u64()
+            let key_path = format!("{props}/key");
+            let label = tree.string_at(&format!("{props}/label"))?.to_owned();
+            let key = tree.subprojection(&key_path).ok()?;
+            let key_display = key.string_at("")?.to_owned();
+            let hotkey_path = format!("{props}/hotkey");
+            let hotkey_source = tree.subprojection(&hotkey_path).ok();
+            let hotkey = match hotkey_source {
+                Some(value) => {
+                    let units = value.string_units("")?;
+                    let [unit] = units.as_slice() else {
+                        return None;
+                    };
+                    let byte = u8::try_from(*unit).ok()?;
+                    if !byte.is_ascii_lowercase() && !byte.is_ascii_digit() {
+                        return None;
+                    }
+                    Some(char::from(byte))
+                }
+                None => None,
+            };
+            let plugin_path = format!("{press}/plugin");
+            let worker_epoch_path = format!("{press}/workerEpoch");
+            let plugin = tree.subprojection(&plugin_path).ok()?;
+            let worker_epoch = tree.subprojection(&worker_epoch_path).ok()?;
+            let handle = number_as_u64(tree.number_at(&format!("{press}/handle"))?)
                 .filter(|value| *value > 0)?;
-            if plugin.is_empty() || worker_epoch.is_empty() || key.is_empty() || label.is_empty() {
+            let render_revision =
+                number_as_u64(tree.number_at(&format!("{press}/renderRevision"))?)
+                    .filter(|value| *value > 0)?;
+            if plugin.string_units("")?.is_empty()
+                || worker_epoch.string_units("")?.is_empty()
+                || key.string_units("")?.is_empty()
+                || label.is_empty()
+            {
                 return None;
             }
             buttons.push(AbovePromptButtonAction {
                 plugin,
                 key,
+                key_display,
                 handle,
                 worker_epoch,
                 render_revision,
                 site_revision,
                 label,
                 hotkey,
-                auto_focus: props.get("autoFocus").and_then(Value::as_bool) == Some(true),
+                auto_focus: tree
+                    .at_pointer(&format!("{props}/autoFocus"))
+                    .and_then(JsonValueView::as_bool)
+                    == Some(true),
             });
         }
         "Box" => {
-            for child in tree.get("children")?.as_array()? {
-                if !child.is_string() {
-                    collect_buttons(child, site_revision, buttons)?;
+            let children = field("children");
+            for index in 0..tree.array_len(&children)? {
+                let child = format!("{children}/{index}");
+                if tree.string_at(&child).is_none() {
+                    collect_buttons(tree, &child, site_revision, buttons, depth + 1)?;
                 }
             }
         }
-        "Text" => {}
+        "Text" => validate_terminal_text(tree, pointer)?,
         _ => return None,
     }
     Some(())
+}
+
+fn valid_terminal_button_children(tree: &Utf16JsonProjection, pointer: &str) -> Option<()> {
+    let Some(_) = tree.at_pointer(pointer) else {
+        return Some(());
+    };
+    for index in 0..tree.array_len(pointer)? {
+        let child = format!("{pointer}/{index}");
+        if let Some(units) = tree.string_units(&child) {
+            if units.len() > 10_000 {
+                return None;
+            }
+            continue;
+        }
+        validate_terminal_text(tree, &child)?;
+    }
+    Some(())
+}
+
+fn validate_terminal_text(tree: &Utf16JsonProjection, pointer: &str) -> Option<()> {
+    if tree.string_at(&format!("{pointer}/type"))? != "Text"
+        || !object_has_only_fields(tree, pointer, &["type", "props", "children"])
+    {
+        return None;
+    }
+    let props = format!("{pointer}/props");
+    if tree.at_pointer(&props).is_some() {
+        if !object_has_only_fields(tree, &props, &["bold"])
+            || tree
+                .at_pointer(&format!("{props}/bold"))
+                .is_some_and(|value| value.as_bool().is_none())
+        {
+            return None;
+        }
+    }
+    let children = format!("{pointer}/children");
+    for index in 0..tree.array_len(&children)? {
+        if tree.string_units(&format!("{children}/{index}"))?.len() > 10_000 {
+            return None;
+        }
+    }
+    Some(())
+}
+
+fn object_has_only_fields(tree: &Utf16JsonProjection, pointer: &str, allowed: &[&str]) -> bool {
+    tree.at_pointer(pointer)
+        .and_then(JsonValueView::object_entries)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .all(|entry| allowed.contains(&entry.display_key))
+        })
+}
+
+fn json_u64(value: u64) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(&value.to_string()).expect("u64 is valid JSON number")
+}
+
+fn number_as_u64(value: f64) -> Option<u64> {
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= u64::MAX as f64)
+        .then_some(value as u64)
+}
+
+/// Convert only at the terminal rendering boundary. Exact source stays in the
+/// event and button-action path; this display projection may replace lone
+/// UTF-16 units because Ratatui renders Unicode scalar text.
+fn display_value(view: JsonValueView<'_>, depth: usize) -> Option<Value> {
+    if depth > 128 {
+        return None;
+    }
+    if let Some(text) = view.as_str() {
+        return Some(Value::String(text.to_owned()));
+    }
+    if let Some(value) = view.as_bool() {
+        return Some(Value::Bool(value));
+    }
+    if view.is_null() {
+        return Some(Value::Null);
+    }
+    if let Some(value) = view.as_number() {
+        return Some(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number));
+    }
+    if let Some(length) = view.array_len() {
+        return (0..length)
+            .map(|index| display_value(view.get_index(index)?, depth + 1))
+            .collect::<Option<Vec<_>>>()
+            .map(Value::Array);
+    }
+    if let Some(entries) = view.object_entries() {
+        let mut object = serde_json::Map::with_capacity(entries.len());
+        for entry in entries {
+            object.insert(
+                entry.display_key.to_owned(),
+                display_value(entry.value, depth + 1)?,
+            );
+        }
+        return Some(Value::Object(object));
+    }
+    None
 }
 
 pub(crate) fn button_for_key(
@@ -234,8 +363,16 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
         return None;
     }
     let kind = tree.get("type")?.as_str()?;
-    let children = tree.get("children")?.as_array()?;
-    let props = tree.get("props")?.as_object()?;
+    let children = tree
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let empty_props = serde_json::Map::new();
+    let props = tree
+        .get("props")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_props);
     match kind {
         "Text" => {
             if !props.is_empty() {
@@ -251,8 +388,6 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
         "Button" => {
             let props = tree.get("props")?.as_object()?;
             let label = props.get("label")?.as_str()?;
-            let mut parsed = Vec::new();
-            collect_buttons(tree, 1, &mut parsed)?;
             let hotkey = props.get("hotkey").and_then(Value::as_str);
             Some(vec![match hotkey {
                 Some(hotkey) => format!("[{hotkey}] {label}"),
@@ -266,16 +401,20 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
                 || props
                     .get("flexDirection")
                     .is_some_and(|value| !matches!(value.as_str(), Some("row" | "column")))
-                || props
-                    .get("columnGap")
-                    .is_some_and(|value| value.as_u64().is_none_or(|gap| gap > 16))
+                || props.get("columnGap").is_some_and(|value| {
+                    value
+                        .as_f64()
+                        .and_then(number_as_u64)
+                        .is_none_or(|gap| gap > 16)
+                })
             {
                 return None;
             }
             let row = props.get("flexDirection").and_then(Value::as_str) == Some("row");
             let gap = props
                 .get("columnGap")
-                .and_then(Value::as_u64)
+                .and_then(Value::as_f64)
+                .and_then(number_as_u64)
                 .unwrap_or(1)
                 .min(16) as usize;
             let mut child_lines = Vec::with_capacity(children.len());
@@ -311,6 +450,11 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn source(value: &Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
+    }
 
     #[tokio::test]
     async fn clear_then_render_awaits_same_revision_operations_in_order() {
@@ -336,24 +480,24 @@ mod tests {
     #[test]
     fn creates_viewport_props_and_draws_text_inside_boxes() {
         let event = above_prompt_event(88, 26, true, false, 7);
-        assert_eq!(event["component"], "AbovePrompt");
-        assert_eq!(event["requestId"], ABOVE_PROMPT_REQUEST_ID);
-        assert_eq!(event["props"]["bodyColumns"], 88);
-        assert_eq!(event["props"]["maxRows"], 7);
-        assert_eq!(event["props"]["scroll"]["offset"], 0);
-        assert_eq!(event["props"]["scroll"]["bodyRows"], 6);
-        assert_eq!(event["props"]["view"], json!({}));
-        assert_eq!(event["viewport"]["rows"], 26);
+        assert_eq!(event.string_at("/component"), Some("AbovePrompt"));
+        assert_eq!(event.string_at("/requestId"), Some(ABOVE_PROMPT_REQUEST_ID));
+        assert_eq!(event.number_at("/props/bodyColumns"), Some(88.0));
+        assert_eq!(event.number_at("/props/maxRows"), Some(7.0));
+        assert_eq!(event.number_at("/props/scroll/offset"), Some(0.0));
+        assert_eq!(event.number_at("/props/scroll/bodyRows"), Some(6.0));
+        assert_eq!(event.object_entries().unwrap().len(), 5);
+        assert_eq!(event.number_at("/viewport/rows"), Some(26.0));
 
         let lines = tree_lines(
-            &json!({
+            &source(&json!({
                 "type":"Box",
                 "props":{"flexDirection":"row","columnGap":2},
                 "children":[
                     {"type":"Text","props":{},"children":["Ready"]},
                     {"type":"Text","props":{},"children":["2 items"]}
                 ]
-            }),
+            })),
             2,
         )
         .unwrap();
@@ -371,6 +515,7 @@ mod tests {
                 {"type":"Text","props":{},"children":["three"]}
             ]
         });
+        let tree = source(&tree);
         assert_eq!(tree_lines(&tree, 2), Some(vec!["one".into(), "two".into()]));
         assert_eq!(tree_lines(&tree, 0), Some(Vec::new()));
     }
@@ -386,11 +531,11 @@ mod tests {
                     "workerEpoch":"worker-epoch","renderRevision":7}
             })
         };
-        let tree = json!({
+        let tree = source(&json!({
             "type":"Box",
             "props":{"flexDirection":"column"},
             "children":[button("first","First",1,false), button("second","Second",2,true)]
-        });
+        }));
         assert_eq!(
             tree_lines(&tree, 3),
             Some(vec!["[1] First".into(), "[1] Second".into()])
@@ -401,29 +546,55 @@ mod tests {
         assert_eq!(actions[1].render_revision, 7);
         assert_eq!(
             actions[1].press_event(),
-            json!({
+            source(&json!({
                 "surface":"terminal",
                 "component":"AbovePrompt",
                 "requestId":ABOVE_PROMPT_REQUEST_ID,
                 "plugin":"button-mod",
                 "element":"second",
                 "press":{"handle":2,"workerEpoch":"worker-epoch","renderRevision":7}
-            })
+            }))
         );
         let digit = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
         assert_eq!(
-            button_for_key(&actions, digit, true, false).unwrap().key,
+            button_for_key(&actions, digit, true, false)
+                .unwrap()
+                .key_display,
             "second",
             "later buttons win duplicate hotkeys"
         );
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
-            button_for_key(&actions, enter, true, false).unwrap().key,
+            button_for_key(&actions, enter, true, false)
+                .unwrap()
+                .key_display,
             "second",
             "Enter activates the auto-focused button"
         );
         assert!(button_for_key(&actions, enter, false, false).is_none());
         assert!(button_for_key(&actions, enter, true, true).is_none());
+    }
+
+    #[test]
+    fn button_children_are_validated_and_display_uses_the_native_label() {
+        let tree = source(&json!({
+            "type":"Button",
+            "props":{"key":"mixed","label":"ABC"},
+            "press":{"plugin":"button-mod","handle":4,
+                "workerEpoch":"worker-epoch","renderRevision":7},
+            "children":["A",{"type":"Text","props":{"bold":true},"children":["B","C"]}]
+        }));
+        assert_eq!(tree_lines(&tree, 1), Some(vec!["[ABC]".into()]));
+        assert_eq!(tree_buttons(&tree, 9).unwrap().len(), 1);
+
+        let folded = source(&json!({
+            "type":"Button",
+            "props":{"key":"folded","label":"Folded"},
+            "press":{"plugin":"button-mod","handle":5,
+                "workerEpoch":"worker-epoch","renderRevision":7}
+        }));
+        assert_eq!(tree_lines(&folded, 1), Some(vec!["[Folded]".into()]));
+        assert_eq!(tree_buttons(&folded, 9).unwrap().len(), 1);
     }
 
     #[test]

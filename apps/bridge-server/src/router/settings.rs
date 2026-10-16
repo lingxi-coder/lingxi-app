@@ -1,6 +1,5 @@
 use super::EngineCommandRouter;
 use crate::settings_bridge::apply_patch;
-use crate::settings_bridge::build_snapshot;
 use crate::settings_bridge::lower_snapshot;
 use crate::settings_bridge::permission_destination;
 use crate::settings_bridge::permission_paths;
@@ -11,6 +10,7 @@ use client::protocol::commands::PermissionBehaviorDto;
 use client::protocol::commands::WritableScopeDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
+use client::protocol::text::ClientTextDto;
 use std::path::PathBuf;
 
 /// Decode a `ClientCommand::UpdateSettings.patch_json` wire string into the
@@ -53,25 +53,37 @@ impl EngineCommandRouter {
         // This private action records the already failed invocation and never
         // retries resolution or execution against a potentially changed default.
         if command.action == "record_failure" {
-            let display = match command.payload_json.as_deref()
+            let display = match command
+                .payload_json
+                .as_deref()
                 .ok_or_else(|| "Fusion failure payload is required".to_string())
                 .and_then(parse_fusion_failure)
             {
                 Ok((raw, error)) => harness_runtime::desktop::record_fusion_command_failure(
-                    self.handle.as_ref(), &raw, &error,
-                ).await.unwrap_or_else(|storage| format!("{error}\nCould not save the Fusion failure: {storage}")),
+                    self.handle.as_ref(),
+                    &raw,
+                    &error,
+                )
+                .await
+                .unwrap_or_else(|storage| {
+                    format!("{error}\nCould not save the Fusion failure: {storage}")
+                }),
                 Err(error) => error,
             };
             sink.emit(ClientEvent::SlashCommandResult {
-                turn_id: None, display, is_error: true,
-            }).await;
+                turn_id: None,
+                display: display.into(),
+                is_error: true,
+            })
+            .await;
             return;
         }
         let Some(context) = self.settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
                 message: "Fusion administration unavailable: missing settings context".into(),
-            }).await;
+            })
+            .await;
             return;
         };
         configuration_admin::fusion_admin::handle_command(context, command, sink).await;
@@ -116,10 +128,10 @@ impl EngineCommandRouter {
             return;
         };
         let fast_mode = self.handle.fast_mode().await;
-        sink.emit(ClientEvent::ConversationControlsChanged {
-            controls: lower_conversation_controls(controls),
-        })
-        .await;
+        let proactivity = self.handle.native_proactivity_snapshot();
+        let controls = lower_conversation_controls(controls, proactivity);
+        sink.emit(ClientEvent::ConversationControlsChanged { controls })
+            .await;
 
         sink.emit(ClientEvent::FastModeChanged { enabled: fast_mode })
             .await;
@@ -137,18 +149,35 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "settings listing unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
         };
 
-        let snapshot = build_snapshot(
-            &context.paths,
-            context.active_snapshot(),
-            context.managed.clone(),
-        );
-        let lowered = lower_snapshot(&snapshot);
+        let snapshot = match context.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: settings_listing_error_message(&error),
+                })
+                .await;
+                return;
+            }
+        };
+        let lowered = match lower_snapshot(&snapshot) {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: settings_listing_error_message(&error),
+                })
+                .await;
+                return;
+            }
+        };
         sink.emit(ClientEvent::SettingsSnapshot {
             effective_json: lowered.effective_json,
             provenance_json: lowered.provenance_json,
@@ -180,7 +209,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "settings update unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return;
@@ -191,7 +221,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
-                    message,
+                    message: message.into(),
                 })
                 .await;
                 return;
@@ -212,7 +242,7 @@ impl EngineCommandRouter {
             Err(message) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message,
+                    message: message.into(),
                 })
                 .await;
             }
@@ -234,7 +264,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Internal,
                 message: "permission update unavailable: this connection was built without a \
                           settings context"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
             return None;
@@ -279,7 +310,7 @@ impl EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("failed to persist permission rules: {error}"),
+                        message: format!("failed to persist permission rules: {error}").into(),
                     })
                     .await;
                     // `add` and `remove` are two SEPARATE transactions. If the
@@ -309,7 +340,8 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Rejected,
                 message: "no permission rule changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
         }
@@ -339,7 +371,8 @@ impl EngineCommandRouter {
                     kind: ErrorKindDto::Rejected,
                     message: "`bypassPermissions` is session-scoped and is deliberately never \
                               persisted as the default mode"
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 })
                 .await;
             }
@@ -349,14 +382,15 @@ impl EngineCommandRouter {
                     message: format!(
                         "default permission mode was not persisted: `{mode}` is unrecognized, \
                          or already the current default"
-                    ),
+                    )
+                    .into(),
                 })
                 .await;
             }
             Err(error) => {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Internal,
-                    message: format!("failed to persist default permission mode: {error}"),
+                    message: format!("failed to persist default permission mode: {error}").into(),
                 })
                 .await;
             }
@@ -390,7 +424,7 @@ impl EngineCommandRouter {
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("failed to persist workspace directories: {error}"),
+                        message: format!("failed to persist workspace directories: {error}").into(),
                     })
                     .await;
                     // Same honesty property as `apply_permission_rule_update`:
@@ -413,17 +447,53 @@ impl EngineCommandRouter {
                 kind: ErrorKindDto::Rejected,
                 message: "no workspace directory changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             })
             .await;
         }
+    }
+}
+fn settings_listing_error_message(error: &lingxi_core::settings::SettingsError) -> ClientTextDto {
+    let mut units: Vec<u16> = "settings listing failed: ".encode_utf16().collect();
+    units.extend(
+        error
+            .message_projection()
+            .string_units("")
+            .expect("settings error message is a root string"),
+    );
+    ClientTextDto::from_code_units(units)
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::settings_listing_error_message;
+    use lingxi_core::settings::SettingsError;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn settings_listing_error_keeps_source_surrogate_after_prefix() {
+        let message = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let diagnostics = Utf16JsonProjection::object(Vec::new()).unwrap();
+        let error = SettingsError::source_failure("managed", message, diagnostics, None);
+
+        assert_eq!(
+            settings_listing_error_message(&error).code_units,
+            "settings listing failed: "
+                .encode_utf16()
+                .chain([0xd800])
+                .collect::<Vec<_>>(),
+        );
     }
 }
 
 fn parse_fusion_failure(payload: &str) -> Result<(String, String), String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Failure { raw: String, error: String }
+    struct Failure {
+        raw: String,
+        error: String,
+    }
     let failure: Failure = serde_json::from_str(payload)
         .map_err(|error| format!("Invalid Fusion failure payload: {error}"))?;
     if failure.raw.len() > 131_072 || failure.error.len() > 32_768 {
@@ -439,11 +509,21 @@ mod fusion_failure_tests {
     #[test]
     fn failure_payload_is_strict_and_bounded() {
         let payload = serde_json::json!({"raw":"/fusion --strategy user:review inspect", "error":"Unavailable"});
-        assert_eq!(parse_fusion_failure(&payload.to_string()).unwrap(), (
-            "/fusion --strategy user:review inspect".into(), "Unavailable".into(),
-        ));
+        assert_eq!(
+            parse_fusion_failure(&payload.to_string()).unwrap(),
+            (
+                "/fusion --strategy user:review inspect".into(),
+                "Unavailable".into(),
+            )
+        );
         assert!(parse_fusion_failure(r#"{"raw":"/fusion inspect"}"#).is_err());
-        assert!(parse_fusion_failure(r#"{"raw":"/fusion inspect","error":"unavailable","strategy":"user:other"}"#).is_err());
-        assert!(parse_fusion_failure(&serde_json::json!({"raw":"/fusion inspect","error":"x".repeat(32_769)}).to_string()).is_err());
+        assert!(parse_fusion_failure(
+            r#"{"raw":"/fusion inspect","error":"unavailable","strategy":"user:other"}"#
+        )
+        .is_err());
+        assert!(parse_fusion_failure(
+            &serde_json::json!({"raw":"/fusion inspect","error":"x".repeat(32_769)}).to_string()
+        )
+        .is_err());
     }
 }

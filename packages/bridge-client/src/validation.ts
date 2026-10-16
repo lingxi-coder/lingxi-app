@@ -16,6 +16,7 @@ import type {
   ClientEvent,
   FusionCatalogDto,
   MessageDto,
+  PermissionRequest,
   SessionAgentMessageRowDto,
   NativeUiClientAddressDto,
   NativeUiComponent,
@@ -39,6 +40,7 @@ import type {
   UiClientOperation,
   UiClientOperationResponseFor,
   UiClientFrameDto,
+  UiClientFrameEventSnapshotDto,
   UiClientFrameOperationResponseDto,
   UiClientHandledOperationResponseDto,
   UiClientOperationNoopResponseDto,
@@ -395,6 +397,7 @@ const NATIVE_UI_COMPONENTS = [
   'PromptHint', 'AbovePrompt', 'Pane',
 ] as const satisfies readonly NativeUiComponent[];
 
+const UI_CONTROL_STRING_LIMIT = 256;
 const UI_PARENT_DESCRIPTOR_STRING_LIMIT = 10_000;
 
 function uiString(value: unknown, name: string, max = 256): string {
@@ -946,14 +949,33 @@ function parseUiClientFramePayload(value: unknown) {
       },
     } satisfies UiClientWorkerFaultSnapshotDto;
   }
-  exactKeys(input, ['renderRevision', 'frameSequence', 'tree', 'hasPointerListener', 'hasKeyListener'], 'UI client frame');
+  exactKeys(input, [
+    'renderRevision', 'frameSequence', 'tree', 'hasPointerListener', 'hasKeyListener', 'parent', 'client',
+  ], 'UI client frame');
+  const parentInput = object(input['parent'], 'UI client parent identity');
+  exactKeys(parentInput, ['surface', 'component', 'instance_id'], 'UI client parent identity');
+  if (parentInput['surface'] !== 'desktop') throw new Error('invalid UI client parent surface');
+  const parent: UiClientFrameEventSnapshotDto['parent'] = {
+    surface: 'desktop',
+    component: uiComponent(parentInput['component'], 'UI parent component'),
+    instance_id: nativeUiString(parentInput['instance_id'], 'UI instance id', UI_CONTROL_STRING_LIMIT),
+  };
+  const clientInput = object(input['client'], 'UI client identity');
+  exactKeys(clientInput, ['plugin', 'key', 'module'], 'UI client identity');
+  const client: UiClientFrameEventSnapshotDto['client'] = {
+    plugin: nativeUiString(clientInput['plugin'], 'UI plugin', UI_CONTROL_STRING_LIMIT),
+    key: nativeUiString(clientInput['key'], 'UI client key', UI_PARENT_DESCRIPTOR_STRING_LIMIT),
+    module: nativeUiString(clientInput['module'], 'UI module id', UI_PARENT_DESCRIPTOR_STRING_LIMIT),
+  };
   return {
     renderRevision,
     frameSequence: positiveInteger(input['frameSequence'], 'UI frame sequence'),
     tree: uiJsonValue(input['tree'], 'UI client tree'),
     hasPointerListener: boolean(input['hasPointerListener'], 'UI pointer listener flag'),
     hasKeyListener: boolean(input['hasKeyListener'], 'UI key listener flag'),
-  };
+    parent,
+    client,
+  } satisfies UiClientFrameEventSnapshotDto;
 }
 
 export function parseUiFrameEvent(sessionId: string, runtimeId: string, frameJson: unknown) {
@@ -1038,6 +1060,21 @@ export function validateClientEvent(value: unknown): ClientEvent {
   const input = object(value, 'client event');
   const type = string(input['type'], 'client event type');
   switch (type) {
+    case 'terminal_api_error': {
+      exactKeys(input, ['type', 'api_error_status', 'terminal_reason', 'stop_reason'], 'client event');
+      const apiErrorStatus = input['api_error_status'] === undefined
+        ? undefined
+        : integer(input['api_error_status'], 'API error status');
+      if (apiErrorStatus !== undefined && apiErrorStatus > 0xffff) {
+        throw new Error('invalid API error status');
+      }
+      return {
+        type,
+        ...(apiErrorStatus === undefined ? {} : { api_error_status: apiErrorStatus }),
+        terminal_reason: string(input['terminal_reason'], 'terminal reason'),
+        stop_reason: string(input['stop_reason'], 'terminal stop reason'),
+      };
+    }
     case 'fusion_catalog': {
       exactKeys(input, ['type', 'catalog_json'], 'Fusion catalog event');
       const catalog_json = string(input['catalog_json'], 'Fusion catalog JSON');
@@ -1058,35 +1095,6 @@ export function validateClientEvent(value: unknown): ClientEvent {
         ...(error === undefined ? {} : { error }),
       };
     }
-    case 'side_chat_permission': {
-      exactKeys(input, ['type', 'side_id', 'request']);
-      const request = object(input['request'], 'side permission');
-      integer(request['request_id'], 'side permission id');
-      object(request['kind'], 'side permission kind');
-      return { type, side_id: string(input['side_id'], 'side id'), request: request as unknown as import('./protocol.js').PermissionRequest };
-    }
-    case 'side_chat_submitted':
-    case 'side_chat_created':
-      exactKeys(input, ['type', 'request_id', 'side_id']);
-      return { type, request_id: string(input['request_id'], 'side request id'), side_id: string(input['side_id'], 'side id') };
-    case 'side_chat_list':
-      exactKeys(input, ['type', 'side_ids']);
-      if (!Array.isArray(input['side_ids'])) throw new Error('invalid side ids');
-      return { type, side_ids: input['side_ids'].map(value => string(value, 'side id')) };
-    case 'side_chat_snapshot':
-      exactKeys(input, ['type', 'side_id', 'events_json']);
-      if (!Array.isArray(input['events_json'])) throw new Error('invalid side events');
-      return { type, side_id: string(input['side_id'], 'side id'), events_json: input['events_json'].map(value => string(value, 'side event JSON')) };
-    case 'side_chat_event':
-      exactKeys(input, ['type', 'side_id', 'event_json']);
-      return { type, side_id: string(input['side_id'], 'side id'), event_json: string(input['event_json'], 'side event JSON') };
-    case 'side_chat_ended':
-      exactKeys(input, ['type', 'side_id']);
-      return { type, side_id: string(input['side_id'], 'side id') };
-    case 'side_chat_error':
-      exactKeys(input, ['type', 'request_id', 'side_id', 'message']);
-      return { type, ...(input['request_id'] === undefined ? {} : { request_id: string(input['request_id'], 'side request id') }), ...(input['side_id'] === undefined ? {} : { side_id: string(input['side_id'], 'side id') }), message: string(input['message'], 'side error') };
-
     case 'ui_control_result':
       exactKeys(input, ['type', 'request_id', 'response_json', 'metadata_json', 'error'], 'client event');
       if (input['response_json'] === undefined && input['error'] === undefined) {
@@ -1125,6 +1133,24 @@ export function validateClientEvent(value: unknown): ClientEvent {
         ...(reference === undefined ? {} : { reference }),
       };
     }
+    case 'prompt_suggestion':
+      exactKeys(input, ['type', 'suggestion', 'uuid', 'session_id'], 'client event');
+      return {
+        type,
+        suggestion: string(input['suggestion'], 'prompt suggestion'),
+        uuid: string(input['uuid'], 'prompt suggestion UUID'),
+        session_id: string(input['session_id'], 'prompt suggestion session id'),
+      };
+    case 'prompt_suggestion_state':
+      exactKeys(input, ['type', 'enabled', 'notice'], 'client event');
+      if (input['notice'] !== null && typeof input['notice'] !== 'string') {
+        throw new Error('invalid prompt suggestion notice');
+      }
+      return {
+        type,
+        enabled: boolean(input['enabled'], 'prompt suggestion enabled'),
+        notice: input['notice'] as string | null,
+      };
     case 'ui_invalidate':
       exactKeys(input, ['type', 'instances_json', 'uuid', 'session_id'], 'client event');
       if (input['instances_json'] !== undefined) parseUiInvalidateInstances(input['instances_json']);
@@ -1194,6 +1220,9 @@ export function validateClientEvent(value: unknown): ClientEvent {
       exactKeys(input, ['type', 'plugin', 'text'], 'client event');
       return { type, plugin: string(input['plugin'], 'plugin'),
         text: input['text'] === null ? null : string(input['text'], 'text') };
+    case 'ui_notify':
+      exactKeys(input, ['type', 'plugin', 'text'], 'client event');
+      return { type, plugin: string(input['plugin'], 'plugin'), text: string(input['text'], 'text') };
     case 'session_agent_transcript': {
       exactKeys(input, ['type', 'session_id', 'agent_id', 'messages', 'next_message_index', 'revision'], 'client event');
       if (!Array.isArray(input['messages'])) throw new Error('invalid session agent transcript rows');
@@ -1315,8 +1344,107 @@ export function validateClientEvent(value: unknown): ClientEvent {
     case 'audio_capabilities_changed':
       exactKeys(input, ['type', 'capabilities'], 'client event');
       return { type, capabilities: audioCapabilities(input['capabilities']) };
+    case 'side_chat_created':
+      exactKeys(input, ['type', 'request_id', 'side_id'], 'client event');
+      return {
+        type,
+        request_id: string(input['request_id'], 'side chat request id'),
+        side_id: string(input['side_id'], 'side chat id'),
+      };
+    case 'side_chat_list':
+      exactKeys(input, ['type', 'side_ids'], 'client event');
+      return { type, side_ids: stringArray(input['side_ids'], 'side chat ids') };
+    case 'side_chat_snapshot':
+      exactKeys(input, ['type', 'side_id', 'events_json'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        events_json: stringArray(input['events_json'], 'side chat replay events'),
+      };
+    case 'side_chat_event':
+      exactKeys(input, ['type', 'side_id', 'event_json'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        event_json: string(input['event_json'], 'side chat event JSON'),
+      };
+    case 'side_chat_permission':
+      exactKeys(input, ['type', 'side_id', 'request'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        request: sideChatPermissionRequest(input['request']),
+      };
+    case 'side_chat_submitted':
+      exactKeys(input, ['type', 'side_id', 'request_id'], 'client event');
+      return {
+        type,
+        side_id: string(input['side_id'], 'side chat id'),
+        request_id: string(input['request_id'], 'side chat request id'),
+      };
+    case 'side_chat_ended':
+      exactKeys(input, ['type', 'side_id'], 'client event');
+      return { type, side_id: string(input['side_id'], 'side chat id') };
+    case 'side_chat_error':
+      exactKeys(input, ['type', 'request_id', 'side_id', 'message'], 'client event');
+      return {
+        type,
+        ...(input['request_id'] === undefined ? {} : { request_id: string(input['request_id'], 'side chat request id') }),
+        ...(input['side_id'] === undefined ? {} : { side_id: string(input['side_id'], 'side chat id') }),
+        message: string(input['message'], 'side chat error'),
+      };
   }
   return input as ClientEvent;
+}
+
+function sideChatPermissionRequest(value: unknown): PermissionRequest {
+  const request = object(value, 'side chat permission request');
+  exactKeys(request, [
+    'request_id', 'kind', 'worker', 'owner', 'suppress_always_allow_rule', 'auto_mode_prompt',
+  ], 'side chat permission request');
+  integer(request['request_id'], 'side chat permission request id');
+
+  const kind = object(request['kind'], 'side chat permission kind');
+  switch (kind['type']) {
+    case 'tool_use_confirm':
+      exactKeys(kind, ['type', 'tool_name', 'tool_input_json', 'default_allow'], 'side chat permission kind');
+      string(kind['tool_name'], 'side chat permission tool');
+      string(kind['tool_input_json'], 'side chat permission tool input');
+      boolean(kind['default_allow'], 'side chat permission default allow');
+      break;
+    case 'exit_plan_mode':
+      exactKeys(kind, ['type', 'plan'], 'side chat permission kind');
+      string(kind['plan'], 'side chat permission plan');
+      break;
+    case 'bypass_permissions_mode':
+      exactKeys(kind, ['type'], 'side chat permission kind');
+      break;
+    default:
+      throw new Error('invalid side chat permission kind');
+  }
+
+  if (request['worker'] !== undefined) {
+    const worker = object(request['worker'], 'side chat permission worker');
+    exactKeys(worker, ['name', 'color', 'team'], 'side chat permission worker');
+    string(worker['name'], 'side chat permission worker name');
+    string(worker['color'], 'side chat permission worker color');
+    if (worker['team'] !== undefined) string(worker['team'], 'side chat permission worker team');
+  }
+  if (request['owner'] !== undefined) {
+    const owner = object(request['owner'], 'side chat permission owner');
+    exactKeys(owner, ['session_id', 'turn_id', 'worker_name'], 'side chat permission owner');
+    if (owner['session_id'] !== undefined) string(owner['session_id'], 'side chat permission owner session');
+    if (owner['turn_id'] !== undefined) integer(owner['turn_id'], 'side chat permission owner turn');
+    if (owner['worker_name'] !== undefined) string(owner['worker_name'], 'side chat permission owner worker');
+  }
+  if (request['suppress_always_allow_rule'] !== undefined) {
+    boolean(request['suppress_always_allow_rule'], 'side chat permission always-allow suppression');
+  }
+  if (request['auto_mode_prompt'] !== undefined
+    && !['workflow_bash', 'exit_plan_mode'].includes(String(request['auto_mode_prompt']))) {
+    throw new Error('invalid side chat auto-mode prompt');
+  }
+  return request as unknown as PermissionRequest;
 }
 
 export function validateServerHello(value: unknown): ServerHello {

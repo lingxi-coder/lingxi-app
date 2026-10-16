@@ -47,7 +47,10 @@ use crate::driver::OrchestratorTurnDriver;
 use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
-use crate::settings_bridge::{active_settings_baseline, SettingsContext, SettingsPaths};
+use crate::settings_bridge::{
+    active_settings_baseline, empty_settings_source, settings_error_message, SettingsContext,
+    SettingsPaths,
+};
 
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
@@ -80,6 +83,8 @@ pub struct BridgeArgs {
     pub credential_stdin: bool,
     /// Allow workspace-controlled configuration and customization sources.
     pub trusted_workspace: bool,
+    /// Private parent-provided local policy verdict for `/insights`.
+    pub insights_policy_gate: Option<bool>,
     /// Own versioned scheduled tasks for this scope independently of chat runtimes.
     pub scheduled_controller: bool,
     /// Enforce the packaged desktop credential boundary: trusted workspace
@@ -137,6 +142,20 @@ impl BridgeArgs {
                 "--api-key-stdin" => out.api_key_stdin = true,
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
+                "--host-insights-policy-gate" => {
+                    let value = it.next().ok_or_else(|| {
+                        "--host-insights-policy-gate requires true or false".to_string()
+                    })?;
+                    out.insights_policy_gate = Some(match value.as_ref() {
+                        "true" => true,
+                        "false" => false,
+                        _ => {
+                            return Err(
+                                "--host-insights-policy-gate requires true or false".to_string()
+                            )
+                        }
+                    });
+                }
                 "--scheduled-controller" => out.scheduled_controller = true,
                 "--packaged-credential-stdin-only" => {
                     out.packaged_credential_stdin_only = true;
@@ -628,208 +647,228 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     };
     let trusted = args.trusted_workspace;
 
-    DesktopConfig {
-        diagnostics: None,
-        composition: None,
-        defer_session_start: false,
+    let build_info = harness_runtime::desktop::BuildInfo::new(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+    );
+    let api_base = resolve_api_base();
+    let anthropic_client_metadata = cli::init::native_anthropic_client_metadata_for_host(
+        &api_base,
+        "lingxi-desktop",
+        build_info.version,
+    );
+
+    {
+        let mut __desktop_config = DesktopConfig::default();
+        __desktop_config.build_info = build_info;
+        __desktop_config.diagnostics = None;
+        __desktop_config.composition = None;
+        __desktop_config.defer_session_start = false;
         // The desktop opens a session while its startup MCP servers connect;
         // `spawn_mcp_startup_publisher` re-publishes the listings as each
         // settles.
-        connect_mcp_in_background: true,
-        session_transcript_path: None,
-        session_resume_snapshot: None,
-        session_resume_cost: None,
-        max_structured_output_retries: 5,
-        mcp_services_factory: None,
-        user_agent_environment: None,
-        request_identity: None,
-        anthropic_compatible_version: None,
-        anthropic_client_metadata: None,
-        native_thinking_display: None,
-        oauth_environment_lookup: None,
-        verified_computer_profiles: Vec::new(),
-        build_info: harness_runtime::desktop::BuildInfo::new(
-            env!("CARGO_PKG_VERSION"),
-            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-        ),
-        host_workspace_trusted: Some(trusted),
-        mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
-        enable_automation_scheduler: args.scheduled_controller,
-        initial_teammate_team_name: None,
-        api_base: resolve_api_base(),
+        __desktop_config.connect_mcp_in_background = true;
+        __desktop_config.session_transcript_path = None;
+        __desktop_config.session_resume_snapshot = None;
+        __desktop_config.session_resume_cost = None;
+        __desktop_config.max_structured_output_retries = 5;
+        __desktop_config.mcp_services_factory = None;
+        __desktop_config.user_agent_environment = None;
+        __desktop_config.request_identity = None;
+        __desktop_config.anthropic_compatible_version = None;
+        __desktop_config.native_thinking_display = None;
+        __desktop_config.oauth_environment_lookup = None;
+        __desktop_config.verified_computer_profiles = Vec::new();
+        __desktop_config.host_workspace_trusted = Some(trusted);
+        __desktop_config.insights_policy_gate = args.insights_policy_gate;
+        __desktop_config.mod_render_surface =
+            Some(harness_runtime::desktop::ModRenderSurface::Desktop);
+        __desktop_config.native_settings_agent_context =
+            lingxi_core::host::NativeSettingsAgentContext::Main;
+        __desktop_config.enable_automation_scheduler = args.scheduled_controller;
+        __desktop_config.initial_teammate_team_name = None;
+        __desktop_config.api_base = api_base;
+        __desktop_config.anthropic_client_metadata = anthropic_client_metadata;
         // Credentials are supplied explicitly by the parent over stdin and
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.
-        api_key: String::new(),
-        api_key_source: llm_runtime::CredentialSource::Configured,
+        __desktop_config.api_key = String::new();
+        __desktop_config.api_key_source = llm_runtime::CredentialSource::Configured;
         // The packaged bridge gets an explicit process-local store. Desktop,
         // CLI, and TUI own persistent broker access; this sidecar receives only
         // its current session credential over stdin.
-        isolated_credential_storage: false,
-        credential_storage_policy: if args.packaged_credential_stdin_only {
+        __desktop_config.isolated_credential_storage = false;
+        __desktop_config.credential_storage_policy = if args.packaged_credential_stdin_only {
             CredentialStoragePolicy::NativeOrMemory
         } else {
             CredentialStoragePolicy::NativePreferred
-        },
-        injected_plugin_secrets: BTreeMap::new(),
-        api_key_helper,
+        };
+        __desktop_config.injected_plugin_secrets = BTreeMap::new();
+        __desktop_config.api_key_helper = api_key_helper;
         // (M13) The bridge host does not resolve managed login-method forcing
         // (the Electron parent owns credential policy) and passes no
         // FD-inherited key — both auth-resolver inputs stay at their inert
         // defaults.
-        managed_oauth_only: false,
-        anthropic_key_fd_present: false,
-        cwd,
-        lingxi_home,
-        default_model,
+        __desktop_config.managed_oauth_only = false;
+        __desktop_config.anthropic_key_fd_present = false;
+        __desktop_config.cwd = cwd;
+        // Bridge-server is a local host; it exposes no remote workspace,
+        // diskless session, or pre-resolved Windows network-drive roots.
+        __desktop_config.remote_workspace = false;
+        __desktop_config.diskless = false;
+        __desktop_config.trusted_network_directories = Vec::new();
+        __desktop_config.lingxi_home = lingxi_home;
+        __desktop_config.default_model = default_model;
         // Only a `--model` arg is an explicit per-session choice; the built-in
         // default stays eligible for the engine's connected-provider fallback.
-        default_model_explicit: args.model.is_some(),
+        __desktop_config.default_model_explicit = args.model.is_some();
         // The bridge does not read the TUI's `settings.recentModels`; the
         // fallback uses the static provider order only.
-        recent_models: Vec::new(),
+        __desktop_config.recent_models = Vec::new();
         // The Electron bridge does not expose --fallback-model (CLI --print
         // only); the Opus consecutive-529 fallback stays disabled here.
-        fallback_model: None,
+        __desktop_config.fallback_model = None;
         // The Electron host currently exposes no custom beta-header flag.
-        custom_betas: Vec::new(),
+        __desktop_config.custom_betas = Vec::new();
         // The Electron host does not expose CLI `--settings` / flagSettings.
-        flag_settings: None,
-        provider_profiles,
-        routing,
-        mcp_paths: if trusted {
+        __desktop_config.flag_settings = None;
+        __desktop_config.flag_settings_source = None;
+        __desktop_config.provider_profiles = provider_profiles;
+        __desktop_config.routing = routing;
+        __desktop_config.mcp_paths = if trusted {
             vec![project_mcp_path, global_mcp_path]
         } else {
             Vec::new()
-        },
+        };
         // A transport binds the connection-scoped AdapterPermissionGate (F2-06).
-        use_noop_permission_gate: false,
+        __desktop_config.use_noop_permission_gate = false;
         // Transport host: the adapter gate IS the enforcement, so headless
         // deny-on-ask does not apply (only consulted when use_noop is true).
-        deny_unresolved_ask: false,
+        __desktop_config.deny_unresolved_ask = false;
         // Transport host: no process stdout TTY for `tengu_api_success.isTTY`.
-        is_tty: false,
+        __desktop_config.is_tty = false;
         // Transport host: no injected interactive gate (that is the TUI's path).
-        injected_permission_gate: None,
+        __desktop_config.injected_permission_gate = None;
         // The headless bridge has no interactive /fork or /resume-as-background
         // surface, so it wires no background-session forker seam.
-        bg_session_forker: None,
+        __desktop_config.bg_session_forker = None;
         // Placeholder — `assemble_with_provider_keys` installs the
         // connection-scoped AskUserQuestion broker once the event sink exists.
-        ask_user_question_tx: None,
+        __desktop_config.ask_user_question_tx = None;
         // Placeholder — `resolve_desktop_config` has no live connection to
         // build a sink from yet. `assemble_with_provider_keys` overwrites this
         // to `Some(sender)` once the `BridgeConnection` (and therefore its
         // `computer_access_sink()`) exists, wiring the Electron-facing
         // `ComputerAccessBroker`.
-        computer_access_tx: None,
+        __desktop_config.computer_access_tx = None;
         // Filled by `assemble_with_provider_keys` after the connection-scoped
         // event sink exists; this keeps subagent lifecycle events on the same
         // authenticated session stream as ordinary turn events.
-        session_agent_observer: None,
+        __desktop_config.session_agent_observer = None;
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
-        session_started_as_coordinator: false,
+        __desktop_config.session_started_as_coordinator = false;
         // Production memory: load the real `<cwd>/LINGXI.md` +
         // `~/.lingxi/LINGXI.md` hierarchy into the system prompt (claude-code
         // parity), which also makes the session-start
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
-        memory_provider: trusted.then(orchestrator::prompt::real_provider),
+        __desktop_config.memory_provider = trusted.then(orchestrator::prompt::real_provider);
         // Trusted desktop sessions share the engine Auto default. Workspace
         // trust is still required before granting autonomous permissions.
-        permission_mode: if trusted {
+        __desktop_config.permission_mode = if trusted {
             permission::PermissionMode::Auto
         } else {
             permission::PermissionMode::Default
-        },
-        permission_mode_cli: None,
-        permission_mode_preference: None,
-        permission_mode_cli_explicit: false,
+        };
+        __desktop_config.permission_mode_cli = None;
+        __desktop_config.permission_mode_preference = None;
+        __desktop_config.permission_mode_cli_explicit = false;
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
-        connect_prompt: None,
+        __desktop_config.connect_prompt = None;
         // The Electron bridge exposes no --max-turns / --max-budget flags;
         // both stay unset (unbounded), matching the CLI defaults.
-        max_turns: None,
-        plan_mode_instructions: None,
-        plans_directory: None,
-        max_budget_usd: None,
+        __desktop_config.max_turns = None;
+        __desktop_config.plan_mode_instructions = None;
+        __desktop_config.plans_directory = None;
+        __desktop_config.max_budget_usd = None;
         // The bridge has no structured-output flag; unconstrained turns.
-        json_schema: None,
+        __desktop_config.json_schema = None;
         // The bridge has no --system-prompt / --append-system-prompt CLI flags.
-        system_prompt_override: None,
-        append_system_prompt: None,
+        __desktop_config.system_prompt_override = None;
+        __desktop_config.append_system_prompt = None;
         // The Desktop host owns the session UUID so multiple bridge processes can
         // address one another without relying on generated display names.
-        session_id_override: args.session_id.clone(),
-        session_writer_lease: None,
-        parent_session_id: None,
+        __desktop_config.session_id_override = args.session_id.clone();
+        __desktop_config.session_writer_lease = None;
+        __desktop_config.parent_session_id = None;
         // The Electron bridge has no --disable-slash-commands flag.
-        disable_slash_commands: false,
+        __desktop_config.disable_slash_commands = false;
         // There is no per-session skill allowlist input on the bridge. `None`
         // keeps all otherwise eligible registered skills model-invocable.
-        session_skill_allowlist: None,
+        __desktop_config.session_skill_allowlist = None;
         // The Electron bridge has no --add-dir flag.
-        add_dir: Vec::new(),
+        __desktop_config.add_dir = Vec::new();
         // The Electron bridge has no --mcp-config flag.
-        cli_mcp_servers: Vec::new(),
+        __desktop_config.cli_mcp_servers = Vec::new();
         // The Electron bridge has no --strict-mcp-config flag either; ambient
         // MCP configs stay eligible (trust gating above still applies) and
         // agent-frontmatter servers are never strict-skipped.
-        strict_mcp_config: false,
-        restricted: false,
-        restricted_tools: None,
+        __desktop_config.strict_mcp_config = false;
+        __desktop_config.restricted = false;
+        __desktop_config.restricted_tools = None;
         // The Electron bridge has no --exclude-dynamic-system-prompt-sections flag.
-        exclude_dynamic_system_prompt_sections: false,
+        __desktop_config.exclude_dynamic_system_prompt_sections = false;
         // The bridge has no `--setting-sources` flag; load all tiers.
-        setting_source_scope: if trusted {
+        __desktop_config.setting_source_scope = if trusted {
             (true, true)
         } else {
             (false, false)
-        },
+        };
         // The Electron bridge has no --safe-mode / --bare flags (CLI-only
         // reduced modes); all customizations load.
-        customization_gates: if trusted {
+        __desktop_config.customization_gates = if trusted {
             harness_runtime::desktop::CustomizationGates::default()
         } else {
             harness_runtime::desktop::CustomizationGates {
                 safe_mode: true,
                 bare: false,
             }
-        },
+        };
         // The Electron bridge has no --no-session-persistence flag; persist.
-        session_persistence: true,
+        __desktop_config.session_persistence = true;
         // (M4 cc2.1.198) The Electron bridge exposes none of --agents /
         // --agent / --plugin-dir / --effort (CLI session flags).
-        cli_agents_json: None,
-        cli_agent: None,
-        cli_plugin_dirs: Vec::new(),
-        initial_effort: None,
+        __desktop_config.cli_agents_json = None;
+        __desktop_config.cli_agent = None;
+        __desktop_config.cli_plugin_dirs = Vec::new();
+        __desktop_config.initial_effort = None;
         // The Electron bridge (accepted divergence) keeps the byte-identical
         // defaults for the ANTHROPIC_MODEL env-pin exemption + boot thinking
         // config; the CLI `resolve_desktop_config` is the parity surface.
-        default_model_env_pinned: false,
-        session_thinking: Default::default(),
+        __desktop_config.default_model_env_pinned = false;
+        __desktop_config.session_thinking = Default::default();
         // The Electron bridge has no `-w`/`--worktree` flag; inert boot (no
         // worktree launch).
-        worktree_launch: None,
+        __desktop_config.worktree_launch = None;
         // The Electron bridge has no `--tmux` flag; inert (no tmux session).
-        tmux_launch: None,
+        __desktop_config.tmux_launch = None;
         // The trusted Electron shell exposes an explicit, user-operated Full
         // access selector. This only makes the live bypass mode AVAILABLE; the
         // session still boots in Default and changes mode only after an
         // authenticated renderer command crosses the bridge IPC boundary.
-        allow_dangerously_skip_permissions: trusted,
+        __desktop_config.allow_dangerously_skip_permissions = trusted;
         // Device audio is CONNECTION-scoped, not argv-scoped: the bridge it
         // proxies through cannot exist until `assemble` has a connection to
         // build it over, so it is filled there and never here.
-        audio: None,
+        __desktop_config.audio = None;
         // Electron renders inline widgets (`lingxi-viz://visualization`), so
         // the `Visualization` tool and `/visualize` skill are offered here.
-        inline_visualization: true,
+        __desktop_config.inline_visualization = true;
         // Desktop has no Apps page for the built-in library yet; the
         // local-app-builder plugin builds and opens apps in the browser.
-        local_apps: false,
+        __desktop_config.local_apps = false;
+        __desktop_config
     }
 }
 
@@ -857,7 +896,6 @@ pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
 /// is held so its background tasks (cost-persist drain, etc.) stay alive for the
 /// process lifetime.
 pub struct BoundServer {
-    side_chats: Arc<harness_runtime::side_chat::SideChatManager>,
     /// The fully-bound connection (driver + router attached).
     pub connection: BridgeConnection,
     /// The desktop runtime — held (not read) so its handles and the spawned
@@ -879,9 +917,6 @@ pub struct BoundServer {
 }
 
 impl BoundServer {
-    pub fn side_chats(&self) -> Arc<harness_runtime::side_chat::SideChatManager> {
-        self.side_chats.clone()
-    }
     /// The names of the tools the assembled engine registered.
     ///
     /// Delegates to [`DesktopRuntime::registered_tool_names`]; the runtime
@@ -906,16 +941,40 @@ impl BoundServer {
         self.runtime.session_lifecycle.clone()
     }
 
-    /// Observe the existing authenticated RequestExit command without exposing
-    /// the runtime's broad handles or borrowing the moved connection.
+    /// Observe a source-scoped failure to validate a required Native policy
+    /// semantic. Kept separate from the Native refusal and RequestExit paths.
+    pub fn wait_for_policy_semantic_worker_failure(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = std::sync::Arc<
+                        harness_runtime::desktop::NativePolicySemanticWorkerFailure,
+                    >,
+                > + Send,
+        >,
+    > {
+        let mut probe = self.runtime.policy_helper_semantic_worker_failure.clone();
+        Box::pin(async move { probe.wait().await })
+    }
+
+    /// Observe authenticated RequestExit or a managed-policy refusal without
+    /// borrowing the moved connection. A refusal retains its typed source error.
     pub fn wait_for_exit_requested(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Option<harness_runtime::desktop::PolicyHelperStartupError>,
+                > + Send,
+        >,
+    > {
         let orchestrator = self.runtime.orchestrator.clone();
+        let refusal = self.runtime.policy_helper_refusal.clone();
         Box::pin(async move {
             loop {
                 if orchestrator.current_should_exit() {
-                    return;
+                    return refusal.current().map(|error| error.as_ref().clone());
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
@@ -1418,8 +1477,22 @@ pub async fn assemble_with_credentials(
         // here, and reused for both `active`'s one-time bake-in below and the
         // `managed` field every later listing re-applies to `effective` — the
         // same map both places, so the two can never drift apart.
-        let managed = harness_runtime::desktop::managed_settings_overlay().await;
-        let active = active_settings_baseline(&paths, &managed);
+        let (managed, managed_diagnostics) =
+            match harness_runtime::desktop::managed_settings_overlay(&cfg).await {
+                Ok(Some(managed)) => (managed, None),
+                Ok(None) => (empty_settings_source(), None),
+                Err(lingxi_core::settings::SettingsError::SourceFailure {
+                    diagnostics,
+                    effective,
+                    ..
+                }) => (
+                    effective.unwrap_or_else(empty_settings_source),
+                    Some(diagnostics),
+                ),
+                Err(error) => return Err(settings_error_message(&error)),
+            };
+        let active = active_settings_baseline(&paths, &managed)
+            .map_err(|error| settings_error_message(&error))?;
         SettingsContext {
             fusion_layers: Some(Arc::new({
                 let config = cfg.clone();
@@ -1428,6 +1501,7 @@ pub async fn assemble_with_credentials(
             paths,
             active: Arc::new(std::sync::RwLock::new(active)),
             managed,
+            managed_diagnostics,
         }
     };
 
@@ -1514,7 +1588,8 @@ pub async fn assemble_with_credentials(
     ));
     let provider_model_catalog_listings = desktop_provider_catalog_listings(
         &cfg,
-        harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed),
+        harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
+            .map_err(|error| settings_error_message(&error))?,
     );
 
     let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
@@ -1580,14 +1655,19 @@ pub async fn assemble_with_credentials(
     // coordinator. Do not let the bridge's process-registration guard pin the
     // old session through later hot clear/resume operations.
     live_session.release_writer_claim();
+    let provider_region = match runtime.provider_region {
+        llm_runtime::Region::ChinaMainland => "china_mainland",
+        llm_runtime::Region::International => "international",
+    };
     settings_context
         .active
         .write()
         .map_err(|_| "settings state lock poisoned".to_owned())?
-        .insert(
-            "providerRegion".into(),
-            serde_json::to_value(runtime.provider_region).map_err(|e| e.to_string())?,
-        );
+        .set_field(
+            "providerRegion",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(provider_region),
+        )
+        .map_err(|error| format!("failed to update active providerRegion: {error}"))?;
 
     // Seeds the parent-supplied keys and refreshes Fusion's catalog filter for
     // them under ONE bounded budget -- see `seed_parent_supplied_provider_keys`
@@ -1653,7 +1733,7 @@ pub async fn assemble_with_credentials(
                             text: harness_runtime::desktop::teammate_message_envelope_with_summary(
                                 &message.from_name,
                                 &message.content,
-                                message.summary.as_deref(),
+                                message.summary.as_ref(),
                             ),
                         },
                         priority: msgqueue::QueuePriority::Next,
@@ -1762,11 +1842,6 @@ pub async fn assemble_with_credentials(
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
     let dispatcher: Arc<dyn SlashCommandDispatcher> =
         Arc::new(RegistrySlashDispatcherClone::wrap(&runtime));
-    let side_chats = harness_runtime::side_chat::SideChatManager::new(
-        runtime.orchestrator.clone(),
-        runtime.side_chat_factory.clone(),
-        connection.unscoped_event_sink(),
-    );
     let mut router = EngineCommandRouter::new(
         handle,
         runtime.auth.clone(),
@@ -1775,7 +1850,10 @@ pub async fn assemble_with_credentials(
         Some(dispatcher),
         Some(runtime.shared_command_registry.clone()),
     )
-    .with_side_chats(side_chats.clone())
+    .with_side_chat_runtime(
+        runtime.orchestrator.clone(),
+        runtime.side_chat_factory.clone(),
+    )
     .with_cron_firer(cron_firer)
     .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
     .with_credentials(runtime.credentials.clone())
@@ -1805,6 +1883,7 @@ pub async fn assemble_with_credentials(
     );
 
     let connection = connection
+        .with_policy_helper_refusal(runtime.policy_helper_refusal.clone())
         .bind(gate, driver)
         .bind_router(router)
         .bind_computer_access(computer_access_broker, computer_access_rx)
@@ -1818,7 +1897,6 @@ pub async fn assemble_with_credentials(
         .with_task_notification_registry(runtime.task_registry.clone())
         .with_queue_wakeup();
     Ok(BoundServer {
-        side_chats,
         connection,
         runtime,
         audio: audio_bridge,
@@ -1870,8 +1948,12 @@ impl RegistrySlashDispatcherClone {
 
 #[async_trait::async_trait]
 impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
-    async fn dispatch(&self, raw: &str) -> lingxi_core::host::SlashDispatchResult {
-        self.inner.dispatch(raw).await
+    async fn dispatch(
+        &self,
+        raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> lingxi_core::host::SlashDispatchResult {
+        self.inner.dispatch(raw, cancellation).await
     }
 }
 
@@ -2317,7 +2399,7 @@ mod tests {
         let mut owned_by_a = lingxi_core::host::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
-            "owned by A",
+            &"owned by A".into(),
             None,
         );
         owned_by_a.msg_id = Some("accepted-a".into());
@@ -2381,6 +2463,24 @@ mod tests {
         assert!(BridgeArgs::parse(["--cwd"]).is_err());
         assert!(BridgeArgs::parse(["--model"]).is_err());
         assert!(BridgeArgs::parse(["--bridge-dir"]).is_err());
+    }
+
+    #[test]
+    fn parse_private_insights_policy_verdict_without_public_help_switch() {
+        assert_eq!(
+            BridgeArgs::parse(["--host-insights-policy-gate", "true"])
+                .unwrap()
+                .insights_policy_gate,
+            Some(true)
+        );
+        assert_eq!(
+            BridgeArgs::parse(["--host-insights-policy-gate", "false"])
+                .unwrap()
+                .insights_policy_gate,
+            Some(false)
+        );
+        assert!(BridgeArgs::parse(["--host-insights-policy-gate", "yes"]).is_err());
+        assert!(!usage().contains("--host-insights-policy-gate"));
     }
 
     #[test]
@@ -2625,14 +2725,15 @@ mod tests {
 
     #[test]
     fn has_no_credential_source_detects_empty() {
-        let mut cfg = DesktopConfig {
-            build_info: harness_runtime::desktop::BuildInfo::new(
+        let mut cfg = {
+            let mut __desktop_config = DesktopConfig::default();
+            __desktop_config.build_info = harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-            ),
-            api_key: String::new(),
-            provider_profiles: None,
-            ..DesktopConfig::default()
+            );
+            __desktop_config.api_key = String::new();
+            __desktop_config.provider_profiles = None;
+            __desktop_config
         };
         assert!(has_no_credential_source(&cfg));
 
@@ -2666,109 +2767,120 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
-        let cfg = DesktopConfig {
-            diagnostics: None,
-            composition: None,
-            defer_session_start: false,
-            connect_mcp_in_background: false,
-            session_transcript_path: None,
-            session_resume_snapshot: None,
-            session_resume_cost: None,
-            max_structured_output_retries: 5,
-            mcp_services_factory: None,
-            user_agent_environment: None,
-            request_identity: None,
-            anthropic_compatible_version: None,
-            anthropic_client_metadata: None,
-            native_thinking_display: None,
-            oauth_environment_lookup: None,
-            verified_computer_profiles: Vec::new(),
-            api_key_source: llm_runtime::CredentialSource::Configured,
-            build_info: harness_runtime::desktop::BuildInfo::new(
+        let cfg = {
+            let mut __desktop_config = DesktopConfig::default();
+            __desktop_config.remote_workspace = false;
+            __desktop_config.diskless = false;
+            __desktop_config.trusted_network_directories = Vec::new();
+            __desktop_config.flag_settings_source = None;
+            __desktop_config.diagnostics = None;
+            __desktop_config.composition = None;
+            __desktop_config.defer_session_start = false;
+            __desktop_config.connect_mcp_in_background = false;
+            __desktop_config.session_transcript_path = None;
+            __desktop_config.session_resume_snapshot = None;
+            __desktop_config.session_resume_cost = None;
+            __desktop_config.max_structured_output_retries = 5;
+            __desktop_config.mcp_services_factory = None;
+            __desktop_config.user_agent_environment = None;
+            __desktop_config.request_identity = None;
+            __desktop_config.anthropic_compatible_version = None;
+            __desktop_config.anthropic_client_metadata = None;
+            __desktop_config.native_thinking_display = None;
+            __desktop_config.oauth_environment_lookup = None;
+            __desktop_config.verified_computer_profiles = Vec::new();
+            __desktop_config.api_key_source = llm_runtime::CredentialSource::Configured;
+            __desktop_config.build_info = harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-            ),
-            enable_automation_scheduler: false,
-            host_workspace_trusted: Some(true),
-            mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
-            initial_teammate_team_name: None,
+            );
+            __desktop_config.enable_automation_scheduler = false;
+            __desktop_config.host_workspace_trusted = Some(true);
+            __desktop_config.insights_policy_gate = None;
+            __desktop_config.mod_render_surface =
+                Some(harness_runtime::desktop::ModRenderSurface::Desktop);
+            __desktop_config.native_settings_agent_context =
+                lingxi_core::host::NativeSettingsAgentContext::Main;
+            __desktop_config.initial_teammate_team_name = None;
             // This unit test must not require the signed macOS Credential
             // Broker or inherit a developer login keychain.
-            isolated_credential_storage: true,
-            credential_storage_policy: CredentialStoragePolicy::NativePreferred,
-            api_base: DEFAULT_API_BASE.to_string(),
-            api_key: String::new(),
-            api_key_helper: None,
+            __desktop_config.isolated_credential_storage = true;
+            __desktop_config.credential_storage_policy = CredentialStoragePolicy::NativePreferred;
+            __desktop_config.api_base = DEFAULT_API_BASE.to_string();
+            __desktop_config.api_key = String::new();
+            __desktop_config.api_key_helper = None;
             // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
             // FD-inherited key.
-            managed_oauth_only: false,
-            anthropic_key_fd_present: false,
-            cwd: cwd.clone(),
-            lingxi_home: cwd.join(".lingxi"),
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            __desktop_config.managed_oauth_only = false;
+            __desktop_config.anthropic_key_fd_present = false;
+            __desktop_config.cwd = cwd.clone();
+            __desktop_config.lingxi_home = cwd.join(".lingxi");
+            __desktop_config.default_model = "claude-sonnet-4-20250514".to_string();
             // Deterministic across host machines: a dev keychain with real
             // provider keys must not trigger the connected-provider fallback.
-            default_model_explicit: true,
-            recent_models: Vec::new(),
-            fallback_model: None,
-            custom_betas: Vec::new(),
-            flag_settings: None,
-            provider_profiles: None,
-            routing: None,
-            mcp_paths: vec![cwd.join(".mcp.json")],
-            use_noop_permission_gate: false,
-            deny_unresolved_ask: false,
-            is_tty: false,
-            injected_permission_gate: None,
-            injected_plugin_secrets: BTreeMap::new(),
-            ask_user_question_tx: None,
-            computer_access_tx: None,
-            session_agent_observer: None,
-            session_started_as_coordinator: false,
+            __desktop_config.default_model_explicit = true;
+            __desktop_config.recent_models = Vec::new();
+            __desktop_config.fallback_model = None;
+            __desktop_config.custom_betas = Vec::new();
+            __desktop_config.flag_settings = None;
+            __desktop_config.provider_profiles = None;
+            __desktop_config.routing = None;
+            __desktop_config.mcp_paths = vec![cwd.join(".mcp.json")];
+            __desktop_config.use_noop_permission_gate = false;
+            __desktop_config.deny_unresolved_ask = false;
+            __desktop_config.is_tty = false;
+            __desktop_config.injected_permission_gate = None;
+            __desktop_config.injected_plugin_secrets = BTreeMap::new();
+            __desktop_config.ask_user_question_tx = None;
+            __desktop_config.computer_access_tx = None;
+            __desktop_config.session_agent_observer = None;
+            __desktop_config.session_started_as_coordinator = false;
             // Deterministic test: empty memory, never the real FS.
-            memory_provider: None,
-            permission_mode: permission::PermissionMode::Default,
-            permission_mode_cli: None,
-            permission_mode_preference: None,
-            permission_mode_cli_explicit: false,
-            allow_dangerously_skip_permissions: false,
-            connect_prompt: None,
-            max_turns: None,
-            plan_mode_instructions: None,
-            plans_directory: None,
-            max_budget_usd: None,
-            json_schema: None,
-            system_prompt_override: None,
-            append_system_prompt: None,
-            session_id_override: None,
-            session_writer_lease: None,
-            parent_session_id: None,
-            disable_slash_commands: false,
-            session_skill_allowlist: None,
-            add_dir: Vec::new(),
-            cli_mcp_servers: Vec::new(),
-            strict_mcp_config: false,
-            restricted: false,
-            restricted_tools: None,
-            exclude_dynamic_system_prompt_sections: false,
-            setting_source_scope: (true, true),
-            customization_gates: harness_runtime::desktop::CustomizationGates::default(),
-            session_persistence: true,
-            cli_agents_json: None,
-            cli_agent: None,
-            cli_plugin_dirs: Vec::new(),
-            initial_effort: None,
-            default_model_env_pinned: false,
-            session_thinking: Default::default(),
-            bg_session_forker: None,
-            worktree_launch: None,
-            tmux_launch: None,
+            __desktop_config.memory_provider = None;
+            __desktop_config.permission_mode = permission::PermissionMode::Default;
+            __desktop_config.permission_mode_cli = None;
+            __desktop_config.permission_mode_preference = None;
+            __desktop_config.permission_mode_cli_explicit = false;
+            __desktop_config.allow_dangerously_skip_permissions = false;
+            __desktop_config.connect_prompt = None;
+            __desktop_config.max_turns = None;
+            __desktop_config.plan_mode_instructions = None;
+            __desktop_config.plans_directory = None;
+            __desktop_config.max_budget_usd = None;
+            __desktop_config.json_schema = None;
+            __desktop_config.system_prompt_override = None;
+            __desktop_config.append_system_prompt = None;
+            __desktop_config.session_id_override = None;
+            __desktop_config.session_writer_lease = None;
+            __desktop_config.parent_session_id = None;
+            __desktop_config.disable_slash_commands = false;
+            __desktop_config.session_skill_allowlist = None;
+            __desktop_config.add_dir = Vec::new();
+            __desktop_config.cli_mcp_servers = Vec::new();
+            __desktop_config.strict_mcp_config = false;
+            __desktop_config.restricted = false;
+            __desktop_config.restricted_tools = None;
+            __desktop_config.exclude_dynamic_system_prompt_sections = false;
+            __desktop_config.setting_source_scope = (true, true);
+            __desktop_config.customization_gates =
+                harness_runtime::desktop::CustomizationGates::default();
+            __desktop_config.session_persistence = true;
+            __desktop_config.cli_agents_json = None;
+            __desktop_config.cli_agent = None;
+            __desktop_config.cli_plugin_dirs = Vec::new();
+            __desktop_config.initial_effort = None;
+            __desktop_config.default_model_env_pinned = false;
+            __desktop_config.session_thinking = Default::default();
+            __desktop_config.bg_session_forker = None;
+            __desktop_config.worktree_launch = None;
+            __desktop_config.tmux_launch = None;
             // `assemble` fills this with the connection's own bridge; a
             // caller-supplied value would be a lie about which connection the
             // engine's audio calls reach.
-            audio: None,
-            inline_visualization: false,
-            local_apps: false,
+            __desktop_config.audio = None;
+            __desktop_config.inline_visualization = false;
+            __desktop_config.local_apps = false;
+            __desktop_config
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         assert!(bound.runtime.orchestrator.workspace_trusted().await);
@@ -2801,9 +2913,13 @@ mod tests {
             "an idle session must not request process exit"
         );
         bound.runtime.orchestrator.request_exit().await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), requested_exit)
+        let refusal = tokio::time::timeout(std::time::Duration::from_secs(1), requested_exit)
             .await
             .expect("authenticated RequestExit must wake host teardown");
+        assert!(
+            refusal.is_none(),
+            "ordinary RequestExit is not a policy refusal"
+        );
         let report = bound.session_lifecycle().shutdown_and_drain().await;
         assert!(report.complete, "shutdown errors: {:?}", report.errors);
     }

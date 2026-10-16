@@ -125,13 +125,18 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     ) || (parsed.command.is_none()
         && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui));
     startup_trace::mark("mode_decide_for_logging");
-    logging::init(parsed.debug_enabled(), interactive_tui);
+    logging::init_for_launch(&parsed, interactive_tui);
     let telemetry_records_session = parsed.command.is_none()
         || matches!(
             parsed.command.as_ref(),
             Some(crate::commands::Commands::BgPtySession(_))
         );
-    let managed_otel_overrides = harness_runtime::desktop::managed_otel_env_overrides().await;
+    // Startup managed-policy readers share one source snapshot; each helper
+    // keeps its own incomplete-read behavior. These reads are cwd-independent,
+    // so a default DesktopConfig is the appropriate context here.
+    let managed_settings_config = harness_runtime::desktop::DesktopConfig::default();
+    let managed_otel_overrides =
+        harness_runtime::desktop::managed_otel_env_overrides(&managed_settings_config).await;
     let _telemetry_guard =
         match telemetry::otel::OtelConfig::from_env_with_managed(&managed_otel_overrides) {
             cfg if cfg.enabled => telemetry::otel::install_process_with_config(
@@ -368,21 +373,42 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     }
 
     // Managed enterprise startup version gate (parity 2.1.207 H-BIN-09,
-    // CC `c1p`/`a1p` on the fast startup path). If a managed (`policySettings`)
-    // tier pins `requiredMinimumVersion`/`requiredMaximumVersion` and this
-    // binary's version is outside the org-approved range, print the byte-exact
+    // CC `c1p`/`a1p` on the fast startup path). If the selected managed
+    // (`policySettings`) overlay pins `requiredMinimumVersion`/
+    // `requiredMaximumVersion` and this binary's version is outside the
+    // org-approved range, print the byte-exact
     // instruction message to stderr and exit 1 — BEFORE any subcommand dispatch
     // or session build. `update`/`install`/`doctor` are exempt (a pinned-out
     // user must be able to fix their install); a bare session (no command) is
-    // gated. Reads the OS-level managed dir (cwd-independent, already-applied
-    // `--cwd` is irrelevant). Fail-open on an unreadable/malformed policy.
+    // gated. Reads the source-aware OS-level managed snapshot (cwd-independent,
+    // so `--cwd` is irrelevant). An incomplete read retains its healthy
+    // effective projection; if no projection can be formed the gate fails open.
     {
         let top_level = parsed
             .command
             .as_ref()
             .map(crate::commands::Commands::top_level_name);
-        let managed_tiers =
-            harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await;
+        let managed_overlay = match harness_runtime::desktop::managed_settings_overlay(
+            &managed_settings_config,
+        )
+        .await
+        {
+            Ok(overlay) => overlay,
+            Err(lingxi_core::settings::SettingsError::SourceFailure { effective, .. }) => {
+                tracing::warn!(
+                    "managed settings are incomplete; applying the available startup policy"
+                );
+                effective
+            }
+            Err(_) => {
+                tracing::warn!("managed settings are unavailable; startup version gate fails open");
+                None
+            }
+        };
+        let managed_tiers = managed_overlay
+            .and_then(|source| source.to_json_string().ok())
+            .into_iter()
+            .collect::<Vec<_>>();
         let policy = lingxi_core::settings::enterprise::managed_version_policy(&managed_tiers);
         if let Some(msg) = lingxi_core::settings::enterprise::version_gate(
             env!("CARGO_PKG_VERSION"),
@@ -407,7 +433,13 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             return exit_codes::RUNTIME_ERROR;
         }
     };
-    if let Err(error) = process_wrapper::configure(parsed.settings.as_deref(), &wrapper_cwd).await {
+    if let Err(error) = process_wrapper::configure(
+        parsed.settings.as_deref(),
+        &wrapper_cwd,
+        &managed_settings_config,
+    )
+    .await
+    {
         eprintln!("lingxi-cli: {error}");
         return exit_codes::RUNTIME_ERROR;
     }

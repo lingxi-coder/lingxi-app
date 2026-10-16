@@ -1,0 +1,31 @@
+{
+  "commands": [
+    { "type": "side_chat_create", "request_id": "create-1", "initial_input": "\ud800" },
+    { "type": "side_chat_list" },
+    { "type": "side_chat_get", "side_id": "side-1" },
+    { "type": "side_chat_end", "side_id": "side-1" },
+    {
+      "type": "side_chat_submit",
+      "side_id": "side-1",
+      "request_id": "submit-1",
+      "command_json": "{\"type\":\"send_prompt\",\"text\":\"\\udc00\",\"images\":[],\"turn_id\":17}"
+    }
+  ],
+  "events": [
+    { "type": "side_chat_created", "request_id": "create-1", "side_id": "side-1" },
+    { "type": "side_chat_list", "side_ids": ["side-1"] },
+    { "type": "side_chat_snapshot", "side_id": "side-1", "events_json": ["{\"type\":\"turn_started\"}"] },
+    { "type": "side_chat_event", "side_id": "side-1", "event_json": "{\"type\":\"turn_ended\"}" },
+    {
+      "type": "side_chat_permission",
+      "side_id": "side-1",
+      "request": {
+        "request_id": 7,
+        "kind": { "type": "tool_use_confirm", "tool_name": "Bash", "tool_input_json": "{}", "default_allow": false }
+      }
+    },
+    { "type": "side_chat_submitted", "side_id": "side-1", "request_id": "submit-1" },
+    { "type": "side_chat_ended", "side_id": "side-1" },
+    { "type": "side_chat_error", "request_id": "create-2", "message": "child setup failed" }
+  ]
+}

@@ -174,7 +174,7 @@ impl ActiveTurn {
                     messages.push(RenderedMessage::CompactBoundary {
                         messages_before,
                         messages_after,
-                        summary,
+                        summary: summary.display(),
                     });
                 }
             }
@@ -418,7 +418,9 @@ mod tests {
             messages_before: 10,
             messages_after: 3,
             bytes_saved: 1024,
-            summary: "Summary:\nimportant context".to_string(),
+            summary: client::protocol::text::ClientTextDto::from_utf8(
+                "Summary:\nimportant context",
+            ),
         };
         at.apply(ev(), &mut msgs);
         at.apply(ev(), &mut msgs);

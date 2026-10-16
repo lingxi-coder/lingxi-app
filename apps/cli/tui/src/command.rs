@@ -1098,7 +1098,7 @@ mod tests {
         let mut expected: Vec<_> = advertised().collect();
         expected.sort_by_key(|command| command.name);
         for (item, command) in items.iter().zip(expected) {
-            assert_eq!(item.insert, command.name);
+            assert_eq!(item.insert, command.name.into());
             // Dynamic descriptions read live global state that parallel tests
             // mutate (the sandbox toggle) — only static text is compared.
             if command.dynamic_description.is_none() {

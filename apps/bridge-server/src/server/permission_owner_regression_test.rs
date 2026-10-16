@@ -13,13 +13,14 @@ use tokio_tungstenite::tungstenite::Message;
 struct IdleDriver;
 #[async_trait]
 impl TurnDriver for IdleDriver {
-    async fn run_turn(&self, _: String) {}
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
     async fn current_session_id(&self) -> Option<String> {
         Some("session-a".into())
     }
 }
 
-async fn request(socket: &mut Socket, id: u64, method: &str, params: serde_json::Value) {
+async fn request<P: serde::Serialize>(socket: &mut Socket, id: u64, method: &str, params: P) {
+    let params = serialize_source(&params).expect("test request params serialize as source JSON");
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Request(BridgeRequest {
@@ -34,7 +35,7 @@ async fn request(socket: &mut Socket, id: u64, method: &str, params: serde_json:
 }
 
 async fn handshake(socket: &mut Socket) {
-    request(socket, 1, "hello", serde_json::to_value(hello()).unwrap()).await;
+    request(socket, 1, "hello", hello()).await;
     assert!(matches!(
         next_frame(socket).await,
         Frame::Response(BridgeResponse {
@@ -62,8 +63,8 @@ async fn scope(socket: &mut Socket, id: u64, request_id: u64) -> serde_json::Val
         let Message::Text(text) = message else {
             continue;
         };
+        let frame: Frame = serde_json::from_str(&text).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let frame: Frame = serde_json::from_value(wire.clone()).unwrap();
         let Frame::Response(BridgeResponse {
             id: response_id,
             error: None,
@@ -103,7 +104,10 @@ fn check(
     tokio::spawn(async move {
         gate.check_with_context(
             "Write",
-            &json!({"file_path":path}),
+            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":path}),
+            )
+            .unwrap(),
             &PermissionCheckContext {
                 background_owned: background,
                 worker,
@@ -225,11 +229,10 @@ async fn background_permissions_survive_main_cancel_and_normal_terminal_but_not_
             &mut socket,
             7,
             "command",
-            serde_json::to_value(ClientCommand::ApprovePermission {
+            ClientCommand::ApprovePermission {
                 request_id: named_request.request_id,
                 response: PermissionResponseDto::AllowAlways,
-            })
-            .unwrap(),
+            },
         )
         .await;
         assert!(
@@ -296,8 +299,16 @@ async fn delayed_foreground_permission_cannot_attach_to_a_successor_main_owner()
     let rules = gate.session_allow_rules();
     let rules_guard = rules.lock().await;
     let g = gate.clone();
-    let mut old_check =
-        Box::pin(async move { g.check("Write", &json!({"file_path":"/tmp/old"})).await });
+    let mut old_check = Box::pin(async move {
+        g.check(
+            "Write",
+            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":"/tmp/old"}),
+            )
+            .unwrap(),
+        )
+        .await
+    });
     let first_poll = std::future::poll_fn(|cx| {
         std::task::Poll::Ready(std::future::Future::poll(old_check.as_mut(), cx))
     })
@@ -383,6 +394,7 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
         json!({"request_id":-1}),
         json!({"request_id":1,"worker":"forged"}),
         json!({"request_id":"1"}),
+        json!({"request_id":u64::MAX}),
     ] {
         request(&mut socket, 11, "permission_request_scope", params).await;
         assert!(matches!(
@@ -400,10 +412,9 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
         &mut socket,
         12,
         "command",
-        serde_json::to_value(ClientCommand::SetModel {
+        ClientCommand::SetModel {
             model: "slow".into(),
-        })
-        .unwrap(),
+        },
     )
     .await;
     tokio::time::timeout(Duration::from_secs(2), router.entered.notified())
@@ -414,7 +425,7 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
         json!({"request_id":permission.request_id,"background_owned":true})
     );
     assert_eq!(
-        scope(&mut socket, 14, u64::MAX).await,
+        scope(&mut socket, 14, 9_007_199_254_740_991).await,
         serde_json::Value::Null
     );
     router.release.notify_one();

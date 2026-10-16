@@ -22,3 +22,9 @@ test('ui_status accepts a text line or null clear', () => {
   assert.deepEqual(validateClientEvent({ ...event, text: null }), { ...event, text: null });
   assert.throws(() => validateClientEvent({ ...event, text: 42 }), /text/);
 });
+test('ui_notify carries plugin text without a timeout field', () => {
+  const event = { type: 'ui_notify', plugin: 'review', text: 'Done' };
+  assert.deepEqual(validateClientEvent(event), event);
+  assert.throws(() => validateClientEvent({ ...event, timeout_ms: 4000 }), /client event/);
+  assert.throws(() => validateClientEvent({ ...event, text: 42 }), /text/);
+});

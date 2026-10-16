@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::gate::{
     PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
     PermissionRequest, PermissionResponse, PromptWorker,
@@ -31,7 +32,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// keeps resolving. `TuiPermissionGate` (below) still constructs it.
 use tui_core::permission_bridge::PermissionExchange;
 
-type PolicyRuleAuthority = dyn Fn(&str, &serde_json::Value) -> bool + Send + Sync;
+type PolicyRuleAuthority = dyn Fn(&str, &Utf16JsonProjection) -> bool + Send + Sync;
 
 /// Orchestrator-side permission gate that forwards each `check` call to
 /// the TUI over an mpsc channel and awaits a oneshot reply.
@@ -106,7 +107,7 @@ impl PermissionGate for TuiPermissionGate {
             .store(enabled, std::sync::atomic::Ordering::Release);
     }
 
-    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+    async fn check(&self, name: &str, input: &Utf16JsonProjection) -> PermissionDecision {
         // Main-thread call — no worker attribution.
         self.check_with_worker(name, input, None).await
     }
@@ -114,7 +115,7 @@ impl PermissionGate for TuiPermissionGate {
     async fn check_with_worker(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
@@ -137,7 +138,7 @@ impl PermissionGate for TuiPermissionGate {
     async fn check_with_context(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         match self
@@ -170,7 +171,7 @@ impl TuiPermissionGate {
     async fn check_with_context_impl(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
         suppress_always_allow_rule: bool,
         permission_persistence: Option<
@@ -234,11 +235,7 @@ impl TuiPermissionGate {
         let default_decision = permission::tool_default(name);
         let request = if name == "ExitPlanMode" {
             PermissionRequest::ExitPlanMode {
-                plan: input
-                    .get("plan")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                plan: input.string_at("/plan").unwrap_or_default().to_string(),
             }
         } else {
             PermissionRequest::ToolUseConfirm {
@@ -276,12 +273,12 @@ impl TuiPermissionGate {
         if self.event_tx.send(exchange).await.is_err() {
             // TUI is gone — fail closed.
             return PermissionOutcome::Deny {
-                reason: "permission request could not be delivered".to_string(),
+                reason: "permission request could not be delivered".into(),
             };
         }
         let Ok(response) = rx.await else {
             return PermissionOutcome::Deny {
-                reason: "permission request was not resolved".to_string(),
+                reason: "permission request was not resolved".into(),
             };
         };
 
@@ -365,7 +362,7 @@ impl TuiPermissionGate {
                 decision_classification: None,
             },
             PermissionResponse::Deny => PermissionOutcome::Deny {
-                reason: "user denied via dialog".to_string(),
+                reason: "user denied via dialog".into(),
             },
         }
     }
@@ -375,6 +372,11 @@ impl TuiPermissionGate {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn source_json(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value)
+            .expect("test JSON values must form valid source projections")
+    }
 
     #[tokio::test]
     async fn tui_gate_sends_request_and_receives_response() {
@@ -395,7 +397,9 @@ mod tests {
             let _ = ex.resp_tx.send(PermissionResponse::AllowOnce);
         });
 
-        let decision = gate.check("Bash", &json!({"command": "ls"})).await;
+        let decision = gate
+            .check("Bash", &source_json(json!({"command": "ls"})))
+            .await;
         assert_eq!(decision, PermissionDecision::Allow);
         tui_task.await.unwrap();
 
@@ -420,7 +424,7 @@ mod tests {
         let decision = gate
             .check_with_worker(
                 "Bash",
-                &json!({"command": "ls"}),
+                &source_json(json!({"command": "ls"})),
                 Some(PromptWorker {
                     name: "researcher".to_string(),
                     team: Some("alpha".to_string()),
@@ -438,7 +442,9 @@ mod tests {
         let rules = Arc::new(Mutex::new(vec![PermissionRule::allow_tool_session("Bash")]));
         let gate = TuiPermissionGate::new(event_tx, rules.clone());
 
-        let decision = gate.check("Bash", &json!({"command": "ls"})).await;
+        let decision = gate
+            .check("Bash", &source_json(json!({"command": "ls"})))
+            .await;
         assert_eq!(decision, PermissionDecision::Allow);
         // No event should have been sent to the TUI.
         assert!(event_rx.try_recv().is_err());
@@ -463,10 +469,10 @@ mod tests {
         });
         cwd.change_cwd(second.path().to_owned());
         let ctx = PermissionCheckContext {
-            permission_suggestions: Some(json!([{
+            permission_suggestions: Some(source_json(json!([{
                 "type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "git diff *"}],
                 "behavior": "allow", "destination": "localSettings"
-            }])),
+            }]))),
             ..Default::default()
         };
         let responder = tokio::spawn(async move {
@@ -478,7 +484,11 @@ mod tests {
                 .unwrap();
         });
         let outcome = gate
-            .check_with_context("Bash", &json!({"command": "git diff --stat"}), &ctx)
+            .check_with_context(
+                "Bash",
+                &source_json(json!({"command": "git diff --stat"})),
+                &ctx,
+            )
             .await;
         assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
         responder.await.unwrap();
@@ -504,14 +514,14 @@ mod tests {
         let rules = Arc::new(Mutex::new(Vec::new()));
         let gate = TuiPermissionGate::new(event_tx, rules.clone());
         let ctx = PermissionCheckContext {
-            permission_suggestions: Some(json!([
+            permission_suggestions: Some(source_json(json!([
                 {
                     "type": "addRules",
                     "rules": [{"toolName": "Bash", "ruleContent": "git diff *"}],
                     "behavior": "allow",
                     "destination": "session"
                 }
-            ])),
+            ]))),
             ..Default::default()
         };
 
@@ -526,7 +536,7 @@ mod tests {
             let _ = ex.resp_tx.send(PermissionResponse::AllowAlways);
         });
         let outcome = gate
-            .check_with_context("Bash", &json!({"command": "git status"}), &ctx)
+            .check_with_context("Bash", &source_json(json!({"command": "git status"})), &ctx)
             .await;
         let PermissionOutcome::Allow {
             permission_updates, ..
@@ -534,15 +544,24 @@ mod tests {
         else {
             panic!("expected allow outcome");
         };
-        assert_eq!(
-            permission_updates,
-            vec![ctx.permission_suggestions.unwrap()[0].clone()]
-        );
+        let expected_update = ctx
+            .permission_suggestions
+            .as_ref()
+            .and_then(|suggestions| suggestions.subprojection("/0").ok())
+            .expect("the test context contains one exact update");
+        assert_eq!(permission_updates, vec![expected_update]);
         tui_task.await.unwrap();
 
         let stored = rules.lock().await;
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].value.rule_content.as_deref(), Some("git diff *"));
+        assert_eq!(
+            stored[0]
+                .value
+                .rule_content
+                .as_ref()
+                .and_then(|content| content.string_at("")),
+            Some("git diff *")
+        );
     }
 
     // ===== §27b: `check_with_context` / `suppress_always_allow_rule` =====
@@ -566,7 +585,9 @@ mod tests {
             assert_eq!(ex.permission_persistence, None);
             let _ = ex.resp_tx.send(PermissionResponse::AllowOnce);
         });
-        let _ = gate.check_with_worker("Bash", &json!({}), None).await;
+        let _ = gate
+            .check_with_worker("Bash", &source_json(json!({})), None)
+            .await;
         tui_task.await.unwrap();
     }
 
@@ -595,7 +616,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = gate
-            .check_with_context("mcp__server__tool", &json!({}), &ctx)
+            .check_with_context("mcp__server__tool", &source_json(json!({})), &ctx)
             .await;
         assert_eq!(
             outcome,
@@ -623,16 +644,16 @@ mod tests {
         });
         let ctx = permission::gate::PermissionCheckContext {
             requires_user_interaction: true,
-            permission_suggestions: Some(json!([{
+            permission_suggestions: Some(source_json(json!([{
                 "type": "addRules",
                 "rules": [{"toolName": "mcp__server__tool"}],
                 "behavior": "allow",
                 "destination": "session"
-            }])),
+            }]))),
             ..Default::default()
         };
         let outcome = gate
-            .check_with_context("mcp__server__tool", &json!({}), &ctx)
+            .check_with_context("mcp__server__tool", &source_json(json!({})), &ctx)
             .await;
         assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
         tui_task.await.unwrap();
@@ -657,16 +678,16 @@ mod tests {
                 .unwrap();
         });
         let ctx = PermissionCheckContext {
-            permission_suggestions: Some(json!([{
+            permission_suggestions: Some(source_json(json!([{
                 "type": "addRules",
                 "rules": [{"toolName": "Bash", "ruleContent": "git diff *"}],
                 "behavior": "allow",
                 "destination": "localSettings"
-            }])),
+            }]))),
             ..Default::default()
         };
         let outcome = gate
-            .check_with_context("Bash", &json!({"command": "git diff"}), &ctx)
+            .check_with_context("Bash", &source_json(json!({"command": "git diff"})), &ctx)
             .await;
         task.await.unwrap();
         assert!(rules.lock().await.is_empty());
@@ -692,7 +713,7 @@ mod tests {
         let outcome = gate
             .check_with_context(
                 "Bash",
-                &json!({"command": "git status"}),
+                &source_json(json!({"command": "git status"})),
                 &Default::default(),
             )
             .await;
@@ -714,7 +735,7 @@ mod tests {
             ..Default::default()
         };
         let task = tokio::spawn(async move {
-            gate.check_with_context("Bash", &json!({"command": "echo hi"}), &ctx)
+            gate.check_with_context("Bash", &source_json(json!({"command": "echo hi"})), &ctx)
                 .await
         });
         let exchange = event_rx.recv().await.unwrap();
@@ -743,8 +764,12 @@ mod tests {
             ..Default::default()
         };
         let task = tokio::spawn(async move {
-            gate.check_with_context("ExitPlanMode", &json!({"plan": "1. Ship it"}), &ctx)
-                .await
+            gate.check_with_context(
+                "ExitPlanMode",
+                &source_json(json!({"plan": "1. Ship it"})),
+                &ctx,
+            )
+            .await
         });
         let exchange = event_rx.recv().await.unwrap();
         match exchange.request {
@@ -775,7 +800,7 @@ mod tests {
             ..Default::default()
         };
         let task = tokio::spawn(async move {
-            gate.check_with_context("Bash", &json!({"command": "echo hi"}), &ctx)
+            gate.check_with_context("Bash", &source_json(json!({"command": "echo hi"})), &ctx)
                 .await
         });
         let exchange = event_rx.recv().await.unwrap();
@@ -833,10 +858,11 @@ mod tests {
             let ex = event_rx.recv().await.unwrap();
             let _ = ex.resp_tx.send(PermissionResponse::Deny);
         });
-        let decision = gate.check("Bash", &json!({})).await;
+        let decision = gate.check("Bash", &source_json(json!({}))).await;
         match decision {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("user denied"), "got: {reason}");
+                let text = reason.string_at("").expect("deny reason is source text");
+                assert!(text.contains("user denied"), "got: {text}");
             }
             PermissionDecision::Allow => panic!("expected Deny"),
         }
@@ -854,16 +880,17 @@ mod tests {
             // Drop resp_tx without sending anything.
             drop(ex.resp_tx);
         });
-        let decision = gate.check("Bash", &json!({})).await;
+        let decision = gate.check("Bash", &source_json(json!({}))).await;
         match decision {
             PermissionDecision::Deny { reason } => {
                 // G006: this reason can reach a (possibly foreign) model as
                 // raw tool-error text — model-neutral copy, no
                 // transport-internal jargon.
-                assert_eq!(reason, "permission request was not resolved");
+                let text = reason.string_at("").expect("deny reason is source text");
+                assert_eq!(text, "permission request was not resolved");
                 assert!(
-                    !reason.contains("TUI") && !reason.contains("dropped"),
-                    "got: {reason}"
+                    !text.contains("TUI") && !text.contains("dropped"),
+                    "got: {text}"
                 );
             }
             PermissionDecision::Allow => panic!("expected Deny"),
@@ -901,7 +928,9 @@ mod tests {
             ex.resp_tx.send(PermissionResponse::AllowOnce).unwrap();
         });
 
-        let decision = gate.check("Write", &json!({"file_path": "a.txt"})).await;
+        let decision = gate
+            .check("Write", &source_json(json!({"file_path": "a.txt"})))
+            .await;
         assert!(matches!(decision, PermissionDecision::Allow));
         responder.await.unwrap();
     }
@@ -924,7 +953,7 @@ mod tests {
             ex.resp_tx.send(PermissionResponse::Deny).unwrap();
         });
 
-        let decision = gate.check("Write", &json!({})).await;
+        let decision = gate.check("Write", &source_json(json!({}))).await;
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
         responder.await.unwrap();
     }
@@ -943,7 +972,9 @@ mod tests {
         let policy = Arc::new(PermissionPolicy::new(PermissionMode::Default));
         let gate = permission::PolicyPermissionGate::new(policy, inner);
 
-        let decision = gate.check("Read", &json!({"file_path": "a.txt"})).await;
+        let decision = gate
+            .check("Read", &source_json(json!({"file_path": "a.txt"})))
+            .await;
         assert!(matches!(decision, PermissionDecision::Allow));
         // No exchange should have been emitted.
         assert!(
@@ -968,14 +999,17 @@ mod tests {
         let rules = Arc::new(Mutex::new(Vec::new()));
         let gate = TuiPermissionGate::new(event_tx, rules);
 
-        let decision = gate.check("Bash", &json!({"command": "ls"})).await;
+        let decision = gate
+            .check("Bash", &source_json(json!({"command": "ls"})))
+            .await;
         let PermissionDecision::Deny { reason } = decision else {
             panic!("expected deny, got {decision:?}");
         };
+        let text = reason.string_at("").expect("deny reason is source text");
         assert!(
-            !reason.contains("TUI"),
-            "deny reason must not leak transport-internal jargon to the model: {reason:?}"
+            !text.contains("TUI"),
+            "deny reason must not leak transport-internal jargon to the model: {text:?}"
         );
-        assert_eq!(reason, "permission request could not be delivered");
+        assert_eq!(text, "permission request could not be delivered");
     }
 }

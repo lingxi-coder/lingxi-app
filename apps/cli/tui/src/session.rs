@@ -5,6 +5,8 @@
 //! Backend-neutral plain data — no handles, no async on the render path,
 //! mirroring the iocraft screens' "capture a value at open time" contract.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
 /// One row in a read-only listing screen (`/mcp`, `/hooks`, `/agents`): a bold
 /// title line and an optional dim detail line beneath it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -138,7 +140,7 @@ pub fn connected_model_rows(
 pub fn connected_model_rows_restricted(
     all: &[ModelRow],
     availability: &std::collections::BTreeMap<String, bool>,
-    allowlist: Option<&[String]>,
+    allowlist: Option<&Utf16JsonProjection>,
     overrides: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Vec<ModelRow> {
     let current_provider = all
@@ -258,7 +260,7 @@ pub struct SessionInfo {
     /// enterprise policy tier restricts model selection, the `/model` picker
     /// filters out barred rows (keeping the current model selectable). `None`
     /// (the default install) = no restriction — the picker is unfiltered.
-    pub model_allowlist: Option<Vec<String>>,
+    pub model_allowlist: Option<Utf16JsonProjection>,
     /// Managed `modelOverrides` reverse-map (Anthropic id → provider id) applied
     /// alongside [`Self::model_allowlist`] so a Bedrock-ARN row still matches an
     /// allowlisted Anthropic id. Empty (the default) = no reverse-mapping.
@@ -482,7 +484,8 @@ mod tests {
         let mut avail = BTreeMap::new();
         avail.insert("anthropic".to_string(), true);
         // Managed allowlist permits only the opus family.
-        let allow = vec!["opus".to_string()];
+        let allow =
+            Utf16JsonProjection::parse(r#"["opus"]"#).expect("test allowlist is valid JSON");
 
         let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
         let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
@@ -524,7 +527,7 @@ mod tests {
         ];
         let mut avail = BTreeMap::new();
         avail.insert("anthropic".to_string(), true);
-        let allow: Vec<String> = Vec::new();
+        let allow = Utf16JsonProjection::parse("[]").expect("empty allowlist is valid JSON");
         let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
         let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
         assert_eq!(
@@ -532,5 +535,26 @@ mod tests {
             vec!["claude-opus-4-8"],
             "only the current model survives"
         );
+    }
+
+    #[test]
+    fn allowlist_keeps_lone_surrogates_distinct_from_replacement_characters() {
+        use std::collections::BTreeMap;
+
+        let all = vec![
+            row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", true),
+            row("Malformed Opus", "claude-opus-\u{fffd}", "anthropic", false),
+        ];
+        let mut avail = BTreeMap::new();
+        avail.insert("anthropic".to_string(), true);
+        let allow = Utf16JsonProjection::parse(r#"["claude-opus-\ud800"]"#)
+            .expect("lone-surrogate allowlist entry is valid JSON");
+
+        let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
+        let ids: Vec<&str> = shown
+            .iter()
+            .map(|model| model.request_model.as_str())
+            .collect();
+        assert_eq!(ids, vec!["claude-sonnet-5"]);
     }
 }

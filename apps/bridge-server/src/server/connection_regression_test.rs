@@ -31,7 +31,7 @@ pub(super) async fn captured_sink() -> (bridge::McpEndpoint, Socket, FrameSink) 
     let frame = Frame::Request(BridgeRequest {
         id: 0,
         method: "capture".into(),
-        params: serde_json::json!({}),
+        params: Utf16JsonProjection::parse("{}").expect("empty request params are valid JSON"),
     });
     socket
         .send(Message::Text(serde_json::to_string(&frame).unwrap()))
@@ -324,24 +324,24 @@ async fn cancelled_cron_request_is_removed_from_the_replay_buffer() {
 }
 
 struct InputDriver {
-    entries: mpsc::UnboundedSender<(String, Vec<ImageRefDto>, CancellationToken)>,
+    entries: mpsc::UnboundedSender<(Utf16JsonProjection, Vec<ImageRefDto>, CancellationToken)>,
     release_seed: Notify,
 }
 #[async_trait]
 impl TurnDriver for InputDriver {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: Utf16JsonProjection) {
         panic!("metadata input must keep its complete entrypoint");
     }
     async fn run_turn_with_images_and_cancel(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
         self.entries
             .send((text.clone(), images, cancel.clone()))
             .unwrap();
-        if text == "seed" {
+        if text.string_units("") == Some("seed".encode_utf16().collect()) {
             self.release_seed.notified().await;
         } else {
             cancel.cancelled().await;
@@ -352,7 +352,7 @@ impl TurnDriver for InputDriver {
 fn input_connection() -> (
     BridgeConnection,
     Arc<InputDriver>,
-    mpsc::UnboundedReceiver<(String, Vec<ImageRefDto>, CancellationToken)>,
+    mpsc::UnboundedReceiver<(Utf16JsonProjection, Vec<ImageRefDto>, CancellationToken)>,
 ) {
     let (entries, receiver) = mpsc::unbounded_channel();
     let driver = Arc::new(InputDriver {
@@ -364,8 +364,12 @@ fn input_connection() -> (
     (connection, driver, receiver)
 }
 async fn input_started(
-    receiver: &mut mpsc::UnboundedReceiver<(String, Vec<ImageRefDto>, CancellationToken)>,
-) -> (String, Vec<ImageRefDto>, CancellationToken) {
+    receiver: &mut mpsc::UnboundedReceiver<(
+        Utf16JsonProjection,
+        Vec<ImageRefDto>,
+        CancellationToken,
+    )>,
+) -> (Utf16JsonProjection, Vec<ImageRefDto>, CancellationToken) {
     tokio::time::timeout(Duration::from_secs(2), receiver.recv())
         .await
         .unwrap()
@@ -402,7 +406,10 @@ async fn queued_images_and_turn_id_survive_mid_turn_drain_and_targeted_cancel() 
     );
     driver.release_seed.notify_one();
     let (text, attachments, follow_cancel) = input_started(&mut entries).await;
-    assert_eq!(text, "follow-up");
+    assert_eq!(
+        text.string_units(""),
+        Some("follow-up".encode_utf16().collect())
+    );
     assert_eq!(attachments, images());
     assert_eq!(connection.active_turn.turn_id(), Some(2));
     assert!(
@@ -454,7 +461,13 @@ async fn uncorrelated_text_keeps_legacy_mid_turn_delivery() {
         .handle_send_prompt("folded text".into(), Vec::new(), None)
         .await;
     assert_eq!(
-        connection.queue.take_mid_turn_prompt().await.as_deref(),
+        connection
+            .queue
+            .take_mid_turn_prompt()
+            .await
+            .as_ref()
+            .and_then(|text| text.string_at(""))
+            .as_deref(),
         Some("folded text")
     );
     assert!(connection.queued_prompt_payloads.lock().await.is_empty());
@@ -1039,6 +1052,110 @@ async fn mod_ui_request_uses_correlated_unscoped_reply_while_turn_is_active() {
         Frame::Event(ClientEvent::UiClientFrame { runtime_id, .. })
             if runtime_id == "runtime-1"
     ));
+
+    connection.close_connection(Some(&sink)).await;
+    drop(socket);
+    endpoint.shutdown().await;
+}
+
+struct ModUiClientModuleDriver {
+    requests: std::sync::Mutex<Vec<Utf16JsonProjection>>,
+}
+
+#[async_trait]
+impl TurnDriver for ModUiClientModuleDriver {
+    async fn run_turn(&self, _prompt: Utf16JsonProjection) {}
+
+    async fn mod_ui_control(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        self.requests.lock().unwrap().push(request.clone());
+        let plugin = request.string_at("/plugin").unwrap_or_default();
+        if plugin == "review" {
+            Ok(lingxi_core::host::orchestrator::ModUiControlOutcome {
+                response: Utf16JsonProjection::parse(
+                    r#"{"plugin":"review","hash":"module-hash","modules":[{"module":"hooks/board.tsx","entry":"surface:///hooks/board.tsx","component":"default"}]}"#,
+                )
+                .expect("static client-module manifest is valid JSON"),
+                render_revision: None,
+                client_runtime_epochs: Default::default(),
+                client_state_token: None,
+            })
+        } else {
+            Err(lingxi_core::host::HandleError::ActionFailed(format!(
+                "ui_client_module: plugin {plugin} is not loaded or its hooks module names no surface module"
+            )))
+        }
+    }
+}
+
+#[tokio::test]
+async fn mod_ui_client_module_forwards_driver_success_and_missing_plugin_error_while_turn_active() {
+    let driver = Arc::new(ModUiClientModuleDriver {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let unbound_connection = BridgeConnection::new();
+    let gate = Arc::new(AdapterPermissionGate::new(
+        unbound_connection.permission_sink(),
+    ));
+    let connection = unbound_connection.bind(gate, driver.clone());
+    let (endpoint, mut socket, sink) = captured_sink().await;
+    connection.close_connection(Some(&sink)).await;
+    assert!(connection.claim_outbound(&sink).await);
+    connection.handle_hello(3, hello()).await;
+    assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+
+    let _turn_owner = connection.active_turn.begin(Some(7));
+    connection.turn_running.store(true, Ordering::SeqCst);
+    connection
+        .dispatch(ClientCommand::UiClientModule {
+            request_id: "module-review".into(),
+            plugin: "review".into(),
+        })
+        .await;
+    match next_frame(&mut socket).await {
+        Frame::Event(ClientEvent::UiControlResult {
+            request_id,
+            response_json: Some(response_json),
+            metadata_json: None,
+            error: None,
+        }) => {
+            assert_eq!(request_id, "module-review");
+            let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+            assert_eq!(response["plugin"], "review");
+            assert_eq!(response["modules"][0]["module"], "hooks/board.tsx");
+        }
+        frame => panic!("expected successful module manifest reply, got {frame:?}"),
+    }
+
+    connection
+        .dispatch(ClientCommand::UiClientModule {
+            request_id: "module-missing".into(),
+            plugin: "unavailable-plugin".into(),
+        })
+        .await;
+    match next_frame(&mut socket).await {
+        Frame::Event(ClientEvent::UiControlResult {
+            request_id,
+            response_json: None,
+            metadata_json: None,
+            error: Some(error),
+        }) => {
+            assert_eq!(request_id, "module-missing");
+            assert!(error.contains("unavailable-plugin is not loaded"));
+        }
+        frame => panic!("expected unavailable-plugin error reply, got {frame:?}"),
+    }
+
+    let requests = driver.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.string_at("/subtype") == Some("ui_client_module")));
+    assert_eq!(requests[0].string_at("/plugin"), Some("review"));
+    assert_eq!(requests[1].string_at("/plugin"), Some("unavailable-plugin"));
 
     connection.close_connection(Some(&sink)).await;
     drop(socket);

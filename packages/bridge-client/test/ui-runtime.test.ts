@@ -335,15 +335,49 @@ test('UI control metadata preserves native render revision and host client lifec
 });
 
 test('UI frames and invalidations stay scoped to their owning session', () => {
-  assert.deepEqual(parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify({
-    renderRevision: 2, frameSequence: 2, tree: { type: 'text', text: 'hello' }, hasPointerListener: false, hasKeyListener: true,
-  })), {
-    sessionId: 'session-a', runtimeId: 'runtime-a', frame: {
-      renderRevision: 2, frameSequence: 2, tree: { type: 'text', text: 'hello' }, hasPointerListener: false, hasKeyListener: true,
-    },
+  const clientKey = 'client-\u0000\uD800';
+  const parent = { surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-a' } as const;
+  const client = { plugin: 'plugin-a', key: clientKey, module: 'main' } as const;
+  const successfulFrame = {
+    renderRevision: 2,
+    frameSequence: 2,
+    tree: { type: 'text', text: 'hello' },
+    hasPointerListener: false,
+    hasKeyListener: true,
+    parent,
+    client,
+  } as const;
+  const parsedFrame = parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify(successfulFrame));
+  assert.deepEqual(parsedFrame, {
+    sessionId: 'session-a', runtimeId: 'runtime-a', frame: successfulFrame,
   });
+  if ('fault' in parsedFrame.frame) assert.fail('successful frame was parsed as a worker fault');
+  assert.equal(parsedFrame.frame.client.key, clientKey);
+  assert.equal(parsedFrame.frame.client.key.charCodeAt(7), 0x0000);
+  assert.equal(parsedFrame.frame.client.key.charCodeAt(8), 0xd800);
+
+  const emptyKeyFrame = { ...successfulFrame, client: { ...client, key: '' } };
+  const parsedEmptyKey = parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify(emptyKeyFrame));
+  if ('fault' in parsedEmptyKey.frame) assert.fail('successful frame was parsed as a worker fault');
+  assert.equal(parsedEmptyKey.frame.client.key, '');
+
+  const frameWithoutParent = { ...successfulFrame } as Record<string, unknown>;
+  delete frameWithoutParent['parent'];
+  assert.throws(() => parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify(frameWithoutParent)), /UI client parent identity/);
+  const frameWithoutClient = { ...successfulFrame } as Record<string, unknown>;
+  delete frameWithoutClient['client'];
+  assert.throws(() => parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify(frameWithoutClient)), /UI client identity/);
   assert.throws(() => parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify({
-    renderRevision: 2, tree: { type: 'text', text: 'missing sequence' }, hasPointerListener: false, hasKeyListener: true,
+    ...successfulFrame, parent: { ...parent, surface: 'mobile' },
+  })), /parent surface/);
+  assert.throws(() => parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify({
+    ...successfulFrame, client: { ...client, key: 42 },
+  })), /UI client key/);
+  assert.throws(() => parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify({
+    ...successfulFrame, client: { ...client, future_identity_field: true },
+  })), /UI client identity contains unsupported fields/);
+  assert.throws(() => parseUiFrameEvent('session-a', 'runtime-a', JSON.stringify({
+    ...successfulFrame, frameSequence: undefined,
   })), /frame sequence/);
   const workerFault = {
     renderRevision: 2,

@@ -67,7 +67,7 @@ cron = { workspace = true }
 harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
 cli = { path = "../cli/host" }
 plugin = { workspace = true }
-skill-api = { workspace = true }
+skill = { workspace = true }
 hooks = { workspace = true }
 mcp = { workspace = true }
 # `computer_access_bridge::ComputerAccessExchange` — the channel item type for
@@ -97,6 +97,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 
 [dev-dependencies]
+harness-runtime = { workspace = true, default-features = true, features = ["desktop", "test-support"] }
 client = { workspace = true, features = ["test-support"] }
 # Codex slot router tests implement the token refresh transport.
 lingxi-llm-client = { workspace = true }

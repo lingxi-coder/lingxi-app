@@ -72,4 +72,45 @@ class ProviderImportTest {
         assertTrue(credentialIndex>=0 && writeIndex>credentialIndex)
         assertFalse((commands[writeIndex] as ClientCommand.UpdateSettings).patchJson.contains("fixture-secret"))
     }
+    @Test fun contextPoliciesSurviveImportAndRejectInvalidBudgets() {
+        fun document(context: String): String = """{"providers":{"custom":{"type":"openai","baseUrl":"https://example.test/v1","models":[{"id":"m","metadata":{"context":$context}}]}}}"""
+        for (context in listOf(
+            """{"application":{"mode":"auto"}}""",
+            """{"application":{"mode":"long"}}""",
+            """{"sharedWindow":true,"thinkingMaxInputTokens":8192,"recommendation":{"inputTokens":4000,"source":"https://example.test/model","verifiedAt":"2026-10-15"},"application":{"mode":"custom","input_tokens":200000}}""",
+        )) {
+            val entry = parseProviderImport(document(context), JSONObject()).entries.single()
+            assertNull(entry.error)
+            val merged = mergeProviderImport(JSONObject(), listOf(entry))
+            val saved = merged.getJSONObject("custom").getJSONArray("models").getJSONObject(0).getJSONObject("metadata").getJSONObject("context")
+            assertEquals(JSONObject(context).toString(), saved.toString())
+        }
+        for (context in listOf(
+            """{"sharedWindow":"true"}""", """{"thinkingMaxInputTokens":0}""",
+            """{"recommendation":{"inputTokens":3000}}""",
+            """{"application":{"mode":"custom","input_tokens":0}}""",
+            """{"application":{"mode":"custom","input_tokens":"8192"}}""",
+            """{"application":{"mode":"auto","input_tokens":8192}}""",
+            """{"application":{"mode":"unknown"}}""",
+        )) {
+            val entry = parseProviderImport(document(context), JSONObject()).entries.single()
+            assertNotNull(entry.error)
+            assertThrows(IllegalArgumentException::class.java) { mergeProviderImport(JSONObject(), listOf(entry)) }
+        }
+    }
+
+    @Test fun outputDefaultsRequirePositiveU32AndAllowRuntimeClamping() {
+        fun document(budget: String): String = """{"providers":{"custom":{"type":"openai","baseUrl":"https://example.test/v1","models":[{"id":"m","metadata":{"maxOutputTokens":4096,"applicationOutputTokens":$budget}}]}}}"""
+        for (budget in listOf("null", "1", "8192", "4294967295")) {
+            val entry = parseProviderImport(document(budget), JSONObject()).entries.single()
+            assertNull(entry.error)
+            assertTrue(mergeProviderImport(JSONObject(), listOf(entry)).has("custom"))
+        }
+        for (budget in listOf("0", "-1", "1.5", "4294967296", "true", "\"8192\"")) {
+            val entry = parseProviderImport(document(budget), JSONObject()).entries.single()
+            assertNotNull(entry.error)
+            assertThrows(IllegalArgumentException::class.java) { mergeProviderImport(JSONObject(), listOf(entry)) }
+        }
+    }
+
 }

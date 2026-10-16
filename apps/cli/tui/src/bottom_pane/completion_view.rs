@@ -10,6 +10,7 @@
 //! coexists with the composer (typing keeps filtering), so its state stays
 //! with the composer owner (`RataApp` today, `BottomPane` in plan Phase 5).
 
+use client::protocol::text::ClientTextDto;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -25,10 +26,19 @@ const MAX_ROWS: usize = 6;
 pub struct CompletionItem {
     /// The text shown in the popup's left column.
     pub label: String,
-    /// The text inserted when the item is chosen.
-    pub insert: String,
+    /// Exact source text inserted when the item is chosen. `display()` is only
+    /// for UI rendering; the composer receives these units unchanged.
+    pub insert: ClientTextDto,
     /// A dim right-column hint (command description, or `""`).
     pub desc: String,
+}
+
+impl CompletionItem {
+    /// Display text for tests and human-visible selection feedback.
+    #[must_use]
+    pub fn display_insert(&self) -> String {
+        self.insert.display()
+    }
 }
 
 /// Emoji shortcode candidates supported by the composer.  Keeping this table
@@ -88,7 +98,7 @@ pub fn emoji_items(fragment: &str) -> Vec<CompletionItem> {
         .filter(|(name, _)| name.starts_with(&query))
         .map(|(name, glyph)| CompletionItem {
             label: format!(":{name}:  {glyph}"),
-            insert: (*glyph).to_string(),
+            insert: (*glyph).into(),
             desc: String::new(),
         })
         .collect()
@@ -117,20 +127,20 @@ pub fn exact_emoji(fragment: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrySlashRow {
     /// Command name WITH the leading `/` (e.g. `/loop`).
-    pub name: String,
+    pub name: ClientTextDto,
     /// Full description (the model-facing text; used for match candidacy).
-    pub description: String,
+    pub description: ClientTextDto,
     /// Compact `/`-menu label (reference `menuDescription`). When present the
     /// popup shows this instead of `description` (`menuDescription ??
     /// description`); `None` falls back to `description`. Matching still uses
     /// `description`.
-    pub menu_description: Option<String>,
+    pub menu_description: Option<ClientTextDto>,
     /// Alternate names WITH the leading `/`.
-    pub aliases: Vec<String>,
+    pub aliases: Vec<ClientTextDto>,
     pub hidden: bool,
     pub replaces_builtin: bool,
-    pub argument_hint: Option<String>,
-    pub argument_names: Vec<String>,
+    pub argument_hint: Option<ClientTextDto>,
+    pub argument_names: Vec<ClientTextDto>,
 }
 
 /// A popup candidate: either a static builtin or a registry-backed command.
@@ -142,19 +152,27 @@ enum Cand<'a> {
 }
 
 impl Cand<'_> {
-    /// Command name WITH the leading `/`.
-    fn name(&self) -> &str {
+    /// Command name WITH the leading `/`, kept as exact UTF-16 for matching
+    /// and ordering. Display conversion belongs at the popup-label boundary.
+    fn name_units(&self) -> Vec<u16> {
         match self {
-            Cand::Builtin(c) => c.name,
-            Cand::Registry(r) => &r.name,
+            Cand::Builtin(c) => c.name.encode_utf16().collect(),
+            Cand::Registry(r) => r.name.code_units.clone(),
+        }
+    }
+
+    fn source_name(&self) -> ClientTextDto {
+        match self {
+            Cand::Builtin(c) => (*c.name).into(),
+            Cand::Registry(r) => r.name.clone(),
         }
     }
 
     /// Full description — used for match candidacy (the searchable text).
-    fn describe(&self) -> String {
+    fn description_units(&self) -> Vec<u16> {
         match self {
-            Cand::Builtin(c) => c.describe(),
-            Cand::Registry(r) => r.description.clone(),
+            Cand::Builtin(c) => c.describe().encode_utf16().collect(),
+            Cand::Registry(r) => r.description.code_units.clone(),
         }
     }
 
@@ -166,18 +184,116 @@ impl Cand<'_> {
             Cand::Builtin(c) => c.describe(),
             Cand::Registry(r) => r
                 .menu_description
-                .clone()
-                .unwrap_or_else(|| r.description.clone()),
+                .as_ref()
+                .map(ClientTextDto::display)
+                .unwrap_or_else(|| r.description.display()),
         }
     }
 
-    /// Alternate names WITH the leading `/`.
-    fn aliases(&self) -> Vec<&str> {
+    /// Alternate names WITH the leading `/`, kept as exact UTF-16.
+    fn aliases(&self) -> Vec<Vec<u16>> {
         match self {
-            Cand::Builtin(c) => c.aliases.iter().copied().collect(),
-            Cand::Registry(r) => r.aliases.iter().map(String::as_str).collect(),
+            Cand::Builtin(c) => c
+                .aliases
+                .iter()
+                .map(|alias| alias.encode_utf16().collect())
+                .collect(),
+            Cand::Registry(r) => r
+                .aliases
+                .iter()
+                .map(|alias| alias.code_units.clone())
+                .collect(),
         }
     }
+}
+
+/// Lowercase valid Unicode scalars while preserving unpaired UTF-16 units.
+/// This keeps case-insensitive command matching from making malformed source
+/// text collide with the replacement character used only for display.
+fn lowercase_units(units: &[u16]) -> Vec<u16> {
+    fn flush_valid_run(run: &mut String, lowered: &mut Vec<u16>) {
+        let lowercase = run.to_lowercase();
+        lowered.extend(lowercase.encode_utf16());
+        run.clear();
+    }
+
+    let mut lowered = Vec::with_capacity(units.len());
+    let mut valid_run = String::new();
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => valid_run.push(character),
+            Err(error) => {
+                flush_valid_run(&mut valid_run, &mut lowered);
+                lowered.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    flush_valid_run(&mut valid_run, &mut lowered);
+    lowered
+}
+
+fn bare_units(units: &[u16]) -> &[u16] {
+    units.strip_prefix(&[b'/' as u16]).unwrap_or(units)
+}
+
+fn contains_units(haystack: &[u16], needle: &[u16]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn description_has_word_prefix(description: &[u16], query: &[u16]) -> bool {
+    fn matches_word(word: &[u16], query: &[u16]) -> bool {
+        let mut characters: Vec<(Vec<u16>, bool)> = Vec::new();
+        for decoded in char::decode_utf16(word.iter().copied()) {
+            match decoded {
+                Ok(character) => {
+                    let mut encoded = [0; 2];
+                    characters.push((
+                        character.encode_utf16(&mut encoded).to_vec(),
+                        character.is_alphanumeric(),
+                    ));
+                }
+                Err(error) => characters.push((vec![error.unpaired_surrogate()], false)),
+            }
+        }
+        let Some(first) = characters
+            .iter()
+            .position(|(_, alphanumeric)| *alphanumeric)
+        else {
+            return false;
+        };
+        let last = characters
+            .iter()
+            .rposition(|(_, alphanumeric)| *alphanumeric)
+            .expect("a first alphanumeric character exists");
+        let trimmed: Vec<u16> = characters[first..=last]
+            .iter()
+            .flat_map(|(units, _)| units.iter().copied())
+            .collect();
+        lowercase_units(&trimmed).starts_with(query)
+    }
+
+    let mut word = Vec::new();
+    for decoded in char::decode_utf16(description.iter().copied()) {
+        match decoded {
+            Ok(character) if character.is_whitespace() => {
+                if matches_word(&word, query) {
+                    return true;
+                }
+                word.clear();
+            }
+            Ok(character) => {
+                let mut encoded = [0; 2];
+                word.extend_from_slice(character.encode_utf16(&mut encoded));
+            }
+            Err(error) => {
+                word.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    matches_word(&word, query)
 }
 
 /// The builtin commands matching `prefix` (a `/`-led token), as completion
@@ -186,7 +302,8 @@ impl Cand<'_> {
 /// [`command_items_merged`] with an empty registry snapshot.
 #[must_use]
 pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
-    command_items_merged(prefix, &[])
+    let prefix = lingxi_core::types::utf16_json::Utf16JsonProjection::from(prefix);
+    command_items_merged(&prefix, &[])
 }
 
 /// The commands matching `prefix`, merging the static builtins with the
@@ -213,29 +330,38 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
 ///   (`findMatchedAlias`), e.g. `/quit` → `/exit (quit)`.
 #[must_use]
 pub fn command_items_merged<'a>(
-    prefix: &str,
+    prefix: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     registry: &'a [RegistrySlashRow],
 ) -> Vec<CompletionItem> {
-    if !prefix.starts_with('/') {
+    let Some(prefix_units) = prefix.string_units("") else {
+        return Vec::new();
+    };
+    if prefix_units.first().copied() != Some(b'/' as u16) {
         return Vec::new();
     }
-    let rest = &prefix[1..];
+    let rest_units = &prefix_units[1..];
     // `hasCommandArgs`: once arguments are being typed there are no command
-    // suggestions.
-    if rest.contains(char::is_whitespace) {
+    // suggestions. Inspect decoded source units so malformed UTF-16 remains
+    // distinct from the replacement character used by display rendering.
+    if char::decode_utf16(rest_units.iter().copied())
+        .any(|decoded| decoded.is_ok_and(char::is_whitespace))
+    {
         return Vec::new();
     }
-    let query = rest.to_lowercase();
+    let query = lowercase_units(rest_units);
     let replaces_builtin = |name: &str| {
-        registry
-            .iter()
-            .any(|row| row.replaces_builtin && row.name == name)
+        registry.iter().any(|row| {
+            row.replaces_builtin && row.name.code_units == name.encode_utf16().collect::<Vec<_>>()
+        })
     };
     let registry_is_available = |row: &&RegistrySlashRow| {
         row.replaces_builtin
-            || !crate::command::BUILTIN
-                .iter()
-                .any(|builtin| builtin.name == row.name)
+            || !crate::command::BUILTIN.iter().any(|builtin| {
+                builtin
+                    .name
+                    .encode_utf16()
+                    .eq(row.name.code_units.iter().copied())
+            })
     };
 
     // Registry rows whose name a builtin already owns are dropped (the builtin
@@ -261,15 +387,12 @@ pub fn command_items_merged<'a>(
                     Cand::Builtin(command)
                 }),
         );
-        commands.sort_by(|a, b| a.name().cmp(b.name()));
+        commands.sort_by_key(Cand::name_units);
         return commands
             .into_iter()
-            .map(|c| item(c.name(), c.display_desc(), None))
+            .map(|c| item_source(&c.source_name(), c.display_desc(), None))
             .collect();
     }
-
-    // Strip the leading slash from a registry name/alias for matching.
-    let bare = |name: &str| name[1..].to_lowercase();
 
     // `hiddenExact`: an unadvertised builtin typed out in full surfaces — unless
     // a visible command shares the name. Only builtins carry a hidden flag;
@@ -278,7 +401,7 @@ pub fn command_items_merged<'a>(
         .iter()
         .filter(registry_is_available)
         .filter(|row| row.hidden)
-        .find(|row| bare(&row.name) == query)
+        .find(|row| lowercase_units(bare_units(&row.name.code_units)) == query)
         .map(Cand::Registry)
         .or_else(|| {
             crate::command::BUILTIN
@@ -287,7 +410,10 @@ pub fn command_items_merged<'a>(
                 .filter(|command| {
                     !command.advertised || crate::command::is_runtime_hidden(command.name)
                 })
-                .find(|command| bare(command.name) == query)
+                .find(|command| {
+                    lowercase_units(bare_units(&command.name.encode_utf16().collect::<Vec<_>>()))
+                        == query
+                })
                 .map(|command| {
                     let command: &'a crate::command::SlashCommand = command;
                     Cand::Builtin(command)
@@ -311,26 +437,29 @@ pub fn command_items_merged<'a>(
             }),
     );
     candidates.retain(|c| {
-        bare(c.name()).contains(&query)
+        let name = lowercase_units(bare_units(&c.name_units()));
+        contains_units(&name, &query)
             || c.aliases()
                 .iter()
-                .any(|a| bare(a).to_lowercase().contains(&query))
-            || bare(c.name())
-                .split(['-', '_', ':'])
+                .any(|alias| contains_units(&lowercase_units(bare_units(alias)), &query))
+            || name
+                .split(|unit| {
+                    *unit == u16::from(b'-') || *unit == u16::from(b'_') || *unit == u16::from(b':')
+                })
                 .any(|part| part.starts_with(&query))
-            || c.describe().to_lowercase().split_whitespace().any(|word| {
-                word.trim_matches(|ch: char| !ch.is_alphanumeric())
-                    .starts_with(&query)
-            })
+            || description_has_word_prefix(&c.description_units(), &query)
     });
 
     // Rank tiers (the reference comparator, minus the Fuse-score tail).
     let tier = |c: &Cand| -> (u8, usize) {
-        let name = bare(c.name());
+        let name = lowercase_units(bare_units(&c.name_units()));
         if name == query {
             return (0, 0);
         }
-        if c.aliases().iter().any(|a| bare(a).to_lowercase() == query) {
+        if c.aliases()
+            .iter()
+            .any(|alias| lowercase_units(bare_units(alias)) == query)
+        {
             return (1, 0);
         }
         if name.starts_with(&query) {
@@ -339,14 +468,19 @@ pub fn command_items_merged<'a>(
         if let Some(alias) = c
             .aliases()
             .iter()
-            .filter(|a| bare(a).to_lowercase().starts_with(&query))
-            .min_by_key(|a| a.len())
+            .map(|alias| lowercase_units(bare_units(alias)))
+            .filter(|alias| alias.starts_with(&query))
+            .min_by_key(Vec::len)
         {
             return (3, alias.len());
         }
         (4, 0)
     };
-    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name().cmp(b.name())));
+    candidates.sort_by(|a, b| {
+        tier(a)
+            .cmp(&tier(b))
+            .then(a.name_units().cmp(&b.name_units()))
+    });
 
     let mut items: Vec<CompletionItem> = candidates
         .into_iter()
@@ -355,80 +489,112 @@ pub fn command_items_merged<'a>(
             let matched_alias = c
                 .aliases()
                 .into_iter()
-                .find(|a| bare(a).to_lowercase().starts_with(&query))
-                .map(|a| a[1..].to_string());
-            let mut suggestion = item(c.name(), c.display_desc(), matched_alias.as_deref());
-            // Native HK keeps an alias only when resolving it still returns
-            // this selected command. A different canonical name (or an earlier
-            // alias owner) must never turn completion into another command.
+                .find(|alias| lowercase_units(bare_units(alias)).starts_with(&query))
+                .map(|alias| bare_units(&alias).to_vec());
+            let mut suggestion =
+                item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref());
+            let selected_name = c.name_units();
             if matched_alias.is_some()
-                && resolve_catalog_name(&suggestion.insert, registry) != Some(c.name())
+                && resolve_catalog_name_units(&suggestion.insert.code_units, registry).as_deref()
+                    != Some(selected_name.as_slice())
             {
-                suggestion.insert = c.name().to_string();
+                suggestion.insert = c.source_name();
             }
             suggestion
         })
         .collect();
     if let Some(hidden) = hidden_exact {
-        if !items.iter().any(|i| i.insert == hidden.name()) {
-            items.insert(0, item(hidden.name(), hidden.display_desc(), None));
+        let name = hidden.source_name();
+        if !items.iter().any(|i| i.insert.code_units == name.code_units) {
+            items.insert(0, item_source(&name, hidden.display_desc(), None));
         }
     }
     items
 }
 
-pub(super) fn resolve_catalog_name<'a>(
-    name: &str,
-    registry: &'a [RegistrySlashRow],
-) -> Option<&'a str> {
-    let replaces_builtin = |name: &str| {
+/// Resolve canonical names before aliases while keeping source identity in UTF-16 units.
+/// It resolves canonical names before aliases without decoding a DTO to display text.
+pub(super) fn resolve_catalog_name_units(
+    name: &[u16],
+    registry: &[RegistrySlashRow],
+) -> Option<Vec<u16>> {
+    let replaces_builtin = |builtin: &str| {
+        let builtin_units: Vec<u16> = builtin.encode_utf16().collect();
         registry
             .iter()
-            .any(|row| row.replaces_builtin && row.name == name)
+            .any(|row| row.replaces_builtin && row.name.code_units == builtin_units)
     };
     let available = |row: &&RegistrySlashRow| {
         row.replaces_builtin
-            || !crate::command::BUILTIN
-                .iter()
-                .any(|builtin| builtin.name == row.name)
+            || !crate::command::BUILTIN.iter().any(|builtin| {
+                builtin
+                    .name
+                    .encode_utf16()
+                    .eq(row.name.code_units.iter().copied())
+            })
     };
     registry
         .iter()
         .filter(available)
-        .find(|row| row.name == name)
-        .map(|row| row.name.as_str())
+        .find(|row| row.name.code_units.as_slice() == name)
+        .map(|row| row.name.code_units.clone())
         .or_else(|| {
             crate::command::BUILTIN
                 .iter()
-                .find(|command| command.name == name && !replaces_builtin(command.name))
-                .map(|command| command.name)
+                .find(|command| {
+                    command.name.encode_utf16().eq(name.iter().copied())
+                        && !replaces_builtin(command.name)
+                })
+                .map(|command| command.name.encode_utf16().collect())
         })
         .or_else(|| {
             registry
                 .iter()
                 .filter(available)
-                .find(|row| row.aliases.iter().any(|alias| alias == name))
-                .map(|row| row.name.as_str())
+                .find(|row| {
+                    row.aliases
+                        .iter()
+                        .any(|alias| alias.code_units.as_slice() == name)
+                })
+                .map(|row| row.name.code_units.clone())
         })
         .or_else(|| {
             crate::command::BUILTIN
                 .iter()
-                .find(|command| !replaces_builtin(command.name) && command.aliases.contains(&name))
-                .map(|command| command.name)
+                .find(|command| {
+                    !replaces_builtin(command.name)
+                        && command
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.encode_utf16().eq(name.iter().copied()))
+                })
+                .map(|command| command.name.encode_utf16().collect())
         })
 }
 
-/// Build one popup row (claude-code `createCommandSuggestionItem`). `name`
-/// carries the leading `/`; `matched_alias` (without slash) is appended in
-/// parens when the user typed the alias, and preserved by completion (native HK).
-fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem {
+/// Build one popup row. The label uses safe display text, while insertion keeps
+/// either the exact canonical name or the exact source alias that was matched.
+fn item_source(
+    name: &ClientTextDto,
+    desc: String,
+    matched_alias: Option<&[u16]>,
+) -> CompletionItem {
+    let display = name.display();
     let label = match matched_alias {
-        Some(alias) => format!("{name} ({alias})"),
-        None => name.to_string(),
+        Some(alias) => format!("{display} ({})", String::from_utf16_lossy(alias)),
+        None => display,
     };
+    let insert = matched_alias.map_or_else(
+        || name.clone(),
+        |alias| {
+            let mut units = vec![b'/' as u16];
+            units.extend_from_slice(alias);
+            ClientTextDto::from_code_units(units)
+        },
+    );
     CompletionItem {
         label,
-        insert: matched_alias.map_or_else(|| name.to_string(), |alias| format!("/{alias}")),
+        insert,
         desc,
     }
 }
@@ -460,7 +626,13 @@ impl CompletionView {
 
     /// The text the highlighted item inserts.
     #[must_use]
-    pub fn selected_insert(&self) -> &str {
+    pub fn selected_insert(&self) -> String {
+        self.items[self.selected].insert.display()
+    }
+
+    /// Exact text inserted when a completion is selected.
+    #[must_use]
+    pub fn selected_source_insert(&self) -> &ClientTextDto {
         &self.items[self.selected].insert
     }
 
@@ -565,22 +737,22 @@ mod tests {
         assert_eq!(all.len(), crate::command::advertised().count());
         // "/m" matches /model + /mcp.
         let m = command_items("/m");
-        assert!(m.iter().any(|i| i.insert == "/model"));
-        assert!(m.iter().any(|i| i.insert == "/mcp"));
-        assert!(!m.iter().any(|i| i.insert == "/help"));
+        assert!(m.iter().any(|i| i.display_insert() == "/model"));
+        assert!(m.iter().any(|i| i.display_insert() == "/mcp"));
+        assert!(!m.iter().any(|i| i.display_insert() == "/help"));
         // Non-slash input yields nothing.
         assert!(command_items("model").is_empty());
         assert!(command_items("/zzz").is_empty());
         // Unadvertised registry entries never surface.
-        assert!(!all.iter().any(|i| i.insert == "/image"));
+        assert!(!all.iter().any(|i| i.display_insert() == "/image"));
     }
 
     fn rows(names: &[(&str, &str)]) -> Vec<RegistrySlashRow> {
         names
             .iter()
             .map(|(n, d)| RegistrySlashRow {
-                name: (*n).to_string(),
-                description: (*d).to_string(),
+                name: (*n).into(),
+                description: (*d).into(),
                 menu_description: None,
                 aliases: Vec::new(),
                 hidden: false,
@@ -597,7 +769,10 @@ mod tests {
         // builtin-only popup — the R1 ordering guarantee is untouched.
         for q in ["/", "/m", "/re", "/help", "/zzz", "model"] {
             assert_eq!(
-                command_items_merged(q, &[]),
+                command_items_merged(
+                    &lingxi_core::types::utf16_json::Utf16JsonProjection::from(q),
+                    &[]
+                ),
                 command_items(q),
                 "query {q:?}"
             );
@@ -609,21 +784,140 @@ mod tests {
         let reg = rows(&[("/loop", "run a task on a loop"), ("/deploy", "ship it")]);
         // Bare "/" now includes the registry rows alongside the builtins,
         // alphabetically, and one more than the builtin-only count.
-        let all = command_items_merged("/", &reg);
+        let all = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg,
+        );
         assert_eq!(all.len(), crate::command::advertised().count() + reg.len());
-        assert!(all.iter().any(|i| i.insert == "/loop"));
-        assert!(all.iter().any(|i| i.insert == "/deploy"));
+        assert!(all.iter().any(|i| i.display_insert() == "/loop"));
+        assert!(all.iter().any(|i| i.display_insert() == "/deploy"));
         // Sorted by name: /deploy precedes /loop.
-        let d = all.iter().position(|i| i.insert == "/deploy").unwrap();
-        let l = all.iter().position(|i| i.insert == "/loop").unwrap();
+        let d = all
+            .iter()
+            .position(|i| i.display_insert() == "/deploy")
+            .unwrap();
+        let l = all
+            .iter()
+            .position(|i| i.display_insert() == "/loop")
+            .unwrap();
         assert!(d < l);
         // A query surfaces the registry command with its description.
-        let lo = command_items_merged("/lo", &reg);
+        let lo = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/lo"),
+            &reg,
+        );
         let loop_row = lo
             .iter()
-            .find(|i| i.insert == "/loop")
+            .find(|i| i.display_insert() == "/loop")
             .expect("/loop matches /lo");
         assert_eq!(loop_row.desc, "run a task on a loop");
+    }
+
+    #[test]
+    fn malformed_source_command_name_keeps_exact_completion_insertion() {
+        let row = RegistrySlashRow {
+            name: ClientTextDto::from_code_units(vec![b'/' as u16, b'x' as u16, 0xd800]),
+            description: "source command".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        };
+        let prefix =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""/x\ud800""#).unwrap();
+        let candidates = command_items_merged(&prefix, &[row]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].insert.code_units,
+            vec![b'/' as u16, b'x' as u16, 0xd800]
+        );
+        assert_eq!(candidates[0].display_insert(), "/x�");
+    }
+
+    #[test]
+    fn malformed_alias_matching_does_not_collide_with_replacement_character() {
+        let row = RegistrySlashRow {
+            name: "/custom".into(),
+            description: "unrelated command".into(),
+            menu_description: None,
+            aliases: vec![ClientTextDto::from_code_units(vec![
+                b'/' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'a' as u16,
+                b's' as u16,
+                0xd800,
+            ])],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        };
+
+        let malformed_query =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""/alias\ud800""#)
+                .unwrap();
+        let matching = command_items_merged(&malformed_query, std::slice::from_ref(&row));
+        assert_eq!(matching.len(), 1);
+        assert_eq!(
+            matching[0].insert,
+            ClientTextDto::from_code_units(vec![
+                b'/' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'a' as u16,
+                b's' as u16,
+                0xd800,
+            ])
+        );
+        assert_eq!(matching[0].label, "/custom (alias�)");
+
+        let replacement_query =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("/alias�");
+        let nonmatching = command_items_merged(&replacement_query, &[row]);
+        assert!(!nonmatching
+            .iter()
+            .any(|candidate| candidate.insert == ClientTextDto::from_utf8("/custom")));
+    }
+
+    #[test]
+    fn lowercase_units_preserves_contextual_sigma_and_surrogate_boundaries() {
+        let uppercase_sigma: Vec<u16> = "ΟΣ".encode_utf16().collect();
+        let final_sigma: Vec<u16> = "ος".encode_utf16().collect();
+        assert_eq!(lowercase_units(&uppercase_sigma), final_sigma);
+
+        let mut separated_runs: Vec<u16> = "ΟΣ".encode_utf16().collect();
+        separated_runs.push(0xd800);
+        separated_runs.extend("Σ".encode_utf16());
+        let mut expected: Vec<u16> = "ος".encode_utf16().collect();
+        expected.push(0xd800);
+        expected.extend("σ".encode_utf16());
+        assert_eq!(lowercase_units(&separated_runs), expected);
+    }
+
+    #[test]
+    fn contextual_sigma_case_folding_matches_registry_aliases() {
+        let row = RegistrySlashRow {
+            name: "/custom".into(),
+            description: "unrelated command".into(),
+            menu_description: None,
+            aliases: vec!["/ΟΣ".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        };
+        let query = lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ος");
+        let matching = command_items_merged(&query, &[row]);
+        let selected = matching
+            .iter()
+            .find(|candidate| candidate.label == "/custom (ΟΣ)")
+            .expect("case-insensitive contextual sigma match keeps the alias row");
+        assert_eq!(selected.insert, ClientTextDto::from_utf8("/ΟΣ"));
     }
 
     #[test]
@@ -642,18 +936,33 @@ mod tests {
             argument_names: Vec::new(),
         }];
         // Bare "/": the row shows the compact menu label, not the full description.
-        let all = command_items_merged("/", &reg);
-        let row = all.iter().find(|i| i.insert == "/simplify").unwrap();
+        let all = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg,
+        );
+        let row = all
+            .iter()
+            .find(|i| i.display_insert() == "/simplify")
+            .unwrap();
         assert_eq!(row.desc, "Clean up the changed code");
         // Matching still works off the full description ("altitude" is only there).
-        assert!(command_items_merged("/altitude", &reg)
-            .iter()
-            .any(|i| i.insert == "/simplify"));
+        assert!(command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/altitude"),
+            &reg
+        )
+        .iter()
+        .any(|i| i.display_insert() == "/simplify"));
         // A row without a menu label falls back to its description.
         let reg2 = rows(&[("/verify", "Verify a code change end-to-end")]);
-        let v = command_items_merged("/", &reg2);
+        let v = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg2,
+        );
         assert_eq!(
-            v.iter().find(|i| i.insert == "/verify").unwrap().desc,
+            v.iter()
+                .find(|i| i.display_insert() == "/verify")
+                .unwrap()
+                .desc,
             "Verify a code change end-to-end"
         );
     }
@@ -662,25 +971,32 @@ mod tests {
     fn completion_preserves_an_alias_only_when_it_resolves_to_the_selected_command() {
         let mut reg = rows(&[("/deploy", "Deploy"), ("/ship-prod", "Canonical owner")]);
         reg[0].aliases = vec!["/ship-prod".into()];
-        let items = command_items_merged("/ship-p", &reg);
+        let items = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ship-p"),
+            &reg,
+        );
         let selected = items
             .iter()
             .find(|item| item.label.starts_with("/deploy "))
             .unwrap();
         assert_eq!(
-            selected.insert, "/deploy",
+            selected.insert,
+            ClientTextDto::from_utf8("/deploy"),
             "a canonical owner wins over the alias"
         );
 
         reg.pop();
         reg[0].aliases = vec!["/SHIP-prod".into()];
-        let items = command_items_merged("/ship-p", &reg);
+        let items = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ship-p"),
+            &reg,
+        );
         // Native alias matching ignores case; insertion preserves its bytes.
         let selected = items
             .iter()
             .find(|item| item.label.starts_with("/deploy "))
             .unwrap();
-        assert_eq!(selected.insert, "/SHIP-prod");
+        assert_eq!(selected.insert, ClientTextDto::from_utf8("/SHIP-prod"));
     }
 
     #[test]
@@ -688,9 +1004,15 @@ mod tests {
         // A registry entry that reuses a builtin name never duplicates the
         // builtin row — the builtin surface is authoritative.
         let reg = rows(&[("/help", "SHOULD NOT WIN")]);
-        let all = command_items_merged("/", &reg);
+        let all = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg,
+        );
         assert_eq!(all.len(), crate::command::advertised().count());
-        let help: Vec<_> = all.iter().filter(|i| i.insert == "/help").collect();
+        let help: Vec<_> = all
+            .iter()
+            .filter(|i| i.display_insert() == "/help")
+            .collect();
         assert_eq!(help.len(), 1);
         assert_ne!(help[0].desc, "SHOULD NOT WIN");
     }
@@ -700,15 +1022,24 @@ mod tests {
         let mut rows = rows(&[("/help", "Mod help"), ("/secret", "Secret command")]);
         rows[0].replaces_builtin = true;
         rows[1].hidden = true;
-        let all = command_items_merged("/", &rows);
+        let all = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &rows,
+        );
         assert_eq!(
-            all.iter().find(|item| item.insert == "/help").unwrap().desc,
+            all.iter()
+                .find(|item| item.display_insert() == "/help")
+                .unwrap()
+                .desc,
             "Mod help"
         );
-        assert!(!all.iter().any(|item| item.insert == "/secret"));
-        assert!(command_items_merged("/secret", &rows)
-            .iter()
-            .any(|item| item.insert == "/secret"));
+        assert!(!all.iter().any(|item| item.display_insert() == "/secret"));
+        assert!(command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/secret"),
+            &rows
+        )
+        .iter()
+        .any(|item| item.display_insert() == "/secret"));
     }
 
     #[test]
@@ -748,7 +1079,7 @@ mod tests {
         let items: Vec<CompletionItem> = (0..10)
             .map(|i| CompletionItem {
                 label: format!("/cmd{i}"),
-                insert: format!("/cmd{i}"),
+                insert: ClientTextDto::from_code_units(format!("/cmd{i}").encode_utf16().collect()),
                 desc: String::new(),
             })
             .collect();

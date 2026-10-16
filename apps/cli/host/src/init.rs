@@ -68,6 +68,10 @@ pub struct Runtime {
     /// Ordered producer/cost/session/outbox drain retained across the desktop
     /// runtime projection.
     pub session_lifecycle: Arc<harness_runtime::desktop::DesktopSessionLifecycle>,
+    /// Latched managed-policy refusal observed by the host's exit path.
+    pub policy_helper_refusal: harness_runtime::desktop::PolicyHelperRefusalProbe,
+    /// Current source-scoped failure to validate a required Native policy JS semantic.
+    pub policy_helper_semantic_worker_failure: harness_runtime::desktop::PolicySemanticWorkerProbe,
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
@@ -229,6 +233,19 @@ pub struct TuiBuild {
     >,
     /// Standard runtime bundle.
     pub runtime: Runtime,
+    /// Managed model allowlist snapshot resolved from the same desktop config
+    /// used to build `runtime`. The raw projection preserves Native UTF-16
+    /// entries for the TUI model picker.
+    pub managed_model_allowlist: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Managed provider-id reverse map paired with `managed_model_allowlist`.
+    pub managed_model_overrides: std::collections::BTreeMap<String, String>,
+    /// Active settings baseline, including the exact managed overlay used to
+    /// build the runtime.
+    pub active_settings: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Source-preserving managed settings overlay selected for this runtime.
+    pub managed_settings: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Incomplete managed-source diagnostics retained beside healthy settings.
+    pub managed_settings_diagnostics: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// The resolved boot permission mode (claude-code `initialPermissionModeFromCLI`)
     /// and whether bypass is an available Shift+Tab cycle target — seed the TUI's
     /// below-composer permission-mode indicator.
@@ -302,8 +319,7 @@ pub struct TuiBuild {
 /// Errors surfaced while building a [`Runtime`].
 ///
 /// F2-01: the underlying assembly moved to [`harness_runtime::desktop::build`]; this enum
-/// is a thin projection of [`harness_runtime::desktop::BuildError`] kept for source
-/// compatibility with the CLI's existing call sites.
+/// is the CLI projection of [`harness_runtime::desktop::BuildError`].
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
     /// API base URL resolution / construction failed.
@@ -347,6 +363,22 @@ pub enum InitError {
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
     InvalidCustomBetas,
+    /// Settings could not be read or projected without losing their source.
+    #[error(transparent)]
+    Settings(#[from] lingxi_core::settings::SettingsError),
+    /// Structured output schema could not be compiled for the active request.
+    #[error("structured output JSON Schema compilation failed: {0}")]
+    StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
+    /// A managed-policy startup refusal retains its source diagnostic until
+    /// the CLI renders the error.
+    #[error("{0}")]
+    PolicyHelperStartup(#[source] harness_runtime::desktop::PolicyHelperStartupError),
+    /// The pinned Bun semantic worker required by Native policy validation is
+    /// unavailable or failed its source-keyed protocol.
+    #[error("Native policy semantic worker failed: {0}")]
+    NativePolicySemanticWorker(
+        #[source] lingxi_core::settings::native_policy_regex::NativePolicyRegexWorkerError,
+    ),
 }
 
 impl From<harness_runtime::desktop::BuildError> for InitError {
@@ -369,6 +401,16 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
             }
             harness_runtime::desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
             harness_runtime::desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
+            harness_runtime::desktop::BuildError::Settings(error) => Self::Settings(error),
+            harness_runtime::desktop::BuildError::StructuredOutputSchema(error) => {
+                Self::StructuredOutputSchema(error)
+            }
+            harness_runtime::desktop::BuildError::PolicyHelperStartup(error) => {
+                Self::PolicyHelperStartup(error)
+            }
+            harness_runtime::desktop::BuildError::NativePolicySemanticWorker(error) => {
+                Self::NativePolicySemanticWorker(error)
+            }
         }
     }
 }
@@ -395,6 +437,98 @@ impl client::adapter::PermissionRequestSink for NoopPermissionRequestSink {
 #[must_use]
 pub fn resolve_api_base() -> String {
     std::env::var("LINGXI_API_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
+}
+
+/// Explicit custom-endpoint opt-in for Native-compatible Anthropic request
+/// metadata. The value must match the configured API base; ordinary custom
+/// gateways keep LingXi's normal transport policy.
+pub const NATIVE_ANTHROPIC_ENDPOINT_ENV: &str = "LINGXI_NATIVE_ANTHROPIC_ENDPOINT";
+
+/// Build the host identity supplied to the Anthropic Native request policy.
+///
+/// The canonical Anthropic API is enabled by default for first-party provider
+/// selection. A custom API base requires an exact endpoint opt-in through
+/// [`NATIVE_ANTHROPIC_ENDPOINT_ENV`]. The runtime still checks the resolved
+/// provider, protocol, profile base, and request URL on every call, so a
+/// different configured provider never receives this policy.
+#[must_use]
+pub fn native_anthropic_client_metadata_for_host(
+    api_base: &str,
+    app_id: &str,
+    host_version: &str,
+) -> Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata> {
+    let first_party_environment = ![
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_USE_MANTLE",
+    ]
+    .iter()
+    .any(|name| lingxi_core::host::env::is_env_truthy(std::env::var(name).ok().as_deref()));
+    let explicit_endpoint = std::env::var(NATIVE_ANTHROPIC_ENDPOINT_ENV).ok();
+    native_anthropic_client_metadata_for_host_with_policy(
+        api_base,
+        app_id,
+        host_version,
+        first_party_environment,
+        explicit_endpoint.as_deref(),
+    )
+}
+
+fn native_anthropic_client_metadata_for_host_with_policy(
+    api_base: &str,
+    app_id: &str,
+    host_version: &str,
+    first_party_environment: bool,
+    explicit_endpoint: Option<&str>,
+) -> Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata> {
+    const CANONICAL_ENDPOINT: &str = "https://api.anthropic.com";
+    let configured_base = api_base.trim_end_matches('/');
+    let canonical_endpoint = configured_base == CANONICAL_ENDPOINT;
+    let explicitly_enabled = explicit_endpoint
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .is_some_and(|endpoint| endpoint.trim_end_matches('/') == configured_base);
+    if !first_party_environment || (!canonical_endpoint && !explicitly_enabled) {
+        return None;
+    }
+
+    let (os, arch) = native_client_platform();
+    Some(
+        lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata {
+            language: "rust".into(),
+            runtime: "lingxi".into(),
+            package_version: lingxi_llm_client::PACKAGE_VERSION.into(),
+            runtime_version: host_version.into(),
+            os,
+            arch,
+            timeout_seconds: 600,
+            session_id: None,
+            app_id: app_id.into(),
+        },
+    )
+}
+
+fn native_client_platform() -> (String, String) {
+    let os = match std::env::consts::OS {
+        "macos" => "MacOS".to_owned(),
+        "windows" => "Windows".to_owned(),
+        "linux" => "Linux".to_owned(),
+        "freebsd" => "FreeBSD".to_owned(),
+        "openbsd" => "OpenBSD".to_owned(),
+        "android" => "Android".to_owned(),
+        "ios" => "iOS".to_owned(),
+        other => format!("Other:{other}"),
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" | "arm64" => "arm64".to_owned(),
+        "x86_64" | "x64" => "x64".to_owned(),
+        "x32" | "arm" => std::env::consts::ARCH.to_owned(),
+        other => format!("other:{other}"),
+    };
+    (os, arch)
 }
 
 /// Which file setting-sources to load, from claude-code `--setting-sources
@@ -824,7 +958,12 @@ pub(crate) fn resolve_desktop_config_at(
     } else {
         setting_source_flags(argv.setting_sources.as_deref())
     };
-    let flag_settings = parse_flag_settings(argv.settings.as_deref());
+    let flag_settings_source = read_flag_settings_source_checked(argv.settings.as_deref())
+        .ok()
+        .flatten();
+    let flag_settings: Option<lingxi_core::settings::SettingsJson> = flag_settings_source
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
 
     let mut default_model = DesktopConfig::default().default_model;
     // Persisted `model` from settings.json (written by the `/model` picker) so the
@@ -892,52 +1031,60 @@ pub(crate) fn resolve_desktop_config_at(
     // batched constructor is wired). Read the flag to silence the unused-field
     // warning and preserve the pre-lift behavior.
     let _ = argv.no_stream;
+    let build_info = harness_runtime::desktop::BuildInfo::new(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+    );
+    let api_base = resolve_api_base();
+    let anthropic_client_metadata =
+        native_anthropic_client_metadata_for_host(&api_base, "lingxi-cli", build_info.version);
 
-    DesktopConfig {
-        // Inline visualization is a bridge/desktop surface; the CLI never renders it.
-        inline_visualization: false,
-        // Nor does it open local apps.
-        local_apps: false,
-        diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
-        composition: None,
-        defer_session_start: false,
-        connect_mcp_in_background: false,
-        session_transcript_path: None,
-        session_resume_snapshot: None,
-        session_resume_cost: None,
-        max_structured_output_retries: 5,
-        mcp_services_factory: None,
-        user_agent_environment: None,
-        request_identity: None,
-        anthropic_compatible_version: None,
-        anthropic_client_metadata: None,
-        native_thinking_display: None,
-        oauth_environment_lookup: None,
-        build_info: harness_runtime::desktop::BuildInfo::new(
-            env!("CARGO_PKG_VERSION"),
-            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-        ),
-        enable_automation_scheduler: true,
-        host_workspace_trusted: None,
-        mod_render_surface: None,
+    {
+        let mut __desktop_config = DesktopConfig::default();
+        __desktop_config.build_info = build_info;
+        __desktop_config.diagnostics = Some(Arc::new(CliDesktopDiagnostics));
+        __desktop_config.native_policy_warning_logger =
+            crate::logging::native_policy_warning_logger(argv);
+        __desktop_config.composition = None;
+        __desktop_config.defer_session_start = false;
+        __desktop_config.connect_mcp_in_background = false;
+        __desktop_config.session_transcript_path = None;
+        __desktop_config.session_resume_snapshot = None;
+        __desktop_config.session_resume_cost = None;
+        __desktop_config.max_structured_output_retries = 5;
+        __desktop_config.inline_visualization = false;
+        // The CLI does not open local apps.
+        __desktop_config.local_apps = false;
+        __desktop_config.mcp_services_factory = None;
+        __desktop_config.user_agent_environment = None;
+        __desktop_config.request_identity = None;
+        __desktop_config.anthropic_compatible_version = None;
+        __desktop_config.native_thinking_display = None;
+        __desktop_config.oauth_environment_lookup = None;
+        __desktop_config.enable_automation_scheduler = true;
+        __desktop_config.host_workspace_trusted = None;
+        __desktop_config.insights_policy_gate = None;
+        __desktop_config.mod_render_surface = None;
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
-        isolated_credential_storage: false,
-        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativePreferred,
-        injected_plugin_secrets: std::collections::BTreeMap::new(),
-        api_base: resolve_api_base(),
-        api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        api_key_source: llm_runtime::CredentialSource::Environment {
+        __desktop_config.isolated_credential_storage = false;
+        __desktop_config.credential_storage_policy =
+            lingxi_core::host::CredentialStoragePolicy::NativePreferred;
+        __desktop_config.injected_plugin_secrets = std::collections::BTreeMap::new();
+        __desktop_config.api_base = api_base;
+        __desktop_config.anthropic_client_metadata = anthropic_client_metadata;
+        __desktop_config.api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        __desktop_config.api_key_source = llm_runtime::CredentialSource::Environment {
             variable: "ANTHROPIC_API_KEY".into(),
-        },
-        api_key_helper: if restricted {
+        };
+        __desktop_config.api_key_helper = if restricted {
             flag_settings
                 .as_ref()
                 .and_then(|settings| settings.api_key_helper.clone())
                 .filter(|helper| !helper.trim().is_empty())
         } else {
             load_settings_api_key_helper(&cwd, incl_user, incl_project)
-        },
+        };
         // (M13) Host-launcher OAuth forcing is claude-code's `KWr()`
         // (@228931361) — a pure env predicate that `zb()` (@228933355)
         // evaluates at credential-resolution time, so the ENGINE reads it
@@ -946,26 +1093,32 @@ pub(crate) fn resolve_desktop_config_at(
         // `build_runtime_from_config`). Nothing on the CLI side declares it: a
         // managed `forceLoginMethod` policy is NOT that predicate and never
         // participates in credential precedence.
-        managed_oauth_only: false,
+        __desktop_config.managed_oauth_only = false;
         // (M13) FD-inherited key presence — claude-code's managed/remote
         // launcher contract. Env presence only; LingXi never reads the FD.
-        anthropic_key_fd_present: std::env::var("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
-            .is_ok_and(|v| !v.trim().is_empty()),
-        cwd: cwd.clone(),
-        lingxi_home,
-        default_model,
+        __desktop_config.anthropic_key_fd_present =
+            std::env::var("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
+                .is_ok_and(|v| !v.trim().is_empty());
+        __desktop_config.cwd = cwd.clone();
+        // The CLI is a local host. Native Windows mapped-drive roots need a
+        // separate filesystem-boundary resolver before they can be advertised.
+        __desktop_config.remote_workspace = false;
+        __desktop_config.diskless = false;
+        __desktop_config.trusted_network_directories = Vec::new();
+        __desktop_config.lingxi_home = lingxi_home;
+        __desktop_config.default_model = default_model;
         // Only a `--model` flag is an EXPLICIT choice; the persisted
         // `settings.model` and the built-in default remain eligible for the
         // engine's boot-time connected-provider fallback. (An `ANTHROPIC_MODEL`
         // env pin is exempted from the fallback via `default_model_env_pinned`
         // below — NOT by widening this flag-only field, which the `--agent`
         // model-override gate keys on as claude-code's `userSpecifiedModel`.)
-        default_model_explicit: argv.model.is_some(),
+        __desktop_config.default_model_explicit = argv.model.is_some();
         // Prior `/model` picks (settings `recentModels`, most-recent-first) —
         // the fallback's first-preference pass. Best-effort read; empty on any
         // failure. `recentModels` lives in the USER settings.json, so the read
         // honors the same `--setting-sources` gate as the sibling loaders.
-        recent_models: if incl_user {
+        __desktop_config.recent_models = if incl_user {
             tui_core::recent_models::load_recent_models()
                 .into_iter()
                 .map(|r| harness_runtime::desktop::RecentModelRef {
@@ -975,26 +1128,27 @@ pub(crate) fn resolve_desktop_config_at(
                 .collect()
         } else {
             Vec::new()
-        },
-        fallback_model,
-        custom_betas: argv.betas.clone().unwrap_or_default(),
-        flag_settings: flag_settings.clone(),
-        provider_profiles: if restricted {
+        };
+        __desktop_config.fallback_model = fallback_model;
+        __desktop_config.custom_betas = argv.betas.clone().unwrap_or_default();
+        __desktop_config.flag_settings = flag_settings.clone();
+        __desktop_config.flag_settings_source = flag_settings_source.clone();
+        __desktop_config.provider_profiles = if restricted {
             flag_settings
                 .as_ref()
                 .and_then(|settings| settings.providers.clone())
         } else {
             load_provider_profiles(&cwd, incl_user, incl_project)
-        },
-        routing: if restricted {
+        };
+        __desktop_config.routing = if restricted {
             flag_settings
                 .as_ref()
                 .and_then(|settings| settings.routing.clone())
         } else {
             load_routing(&cwd, incl_user, incl_project)
-        },
-        mcp_paths: vec![project_mcp_path, global_mcp_path],
-        use_noop_permission_gate: true,
+        };
+        __desktop_config.mcp_paths = vec![project_mcp_path, global_mcp_path];
+        __desktop_config.use_noop_permission_gate = true;
         // HEADLESS deny-on-ask (claude-code `--print` parity): in `-p`/`--print`
         // mode there is no interactive prompt, so an unresolved `Ask` (a mutating
         // tool with no matching allow rule) is DENIED rather than silently allowed.
@@ -1009,49 +1163,49 @@ pub(crate) fn resolve_desktop_config_at(
         // deny-on-ask composition in ANY mode, which is the whole point: an
         // unattended host that is not `--print` still must never block on a
         // prompt nobody will answer.
-        deny_unresolved_ask: argv.print
+        __desktop_config.deny_unresolved_ask = argv.print
             || argv.permission_prompts_none()
-            || (restricted && !matches!(crate::mode::decide_mode(argv), crate::mode::Mode::Tui)),
+            || (restricted && !matches!(crate::mode::decide_mode(argv), crate::mode::Mode::Tui));
         // Claude Code 2.1.245 `process.stdout.isTTY??!1`. Independent of
         // `--print`: `-p` in a terminal is both print and TTY.
-        is_tty: {
+        __desktop_config.is_tty = {
             use std::io::IsTerminal;
             std::io::stdout().is_terminal()
-        },
+        };
         // CLI `--max-turns` / `--max-budget-usd` → orchestrator caps in `build()`
         // (print-gated above; interactive sessions leave both unset).
-        max_turns,
+        __desktop_config.max_turns = max_turns;
         // CLI `--plan-mode-instructions` (print-mode only): custom plan-mode
         // workflow body threaded to `OrchestratorConfig::plan_mode_instructions`.
         // `None` in interactive mode ⟶ the default 5-phase plan reminder.
-        plan_mode_instructions: if argv.print {
+        __desktop_config.plan_mode_instructions = if argv.print {
             argv.plan_mode_instructions.clone()
         } else {
             None
-        },
+        };
         // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory
         // threaded to `OrchestratorConfig::plans_directory`, resolved against the
         // project root with a within-root containment check by the orchestrator.
-        plans_directory: if restricted {
+        __desktop_config.plans_directory = if restricted {
             flag_settings
                 .as_ref()
                 .and_then(|settings| settings.plans_directory.clone())
                 .filter(|dir| !dir.trim().is_empty())
         } else {
             load_settings_plans_directory(&cwd, incl_user, incl_project)
-        },
-        max_budget_usd,
+        };
+        __desktop_config.max_budget_usd = max_budget_usd;
         // `--json-schema` structured output (print-gated above): `build()` forces
         // the StructuredOutput tool + surfaces a capture slot when this is `Some`.
-        json_schema,
+        __desktop_config.json_schema = json_schema;
         // Interactive gate injected ONLY by `build_runtime_for_tui` (the TUI
         // path); this shared headless/REPL config has no interactive prompt.
-        injected_permission_gate: None,
+        __desktop_config.injected_permission_gate = None;
         // M10: the CLI does not start a coordinator session (threading this
         // from session metadata is a follow-up; the default is byte-identical
         // to the pre-M10 build).
-        session_started_as_coordinator: false,
-        initial_teammate_team_name: None,
+        __desktop_config.session_started_as_coordinator = false;
+        __desktop_config.initial_teammate_team_name = None;
         // Production memory: load the real `<cwd>/LINGXI.md` +
         // `~/.lingxi/LINGXI.md` hierarchy into the system prompt (claude-code
         // parity), which also makes the session-start
@@ -1064,125 +1218,126 @@ pub(crate) fn resolve_desktop_config_at(
         // list). Safe mode ALSO exports `LINGXI_DISABLE_LINGXI_MDS=1` in
         // `run_cli` (the orchestrator-level kill-switch); this `None` makes the
         // gate hold without the env mutation too (env-free tests, bridge hosts).
-        memory_provider: if gates
-            .disables_claude_md(argv.add_dir.as_ref().is_some_and(|d| !d.is_empty()))
-        {
-            None
-        } else {
-            Some(orchestrator::prompt::real_provider_with_excludes(
-                if restricted {
-                    flag_settings
-                        .as_ref()
-                        .and_then(|settings| settings.lingxi_md_excludes.clone())
-                        .unwrap_or_default()
-                } else {
-                    load_scoped_settings_at(&cwd, incl_user, incl_project)
-                        .and_then(|settings| settings.settings.lingxi_md_excludes)
-                        .unwrap_or_default()
-                },
-            ))
-        },
+        __desktop_config.memory_provider =
+            if gates.disables_claude_md(argv.add_dir.as_ref().is_some_and(|d| !d.is_empty())) {
+                None
+            } else {
+                Some(orchestrator::prompt::real_provider_with_excludes(
+                    if restricted {
+                        flag_settings
+                            .as_ref()
+                            .and_then(|settings| settings.lingxi_md_excludes.clone())
+                            .unwrap_or_default()
+                    } else {
+                        load_scoped_settings_at(&cwd, incl_user, incl_project)
+                            .and_then(|settings| settings.settings.lingxi_md_excludes)
+                            .unwrap_or_default()
+                    },
+                ))
+            };
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
-        permission_mode,
+        __desktop_config.permission_mode = permission_mode;
         // Preserve the raw CLI request so the composition root can fold a
         // selected main-thread agent's frontmatter `permissionMode` with the
         // oracle precedence: explicit CLI override > agent frontmatter >
         // settings `defaultMode`.
-        permission_mode_preference: crate::permission_mode_preference::load(argv),
-        permission_mode_cli: argv.permission_mode.clone(),
-        permission_mode_cli_explicit: argv.permission_mode.is_some()
-            || argv.dangerously_skip_permissions,
-        allow_dangerously_skip_permissions: argv.allow_dangerously_skip_permissions,
+        __desktop_config.permission_mode_preference = crate::permission_mode_preference::load(argv);
+        __desktop_config.permission_mode_cli = argv.permission_mode.clone();
+        __desktop_config.permission_mode_cli_explicit =
+            argv.permission_mode.is_some() || argv.dangerously_skip_permissions;
+        __desktop_config.allow_dangerously_skip_permissions =
+            argv.allow_dangerously_skip_permissions;
         // Plan 3c: the tui supplies the masked-key prompt via the credential
         // store + `pump_store_provider_key`, not this engine port — so the
         // engine `/connect` text-command path uses the headless no-op default.
-        connect_prompt: None,
+        __desktop_config.connect_prompt = None;
         // CLI `--system-prompt` / `--system-prompt-file` (print-mode only):
         // override the assembled system prompt for the session. `None` in
         // interactive mode so the LINGXI.md hierarchy prompt is used unchanged.
-        system_prompt_override: if argv.print {
+        __desktop_config.system_prompt_override = if argv.print {
             argv.resolve_system_prompt()
         } else {
             None
-        },
+        };
         // CLI `--append-system-prompt` / `--append-system-prompt-file`
         // (print-mode only): text appended to the assembled system prompt.
         // `None` in interactive mode.
-        append_system_prompt: if argv.print {
+        __desktop_config.append_system_prompt = if argv.print {
             argv.resolve_append_system_prompt()
         } else {
             None
-        },
+        };
         // CLI `--session-id <uuid>`: the host validated UUID-ness + the cross-flag
         // rules in `run_cli` BEFORE this runs, so by here `argv.session_id` is
         // either `None` or a valid UUID string. `build()` parses it into the
         // boot-canonical MAIN session id (else mints a fresh one).
-        session_id_override: argv.session_id.clone(),
-        session_writer_lease: None,
+        __desktop_config.session_id_override = argv.session_id.clone();
+        __desktop_config.session_writer_lease = None;
         // Populated by the resume/fork TUI constructor after it has inspected
         // the transcript's versioned `forkedFrom` metadata.
-        parent_session_id: None,
+        __desktop_config.parent_session_id = None;
         // CLI `--disable-slash-commands`: empties the command/skill registry.
-        disable_slash_commands: argv.disable_slash_commands,
+        __desktop_config.disable_slash_commands = argv.disable_slash_commands;
         // The CLI has no per-session skill allowlist input: `None` means all
         // eligible registered skills remain model-invocable. The separate
         // `--disable-slash-commands` flag still empties the registry entirely.
-        session_skill_allowlist: None,
+        __desktop_config.session_skill_allowlist = None;
         // CLI `--add-dir <directories...>`: extra tool-access directories,
         // unioned into the permission working-dir set in `build()`.
-        add_dir: argv.add_dir.clone().unwrap_or_default(),
+        __desktop_config.add_dir = argv.add_dir.clone().unwrap_or_default();
         // CLI `--mcp-config <configs...>` servers (parsed above), merged over the
         // discovered servers in `build()`.
-        cli_mcp_servers,
+        __desktop_config.cli_mcp_servers = cli_mcp_servers;
         // `--strict-mcp-config` proper: the discovered paths were already nulled
         // above; the flag ALSO gates the agent-frontmatter MCP merge in `build()`
         // (claude `FWt`: frontmatter servers skipped under strict mode unless the
         // agent came from `--agents`).
-        strict_mcp_config: argv.strict_mcp_config,
-        restricted,
-        restricted_tools: argv.tools.clone(),
+        __desktop_config.strict_mcp_config = argv.strict_mcp_config;
+        __desktop_config.restricted = restricted;
+        __desktop_config.restricted_tools = argv.tools.clone();
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
-        exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,
+        __desktop_config.exclude_dynamic_system_prompt_sections =
+            argv.exclude_dynamic_system_prompt_sections;
         // `--setting-sources` scope: also gate the engine-side hook + permission
         // tier loaders in `build()` (not just the provider/routing/claudeMdExcludes
         // loaders above), so `--setting-sources project` does NOT load user-level
         // hooks or permission rules. `(true, true)` when the flag is absent.
-        setting_source_scope: (incl_user, incl_project),
+        __desktop_config.setting_source_scope = (incl_user, incl_project);
         // (M3 cc2.1.198) `--safe-mode` / `--bare` gates, consumed at each
         // registration site in `build()` (settings hooks, plugins + plugin LSP,
         // skill/custom-command dirs, custom agents).
-        customization_gates: gates,
+        __desktop_config.customization_gates = gates;
         // (M3 cc2.1.198) `--no-session-persistence`: print-gated like the other
         // print-only flags (the binary hard-errors on non-print use; `run_cli`
         // already enforced that, this guard keeps direct/test callers faithful).
         // `false` ⟶ `build()` wires no session `JsonlWriter`.
-        session_persistence: !(argv.print && argv.no_session_persistence),
+        __desktop_config.session_persistence = !(argv.print && argv.no_session_persistence);
         // (M4 cc2.1.198) `--agents <json>`: raw payload; `build()` parses with
         // the strict flag-record schema and merges (flagSettings precedence);
         // safe-mode ignore (warn) also lives in `build()` so bridge hosts get
         // the same gate.
-        cli_agents_json: argv.agents.clone(),
+        __desktop_config.cli_agents_json = argv.agents.clone();
         // (M4 cc2.1.198) `--agent <agent>`: resolved against the final catalog
         // in `build()` (`dts` lookup + miss warning); main-thread application
         // is a pending seam there.
-        cli_agent: argv.agent.clone(),
+        __desktop_config.cli_agent = argv.agent.clone();
         // (M4 cc2.1.198) `--plugin-dir <path>` (repeatable): session-only
         // plugins loaded via the inline-plugin path in `build()`.
-        cli_plugin_dirs: argv.plugin_dir.clone(),
+        __desktop_config.cli_plugin_dirs = argv.plugin_dir.clone();
         // (M4 cc2.1.198) `--effort <level>`: the argParser-normalized level
         // (`u4i` port; an invalid value already warned on stderr in `run_cli`
         // and normalizes to `None` here) → main-loop `output_config.effort`.
-        initial_effort: argv.normalized_effort().0,
+        __desktop_config.initial_effort = argv.normalized_effort().0;
         // `ANTHROPIC_MODEL` env pin (resolved above) — exempts the model from the
         // boot connected-provider fallback without counting as `userSpecifiedModel`.
-        default_model_env_pinned,
+        __desktop_config.default_model_env_pinned = default_model_env_pinned;
         // Boot SESSION thinking config (claude-code `qIe()` + the `wn` arm):
         // `MAX_THINKING_TOKENS` env > `--max-thinking-tokens` flag >
         // `--thinking` > the `alwaysThinkingEnabled` setting. A fixed budget
         // pre-empts adaptive; `0`/`disabled` turns thinking off.
-        session_thinking: llm_runtime::model::thinking::session_thinking_from_cli(
+        __desktop_config.session_thinking = llm_runtime::model::thinking::session_thinking_from_cli(
             argv.thinking.as_deref(),
             argv.max_thinking_tokens,
             if restricted {
@@ -1192,19 +1347,19 @@ pub(crate) fn resolve_desktop_config_at(
             } else {
                 load_always_thinking_enabled(&cwd, incl_user, incl_project)
             },
-        ),
+        );
         // (worktree-tmux-launch plan, Task 3) `-w`/`--worktree [name]`:
         // `argv.worktree` is `None` when the flag is absent (inert boot),
         // `Some("")` for a bare `-w` (`build()` mints a random slug), or
         // `Some(name)` for an explicit name — threaded verbatim.
-        worktree_launch: argv.worktree.clone(),
+        __desktop_config.worktree_launch = argv.worktree.clone();
         // (worktree-tmux-launch plan, Task 4) `--tmux[=mode]`: `argv.tmux` is
         // `None` when the flag is absent (inert — no worktree tmux session),
         // `Some("")` for a bare `--tmux` (native mode sentinel), or
         // `Some(mode)` for `--tmux=classic` — threaded verbatim. `build()`
         // hard-errors if this is `Some` while `worktree_launch` is `None`
         // (the CLI's own `--tmux` doc: "requires --worktree").
-        tmux_launch: argv.tmux.clone(),
+        __desktop_config.tmux_launch = argv.tmux.clone();
         // (G05 2.1.212 `/fork` `vAd`) BgSessionForker seam: the composition-root
         // impl copies the live conversation into a NEW background session (mints a
         // uuid, SNAPSHOTs the transcript, dispatches a `Launch::Resume` daemon)
@@ -1213,22 +1368,23 @@ pub(crate) fn resolve_desktop_config_at(
         // write and the resume dispatch agree. Injected here into the orchestrator
         // (via `build()`), preserving the crate-layering rule (orchestrator never
         // depends on apps/cli).
-        bg_session_forker: Some(std::sync::Arc::new(
+        __desktop_config.bg_session_forker = Some(std::sync::Arc::new(
             crate::bg_session_forker::CliBgSessionForker::new(
                 crate::run::lingxi_home_dir(),
                 crate::run::daemon_runtime_dir(),
                 crate::background_launch::BackgroundLaunchOptions::from_argv(argv),
                 permission_mode,
             ),
-        )),
-        ask_user_question_tx: None,
-        computer_access_tx: None,
-        verified_computer_profiles: Vec::new(),
-        session_agent_observer: None,
+        ));
+        __desktop_config.ask_user_question_tx = None;
+        __desktop_config.computer_access_tx = None;
+        __desktop_config.verified_computer_profiles = Vec::new();
+        __desktop_config.session_agent_observer = None;
         // No device audio on the CLI/TUI path: audio is proxied to a connected
         // client, and this host has none. The `voice`/`speech` tools are
         // therefore not registered here at all.
-        audio: None,
+        __desktop_config.audio = None;
+        __desktop_config
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
@@ -1284,6 +1440,15 @@ pub(crate) fn parse_flag_settings(
 pub(crate) fn parse_flag_settings_checked(
     settings: Option<&str>,
 ) -> Result<Option<lingxi_core::settings::SettingsJson>, &'static str> {
+    Ok(read_flag_settings_source_checked(settings)?
+        .and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+/// Read the exact parsed source text for `--settings`, preserving unknown
+/// fields such as the permission classifier's `autoMode` categories.
+fn read_flag_settings_source_checked(
+    settings: Option<&str>,
+) -> Result<Option<String>, &'static str> {
     let Some(raw) = settings.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -1303,7 +1468,13 @@ pub(crate) fn parse_flag_settings_checked(
             Err(_) => return Ok(None),
         }
     };
-    Ok(serde_json::from_str(&text).ok())
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&text).ok();
+    let is_settings_object = source
+        .as_ref()
+        .and_then(|source| source.at_pointer(""))
+        .and_then(|root| root.object_entries())
+        .is_some();
+    Ok(is_settings_object.then_some(text))
 }
 
 /// Build the full runtime from parsed argv + the chosen output stream.
@@ -1474,6 +1645,8 @@ pub async fn build_runtime_from_config(
         fusion_recorder: rt.fusion_recorder,
         fusion_recorder_factory: rt.fusion_recorder_factory,
         session_lifecycle: rt.session_lifecycle,
+        policy_helper_refusal: rt.policy_helper_refusal,
+        policy_helper_semantic_worker_failure: rt.policy_helper_semantic_worker_failure,
         dispatcher: rt.dispatcher,
         mod_command_catalog: rt.mod_command_catalog,
         auth: rt.auth,
@@ -1573,6 +1746,24 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         argv,
         resume_session_id,
         parent_session_id,
+        None,
+    ))
+    .await
+}
+
+/// Resume/fork-aware variant for a background launch whose persisted launch
+/// spec is an authoritative Native query-agent identity source.
+pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_context(
+    argv: &Argv,
+    resume_session_id: Option<uuid::Uuid>,
+    parent_session_id: Option<String>,
+    native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
+) -> Result<TuiBuild, InitError> {
+    Box::pin(build_runtime_for_tui_inner_with_parent_impl(
+        argv,
+        resume_session_id,
+        parent_session_id,
+        Some(native_settings_agent_context),
     ))
     .await
 }
@@ -1581,6 +1772,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     argv: &Argv,
     resume_session_id: Option<uuid::Uuid>,
     parent_session_id: Option<String>,
+    native_settings_agent_context: Option<lingxi_core::host::NativeSettingsAgentContext>,
 ) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1599,6 +1791,9 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     // (TUI-PERM) Resolve config ONCE so the gate's persist paths come from the
     // SAME cfg the engine builds with (no double resolve, no lost paths).
     let mut cfg = resolve_desktop_config(argv, permission_mode);
+    if let Some(context) = native_settings_agent_context {
+        cfg.native_settings_agent_context = context;
+    }
     // Apply fixture paths before constructing the permission gate, so its
     // persistence root agrees with the engine's resolved configuration.
     #[cfg(test)]
@@ -1641,6 +1836,35 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     cfg.injected_permission_gate =
         Some(gate.clone() as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
+    // Capture the model-picker policy from the exact config snapshot that will
+    // be consumed by desktop::build below. Keep the projection intact so lone
+    // UTF-16 surrogates are not collapsed through Rust Strings.
+    let (managed_model_allowlist, managed_model_overrides) =
+        harness_runtime::desktop::managed_model_allowlist(&cfg).await;
+    let empty_managed = || {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("static empty managed settings is valid JSON")
+    };
+    let (managed_settings, managed_settings_diagnostics) =
+        match harness_runtime::desktop::managed_settings_overlay(&cfg).await {
+            Ok(Some(settings)) => (settings, None),
+            Ok(None) => (empty_managed(), None),
+            Err(lingxi_core::settings::SettingsError::SourceFailure {
+                effective: Some(effective),
+                diagnostics,
+                ..
+            }) => (effective, Some(diagnostics)),
+            Err(error) => return Err(error.into()),
+        };
+    let settings_paths = configuration_admin::settings_bridge::SettingsPaths {
+        lingxi_home: cfg.lingxi_home.clone(),
+        project_dir: cfg.cwd.clone(),
+    };
+    let active_settings = configuration_admin::settings_bridge::active_settings_baseline(
+        &settings_paths,
+        &managed_settings,
+    )?;
+
     let flag_settings = cfg.flag_settings.clone();
     let fusion_cfg = cfg.clone();
     let fusion_layers = Arc::new(move || {
@@ -1676,6 +1900,11 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     Ok(TuiBuild {
         fusion_layers,
         runtime,
+        managed_model_allowlist,
+        managed_model_overrides,
+        active_settings,
+        managed_settings,
+        managed_settings_diagnostics,
         initial_permission_mode: permission_mode,
         bypass_available: !argv.restricted_enabled()
             && (argv.allow_dangerously_skip_permissions
@@ -1830,13 +2059,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let marker = home.path().join("settings.json");
         std::fs::write(&marker, "{}\n").unwrap();
-        let mut cfg = DesktopConfig {
-            build_info: harness_runtime::desktop::BuildInfo::new(
+        let mut cfg = {
+            let mut __desktop_config = DesktopConfig::default();
+            __desktop_config.build_info = harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-            ),
-            lingxi_home: home.path().to_path_buf(),
-            ..Default::default()
+            );
+            __desktop_config.lingxi_home = home.path().to_path_buf();
+            __desktop_config
         };
         let policy = cfg.credential_storage_policy;
         let guard = isolate_test_runtime_config(&mut cfg).unwrap();
@@ -1904,22 +2134,24 @@ mod tests {
             drop(coordinator);
         }
         let argv = argv_of(&["--permission-mode", "acceptEdits"]);
-        let cfg = DesktopConfig {
-            build_info: harness_runtime::desktop::BuildInfo::new(
+        let cfg = {
+            let mut __desktop_config = DesktopConfig::default();
+            __desktop_config.build_info = harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 "cli-live-state-test",
-            ),
-            lingxi_home: home.to_path_buf(),
-            cwd: cwd.to_path_buf(),
-            permission_mode: permission::PermissionMode::AcceptEdits,
-            session_id_override: Some(session_id.as_uuid().to_string()),
-            bg_session_forker: Some(Arc::new(crate::bg_session_forker::CliBgSessionForker::new(
-                home.to_path_buf(),
-                home.to_path_buf(),
-                crate::background_launch::BackgroundLaunchOptions::from_argv(&argv),
-                permission::PermissionMode::AcceptEdits,
-            ))),
-            ..Default::default()
+            );
+            __desktop_config.lingxi_home = home.to_path_buf();
+            __desktop_config.cwd = cwd.to_path_buf();
+            __desktop_config.permission_mode = permission::PermissionMode::AcceptEdits;
+            __desktop_config.session_id_override = Some(session_id.as_uuid().to_string());
+            __desktop_config.bg_session_forker =
+                Some(Arc::new(crate::bg_session_forker::CliBgSessionForker::new(
+                    home.to_path_buf(),
+                    home.to_path_buf(),
+                    crate::background_launch::BackgroundLaunchOptions::from_argv(&argv),
+                    permission::PermissionMode::AcceptEdits,
+                )));
+            __desktop_config
         };
         build_cli_runtime_from_config(
             cfg,
@@ -1990,13 +2222,14 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let gate = Arc::new(tui::permission_gate::TuiPermissionGate::new(tx, rules));
         let argv = argv_of(&["--permission-mode", "default"]);
-        let cfg = DesktopConfig {
-            lingxi_home: home.to_owned(),
-            cwd: cwd.to_owned(),
-            injected_permission_gate: Some(gate.clone()),
-            permission_mode: permission::PermissionMode::Default,
-            permission_mode_cli_explicit: true,
-            ..Default::default()
+        let cfg = {
+            let mut __desktop_config = DesktopConfig::default();
+            __desktop_config.lingxi_home = home.to_owned();
+            __desktop_config.cwd = cwd.to_owned();
+            __desktop_config.injected_permission_gate = Some(gate.clone());
+            __desktop_config.permission_mode = permission::PermissionMode::Default;
+            __desktop_config.permission_mode_cli_explicit = true;
+            __desktop_config
         };
         let runtime = build_cli_runtime_from_config(
             cfg,
@@ -2015,7 +2248,9 @@ mod tests {
         input: &serde_json::Value,
     ) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let check = gate.check("Bash", input);
+            let input =
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(input).unwrap();
+            let check = gate.check("Bash", &input);
             tokio::pin!(check);
             let exchange = tokio::select! {
                 decision = &mut check => panic!("expected a human prompt, got {decision:?}"),
@@ -2071,7 +2306,11 @@ mod tests {
             cwd: project.path().to_owned(),
         };
         assert!(matches!(
-            gate.check("Bash", &input).await,
+            gate.check(
+                "Bash",
+                &harness_runtime::headless::Utf16JsonProjection::from_serde_value(&input).unwrap()
+            )
+            .await,
             permission::PermissionDecision::Allow
         ));
         for (dest, removed_source, remaining) in [
@@ -2118,7 +2357,14 @@ mod tests {
             if remaining > 0 {
                 assert!(
                     matches!(
-                        gate.check("Bash", &input).await,
+                        gate.check(
+                            "Bash",
+                            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                                &input
+                            )
+                            .unwrap()
+                        )
+                        .await,
                         permission::PermissionDecision::Allow
                     ),
                     "other settings grants must remain live"
@@ -2160,7 +2406,11 @@ mod tests {
             cwd: project.path().to_owned(),
         };
         assert!(matches!(
-            gate.check("Bash", &input).await,
+            gate.check(
+                "Bash",
+                &harness_runtime::headless::Utf16JsonProjection::from_serde_value(&input).unwrap()
+            )
+            .await,
             permission::PermissionDecision::Allow
         ));
         for behavior in [PermissionBehavior::Ask, PermissionBehavior::Deny] {
@@ -2191,7 +2441,12 @@ mod tests {
                 assert_live_permission_asks(&gate, &mut permission_rx, &input).await;
             } else {
                 assert!(matches!(
-                    gate.check("Bash", &input).await,
+                    gate.check(
+                        "Bash",
+                        &harness_runtime::headless::Utf16JsonProjection::from_serde_value(&input)
+                            .unwrap()
+                    )
+                    .await,
                     permission::PermissionDecision::Deny { .. }
                 ));
                 assert!(
@@ -2201,8 +2456,14 @@ mod tests {
             }
             assert!(
                 matches!(
-                    gate.check("Bash", &serde_json::json!({"command":"mkdir unrelated"}))
-                        .await,
+                    gate.check(
+                        "Bash",
+                        &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"command":"mkdir unrelated"})
+                        )
+                        .unwrap()
+                    )
+                    .await,
                     permission::PermissionDecision::Allow
                 ),
                 "content-scoped updates cannot deny unrelated commands"
@@ -2258,7 +2519,13 @@ mod tests {
                 .enforcing_permission_gate
                 .as_ref()
                 .unwrap()
-                .check("Bash", &serde_json::json!({"command":"touch permitted"}))
+                .check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"touch permitted"})
+                    )
+                    .unwrap()
+                )
                 .await,
             permission::PermissionDecision::Allow
         ));
@@ -2331,7 +2598,7 @@ mod tests {
             fixture_cli_runtime_with_balance(home.path(), cwd.path(), Some(123_000_000)).await;
         let orch = &runtime.orchestrator;
         let old_id = orch.current_session_id().await;
-        orch.append_meta_user_message("old-conversation-marker")
+        orch.append_meta_user_message(&"old-conversation-marker".into())
             .await
             .unwrap();
         assert!(!orch.snapshot_history().await.is_empty());
@@ -2359,7 +2626,7 @@ mod tests {
         assert_eq!(cost.session_id.as_uuid().to_string(), new_id);
         assert_eq!(cost.total_nano_usd, 0);
         let preserved_old = std::fs::read(&old_path).unwrap();
-        orch.append_meta_user_message("new-conversation-marker")
+        orch.append_meta_user_message(&"new-conversation-marker".into())
             .await
             .unwrap();
         let new_path = session::jsonl::path::session_path(
@@ -2702,6 +2969,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_anthropic_metadata_is_canonical_or_explicit_custom_endpoint_only() {
+        let canonical = native_anthropic_client_metadata_for_host_with_policy(
+            "https://api.anthropic.com",
+            "lingxi-cli",
+            "0.12.0",
+            true,
+            None,
+        )
+        .expect("the canonical first-party API is enabled");
+        assert_eq!(canonical.language, "rust");
+        assert_eq!(canonical.runtime, "lingxi");
+        assert_eq!(canonical.app_id, "lingxi-cli");
+        assert_eq!(
+            canonical.package_version,
+            lingxi_llm_client::PACKAGE_VERSION
+        );
+        assert_eq!(canonical.runtime_version, "0.12.0");
+        assert_eq!(canonical.session_id, None);
+
+        assert!(native_anthropic_client_metadata_for_host_with_policy(
+            "http://127.0.0.1:3000",
+            "lingxi-cli",
+            "0.12.0",
+            true,
+            None,
+        )
+        .is_none());
+        assert!(native_anthropic_client_metadata_for_host_with_policy(
+            "http://127.0.0.1:3000",
+            "lingxi-cli",
+            "0.12.0",
+            true,
+            Some("http://127.0.0.1:4000"),
+        )
+        .is_none());
+        let custom = native_anthropic_client_metadata_for_host_with_policy(
+            "http://127.0.0.1:3000/",
+            "lingxi-cli",
+            "0.12.0",
+            true,
+            Some("http://127.0.0.1:3000"),
+        )
+        .expect("an exact custom-endpoint opt-in is accepted");
+        assert_eq!(custom.app_id, "lingxi-cli");
+        assert!(native_anthropic_client_metadata_for_host_with_policy(
+            "https://api.anthropic.com",
+            "lingxi-cli",
+            "0.12.0",
+            false,
+            None,
+        )
+        .is_none());
+    }
+
     // ---- ANTHROPIC_MODEL env-pin resolution (claude-code D4) ----------------
     //
     // `resolve_desktop_config` reads the process-global `ANTHROPIC_MODEL`; the
@@ -2803,6 +3125,13 @@ mod tests {
 
     #[test]
     fn parse_flag_settings_accepts_inline_json_and_file_paths() {
+        let source = r#"{"autoMode":{"allow":["\ud800"]}}"#;
+        assert_eq!(
+            read_flag_settings_source_checked(Some(source))
+                .unwrap()
+                .as_deref(),
+            Some(source)
+        );
         let inline = parse_flag_settings(Some(r#"{"workflowSizeGuideline":"large"}"#)).unwrap();
         assert_eq!(inline.workflow_size_guideline.as_deref(), Some("large"));
 

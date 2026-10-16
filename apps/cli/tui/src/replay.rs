@@ -37,9 +37,11 @@
 //! [`RenderedMessage::CompactBoundary`]. The hidden summary is never rendered as
 //! an ordinary user row.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use std::collections::HashMap;
 use tui_core::message::RenderedMessage;
+use tui_core::orchestrator_bridge::projection_to_display_value;
 
 /// Build the seeded scrollback for a resumed session from its persisted
 /// conversation history (in file/arrival order).
@@ -132,13 +134,13 @@ fn rebuild_from_jsonl_impl(
             "user" => {
                 let compact_summary = m
                     .extra
-                    .get("isCompactSummary")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isCompactSummary")
+                    .and_then(|value| value.as_bool())
                     .unwrap_or(false);
                 let transcript_only = m
                     .extra
-                    .get("isVisibleInTranscriptOnly")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isVisibleInTranscriptOnly")
+                    .and_then(|value| value.as_bool())
                     .unwrap_or(false);
                 if compact_summary {
                     acc.attach_compact_summary(&blocks);
@@ -147,16 +149,17 @@ fn rebuild_from_jsonl_impl(
                 }
             }
             "assistant" => acc.push_assistant_blocks(&blocks),
-            "system"
-                if m.extra.get("subtype").and_then(serde_json::Value::as_str)
-                    == Some("compact_boundary") =>
-            {
+            "system" if m.extra.string_at("/subtype") == Some("compact_boundary") => {
                 let messages_before = m
                     .extra
-                    .get("compactMetadata")
-                    .and_then(|metadata| metadata.get("messagesSummarized"))
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|count| u32::try_from(count).ok())
+                    .number_at("/compactMetadata/messagesSummarized")
+                    .filter(|count| {
+                        count.is_finite()
+                            && count.fract() == 0.0
+                            && *count >= 0.0
+                            && *count <= f64::from(u32::MAX)
+                    })
+                    .map(|count| count as u32)
                     .unwrap_or_default();
                 acc.push_compact_boundary(messages_before);
             }
@@ -180,25 +183,38 @@ fn rebuild_from_jsonl_impl(
     acc.out
 }
 
-/// Best-effort `message.content` → `Vec<ContentBlock>` decode. Mirrors
-/// `orchestrator::resume::extract_content_blocks`: a string becomes a single
-/// `Text` block; an array is deserialized as content blocks; anything else (or
-/// a decode failure) yields an empty `Vec` (the turn still anchors order but
-/// contributes no rows).
-fn decode_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
-    let Some(content) = message.get("content") else {
+/// Best-effort exact-source `message.content` → `Vec<ContentBlock>` decode.
+/// Mirrors `orchestrator::resume::extract_content_blocks`: a string becomes a
+/// single text block, retaining isolated UTF-16 units in `TextJsUtf16`; an array
+/// is deserialized directly from its exact JSON source. Anything else (or a
+/// decode failure) yields no rows.
+fn decode_content_blocks(message: &Utf16JsonProjection) -> Vec<ContentBlock> {
+    let Some(content) = message.get_property("content") else {
         return Vec::new();
     };
-    if let Some(s) = content.as_str() {
-        return vec![ContentBlock::Text {
-            text: s.to_string(),
-            citations: None,
-        }];
+    if let Some(text) = content.as_str() {
+        let units = content.code_units().unwrap_or_default();
+        return if String::from_utf16(units).is_ok() {
+            vec![ContentBlock::Text {
+                text: text.to_owned(),
+                citations: None,
+            }]
+        } else {
+            vec![ContentBlock::TextJsUtf16 {
+                text: text.to_owned(),
+                utf16_code_units: units.to_vec(),
+                citations: None,
+            }]
+        };
     }
-    if content.is_array() {
-        if let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(content.clone()) {
-            return blocks;
-        }
+    if content.array_len().is_some() {
+        let Ok(content) = message
+            .subprojection("/content")
+            .and_then(|projection| projection.to_json_string())
+        else {
+            return Vec::new();
+        };
+        return serde_json::from_str::<Vec<ContentBlock>>(&content).unwrap_or_default();
     }
     Vec::new()
 }
@@ -232,7 +248,9 @@ impl ReplayAcc {
         let summary = content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -308,7 +326,9 @@ fn push_user_block(
             // transcript stores the stringified `content`. Re-wrap it as a JSON
             // string so the UserToolResult renderer (which expects a
             // `serde_json::Value`) treats it identically to a live result.
-            let result = serde_json::Value::String(content.clone());
+            let result = serde_json::Value::String(
+                content.string_at("").unwrap_or_default().to_owned(),
+            );
             let _ = is_error; // is_error is not carried on RenderedMessage::UserToolResult
             out.push(RenderedMessage::UserToolResult {
                 id: tool_use_id.clone(),
@@ -360,6 +380,7 @@ fn push_assistant_block(
             });
         }
         ContentBlock::ToolUse { id, name, input, .. } => {
+            let input = projection_to_display_value(input);
             tool_inputs.insert(id.clone(), input.clone());
             tool_names.insert(id.clone(), name.clone());
             out.push(RenderedMessage::AssistantToolUse {
@@ -403,7 +424,8 @@ mod tests {
     use lingxi_core::types::{ImageSource, MessageId};
 
     fn user_text(text: &str) -> ConversationMessage {
-        ConversationMessage::User { api_message_override: None,
+        ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
@@ -412,6 +434,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -423,6 +449,7 @@ mod tests {
                 text: text.into(),
                 citations: None,
             }],
+            resumable: None,
             stop_reason: None,
         }
     }
@@ -457,22 +484,23 @@ mod tests {
                 content: vec![ContentBlock::ToolUse {
                     id: id.clone(),
                     name: "Edit".into(),
-                    input_projection: None,
-                    input: serde_json::json!({
+                    input: Utf16JsonProjection::from_serde_value(&serde_json::json!({
                         "file_path": "/tmp/x.rs",
                         "old_string": "a",
                         "new_string": "b",
-                    }),
+                    }))
+                    .unwrap(),
                     provider_id: None,
                 }],
+                resumable: None,
                 stop_reason: None,
             },
-            ConversationMessage::User { api_message_override: None,
+            ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: "edited".into(),
-                    content_projection: None,
                     is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
@@ -480,6 +508,10 @@ mod tests {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         ];
         let out = rebuild_messages(&h);
@@ -519,12 +551,12 @@ mod tests {
         // A torn transcript: a result with no preceding tool-use. It must still
         // render (empty tool name, no diff inputs) rather than be dropped.
         let id = ToolUseId::new();
-        let h = vec![ConversationMessage::User { api_message_override: None,
+        let h = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id,
                 content: "stdout".into(),
-                content_projection: None,
                 is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
@@ -532,6 +564,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -559,6 +595,7 @@ mod tests {
                 thinking: "reasoning".into(),
                 signature: None,
             }],
+            resumable: None,
             stop_reason: None,
         }];
         let out = rebuild_messages(&h);
@@ -582,6 +619,7 @@ mod tests {
             content: vec![ContentBlock::RedactedThinking {
                 data: "opaque-payload".into(),
             }],
+            resumable: None,
             stop_reason: None,
         }];
         let out = rebuild_messages(&h);
@@ -596,7 +634,8 @@ mod tests {
     fn redacted_thinking_on_user_message_also_replays() {
         // The wire transcript can carry a redacted-thinking block on a user-role
         // entry (provider replay envelope); it replays identically.
-        let h = vec![ConversationMessage::User { api_message_override: None,
+        let h = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::RedactedThinking {
                 data: "opaque".into(),
@@ -604,6 +643,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -625,7 +668,8 @@ mod tests {
                 refusal_fallback: None,
                 model_fallback: None,
             },
-            ConversationMessage::User { api_message_override: None,
+            ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Image {
                     source: ImageSource::Url {
@@ -635,6 +679,10 @@ mod tests {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         ];
         assert!(rebuild_messages(&h).is_empty());
@@ -666,6 +714,30 @@ mod tests {
             &out[0],
             RenderedMessage::UserText { body, .. } if body == "hi from jsonl"
         ));
+    }
+
+    #[test]
+    fn replay_retains_lone_surrogate_units_until_the_rendered_message_boundary() {
+        for source in [
+            r#"{"content":"a\ud800b"}"#,
+            r#"{"content":[{"type":"text","text":"a\ud800b"}]}"#,
+        ] {
+            let message = Utf16JsonProjection::parse(source).expect("exact source JSON");
+            let blocks = decode_content_blocks(&message);
+            let [ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                ..
+            }] = blocks.as_slice()
+            else {
+                panic!("expected one exact UTF-16 text block, got {blocks:?}");
+            };
+            assert_eq!(text, "a�b");
+            assert_eq!(
+                utf16_code_units.as_slice(),
+                &[b'a' as u16, 0xd800, b'b' as u16]
+            );
+        }
     }
 
     #[test]
@@ -873,11 +945,14 @@ mod tests {
                 ContentBlock::ToolUse {
                     id,
                     name: "Read".into(),
-                    input_projection: None,
-                    input: serde_json::json!({"file_path": "/a"}),
+                    input: Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"file_path": "/a"}),
+                    )
+                    .unwrap(),
                     provider_id: None,
                 },
             ],
+            resumable: None,
             stop_reason: None,
         }];
         let out = rebuild_messages(&h);

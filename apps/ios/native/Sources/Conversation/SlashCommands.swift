@@ -3,15 +3,24 @@ import SwiftUI
 
 struct ConversationSlashCommand: Identifiable, Equatable, Hashable {
     let name: String
+    /// Original catalog identity. `name` is only the display-safe projection.
+    var sourceNameCodeUnits: [UInt16]? = nil
     let description: String
     let aliases: [String]
+    /// Original alias identities, indexed like `aliases`.
+    var sourceAliasCodeUnits: [[UInt16]]? = nil
     let argumentHint: String?
     var argumentNames: [String] = []
     let menuDescription: String?
     let source: String
     let hidden: Bool
 
-    var id: String { name }
+    var id: String {
+        guard let sourceNameCodeUnits else { return name }
+        return "utf16:" + sourceNameCodeUnits
+            .map { String($0, radix: 16) }
+            .joined(separator: "-")
+    }
     var canonicalTrigger: String { "/\(name)" }
 
     func matchesExactToken(_ token: String) -> Bool {
@@ -20,6 +29,17 @@ struct ConversationSlashCommand: Identifiable, Equatable, Hashable {
 
     func matchedAlias(for token: String) -> String? {
         aliases.first(where: { $0 == token })
+    }
+
+    func sourceCodeUnits(for token: String) -> [UInt16]? {
+        if token == name {
+            return sourceNameCodeUnits
+        }
+        guard let index = aliases.firstIndex(of: token) else { return nil }
+        guard let sourceAliasCodeUnits, sourceAliasCodeUnits.indices.contains(index) else {
+            return nil
+        }
+        return sourceAliasCodeUnits[index]
     }
 }
 
@@ -296,7 +316,7 @@ struct SlashCommandSuggestionPanel: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(commandAccessibilityLabel(command))
         .accessibilityHint("slash_command_select_hint")
-        .accessibilityIdentifier("composer.slash-command.\(command.name)")
+        .accessibilityIdentifier("composer.slash-command.\(command.id)")
     }
 
     private func commandAccessibilityLabel(_ command: ConversationSlashCommand) -> String {

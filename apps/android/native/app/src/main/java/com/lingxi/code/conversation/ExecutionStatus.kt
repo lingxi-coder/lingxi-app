@@ -40,7 +40,7 @@ enum class WorkflowResumeUiState {
 fun TaskRowDto.toBackgroundTaskUi(): BackgroundTaskUi = BackgroundTaskUi(
     taskId = taskId,
     taskType = taskType,
-    description = description,
+    description = description.displayText(),
     status = status,
     canResume = canResume,
     startedAtMs = startedAtMs,
@@ -49,11 +49,11 @@ fun TaskRowDto.toBackgroundTaskUi(): BackgroundTaskUi = BackgroundTaskUi(
 
 fun SessionAgentSummaryDto.toSessionAgentUi(): SessionAgentUi = SessionAgentUi(
     agentId = agentId,
-    name = name,
+    name = name.displayText(),
     agentType = agentType,
     model = model,
     status = status,
-    latestActivity = latestActivity,
+    latestActivity = latestActivity?.displayText(),
 )
 
 internal fun TaskStatusDto.isAttentionStatus(): Boolean =

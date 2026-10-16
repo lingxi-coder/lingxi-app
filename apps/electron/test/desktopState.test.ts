@@ -171,3 +171,21 @@ for (const type of ['session_started', 'session_resumed', 'session_ended'] as co
     assert.equal(next.status, null);
   });
 }
+
+
+test('status refresh preserves the qualified route and source', () => {
+  const reference = 'anthropic/claude-opus-4-7';
+  const detail = { reference, context_budget: { policy: 'auto', effective_input_budget: 200000 } } as ModelDetailsDto;
+  const listed = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'model_list', models: [reference], current: reference,
+    current_model_source: 'selected-alias', details: [detail],
+  });
+  const snapshot = { model: 'claude-opus-4-7', session_id: 's', n_messages: 1,
+    total_cost_usd: 0, input_tokens: 100, output_tokens: 10, n_mcp_connected: 0,
+    n_mcp_total: 0, n_hooks: 0, n_agents: 0, started_at: '', cwd: '' };
+  const refreshed = reduceDesktopEvent(listed, { type: 'status_snapshot', snapshot });
+  assert.equal(refreshed.currentModel, reference);
+  assert.equal(refreshed.currentModelSource, 'selected-alias');
+  assert.equal(refreshed.modelDetails.find(row => row.reference === refreshed.currentModel)?.context_budget?.effective_input_budget, 200000);
+  assert.deepEqual(refreshed.status, snapshot);
+});

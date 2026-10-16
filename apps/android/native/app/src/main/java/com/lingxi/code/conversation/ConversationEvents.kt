@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.toUi
@@ -57,6 +58,13 @@ sealed interface ReplyEvent {
 
     /** A non-terminal engine notice. */
     data class Notice(val message: String, val isError: Boolean) : ReplyEvent
+
+    /** A completed local slash command, which may have no TurnEnded event. */
+    data class CommandOutput(
+        val display: String,
+        val isError: Boolean,
+        val turnId: ULong?,
+    ) : ReplyEvent
 
     /** Incremental token accounting for the latest API call. */
     data class Usage(val usage: AgentRunUsage) : ReplyEvent
@@ -147,13 +155,18 @@ fun clientEventToReply(
     strings: ConversationStrings = DefaultConversationStrings,
 ): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
-    is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
+    is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text.displayText())
     is ClientEvent.VisualizationBlock ->
         ReplyEvent.Visualization(event.status.toUi(), event.reference?.toUi())
     is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)
     // Reduced on the session-level raw event stream, including before TurnStarted.
     is ClientEvent.ScheduledTaskFire -> null
-    is ClientEvent.SystemNotice -> ReplyEvent.Notice(event.message, event.isError)
+    is ClientEvent.SystemNotice -> ReplyEvent.Notice(event.message.displayText(), event.isError)
+    is ClientEvent.SlashCommandResult -> ReplyEvent.CommandOutput(
+        display = event.display.displayText(),
+        isError = event.isError,
+        turnId = event.turnId,
+    )
     is ClientEvent.ToolUseStarted ->
         if (isShellTool(event.tool)) {
             ReplyEvent.ShellTool(shellStarted(event.id, event.inputJson))
@@ -339,11 +352,12 @@ private fun retainedTurnOutcome(event: JSONObject): String? {
  */
 internal fun userFacingEngineError(
     kind: ErrorKindDto,
-    message: String,
+    message: ClientTextDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): String {
-    if (kind != ErrorKindDto.TRANSPORT) return message
-    val normalized = message.lowercase()
+    val displayMessage = message.displayText()
+    if (kind != ErrorKindDto.TRANSPORT) return displayMessage
+    val normalized = displayMessage.lowercase()
     return when {
         listOf(
             "dns",
@@ -368,7 +382,7 @@ internal fun userFacingEngineError(
         ).any(normalized::contains) ->
             strings.resolve(R.string.chat_error_connect_failed, "无法连接模型服务。请检查当前网络或 VPN 后重试。")
 
-        else -> message
+        else -> displayMessage
     }
 }
 
@@ -378,9 +392,14 @@ internal fun userFacingEngineError(
  * [ReplyEvent.Thinking] (so the run trace shows the instant a turn is armed,
  * before the first engine event), maps each event through [clientEventToReply]
  * (dropping ignored ones), and COMPLETES after the first terminal reply
- * ([ReplyEvent.End] / [ReplyEvent.Error] / [ReplyEvent.Completed]) — emitting a trailing
+ * ([ReplyEvent.End] / [ReplyEvent.Error] / [ReplyEvent.Completed], plus
+ * [ReplyEvent.CommandOutput] when opted in) — emitting a trailing
  * [ReplyEvent.End] after an `Error` so the ViewModel always sees a clean turn
- * boundary.
+ * boundary. A local slash command result is terminal itself because it can
+ * finish without `TurnEnded`.
+ *
+ * @param acceptSlashCommandResults enable only for a submission path that
+ * issued `RunSlashCommand`; ordinary prompt streams ignore command results.
  *
  * Extracted from [EngineConversationSource.submit] as a free function with NO
  * engine / Android dependency so the streaming/ordering contract is exercised on
@@ -390,6 +409,7 @@ internal fun userFacingEngineError(
 fun mapReplyStream(
     events: Flow<ClientEvent>,
     strings: ConversationStrings = DefaultConversationStrings,
+    acceptSlashCommandResults: Boolean = false,
 ): Flow<ReplyEvent> = flow {
     emit(ReplyEvent.Thinking)
     var awaitingDurableReplayAck = false
@@ -407,11 +427,16 @@ fun mapReplyStream(
                 }
                 return@transformWhile true
             }
+            if (event is ClientEvent.SlashCommandResult && !acceptSlashCommandResults) {
+                return@transformWhile true
+            }
             val reply = clientEventToReply(event, strings) ?: return@transformWhile true
             emit(reply)
             awaitingDurableReplayAck = shouldAwaitDurableTurnReplayAck(event, reply)
-            val terminal =
-                reply is ReplyEvent.End || reply is ReplyEvent.Error || reply is ReplyEvent.Completed
+            val terminal = reply is ReplyEvent.End ||
+                reply is ReplyEvent.Error ||
+                reply is ReplyEvent.Completed ||
+                reply is ReplyEvent.CommandOutput
             if (reply is ReplyEvent.Error) emit(ReplyEvent.End)
             !terminal // keep collecting until a terminal reply
         },

@@ -969,12 +969,17 @@ fn help_lines_with_commands(
     out.push(Line::from(""));
     out.push(header("Slash commands"));
     for command in crate::command::BUILTIN {
-        match commands
-            .iter()
-            .find(|candidate| candidate.replaces_builtin && candidate.name == command.name)
-        {
+        match commands.iter().find(|candidate| {
+            candidate.replaces_builtin
+                && candidate
+                    .name
+                    .code_units
+                    .iter()
+                    .copied()
+                    .eq(command.name.encode_utf16())
+        }) {
             Some(described) if !described.hidden => {
-                out.push(row(command.name, &described.description));
+                out.push(row(command.name, &described.description.display()));
             }
             Some(_) => {}
             None if command.advertised && !crate::command::is_runtime_hidden(command.name) => {
@@ -986,11 +991,14 @@ fn help_lines_with_commands(
     for command in commands.iter().filter(|command| {
         !command.hidden
             && !command.replaces_builtin
-            && !crate::command::BUILTIN
-                .iter()
-                .any(|builtin| builtin.name == command.name)
+            && !crate::command::BUILTIN.iter().any(|builtin| {
+                builtin
+                    .name
+                    .encode_utf16()
+                    .eq(command.name.code_units.iter().copied())
+            })
     }) {
-        out.push(row(&command.name, &command.description));
+        out.push(row(&command.name.display(), &command.description.display()));
     }
     // [PARITY] 2.1.206's help dialog (`rCo` header + `LBs` command tabs) ends
     // at the command list — it renders NO "For more help" docs footer, so the

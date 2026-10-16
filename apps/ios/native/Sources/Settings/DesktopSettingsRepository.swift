@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
+#endif
 import Observation
 
 /// Settings file destinations deliberately exclude MCP's independent scopes.
@@ -43,6 +46,8 @@ final class DesktopSettingsRepository {
     private(set) var credentialStorageEncrypted: Bool?
     private(set) var catalogs: [String: String] = [:]
     private(set) var documents: [String: String] = [:]
+    private(set) var skillCatalog: SkillAdminCatalog?
+    private(set) var skillDocument: SkillAdminDocument?
     /// How many catalogs each domain has received, so a reader can wait for
     /// the next one even when it is unchanged.
     private(set) var catalogArrivals: [String: Int] = [:]
@@ -76,6 +81,8 @@ final class DesktopSettingsRepository {
         errorMessage = nil
         catalogs = [:]
         documents = [:]
+        skillCatalog = nil
+        skillDocument = nil
         credentialStates = [:]
         credentialStorageEncrypted = nil
         credentialRequests = [:]
@@ -187,12 +194,21 @@ final class DesktopSettingsRepository {
         do { try await submitter(command) } catch { if generation == sourceGeneration { fail(error.localizedDescription) } }
     }
 
-    func admin(domain: String, action: String, target: String? = nil, scope: String? = nil,
+    func admin(domain: String, action: String, target: String? = nil,
+               skillTarget: SkillAdminIdentity? = nil, scope: String? = nil,
                revision: String? = nil, payload: String? = nil, mutation: Bool = false,
                timeout: Duration = .seconds(20)) async {
         guard connected else { return }
         guard !saving else { errorMessage = "Wait for the current engine operation to finish."; return }
         if scope == "managed" && mutation { errorMessage = "Managed configuration is read-only."; return }
+        if domain == "skill" && target != nil {
+            errorMessage = "Skill targets must retain their source identity."
+            return
+        }
+        if domain != "skill" && skillTarget != nil {
+            errorMessage = "A source skill identity can only target Skill Admin."
+            return
+        }
         nextOperation += 1
         let operation = nextOperation
         if !["get_catalog", "get_snapshot", "get_document"].contains(action) { operations.insert(operation) } else { readRequests.insert(domain) }
@@ -200,7 +216,16 @@ final class DesktopSettingsRepository {
         errorMessage = nil
         let command: ClientCommand
         switch domain {
-        case "skill": command = .skillAdmin(command: .init(action: action, operationId: operation, target: target, scope: scope, revision: revision, payloadJson: payload))
+        case "skill":
+            let sourceTarget = skillTarget.map { ClientTextDto(codeUnits: $0.codeUnits) }
+            command = .skillAdmin(command: .init(
+                action: action,
+                operationId: operation,
+                target: sourceTarget,
+                scope: scope,
+                revision: revision,
+                payloadJson: payload
+            ))
         case "mcp": command = .mcpAdmin(command: .init(action: action, operationId: operation, target: target, scope: scope, revision: revision, payloadJson: payload))
         case "plugin": command = .pluginAdmin(command: .init(action: action, operationId: operation, target: target, scope: scope, revision: revision, payloadJson: payload))
         case "hook": command = .hookAdmin(command: .init(action: action, operationId: operation, target: target, scope: scope, revision: revision, payloadJson: payload))
@@ -298,11 +323,19 @@ final class DesktopSettingsRepository {
             } else if let error { errorMessage = error }
         case let .authState(state): auth = state
         case let .doctorReport(report): doctor = report
-        case let .skillCatalog(json): readRequests.remove("skill"); catalogs["skill"] = json
+        case let .skillCatalog(json):
+            readRequests.remove("skill")
+            catalogs["skill"] = json
+            skillCatalog = SkillAdminCatalog.parse(json)
         case let .pluginCatalog(json):
-            readRequests.remove("plugin"); catalogs["plugin"] = json; catalogArrivals["plugin", default: 0] += 1
+            readRequests.remove("plugin")
+            catalogs["plugin"] = json
+            catalogArrivals["plugin", default: 0] += 1
         case let .mcpConfigurationSnapshot(json): readRequests.remove("mcp"); catalogs["mcp"] = json
-        case let .skillDocument(json): readRequests.remove("skill"); documents["skill"] = json
+        case let .skillDocument(json):
+            readRequests.remove("skill")
+            documents["skill"] = json
+            skillDocument = SkillAdminDocument.parse(json)
         case let .configurationOperation(domain, operationId, status, effect, message, detailsJson):
             let name = String(describing: domain)
             if operationId == 0, name == "hook", let detailsJson {
@@ -323,8 +356,9 @@ final class DesktopSettingsRepository {
                 }
             }
         case let .error(_, message):
-            if saving { fail(message) }
-            else if connected && !readRequests.isEmpty { errorMessage = message; readRequests = [] }
+            let displayMessage = message.displayText
+            if saving { fail(displayMessage) }
+            else if connected && !readRequests.isEmpty { errorMessage = displayMessage; readRequests = [] }
         default: break
         }
     }

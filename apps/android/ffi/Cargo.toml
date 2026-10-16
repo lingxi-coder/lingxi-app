@@ -50,7 +50,7 @@ audio-provider = { path = "../../audio-provider" }
 core = { workspace = true }
 mobile-linux-api.workspace = true
 harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
-skill-api = { workspace = true }
+skill = { workspace = true }
 branding.workspace = true
 thiserror.workspace = true
 serde.workspace = true

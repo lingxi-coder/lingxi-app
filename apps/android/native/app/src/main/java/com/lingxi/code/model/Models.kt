@@ -186,6 +186,7 @@ data class CatalogReasoningOption(
 )
 
 data class CatalogModelPricingTier(
+    val maxInputTokens: ULong? = null,
     val contextThresholdTokens: ULong,
     val inputPerMillion: Double?,
     val outputPerMillion: Double?,
@@ -220,6 +221,7 @@ data class CatalogModelDetails(
     val inputModalities: List<String>,
     val outputModalities: List<String>,
     val contextWindowTokens: ULong?,
+    val contextBudget: com.lingxi.code.bindings.client.ModelContextBudgetDto? = null,
     val maxInputTokens: ULong?,
     val maxOutputTokens: ULong?,
     val openWeights: Boolean?,
@@ -250,6 +252,7 @@ data class CatalogModelDetails(
                 inputModalities = dto.inputModalities,
                 outputModalities = dto.outputModalities,
                 contextWindowTokens = dto.contextWindowTokens,
+                contextBudget = dto.contextBudget,
                 maxInputTokens = dto.maxInputTokens,
                 maxOutputTokens = dto.maxOutputTokens,
                 openWeights = dto.openWeights,
@@ -266,6 +269,7 @@ data class CatalogModelDetails(
                         tiers = pricing.tiers.map { tier ->
                             CatalogModelPricingTier(
                                 contextThresholdTokens = tier.contextThresholdTokens,
+                                maxInputTokens = tier.maxInputTokens,
                                 inputPerMillion = tier.inputPerMillion,
                                 outputPerMillion = tier.outputPerMillion,
                                 cacheReadPerMillion = tier.cacheReadPerMillion,
@@ -595,6 +599,7 @@ object MockData {
 data class EngineModelState(
     val available: List<String> = emptyList(),
     val active: String = "",
+    val activeSourceDisplay: String? = null,
     val details: Map<String, CatalogModelDetails> = emptyMap(),
     /** The active model's effort control; null until the engine reports it. */
     val reasoning: ReasoningControl? = null,

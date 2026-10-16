@@ -470,6 +470,9 @@ final class ConversationModel: ObservableObject {
     @Published var availableModelDetails: [String: ModelRuntimeDetails] = [:]
     /// The active model id the engine reports (`ModelList.current` / `ModelChanged.model`).
     @Published var activeModelId: String = ""
+    /// Effective logical model source when the known route id cannot represent it.
+    /// Selection and capability lookups continue to use `activeModelId`.
+    @Published var activeModelSource: String? = nil
     /// Whether the current source was launched with at least one enabled LLM
     /// provider. The engine may still publish its built-in default model while
     /// keyless, so model availability alone cannot represent configuration.

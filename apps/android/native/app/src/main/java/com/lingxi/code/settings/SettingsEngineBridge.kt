@@ -1,9 +1,11 @@
 package com.lingxi.code.settings
 
+import com.lingxi.code.conversation.toClientTextDto
 import com.lingxi.code.bindings.client.*
 import com.lingxi.code.bindings.runtime.*
 import com.lingxi.code.bindings.android.*
 import com.lingxi.code.conversation.ConversationSource
+import com.lingxi.code.conversation.displayText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -88,7 +90,7 @@ class SettingsEngineBridge {
             is ClientEvent.ModelList -> mutable.value = mutable.value.copy(models = event.details)
             is ClientEvent.Error -> {
                 pendingPatch = null
-                mutable.value = mutable.value.copy(pending = null, savingSettings = false, notice = event.message)
+                mutable.value = mutable.value.copy(pending = null, savingSettings = false, notice = event.message.displayText())
             }
             is ClientEvent.McpConfigurationSnapshot -> catalog("mcp", event.snapshotJson)
             is ClientEvent.SkillCatalog -> catalog("skills", event.catalogJson)
@@ -209,9 +211,14 @@ class SettingsEngineBridge {
             check(mutable.value.pending == null) { "Wait for the current configuration operation" }
             mutable.value = mutable.value.copy(pending = id, notice = "Waiting for engine confirmation…")
         }
+        val skillTarget = target?.let { value ->
+            ClientTextDto(codeUnits = value.map { it.code.toUShort() })
+        }
         val command = when (domain) {
             "mcp" -> ClientCommand.McpAdmin(McpAdminCommandDto(action,id,target,scope,revision,payload))
-            "skills" -> ClientCommand.SkillAdmin(SkillAdminCommandDto(action,id,target,scope,revision,payload))
+            "skills" -> ClientCommand.SkillAdmin(
+                SkillAdminCommandDto(action, id, skillTarget, scope, revision, payload)
+            )
             "plugins" -> ClientCommand.PluginAdmin(PluginAdminCommandDto(action,id,target,scope,revision,payload))
             "hooks" -> ClientCommand.HookAdmin(HookAdminCommandDto(action,id,target,scope,revision,payload))
             else -> error("Unknown configuration domain")

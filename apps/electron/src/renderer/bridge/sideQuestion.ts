@@ -18,7 +18,7 @@ export function beginSideQuestion(state: RuntimeCenterState, sessionId: string, 
   }, sessionId);
   next = reduceRuntimeCenterEvent(next, {
     type: 'session_agent_message', session_id: sessionId, agent_id: agentId,
-    message_index: 0, message_uuid: crypto.randomUUID(),
+    message_index: 0, message_uuid: globalThis.crypto.randomUUID(),
     message: { role: 'user', blocks: [{ type: 'text', text: question }] },
   }, sessionId);
   return openRuntimeCenterItem(next, { kind: 'agent', id: agentId });
@@ -34,7 +34,7 @@ export function finishSideQuestion(state: RuntimeCenterState, sessionId: string,
   }, sessionId);
   next = reduceRuntimeCenterEvent(next, {
     type: 'session_agent_message', session_id: sessionId, agent_id: agentId,
-    message_index: 1, message_uuid: crypto.randomUUID(),
+    message_index: 1, message_uuid: globalThis.crypto.randomUUID(),
     message: { role: 'assistant', blocks: [{ type: 'text', text: answer }] },
   }, sessionId);
   return next;

@@ -502,17 +502,18 @@ fn tool_spec(value: &Value) -> Result<sdk::protocol::ToolSpec, Value> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .into(),
-        input_schema: value
-            .get("parameters")
-            .cloned()
-            .filter(Value::is_object)
-            .ok_or_else(|| failure("unavailable", "Agent tool schema is invalid"))?,
-        input_schema_json: None,
+        input_schema: sdk::protocol::JsonPayload::from_generated_value(
+            value
+                .get("parameters")
+                .filter(|schema| schema.is_object())
+                .ok_or_else(|| failure("unavailable", "Agent tool schema is invalid"))?,
+        )
+        .map_err(|_| failure("unavailable", "Agent tool schema is invalid"))?,
         strict: false,
         defer_loading: false,
         native_options: vec![],
         tool_type: None,
-        extra: Value::Null,
+        extra: sdk::protocol::JsonPayload::default(),
     })
 }
 fn format_json(format: &RealtimeAudioFormat) -> Result<Value, Value> {

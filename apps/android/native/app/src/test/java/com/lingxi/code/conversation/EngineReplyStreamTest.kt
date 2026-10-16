@@ -3,11 +3,15 @@ package com.lingxi.code.conversation
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.bindings.client.TurnOutcomeDto
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runCurrent
@@ -57,7 +61,7 @@ class EngineReplyStreamTest {
         }
         runCurrent() // collector is subscribed before the callback burst starts
 
-        repeat(1_000) { relay.offer(ClientEvent.TextDelta("$it")) }
+        repeat(1_000) { relay.offer(ClientEvent.TextDelta("$it".toClientTextDto())) }
         relay.offer(
             ClientEvent.TurnEnded(
                 outcome = TurnOutcomeDto.END_TURN,
@@ -69,8 +73,8 @@ class EngineReplyStreamTest {
 
         val values = received.await()
         assertEquals(1_001, values.size)
-        assertEquals("0", (values.first() as ClientEvent.TextDelta).text)
-        assertEquals("999", (values[999] as ClientEvent.TextDelta).text)
+        assertEquals("0", (values.first() as ClientEvent.TextDelta).text.displayText())
+        assertEquals("999", (values[999] as ClientEvent.TextDelta).text.displayText())
         assertTrue(values.last() is ClientEvent.TurnEnded)
         relay.close()
     }
@@ -94,8 +98,8 @@ class EngineReplyStreamTest {
         // listener thread firing the first token in the old race window.
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("first")) // the would-be-dropped delta
-                emit(ClientEvent.TextDelta("-second"))
+                emit(ClientEvent.TextDelta("first".toClientTextDto())) // the would-be-dropped delta
+                emit(ClientEvent.TextDelta("-second".toClientTextDto()))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost))
             },
         )
@@ -133,10 +137,10 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("partial"))
-                emit(ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "boom"))
+                emit(ClientEvent.TextDelta("partial".toClientTextDto()))
+                emit(ClientEvent.Error(kind = ErrorKindDto.TRANSPORT, message = "boom".toClientTextDto()))
                 // Anything after the terminal must NOT appear — the stream has stopped.
-                emit(ClientEvent.TextDelta("late"))
+                emit(ClientEvent.TextDelta("late".toClientTextDto()))
             },
         )
 
@@ -153,6 +157,117 @@ class EngineReplyStreamTest {
         assertTrue("no events after terminal", replies.none { it == ReplyEvent.Delta("late") })
     }
 
+    @Test
+    fun localSlashCommandResultTerminatesWithoutTurnEnded() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(
+                    ClientEvent.SlashCommandResult(
+                        turnId = 7uL,
+                        display = "Available commands".toClientTextDto(),
+                        isError = false,
+                    ),
+                )
+                emit(ClientEvent.TextDelta("must not leak".toClientTextDto()))
+            },
+            acceptSlashCommandResults = true,
+        )
+
+        assertEquals(
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.CommandOutput("Available commands", isError = false, turnId = 7uL),
+            ),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun slashCommandReplyFlowDropsOtherTurnResultsBeforeTerminalMapping() = runTest {
+        val matching = ClientEvent.SlashCommandResult(
+            turnId = 7uL,
+            display = "current result".toClientTextDto(),
+            isError = false,
+        )
+        val stream = mapReplyStream(
+            flowOf(
+                ClientEvent.SlashCommandResult(
+                    turnId = 8uL,
+                    display = "stale result".toClientTextDto(),
+                    isError = true,
+                ),
+                matching,
+                ClientEvent.TextDelta("must not leak".toClientTextDto()),
+            ).filter { slashCommandEventBelongsToTurn(it, 7L) },
+            acceptSlashCommandResults = true,
+        )
+
+        assertEquals(
+            listOf(ReplyEvent.Thinking, ReplyEvent.CommandOutput("current result", false, 7uL)),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun promptExpandingSlashCommandContinuesThroughOrdinaryTurnEnd() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(
+                    ClientEvent.TurnRecoveryState(
+                        TurnRecoverySnapshotDto(
+                            sessionId = "session-a",
+                            turnId = 7uL,
+                            state = TurnRecoveryStateDto.RUNNING,
+                            firstSequence = 1uL,
+                            lastSequence = 1uL,
+                            safeToResume = true,
+                            reason = null,
+                        ),
+                    ),
+                )
+                emit(ClientEvent.TurnStarted(turnId = 7uL))
+                emit(ClientEvent.TextDelta("expanded prompt reply".toClientTextDto()))
+                emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
+            },
+            acceptSlashCommandResults = true,
+        )
+
+        assertEquals(
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.Thinking,
+                ReplyEvent.Delta("expanded prompt reply"),
+                ReplyEvent.End,
+            ),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun slashResultDoesNotTerminateAnOrdinaryPromptStream() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(
+                    ClientEvent.SlashCommandResult(
+                        turnId = 99uL,
+                        display = "unrelated command result".toClientTextDto(),
+                        isError = false,
+                    ),
+                )
+                emit(ClientEvent.TextDelta("answer".toClientTextDto()))
+                emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
+            },
+        )
+
+        assertEquals(
+            listOf(ReplyEvent.Thinking, ReplyEvent.Delta("answer"), ReplyEvent.End),
+            stream.toList(),
+        )
+    }
+
     /** Live usage appears while out-of-band configuration events stay filtered. */
     @Test
     fun telemetryFlowsWithoutLeakingOutOfBandEvents() = runTest {
@@ -160,8 +275,8 @@ class EngineReplyStreamTest {
         val stream = mapReplyStream(
             events.onSubscription {
                 emit(ClientEvent.UsageUpdate(isSnapshot = null, inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u))
-                emit(ClientEvent.TextDelta("hi"))
-                emit(ClientEvent.ModelChanged(model = "opus"))
+                emit(ClientEvent.TextDelta("hi".toClientTextDto()))
+                emit(ClientEvent.ModelChanged(modelSource = null, model = "opus"))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
             },
         )
@@ -182,14 +297,14 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val message = com.lingxi.code.bindings.client.MessageDto(
             role = "assistant",
-            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text("first")),
+            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text("first".toClientTextDto())),
             images = emptyList(),
         )
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("first"))
+                emit(ClientEvent.TextDelta("first".toClientTextDto()))
                 emit(ClientEvent.MessageComplete(stopReason = "end_turn", message = message))
-                emit(ClientEvent.TextDelta("second"))
+                emit(ClientEvent.TextDelta("second".toClientTextDto()))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost))
             },
         )
@@ -210,7 +325,7 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.TextDelta("live"))
+                emit(ClientEvent.TextDelta("live".toClientTextDto()))
                 emit(
                     ClientEvent.TurnEventReplay(
                         sessionId = "session-a",
@@ -219,7 +334,7 @@ class EngineReplyStreamTest {
                         eventJson = """{"type":"text_delta","text":"live"}""",
                     ),
                 )
-                emit(ClientEvent.ModelChanged(model = "ignored"))
+                emit(ClientEvent.ModelChanged(modelSource = null, model = "ignored"))
                 emit(
                     ClientEvent.TurnEventReplay(
                         sessionId = "session-a",

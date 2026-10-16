@@ -3,6 +3,7 @@ use crate::exit_codes;
 use crate::init::Runtime;
 use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission;
 #[cfg(unix)]
 use platform_posix::PosixFileSystem as HostFileSystem;
@@ -404,7 +405,7 @@ pub(crate) async fn mount_background_resumed_tui(
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: &crate::background_launch::BackgroundLaunchSpec,
 ) -> crate::mode::RunOutcome {
@@ -427,7 +428,7 @@ pub(super) async fn mount_resumed_tui_inner(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
 ) -> crate::mode::RunOutcome {
@@ -445,19 +446,23 @@ pub(super) async fn mount_resumed_tui_inner(
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
     let parent_session_id = parent_session_id_from_messages(&messages);
-    let mut tui_build = match crate::init::build_runtime_for_tui_inner_with_parent(
-        &resumed_argv,
-        Some(session_id),
-        parent_session_id,
-    )
-    .await
-    {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("lingxi-cli: tui init failed: {e}");
-            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-        }
-    };
+    let native_settings_agent_context =
+        native_settings_agent_context_for_launch(shell_launch.map(|launch| launch.launch));
+    let mut tui_build =
+        match crate::init::build_runtime_for_tui_inner_with_parent_and_native_settings_context(
+            &resumed_argv,
+            Some(session_id),
+            parent_session_id,
+            native_settings_agent_context,
+        )
+        .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("lingxi-cli: tui init failed: {e}");
+                return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+            }
+        };
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     let effective_permission_mode = match seed_orchestrator_session(
@@ -518,9 +523,18 @@ pub(super) async fn mount_resumed_tui_inner(
     if let Some(state) = carried_state {
         let orch = &tui_build.runtime.orchestrator;
         if let Some((model, profile)) = state.model {
-            let _ = orch
-                .switch_model_with_source(&model, profile.as_deref(), "resume")
-                .await;
+            let _ = orch.switch_model(&model, profile.as_deref()).await;
+        }
+        if let Some(user_model_setting) = state.user_model_setting {
+            let session = orch.session();
+            let mut session = session.lock().await;
+            // Carry the complete source/effective-source/route binding from
+            // the outgoing runtime; rebuilding it from the visible model would
+            // lose unresolved source identity and its routing anchor.
+            session.user_model_setting = Some(user_model_setting);
+            session.user_model_setting_provenance = lingxi_core::host::ModelProvenance::UserOrEnv;
+            session.user_model_setting_source =
+                lingxi_core::session::SessionModelSettingSource::UserSelection;
         }
         let _ = orch.set_fast_mode(state.fast_mode).await;
         if state.permission_mode.is_none() {
@@ -588,11 +602,9 @@ pub(super) fn parent_session_id_from_messages(messages: &[JsonlMessage]) -> Opti
     messages.iter().find_map(|entry| {
         entry
             .extra
-            .get("forkedFrom")?
-            .get("sessionId")?
-            .as_str()
+            .string_units("/forkedFrom/sessionId")
+            .and_then(|units| String::from_utf16(&units).ok())
             .filter(|id| !id.is_empty())
-            .map(str::to_string)
     })
 }
 
@@ -1512,5 +1524,46 @@ pub(super) fn resume_by_id_error(
             format!("Failed to resume session {session_id}"),
             exit_codes::RUNTIME_ERROR,
         )),
+    }
+}
+
+fn native_settings_agent_context_for_launch(
+    launch: Option<crate::background_launch::BackgroundLaunchKind>,
+) -> lingxi_core::host::NativeSettingsAgentContext {
+    if launch == Some(crate::background_launch::BackgroundLaunchKind::Fork) {
+        lingxi_core::host::NativeSettingsAgentContext::Subagent {
+            is_main_session: true,
+        }
+    } else {
+        lingxi_core::host::NativeSettingsAgentContext::Main
+    }
+}
+
+#[cfg(test)]
+mod native_settings_agent_context_tests {
+    use super::*;
+    use crate::background_launch::BackgroundLaunchKind as Launch;
+    use lingxi_core::host::NativeSettingsAgentContext as Context;
+
+    #[test]
+    fn only_an_explicit_background_fork_uses_main_session_subagent_identity() {
+        assert_eq!(
+            native_settings_agent_context_for_launch(None),
+            Context::Main
+        );
+        assert_eq!(
+            native_settings_agent_context_for_launch(Some(Launch::Fresh)),
+            Context::Main
+        );
+        assert_eq!(
+            native_settings_agent_context_for_launch(Some(Launch::Resume)),
+            Context::Main
+        );
+        assert_eq!(
+            native_settings_agent_context_for_launch(Some(Launch::Fork)),
+            Context::Subagent {
+                is_main_session: true
+            }
+        );
     }
 }

@@ -53,7 +53,12 @@ struct ModelDetailsSheet: View {
                 ])
 
                 detailSection("Limits", rows: [
-                    ("Context Window", token(details.contextWindowTokens)),
+                    ("模型最大上下文", token(details.contextWindowTokens)),
+                    ("应用输入预算", token(details.contextBudget?.effectiveInputBudget)),
+                    ("上下文策略", details.contextBudget?.policy),
+                    ("标准价格输入上限", details.contextBudget?.standardPriceInputTokens?.formatted()),
+                    ("官方建议输入", token(details.contextBudget?.recommendationInputTokens)),
+                    ("建议来源", details.contextBudget?.recommendationSource),
                     ("Max Input", token(details.maxInputTokens)),
                     ("Max Output", token(details.maxOutputTokens)),
                 ])
@@ -128,7 +133,7 @@ struct ModelDetailsSheet: View {
                             .foregroundStyle(t.text3)
                         ForEach(Array(pricing.tiers.enumerated()), id: \.offset) { _, tier in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("≥ \(ModelDetailFormat.tokenCount(tier.contextThresholdTokens))")
+                                Text("输入 \(tier.contextThresholdTokens.formatted())–\(tier.maxInputTokens.map { $0.formatted() } ?? "∞")，整次请求")
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(t.text)
                                 Text(

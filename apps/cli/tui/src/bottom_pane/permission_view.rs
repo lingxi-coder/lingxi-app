@@ -147,7 +147,9 @@ impl PermissionView {
                 let suppress_always_allow_rule =
                     exchange.suppress_always_allow_rule || *request_suppression;
                 let auto_mode_prompt = exchange.auto_mode_prompt;
-                let mut input = tool_input.to_string();
+                let mut input = tool_input
+                    .to_json_string()
+                    .expect("permission tool input projection is valid JSON");
                 if input.chars().count() > 68 {
                     input = format!("{}…", input.chars().take(67).collect::<String>());
                 }
@@ -412,6 +414,7 @@ impl BottomPaneView for PermissionView {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use ratatui::layout::Position;
 
     use super::*;
@@ -434,23 +437,25 @@ mod tests {
         )
     }
 
+    fn permission_input(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("valid test permission input")
+    }
+
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (mut exchange, resp_rx) = exchange_for(PermissionRequest::ToolUseConfirm {
             tool_name: "Bash".to_string(),
-            tool_input: serde_json::json!({ "command": "ls -la" }),
+            tool_input: permission_input(serde_json::json!({ "command": "ls -la" })),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: false,
         });
+        let suggestions = permission_input(serde_json::json!([{
+            "type": "addRules",
+            "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
+            "behavior": "allow",
+            "destination": "session"
+        }]));
         exchange.permission_persistence =
-            permission::allow_suggestion::permission_persistence_suggestion(
-                "Bash",
-                &serde_json::json!([{
-                    "type": "addRules",
-                    "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
-                    "behavior": "allow",
-                    "destination": "session"
-                }]),
-            );
+            permission::allow_suggestion::permission_persistence_suggestion("Bash", &suggestions);
         (exchange, resp_rx)
     }
 
@@ -458,7 +463,7 @@ mod tests {
     ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         exchange_for(PermissionRequest::ToolUseConfirm {
             tool_name: "Bash".to_string(),
-            tool_input: serde_json::json!({ "command": "ls -la" }),
+            tool_input: permission_input(serde_json::json!({ "command": "ls -la" })),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: false,
         })
@@ -469,7 +474,7 @@ mod tests {
     fn suppressed_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (mut exchange, resp_rx) = exchange_for(PermissionRequest::ToolUseConfirm {
             tool_name: "mcp__server__tool".to_string(),
-            tool_input: serde_json::json!({}),
+            tool_input: permission_input(serde_json::json!({})),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: true,
         });
@@ -752,7 +757,7 @@ mod tests {
         let requests = [
             PermissionRequest::ToolUseConfirm {
                 tool_name: "Bash".to_string(),
-                tool_input: serde_json::json!({}),
+                tool_input: permission_input(serde_json::json!({})),
                 default_decision: permission::gate::PromptDefault::DenyByDefault,
                 suppress_always_allow_rule: false,
             },

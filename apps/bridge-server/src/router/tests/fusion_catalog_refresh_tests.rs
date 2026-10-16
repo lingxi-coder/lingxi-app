@@ -50,19 +50,20 @@ impl AuthHandle for MockAuth {
 
 #[derive(Default)]
 struct MockTaskRegistry {
-    human_messages: std::sync::Mutex<Vec<(String, String)>>,
+    human_messages:
+        std::sync::Mutex<Vec<(String, lingxi_core::types::utf16_json::Utf16JsonProjection)>>,
 }
 #[async_trait::async_trait]
 impl TaskRegistryHandle for MockTaskRegistry {
     async fn send_human_task_message(
         &self,
         task_id: &str,
-        message: &str,
+        message: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<(), TaskRegistryError> {
         self.human_messages
             .lock()
             .unwrap()
-            .push((task_id.into(), message.into()));
+            .push((task_id.into(), message.clone()));
         Ok(())
     }
     async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -128,7 +129,10 @@ async fn task_message_uses_trusted_registry_route_and_preserves_workspace_gate()
         .await;
     assert_eq!(
         *registry.human_messages.lock().unwrap(),
-        vec![("a123".into(), "  continue\nnext".into())]
+        vec![(
+            "a123".into(),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("  continue\nnext")
+        )]
     );
     assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
         event,
@@ -287,16 +291,18 @@ async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejec
     let home = temp.path().join("home");
     std::fs::create_dir_all(&cwd).unwrap();
     let runtime = Box::pin(harness_runtime::desktop::build(
-        harness_runtime::desktop::DesktopConfig {
-            cwd: cwd.clone(),
-            lingxi_home: home.clone(),
-            isolated_credential_storage: true,
-            credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
-            host_workspace_trusted: Some(true),
-            restricted: true,
-            strict_mcp_config: true,
-            default_model_explicit: true,
-            ..Default::default()
+        {
+            let mut __desktop_config = harness_runtime::desktop::DesktopConfig::default();
+            __desktop_config.cwd = cwd.clone();
+            __desktop_config.lingxi_home = home.clone();
+            __desktop_config.isolated_credential_storage = true;
+            __desktop_config.credential_storage_policy =
+                lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
+            __desktop_config.host_workspace_trusted = Some(true);
+            __desktop_config.restricted = true;
+            __desktop_config.strict_mcp_config = true;
+            __desktop_config.default_model_explicit = true;
+            __desktop_config
         },
         Arc::new(orchestrator::test_support::MockOutputStream::new()),
         Arc::new(CronPermissionSink),

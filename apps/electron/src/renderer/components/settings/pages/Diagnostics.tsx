@@ -63,7 +63,7 @@ export function Diagnostics({ bridge, snapshot }: PageContentProps) {
             <button type="button" onClick={() => void bridge.refreshDoctor().catch(() => undefined)} style={ghostButtonStyle(t)}>刷新 Doctor</button>
           </div>
         </Row>
-        <Row title="模型" desc={status?.model ?? bridge.desktop.currentModel ?? '—'} align="center">{null}</Row>
+        <Row title="模型" desc={status?.model_source ?? status?.model ?? bridge.desktop.currentModelSource ?? bridge.desktop.currentModel ?? '—'} align="center">{null}</Row>
         <Row title="工作目录" desc={status?.cwd ?? bridge.activeSession?.projectPath ?? '—'} align="center">{null}</Row>
         <Row
           title="运行概况"

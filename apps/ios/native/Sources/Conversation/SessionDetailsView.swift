@@ -243,7 +243,7 @@ struct SessionDetailsView: View {
     }
 
     private var modelName: String {
-        convo.activeModelId.isEmpty ? convo.model.name : convo.activeModelId
+        convo.activeModelSource ?? (convo.activeModelId.isEmpty ? convo.model.name : convo.activeModelId)
     }
 
     private var statusLabel: String {

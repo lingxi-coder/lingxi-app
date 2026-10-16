@@ -139,7 +139,7 @@ export const platformPages: DocPage[] = [
       { repo: 'lingxi-app', path: 'apps/web/src/data/mockData.ts' },
       { repo: 'lingxi-app', path: 'apps/web/src/utils/apiKeys.ts' },
       { repo: 'lingxi-app', path: 'apps/web/package.json' },
-      { repo: 'lingxi-app', path: 'apps/web/wrangler.jsonc' },
+      { repo: 'lingxi-app', path: 'firebase.json' },
     ],
     sections: [
       {
@@ -165,7 +165,7 @@ export const platformPages: DocPage[] = [
       {
         id: 'web-build-and-hosting', title: t('Build, preview and static hosting', '构建、预览与静态托管'),
         paragraphs: [
-          t('Build runs Vite and writes dist. The checked-in Cloudflare configuration serves dist as SPA assets and declares a route; it contains no worker entry for account, billing or agent execution. A successful static page response establishes frontend serving only. Publication and backend connection require separate authorized work and acceptance.', 'Build 运行 Vite 并写入 dist。已检入的 Cloudflare 配置把 dist 作为 SPA assets 服务并声明路由，没有账号、计费或 Agent 执行 worker 入口。静态页面响应成功只证明前端服务可用；发布及后端连接需要独立授权工作与验收。'),
+          t('Build runs Vite and writes dist. The repository-root Firebase Hosting configuration serves apps/web/dist with an index.html SPA fallback and forwards /v1/** to catalogApi. The model administration page is /admin/models. A successful static page response establishes frontend serving only; catalog/backend operation and runtime agent execution require separate acceptance.', 'Build 运行 Vite 并写入 dist。仓库根目录 Firebase Hosting 配置提供 apps/web/dist，以 index.html 回退处理 SPA 路由，并将 /v1/** 转发到 catalogApi。模型管理页面为 /admin/models。静态页面响应成功只证明前端服务可用；目录／后端运行及运行时 Agent 执行需要各自验收。'),
           t('Run documentation synchronization from the complete local workspace when refreshing source identity. Documentation-only CI can check saved content/output parity without sibling SDK checkouts. A stale API index is a documentation generation failure and should not be interpreted as a provider/network failure. Preserve current locale/theme behavior during schema additions.', '刷新源码身份时，在完整本地工作区运行文档同步。纯文档 CI 可在没有相邻 SDK checkout 时检查保存内容／输出一致性。API 索引过期属于文档生成故障，不能解释成 provider／网络故障。Schema 新增期间保留当前语言／主题行为。'),
         ],
         code: [{ label: t('Website development from product root', '从产品根目录开发官网'), language: 'bash', verification: 'manual', code: 'npm --prefix apps/web ci\nnpm --prefix apps/web run docs:sync\nnpm --prefix apps/web run docs:check\nnpm --prefix apps/web run typecheck\nnpm --prefix apps/web test\nnpm --prefix apps/web run build\nnpm --prefix apps/web run dev -- --host 127.0.0.1' }],

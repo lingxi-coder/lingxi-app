@@ -66,14 +66,14 @@ Current-worktree examples require local checkouts and an explicit complete depen
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/Cargo.toml) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/rust-toolchain.toml) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/setup.sh) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/scripts/lib/runtime_source.py) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/Cargo.toml) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/rust-toolchain.toml) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/setup.sh) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/scripts/lib/runtime_source.py) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
 - [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/Cargo.toml) — Committed source (98fc362da3fabfe36aa5610b9e93818923c1ab31)
 - [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/Cargo.toml) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
 
-- lingxi-app: HEAD ec6ff963545c8d02e0c9c220a22f07874ba62959; Referenced input fingerprint sha256:b657a9b5e03a337d3dce34527025cc7cd87afb3439754fe074426c39589fd716
+- lingxi-app: HEAD bf76316c166e3a00fcd1046b14aa14ef1ba83f28; Referenced input fingerprint sha256:cff8046f4f54c06207ccd8f4b7dd322586d748ed19e26ccf194240be2bbc488e
 - harness-runtime: HEAD 98fc362da3fabfe36aa5610b9e93818923c1ab31; Referenced input fingerprint sha256:8ac34e7055ee1007cfccf0eafbeaa5e2437c2f20dc623f1069d255177d27dd90; Product pin 98fc362da3fabfe36aa5610b9e93818923c1ab31
 - llm-client: HEAD 46240a65df198a654d7d6de1c0bd99c23fcbb979; Referenced input fingerprint sha256:548db437ccaaeec3ce6ad3beb931ef868b263f6ad9b3c47309a3e00c514326dd; Product pin 46240a65df198a654d7d6de1c0bd99c23fcbb979
 

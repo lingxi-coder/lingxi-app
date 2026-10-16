@@ -66,18 +66,18 @@ Undefined FFI symbols indicate a binding/library/component mismatch; missing And
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/ios/native/scripts/build-xcframework.sh)
 
-- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/ios/native/scripts/build-xcframework.sh) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/ios/native/scripts/build-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/ios/native/scripts/build-linux-runtime.sh) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/ios/native/scripts/verify-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/ios/native/scripts/verify-linux-runtime.sh) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/ios/native/project.yml](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/ios/native/project.yml) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/android/native/scripts/build-jni.sh) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/android/native/app/build.gradle.kts](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/android/native/app/build.gradle.kts) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/android/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/android/ffi/uniffi.toml) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/ios/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/ios/ffi/uniffi.toml) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
-- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/ec6ff963545c8d02e0c9c220a22f07874ba62959/apps/electron/scripts/package-macos-flare.sh) — Committed source (ec6ff963545c8d02e0c9c220a22f07874ba62959)
+- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/ios/native/scripts/build-xcframework.sh) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/ios/native/scripts/build-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/ios/native/scripts/build-linux-runtime.sh) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/ios/native/scripts/verify-linux-runtime.sh](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/ios/native/scripts/verify-linux-runtime.sh) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/ios/native/project.yml](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/ios/native/project.yml) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/android/native/scripts/build-jni.sh) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/android/native/app/build.gradle.kts](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/android/native/app/build.gradle.kts) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/android/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/android/ffi/uniffi.toml) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/ios/ffi/uniffi.toml](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/ios/ffi/uniffi.toml) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
+- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/bf76316c166e3a00fcd1046b14aa14ef1ba83f28/apps/electron/scripts/package-macos-flare.sh) — Committed source (bf76316c166e3a00fcd1046b14aa14ef1ba83f28)
 - [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/b65f8856d773d27ebf73b0cade907884d3080704/scripts/checks/check-resource-contracts.sh) — Committed source (b65f8856d773d27ebf73b0cade907884d3080704)
 
-- lingxi-app: HEAD ec6ff963545c8d02e0c9c220a22f07874ba62959; Referenced input fingerprint sha256:b657a9b5e03a337d3dce34527025cc7cd87afb3439754fe074426c39589fd716
+- lingxi-app: HEAD bf76316c166e3a00fcd1046b14aa14ef1ba83f28; Referenced input fingerprint sha256:cff8046f4f54c06207ccd8f4b7dd322586d748ed19e26ccf194240be2bbc488e
 - mobile-linux-runtime: HEAD b65f8856d773d27ebf73b0cade907884d3080704; Referenced input fingerprint sha256:de6f69b8671150c8682b938faea726c0360978b776acaa4c077b257b13792174; Product pin b65f8856d773d27ebf73b0cade907884d3080704
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -24,6 +24,7 @@ test('native credential transactions prevent deleted values from being recached'
     ], { encoding: 'utf8', timeout: 45_000 });
     const output = execFileSync(binary, [], { encoding: 'utf8', timeout: 10_000 });
     assert.match(output, /serialized read\/delete and cache replacement checks passed/);
+    assert.match(output, /Anthropic status\/list\/preview checks remained read-only/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

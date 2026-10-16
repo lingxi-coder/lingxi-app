@@ -455,3 +455,26 @@ test('Fusion configured pairs trim whitespace and cannot be shadowed by another 
   assert.deepEqual(resolveFusionCredentialProviderIds({ providers: { claude: { models: ['custom'] } } },
     { config: { panelModels: [{ profile: 'claude', model: 'custom' }] } }, true), ['claude']);
 });
+
+test('repeated Anthropic status and preview queries never send credential mutations', async () => {
+  const requests: string[] = [];
+  const broker = createMacCredentialBrokerClient({
+    isPackaged: true,
+    transport: {
+      request: async (request) => {
+        requests.push(request.op as string);
+        if (request.op === 'health') return { ok: true, protocol_version: 1, build_version: 'test' };
+        if (request.op === 'list') return { ok: true, protocol_version: 1, accounts: ['anthropic'] };
+        if (request.op === 'preview') return { ok: true, protocol_version: 1, present: true, payload: '••••abcd' };
+        throw new Error('Status query attempted a non-query broker operation');
+      },
+    },
+  });
+  for (let refresh = 0; refresh < 3; refresh += 1) {
+    assert.deepEqual(await broker.listStatus(['anthropic']), [{ providerId: 'anthropic', configured: true }]);
+    assert.deepEqual(await broker.preview('anthropic'), {
+      providerId: 'anthropic', configured: true, maskedValue: '••••abcd',
+    });
+  }
+  assert.deepEqual(requests, ['health', 'list', 'preview', 'list', 'preview', 'list', 'preview']);
+});

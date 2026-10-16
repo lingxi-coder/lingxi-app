@@ -168,6 +168,7 @@ impl LocalApiStub {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(10)))
                             .unwrap();
@@ -458,7 +459,9 @@ fn assert_runtime_command_preview(actual: &str, native: &str) {
     );
     assert_eq!(
         actual_remainder, native_remainder,
-        "the remainder counts available non-prompt commands and must match the Native source"
+        "the remainder counts available non-prompt commands and must match the Native source; actual listed names={actual_names:?}, implied available count={}, Native listed names={expected_product_names:?}, implied available count={}",
+        actual_names.len() + actual_remainder.unwrap_or_default(),
+        expected_product_names.len() + native_remainder.unwrap_or_default(),
     );
 }
 
@@ -524,16 +527,22 @@ fn run_cli_case(
     let home = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    create_project_skills(cwd.path());
+    // TempDir may return `/var/folders/...` while the child process resolves
+    // `getcwd()` to `/private/var/folders/...`. The session path encodes the
+    // runtime cwd string, so use its canonical spelling for the fixture too.
+    let cwd_path = std::fs::canonicalize(cwd.path()).expect("canonicalize CLI fixture cwd");
+    create_project_skills(&cwd_path);
     let stub = LocalApiStub::start();
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"));
     command
         .env_clear()
-        .current_dir(cwd.path())
+        .current_dir(&cwd_path)
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
-        .env("TMPDIR", home.path())
+        // Keep the child temp root above config so the runtime selects its
+        // file-only credential store for this throwaway fixture.
+        .env("TMPDIR", config.path().parent().unwrap())
         .env("LANG", "C.UTF-8")
         .env("TZ", "UTC")
         .env("TERM", "dumb")
@@ -574,18 +583,22 @@ fn run_cli_case(
     }
     let output = child.wait_with_output().unwrap();
     let requests = stub.finish();
-    let transcript_path = session_user_message_path(config.path(), cwd.path(), &case.session_id);
+    let transcript_path = session_user_message_path(config.path(), &cwd_path, &case.session_id);
     let transcript = std::fs::read(&transcript_path).unwrap_or_else(|error| {
         panic!(
-            "case {} session transcript missing at {}: {error}",
+            "case {} session transcript missing at {}: {error}; exit status: {:?}; stdout: {}; stderr: {}; loopback requests: {}",
             case.id,
-            transcript_path.display()
+            transcript_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            requests.len()
         )
     });
     (
         output,
         requests,
-        cwd.path().to_str().unwrap().to_owned(),
+        cwd_path.to_str().unwrap().to_owned(),
         transcript,
     )
 }
@@ -815,7 +828,7 @@ fn actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields() 
             let actual_reminder = actual_request_blocks
                 .first()
                 .expect("unknown-command context precedes the untouched user input");
-            let (native_prefix, _native_commands, native_suffix) =
+            let (native_prefix, native_commands, native_suffix) =
                 unknown_reminder_sections(native_reminder);
             let (actual_prefix, actual_commands, actual_suffix) =
                 unknown_reminder_sections(actual_reminder);

@@ -46,17 +46,12 @@ fn display_segments_from_units(units: &[u16]) -> (Vec<char>, Vec<Vec<u16>>) {
                 .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
         {
             let low = units[index + 1];
-            let scalar = 0x10000
-                + ((u32::from(unit) - 0xd800) << 10)
-                + u32::from(low)
-                - 0xdc00;
+            let scalar = 0x10000 + ((u32::from(unit) - 0xd800) << 10) + u32::from(low) - 0xdc00;
             chars.push(char::from_u32(scalar).expect("paired UTF-16 is a scalar"));
             segments.push(vec![unit, low]);
             index += 2;
         } else {
-            chars.push(
-                char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'),
-            );
+            chars.push(char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'));
             segments.push(vec![unit]);
             index += 1;
         }
@@ -432,10 +427,8 @@ impl Composer {
         let end = self.cursor.min(self.chars.len());
         if start <= end {
             self.chars.splice(start..end, insert.chars());
-            self.source_segments.splice(
-                start..end,
-                source_segments_from_text(insert),
-            );
+            self.source_segments
+                .splice(start..end, source_segments_from_text(insert));
             self.cursor = start + insert.chars().count();
         }
     }
@@ -448,10 +441,8 @@ impl Composer {
         let end = self.cursor.min(self.chars.len());
         if start <= end {
             self.chars.splice(start..end, insert.chars());
-            self.source_segments.splice(
-                start..end,
-                source_segments_from_text(insert),
-            );
+            self.source_segments
+                .splice(start..end, source_segments_from_text(insert));
             self.cursor = start + insert.chars().count();
         }
     }
@@ -623,10 +614,8 @@ impl Composer {
         let chars: Vec<char> = s.chars().collect();
         let n = chars.len();
         self.chars.splice(self.cursor..self.cursor, chars);
-        self.source_segments.splice(
-            self.cursor..self.cursor,
-            source_segments_from_text(s),
-        );
+        self.source_segments
+            .splice(self.cursor..self.cursor, source_segments_from_text(s));
         self.cursor += n;
         EditDelta::inserted(s)
     }
@@ -1318,7 +1307,6 @@ mod tests {
         assert_eq!(c.text(), "/x� a");
         assert_eq!(c.source_units(), units);
 
-        c.move_left();
         assert_eq!(c.backspace().deleted, "a");
         assert_eq!(
             c.source_units(),

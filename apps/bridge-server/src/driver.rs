@@ -139,6 +139,12 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
                     let text = command.text_projection()?.clone();
                     Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
                         text: text.clone(),
+                        // The bridge mid-turn queue stores text-only user
+                        // commands. Image-bearing and turn-correlated prompts
+                        // are held with their separate queued payload and are
+                        // drained as whole turns; this command has no durable
+                        // mobile prompt identity to propagate.
+                        images: Vec::new(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
                             msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
@@ -151,6 +157,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
                         // queue's private command id.
                         source_message_uuid: None,
                         queue_delivery: None,
+                        pending_prompt_identity: None,
                     })
                 })
                 .collect(),
@@ -1576,6 +1583,8 @@ mod tests {
                     orchestrator::QueuedPromptInput {
                         goal_retry_id: None,
                         text: "first".into(),
+                        prompt_ingress_kind: Some(orchestrator::PromptIngressKind::RegularUser),
+                        skip_model_query: false,
                         is_meta: false,
                         turn_companion: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
@@ -1593,6 +1602,8 @@ mod tests {
                     orchestrator::QueuedPromptInput {
                         goal_retry_id: None,
                         text: "second".into(),
+                        prompt_ingress_kind: Some(orchestrator::PromptIngressKind::RegularUser),
+                        skip_model_query: false,
                         is_meta: false,
                         turn_companion: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),

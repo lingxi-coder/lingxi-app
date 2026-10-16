@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, MutexGuard, mpsc};
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -265,7 +265,18 @@ fn invoke_cli(
         .env_remove("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD")
         .env_remove("CLAUDE_CODE_USE_MANTLE")
         .env_remove("CLAUDE_CODE_USE_VERTEX")
-        .args(["--setting-sources", "project", "--strict-mcp-config"]);
+        // The provider-error receipt pins stdout/stderr and request bytes but
+        // does not record its argv. Use an explicit mode so this subprocess
+        // does not inherit the fresh-session Auto fallback and its model-gate
+        // notice; this is a controlled provider-error fixture, not a claim
+        // that the original Native invocation used identical arguments.
+        .args([
+            "--setting-sources",
+            "project",
+            "--strict-mcp-config",
+            "--permission-mode",
+            "dontAsk",
+        ]);
     command
         .args(entrypoint.split_whitespace())
         .args(["--tools", ""])
@@ -722,22 +733,24 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
             case.id
         );
         let request = String::from_utf8_lossy(&requests[0]);
-        assert_eq!(request_header_value(&request, "x-app"), Some("lingxi-cli"));
+        // Native 2.1.295 emits this fixed client-metadata tuple; x-app is the
+        // protocol identifier, not the product binary name.
+        assert_eq!(request_header_value(&request, "x-app"), Some("cli"));
         assert_eq!(
             request_header_value(&request, "x-stainless-lang"),
-            Some("rust")
+            Some("js")
         );
         assert_eq!(
             request_header_value(&request, "x-stainless-runtime"),
-            Some("lingxi")
+            Some("node")
         );
         assert_eq!(
             request_header_value(&request, "x-stainless-package-version"),
-            Some(lingxi_llm_client::PACKAGE_VERSION)
+            Some("0.128.0")
         );
         assert_eq!(
             request_header_value(&request, "x-stainless-runtime-version"),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some("v26.3.0")
         );
         assert_eq!(
             request_header_value(&request, "x-claude-code-session-id"),
@@ -843,12 +856,11 @@ fn explicit_no_stream_uses_batched_messages_create_with_native_295_response() {
 
     assert_eq!(output.status.code(), Some(case.exit_code));
     assert_eq!(requests.len(), 1);
-    assert_eq!(
+    assert!(
         request_body_json(&requests[0])
             .at_pointer("/stream")
-            .and_then(|value| value.as_bool()),
-        Some(false),
-        "--no-stream must preserve the batched messages_create path"
+            .is_none(),
+        "direct batched messages.create omits stream; only streaming requests add stream=true"
     );
     let stdout = std::str::from_utf8(&output.stdout).expect("CLI stdout is UTF-8");
     let result = Utf16JsonProjection::parse(stdout.trim_end()).expect("one JSON result frame");

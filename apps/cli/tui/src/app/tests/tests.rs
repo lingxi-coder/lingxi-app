@@ -23,6 +23,15 @@ fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
 }
 
+fn text_projection(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    text.into()
+}
+
+fn json_projection(source: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source)
+        .expect("valid source JSON fixture")
+}
+
 #[derive(Default)]
 struct FakeEventDriver {
     queued: VecDeque<Event>,
@@ -217,7 +226,9 @@ fn alt_enter_inserts_newline_plain_enter_submits_whole_buffer() {
     );
     // Plain Enter submits the full multi-line buffer.
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "line one\nline two"));
+    assert!(
+        matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("line one\nline two"))
+    );
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
 }
 
@@ -258,7 +269,7 @@ fn typing_then_submit_echoes_user_and_returns_prompt() {
     }
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "hi");
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi"));
+    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("hi")));
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
     assert!(app.chat_widget.turn_running());
     assert_eq!(cells(&app).len(), 1);
@@ -277,7 +288,7 @@ fn submit_while_running_returns_pending_prompt_without_replacing_turn() {
     assert!(matches!(
         app.on_key(press(KeyCode::Enter)),
         ChatOutcome::QueuePrompt(ref prompt, _, ref images, _)
-            if prompt == "pending" && images.is_empty()
+            if prompt == &text_projection("pending") && images.is_empty()
     ));
     assert!(!active.is_cancelled());
     assert!(app.chat_widget.turn_running());
@@ -479,7 +490,7 @@ fn vim_normal_enter_submits() {
     typ(&mut app, "hi");
     app.on_key(press(KeyCode::Esc)); // → Normal
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi"));
+    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("hi")));
 }
 
 #[test]
@@ -518,7 +529,7 @@ fn tab_completes_selected_command_into_composer() {
     typ(&mut app, "/mc");
     assert!(app.chat_widget.bottom_pane().completion().is_some());
     app.on_key(press(KeyCode::Tab));
-    assert_eq!(app.chat_widget.bottom_pane().composer().text(), "/mcp");
+    assert_eq!(app.chat_widget.bottom_pane().composer().text(), "/mcp ");
 }
 
 #[test]
@@ -708,7 +719,7 @@ fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>
     let (resp_tx, resp_rx) = oneshot::channel();
     let request = PermissionRequest::ToolUseConfirm {
         tool_name: "Bash".to_string(),
-        tool_input: serde_json::json!({ "command": "ls -la" }),
+        tool_input: json_projection(r#"{"command":"ls -la"}"#),
         default_decision: permission::gate::PromptDefault::DenyByDefault,
         suppress_always_allow_rule: false,
     };
@@ -720,12 +731,9 @@ fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>
             suppress_always_allow_rule: false,
             permission_persistence: permission::allow_suggestion::permission_persistence_suggestion(
                 "Bash",
-                &serde_json::json!([{
-                    "type": "addRules",
-                    "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
-                    "behavior": "allow",
-                    "destination": "session"
-                }]),
+                &json_projection(
+                    r#"[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls -la"}],"behavior":"allow","destination":"session"}]"#,
+                ),
             ),
             auto_mode_prompt: None,
             background_owned: false,
@@ -849,7 +857,9 @@ fn non_command_slash_input_is_sent_as_a_prompt() {
     }
     let outcome = app.on_key(press(KeyCode::Enter));
     // Unrecognized slash command falls through as a normal prompt.
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "/frobnicate"));
+    assert!(
+        matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("/frobnicate"))
+    );
     assert_eq!(cells(&app).len(), 1);
 }
 
@@ -943,9 +953,9 @@ fn session_clear_drops_render_tree_and_retries_the_same_ui_site_request() {
             old_generation,
             old_revision,
             original_request,
-            Ok(serde_json::json!({
-                "type":"Text","props":{},"children":["stale old tree"]
-            })),
+            Ok(json_projection(
+                r#"{"type":"Text","props":{},"children":["stale old tree"]}"#,
+            )),
         ))
         .unwrap();
     app.drain_mod_ui_render_results();
@@ -1190,7 +1200,7 @@ fn submitted_prompt_is_trimmed_before_echo_and_submit() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "  hi there  ");
     let outcome = app.on_key(press(KeyCode::Enter));
-    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi there"));
+    assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == &text_projection("hi there")));
     assert_eq!(cell::<UserTextCell>(&app, 0).body(), "hi there");
 }
 
@@ -1272,7 +1282,7 @@ fn permission_resolution_is_single_shot_and_releases_keyboard() {
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "x");
     assert!(matches!(
         app.on_key(press(KeyCode::Enter)),
-        ChatOutcome::Submit(ref p, ..) if p == "x"
+        ChatOutcome::Submit(ref p, ..) if p == &text_projection("x")
     ));
 }
 

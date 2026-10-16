@@ -57,6 +57,7 @@ use lingxi_core::host::task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::test_support::MockOrchestratorHandle;
 #[cfg(unix)]
 use platform_posix::{
@@ -83,6 +84,27 @@ mod compact_active_turn;
 
 #[path = "router_test/session_agent_liveness.rs"]
 mod session_agent_liveness;
+
+fn client_text_eq(text: &ClientTextDto, expected: &str) -> bool {
+    text.code_units == expected.encode_utf16().collect::<Vec<_>>()
+}
+
+fn client_text_contains(text: &ClientTextDto, needle: &str) -> bool {
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    !needle.is_empty()
+        && text
+            .code_units
+            .windows(needle.len())
+            .any(|units| units == needle)
+}
+
+fn status_snapshot_for_model(model: &str, profile: Option<&str>) -> StatusSnapshot {
+    StatusSnapshot {
+        model: model.to_owned(),
+        model_profile: profile.map(str::to_owned),
+        ..StatusSnapshot::default()
+    }
+}
 
 // ── Test sink ───────────────────────────────────────────────────────────────
 
@@ -305,6 +327,18 @@ impl lingxi_core::host::OrchestratorHandle for ResumingHandle {
         CostSnapshot::default()
     }
     async fn switch_model(&self, _model: &str, _profile: Option<&str>) -> Result<(), HandleError> {
+        Ok(())
+    }
+    async fn select_model(
+        &self,
+        _request: lingxi_core::host::ModelSelectionRequest,
+    ) -> Result<(), HandleError> {
+        Ok(())
+    }
+    async fn validate_model_selection(
+        &self,
+        _request: &lingxi_core::host::ModelSelectionRequest,
+    ) -> Result<(), HandleError> {
         Ok(())
     }
     async fn request_exit(&self) {}
@@ -1150,6 +1184,10 @@ async fn set_model_routes() {
         .chain([0xD800])
         .collect::<Vec<_>>();
     let display_model = String::from_utf16_lossy(&model_units);
+    // SetModel acknowledgements are lowered from get_status_snapshot(). The
+    // mock records the selection call but keeps status snapshots static, so
+    // seed the authoritative post-selection snapshot this route should report.
+    handle.set_status_snapshot(status_snapshot_for_model(&display_model, None));
 
     router
         .route(
@@ -1275,6 +1313,7 @@ async fn set_model_keeps_provider_in_acknowledgement() {
         fusion_analyst_capable: false,
         connection: Default::default(),
     }]);
+    handle.set_status_snapshot(status_snapshot_for_model("gpt-5.5", Some("github-copilot")));
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
     router.set_turn_active(true);
@@ -1289,6 +1328,10 @@ async fn set_model_keeps_provider_in_acknowledgement() {
         .await;
 
     assert_eq!(handle.last_switched_model().as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        handle.last_switch(),
+        Some(("gpt-5.5".into(), Some("github-copilot".into())))
+    );
     assert_eq!(
         sink.events().await,
         vec![ClientEvent::ModelChanged {
@@ -1763,8 +1806,8 @@ async fn list_skills_routes() {
 #[tokio::test]
 async fn slash_command_routes_to_registry() {
     // A dispatcher seeded with the builtin handlers — the SAME registry the
-    // desktop composition root builds; the routed `/clear` reaches it and yields
-    // a non-empty display string, proving the command crossed into the registry.
+    // desktop composition root builds. Run through BridgeConnection so the
+    // slash expansion has its required connection-owned admission.
     use command_api::builtins::register_all_builtin_commands;
     use command_api::dispatcher::RegistrySlashDispatcher;
     use command_api::registry::CommandRegistry;
@@ -1774,35 +1817,49 @@ async fn slash_command_routes_to_registry() {
     register_all_builtin_commands(&mut reg);
     let dispatcher = Arc::new(RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))));
 
-    let handle = Arc::new(MockOrchestratorHandle::new());
-    let router = EngineCommandRouter::new(
-        handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
+    let router = Arc::new(EngineCommandRouter::new(
+        Arc::new(MockOrchestratorHandle::new())
+            as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
         None,
-    );
-    let sink = CapturingSink::arc();
-
-    router
-        .route(
-            ClientCommand::RunSlashCommand {
-                raw: "/clear".into(),
-                turn_id: Some(7),
-            },
-            sink.clone(),
+    )) as Arc<dyn CommandRouter>;
+    let connection = BridgeConnection::new()
+        .bind(
+            Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink))),
+            Arc::new(NoopTurnDriver),
         )
-        .await;
+        .bind_router(router);
+    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection))
+        .await
+        .expect("endpoint must start");
+    endpoint.set_auth_token(E2E_TOKEN.into());
+    let mut ws = connect(endpoint.port()).await;
+    send_hello(&mut ws).await;
 
-    // The dispatcher handled the command and preserves the caller's turn id in
-    // a structured local-result event.
-    let events = sink.events().await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ClientEvent::SlashCommandResult { turn_id: Some(7), display, is_error: false } if !display.display().is_empty())),
-        "the slash command must route to the registry and surface a display, got {events:?}"
-    );
+    send_command(
+        &mut ws,
+        &ClientCommand::RunSlashCommand {
+            raw: "/clear".into(),
+            turn_id: Some(7),
+        },
+    )
+    .await;
+
+    // The command crossed the connection-owned admission and registry, and its
+    // structured local result retains the caller's turn id.
+    match next_frame(&mut ws).await {
+        Frame::Event(ClientEvent::SlashCommandResult {
+            turn_id: Some(7),
+            display,
+            is_error: false,
+        }) => assert!(!display.display().is_empty()),
+        other => panic!(
+            "the slash command must route to the registry and surface a display, got {other:?}"
+        ),
+    }
+    endpoint.shutdown().await;
 }
 
 #[tokio::test]
@@ -1810,13 +1867,20 @@ async fn fusion_preparation_failure_routes_without_dispatching_a_slash_command()
     struct NeverDispatch;
     #[async_trait]
     impl SlashCommandDispatcher for NeverDispatch {
-        async fn dispatch(&self, _: &str) -> SlashDispatchResult {
+        async fn dispatch(
+            &self,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: tokio_util::sync::CancellationToken,
+        ) -> SlashDispatchResult {
             panic!("recording a failed invocation must never start Fusion")
         }
     }
     let router = EngineCommandRouter::new(
-        Arc::new(MockOrchestratorHandle::new()), Arc::new(MockAuth),
-        Arc::new(MockTaskRegistry { rows: vec![] }), Some(Arc::new(NeverDispatch)), None,
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+        Some(Arc::new(NeverDispatch)),
+        None,
     );
     let sink = CapturingSink::arc();
     router.route(ClientCommand::FusionAdmin {
@@ -1830,7 +1894,7 @@ async fn fusion_preparation_failure_routes_without_dispatching_a_slash_command()
         },
     }, sink.clone()).await;
     assert!(sink.events().await.iter().any(|event| matches!(event,
-        ClientEvent::SlashCommandResult { display, is_error: true, .. } if display.contains("Selected strategy unavailable")
+        ClientEvent::SlashCommandResult { display, is_error: true, .. } if client_text_contains(display, "Selected strategy unavailable")
     )));
 }
 
@@ -1844,8 +1908,8 @@ async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
     let mut reg = CommandRegistry::new();
     command_api::builtins::register_bundled_skills(&mut reg, true);
     reg.register_command(SlashCommand {
-        name: "deploy".to_string(),
-        description: "ship it".to_string(),
+        name: "deploy".into(),
+        description: "ship it".into(),
         source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         kind: SlashCommandKind::Markdown {
             file_path: std::path::PathBuf::from("/tmp/deploy.md"),
@@ -1853,7 +1917,7 @@ async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
                 description: "ship it".to_string(),
                 ..CommandFrontmatter::default()
             },
-            prompt_template: "deploy".to_string(),
+            prompt_template: "deploy".into(),
         },
         ..SlashCommand::default()
     });
@@ -1884,19 +1948,25 @@ async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
         [ClientEvent::SlashCommandCatalog { commands }] => {
             assert!(
                 commands.iter().any(|cmd| {
-                    cmd.name == "deploy"
-                        && cmd.description == "launch safely"
+                    client_text_eq(&cmd.name, "deploy")
+                        && client_text_eq(&cmd.description, "launch safely")
                         && cmd.source == "project"
-                        && cmd.argument_hint.as_deref() == Some("<target>")
+                        && cmd
+                            .argument_hint
+                            .as_ref()
+                            .is_some_and(|hint| client_text_eq(hint, "<target>"))
                         && cmd.hidden
                 }),
                 "expected live registry command in catalog, got {commands:?}"
             );
             assert!(
                 commands.iter().any(|cmd| {
-                    cmd.name == "cron"
+                    client_text_eq(&cmd.name, "cron")
                         && cmd.source == "bundled"
-                        && cmd.argument_hint.as_deref() == Some("<schedule or action>")
+                        && cmd
+                            .argument_hint
+                            .as_ref()
+                            .is_some_and(|hint| client_text_eq(hint, "<schedule or action>"))
                 }),
                 "expected the enabled /cron bundle in the Desktop catalog, got {commands:?}"
             );
@@ -1904,14 +1974,16 @@ async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
         other => panic!("expected SlashCommandCatalog, got {other:?}"),
     }
     assert!(handle.mod_describe_inputs().iter().any(|input| {
-        input
-            == &serde_json::json!({
-                "command": "deploy",
-                "description": "ship it",
-                "isHidden": false,
-                "immediate": false,
-                "provider": {"plugin": "project", "tier": "user"}
-            })
+        input.string_at("/command") == Some("deploy")
+            && input.string_at("/description") == Some("ship it")
+            && input
+                .at_pointer("/isHidden")
+                .is_some_and(|value| value.as_bool() == Some(false))
+            && input
+                .at_pointer("/immediate")
+                .is_some_and(|value| value.as_bool() == Some(false))
+            && input.string_at("/provider/plugin") == Some("project")
+            && input.string_at("/provider/tier") == Some("user")
     }));
 }
 
@@ -1997,8 +2069,8 @@ impl SlashCommandDispatcher for MutatingDispatcher {
 
         if raw.string_at("") == Some("/install") {
             self.registry.write().await.register_command(SlashCommand {
-                name: "newcmd".to_string(),
-                description: "added during dispatch".to_string(),
+                name: "newcmd".into(),
+                description: "added during dispatch".into(),
                 source: CommandSource::Settings(lingxi_core::types::SettingsScope::User),
                 kind: SlashCommandKind::Markdown {
                     file_path: std::path::PathBuf::from("/tmp/newcmd.md"),
@@ -2006,16 +2078,16 @@ impl SlashCommandDispatcher for MutatingDispatcher {
                         description: "added during dispatch".to_string(),
                         ..CommandFrontmatter::default()
                     },
-                    prompt_template: "hello".to_string(),
+                    prompt_template: "hello".into(),
                 },
                 ..SlashCommand::default()
             });
             SlashDispatchResult::Handled {
-                display: "installed".to_string(),
+                display: "installed".into(),
             }
         } else {
             SlashDispatchResult::Handled {
-                display: raw.string_at("").unwrap_or_default().to_string(),
+                display: raw.clone(),
             }
         }
     }
@@ -2040,13 +2112,13 @@ async fn display_only_slash_results_are_not_persisted_in_task_history() {
 
     for raw in ["/usage", "/status", "/help", "/cron list"] {
         let outcome = router
-            .dispatch_slash(raw, tokio_util::sync::CancellationToken::new())
+            .dispatch_slash(raw.into(), tokio_util::sync::CancellationToken::new())
             .await
             .expect("dispatch");
         assert_eq!(
             outcome.result,
             SlashDispatchResult::Handled {
-                display: raw.to_string(),
+                display: raw.into(),
             },
             "{raw} must still return its display to the client",
         );
@@ -2065,8 +2137,8 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
 
     let mut reg = CommandRegistry::new();
     reg.register_command(SlashCommand {
-        name: "install".to_string(),
-        description: "install command".to_string(),
+        name: "install".into(),
+        description: "install command".into(),
         source: CommandSource::Builtin,
         kind: SlashCommandKind::Markdown {
             file_path: std::path::PathBuf::from("/tmp/install.md"),
@@ -2074,12 +2146,12 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
                 description: "install command".to_string(),
                 ..CommandFrontmatter::default()
             },
-            prompt_template: "install".to_string(),
+            prompt_template: "install".into(),
         },
         ..SlashCommand::default()
     });
     let shared = Arc::new(RwLock::new(reg));
-    let router = EngineCommandRouter::new(
+    let router = Arc::new(EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
             as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
@@ -2088,34 +2160,42 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
             registry: shared.clone(),
         })),
         Some(shared),
-    );
-    let sink = CapturingSink::arc();
-
-    router
-        .route(
-            ClientCommand::RunSlashCommand {
-                raw: "/install".into(),
-                turn_id: Some(9),
-            },
-            sink.clone(),
+    )) as Arc<dyn CommandRouter>;
+    let connection = BridgeConnection::new()
+        .bind(
+            Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink))),
+            Arc::new(NoopTurnDriver),
         )
-        .await;
+        .bind_router(router);
+    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection))
+        .await
+        .expect("endpoint must start");
+    endpoint.set_auth_token(E2E_TOKEN.into());
+    let mut ws = connect(endpoint.port()).await;
+    send_hello(&mut ws).await;
 
-    let events = sink.events().await;
+    send_command(
+        &mut ws,
+        &ClientCommand::RunSlashCommand {
+            raw: "/install".into(),
+            turn_id: Some(9),
+        },
+    )
+    .await;
+
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, ClientEvent::SlashCommandResult { turn_id: Some(9), display, is_error: false } if display.display() == "installed")),
-        "dispatcher reply must be surfaced, got {events:?}"
+        matches!(next_frame(&mut ws).await,
+        Frame::Event(ClientEvent::SlashCommandResult { turn_id: Some(9), display, is_error: false }) if display.display() == "installed"),
+        "dispatcher reply must be surfaced over the admitted connection"
     );
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            ClientEvent::CommandsChanged { commands }
-                if commands.iter().any(|cmd| cmd.name == "newcmd" && cmd.source == "user")
-        )),
-        "registry mutation must emit CommandsChanged, got {events:?}"
+        matches!(next_frame(&mut ws).await,
+        Frame::Event(ClientEvent::CommandsChanged { commands })
+            if commands.iter().any(|cmd| client_text_eq(&cmd.name, "newcmd") && cmd.source == "user")),
+        "registry mutation must emit CommandsChanged over the admitted connection"
     );
+
+    endpoint.shutdown().await;
 }
 
 #[tokio::test]
@@ -2647,7 +2727,7 @@ async fn session_agent_routes_list_nested_transcripts_and_load_real_messages() {
     assert_eq!(agents[0].agent_id, "main");
     assert!(agents.iter().any(|agent| {
         agent.agent_id == agent_id.to_string()
-            && agent.name == "Runtime reviewer"
+            && client_text_eq(&agent.name, "Runtime reviewer")
             && agent.status == "completed"
     }));
 
@@ -3248,6 +3328,7 @@ async fn set_model_routes_over_ws() {
     // A connection bound to BOTH the (unused) turn/permission path and the F2-08
     // command router over the engine's mock handle.
     let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_status_snapshot(status_snapshot_for_model("claude-opus-4-8", None));
     let router = Arc::new(router_with(
         handle.clone(),
         Arc::new(MockTaskRegistry { rows: vec![] }),
@@ -3378,19 +3459,18 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
     )
     .unwrap();
 
-    let mut managed = std::collections::BTreeMap::new();
-    managed.insert(
-        "telemetryEnabled".to_string(),
-        serde_json::Value::from(false),
-    );
+    let managed = Utf16JsonProjection::parse(r#"{"telemetryEnabled":false}"#).unwrap();
     let router = router_with_settings(SettingsContext {
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
             project_dir: project.clone(),
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
         managed,
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3530,8 +3610,11 @@ async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3582,8 +3665,11 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3632,8 +3718,11 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3717,8 +3806,11 @@ async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3770,8 +3862,11 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3825,8 +3920,11 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3878,8 +3976,11 @@ async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3930,8 +4031,11 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 
@@ -3995,8 +4099,11 @@ async fn update_workspace_directories_writes_the_named_layer_and_preserves_other
             lingxi_home: home,
             project_dir: project,
         },
-        active: std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
-        managed: std::collections::BTreeMap::new(),
+        active: Arc::new(std::sync::RwLock::new(
+            bridge_server::settings_bridge::empty_settings_source(),
+        )),
+        managed: bridge_server::settings_bridge::empty_settings_source(),
+        managed_diagnostics: None,
     });
     let sink = CapturingSink::arc();
 

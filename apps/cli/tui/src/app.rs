@@ -26,7 +26,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::{self, Event, KeyEventKind};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::computer_access::ComputerAccessExchange;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use std::io;
 use std::io::Write;
 use std::time::Duration;
@@ -516,13 +516,16 @@ impl<'cb> RataApp<'cb> {
         self.run_inner(terminal, Some(session), None, &mut event_driver)
     }
 
-    fn run_inner(
+    fn run_inner<B>(
         &mut self,
-        terminal: &mut RataTerminal,
+        terminal: &mut crate::terminal::Terminal<B>,
         mut session: Option<&mut TerminalSession>,
         exit_request_probe: Option<&(dyn Fn() -> bool + Send + Sync)>,
         event_driver: &mut dyn AppEventDriver,
-    ) -> io::Result<AppExit> {
+    ) -> io::Result<AppExit>
+    where
+        B: Backend<Error = io::Error> + Write,
+    {
         let mut need_draw = true;
         loop {
             if exit_request_probe.is_some_and(|probe| probe()) {

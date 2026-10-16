@@ -974,7 +974,7 @@ impl BoundServer {
         Box::pin(async move {
             loop {
                 if orchestrator.current_should_exit() {
-                    return refusal.current();
+                    return refusal.current().map(|error| error.as_ref().clone());
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
@@ -1655,14 +1655,19 @@ pub async fn assemble_with_credentials(
     // coordinator. Do not let the bridge's process-registration guard pin the
     // old session through later hot clear/resume operations.
     live_session.release_writer_claim();
+    let provider_region = match runtime.provider_region {
+        llm_runtime::Region::ChinaMainland => "china_mainland",
+        llm_runtime::Region::International => "international",
+    };
     settings_context
         .active
         .write()
         .map_err(|_| "settings state lock poisoned".to_owned())?
-        .insert(
-            "providerRegion".into(),
-            serde_json::to_value(runtime.provider_region).map_err(|e| e.to_string())?,
-        );
+        .set_field(
+            "providerRegion",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(provider_region),
+        )
+        .map_err(|error| format!("failed to update active providerRegion: {error}"))?;
 
     // Seeds the parent-supplied keys and refreshes Fusion's catalog filter for
     // them under ONE bounded budget -- see `seed_parent_supplied_provider_keys`
@@ -1946,8 +1951,9 @@ impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
     async fn dispatch(
         &self,
         raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> lingxi_core::host::SlashDispatchResult {
-        self.inner.dispatch(raw).await
+        self.inner.dispatch(raw, cancellation).await
     }
 }
 

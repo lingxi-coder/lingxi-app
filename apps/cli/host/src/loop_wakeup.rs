@@ -134,6 +134,12 @@ impl CliLoopHost {
                 turn_companion: false,
                 message_origin: None,
                 prompt_source: None,
+                // Scheduled triggers are synthetic meta entries, not a user
+                // row with a typed ingress classification.
+                prompt_ingress_kind: None,
+                // A scheduled trigger starts a model turn; only DirectBash
+                // can mark a queued input as already complete.
+                skip_model_query: false,
                 trailing_history_rows: Vec::new(),
                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                     serde_json::json!({"kind":"auto-continuation"})

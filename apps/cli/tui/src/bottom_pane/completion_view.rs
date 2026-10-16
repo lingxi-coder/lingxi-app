@@ -490,8 +490,9 @@ pub fn command_items_merged<'a>(
                 .aliases()
                 .into_iter()
                 .find(|alias| lowercase_units(bare_units(alias)).starts_with(&query))
-                .map(|alias| bare_units(alias).to_vec());
-            let mut suggestion = item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref());
+                .map(|alias| bare_units(&alias).to_vec());
+            let mut suggestion =
+                item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref());
             let selected_name = c.name_units();
             if matched_alias.is_some()
                 && resolve_catalog_name_units(&suggestion.insert.code_units, registry).as_deref()
@@ -550,7 +551,11 @@ pub(super) fn resolve_catalog_name_units(
             registry
                 .iter()
                 .filter(available)
-                .find(|row| row.aliases.iter().any(|alias| alias.code_units.as_slice() == name))
+                .find(|row| {
+                    row.aliases
+                        .iter()
+                        .any(|alias| alias.code_units.as_slice() == name)
+                })
                 .map(|row| row.name.code_units.clone())
         })
         .or_else(|| {
@@ -579,12 +584,19 @@ fn item_source(
         Some(alias) => format!("{display} ({})", String::from_utf16_lossy(alias)),
         None => display,
     };
-    let insert = matched_alias.map_or_else(|| name.clone(), |alias| {
-        let mut units = vec![b'/' as u16];
-        units.extend_from_slice(alias);
-        ClientTextDto::from_code_units(units)
-    });
-    CompletionItem { label, insert, desc }
+    let insert = matched_alias.map_or_else(
+        || name.clone(),
+        |alias| {
+            let mut units = vec![b'/' as u16];
+            units.extend_from_slice(alias);
+            ClientTextDto::from_code_units(units)
+        },
+    );
+    CompletionItem {
+        label,
+        insert,
+        desc,
+    }
 }
 
 /// A completion popup over a candidate list.
@@ -850,7 +862,18 @@ mod tests {
                 .unwrap();
         let matching = command_items_merged(&malformed_query, std::slice::from_ref(&row));
         assert_eq!(matching.len(), 1);
-        assert_eq!(matching[0].insert, ClientTextDto::from_utf8("/custom"));
+        assert_eq!(
+            matching[0].insert,
+            ClientTextDto::from_code_units(vec![
+                b'/' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'a' as u16,
+                b's' as u16,
+                0xd800,
+            ])
+        );
         assert_eq!(matching[0].label, "/custom (alias�)");
 
         let replacement_query =
@@ -890,9 +913,11 @@ mod tests {
         };
         let query = lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ος");
         let matching = command_items_merged(&query, &[row]);
-        assert!(matching
+        let selected = matching
             .iter()
-            .any(|candidate| candidate.insert == ClientTextDto::from_utf8("/custom")));
+            .find(|candidate| candidate.label == "/custom (ΟΣ)")
+            .expect("case-insensitive contextual sigma match keeps the alias row");
+        assert_eq!(selected.insert, ClientTextDto::from_utf8("/ΟΣ"));
     }
 
     #[test]
@@ -946,25 +971,32 @@ mod tests {
     fn completion_preserves_an_alias_only_when_it_resolves_to_the_selected_command() {
         let mut reg = rows(&[("/deploy", "Deploy"), ("/ship-prod", "Canonical owner")]);
         reg[0].aliases = vec!["/ship-prod".into()];
-        let items = command_items_merged("/ship-p", &reg);
+        let items = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ship-p"),
+            &reg,
+        );
         let selected = items
             .iter()
             .find(|item| item.label.starts_with("/deploy "))
             .unwrap();
         assert_eq!(
-            selected.insert, "/deploy",
+            selected.insert,
+            ClientTextDto::from_utf8("/deploy"),
             "a canonical owner wins over the alias"
         );
 
         reg.pop();
         reg[0].aliases = vec!["/SHIP-prod".into()];
-        let items = command_items_merged("/ship-p", &reg);
+        let items = command_items_merged(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ship-p"),
+            &reg,
+        );
         // Native alias matching ignores case; insertion preserves its bytes.
         let selected = items
             .iter()
             .find(|item| item.label.starts_with("/deploy "))
             .unwrap();
-        assert_eq!(selected.insert, "/SHIP-prod");
+        assert_eq!(selected.insert, ClientTextDto::from_utf8("/SHIP-prod"));
     }
 
     #[test]

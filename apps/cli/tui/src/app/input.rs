@@ -1,9 +1,10 @@
 use super::RataApp;
 use crate::chat_widget::ChatOutcome;
-use crate::RataTerminal;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use lingxi_core::host::ModUiSelection;
+use ratatui::backend::Backend;
 use ratatui::layout::Position;
+use std::io::Write;
 
 impl<'cb> RataApp<'cb> {
     /// Route one key press into the chat widget.
@@ -32,7 +33,10 @@ impl<'cb> RataApp<'cb> {
         }
         outcome
     }
-    pub(super) fn on_mouse(&mut self, mouse: MouseEvent, terminal: &RataTerminal) {
+    pub(super) fn on_mouse<B>(&mut self, mouse: MouseEvent, terminal: &crate::terminal::Terminal<B>)
+    where
+        B: Backend<Error = std::io::Error> + Write,
+    {
         let position = Position::new(mouse.column, mouse.row);
         let area = terminal.current_buffer().area;
         match mouse.kind {

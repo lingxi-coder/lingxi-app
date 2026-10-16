@@ -1159,6 +1159,16 @@ fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
         .expect("display is derived from the exact UTF-16 units")
 }
 
+fn prefixed_source_text(prefix: &str, source: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units: Vec<u16> = prefix.encode_utf16().collect();
+    units.extend(
+        source
+            .string_units("")
+            .expect("slash parse failure input is a root string"),
+    );
+    projection_from_units(units)
+}
+
 fn join_source_text(values: &[Utf16JsonProjection]) -> Utf16JsonProjection {
     let mut units = Vec::new();
     for (index, value) in values.iter().enumerate() {
@@ -1740,9 +1750,7 @@ async fn run_owned_bridge_slash(
             .is_some_and(|probe| probe.current().is_some());
     if !dispatch_was_cancelled {
         if let Some(registry) = &owner.task_notification_registry {
-            registry
-                .update_shell_session_activity(true, true, true)
-                .await;
+            registry.update_shell_session_activity(true, true, true);
         }
         if let Some(units) = raw.string_units("") {
             if let Ok(submission) = String::from_utf16(&units) {
@@ -2072,15 +2080,14 @@ async fn run_queued_mod_command(
                     is_error: true,
                 })
                 .await;
-            Err(display.string_at("").unwrap_or_default().to_owned())
+            Err(display)
         }
         lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
             Err(format!("{plugin}: queued command was not a slash command").into())
         }
-        lingxi_core::host::SlashDispatchResult::ParseFailure { input } => Err(format!(
-            "could not parse slash command {}",
-            input.string_at("").unwrap_or_default()
-        )),
+        lingxi_core::host::SlashDispatchResult::ParseFailure { input } => Err(
+            prefixed_source_text("could not parse slash command ", &input),
+        ),
     };
     for event in outcome.authority_events {
         mod_drain.events.emit(event).await;
@@ -2390,6 +2397,9 @@ async fn drain_main_thread(
                     .starts_with("goal-retry-")
                     .then(|| command.uuid.clone()),
                 text,
+                prompt_ingress_kind: is_human_prompt
+                    .then_some(orchestrator::PromptIngressKind::RegularUser),
+                skip_model_query: false,
                 is_meta: command.is_meta || command.source != QueueSource::PromptInput,
                 turn_companion: false,
                 mod_origin: Some(match command.source {
@@ -2532,9 +2542,6 @@ impl BridgeConnection {
         }
     }
 
-    /// Answer `visualization` requests and resolve follow-up context from the
-    /// store under `config_home`.
-    #[must_use]
     /// Bind the runtime's retained Native managed-policy refusal. Once set,
     /// it is terminal for this connection: new work is rejected and the
     /// current active-turn token is cancelled by the queue owner.
@@ -3534,7 +3541,7 @@ impl BridgeConnection {
                     gate.set_session_id(driver.current_session_id().await);
                 }
                 let mut queued_payloads = self.queued_prompt_payloads.lock().await;
-                let mut queued_command = prompt_command(raw_source.clone());
+                let queued_command = prompt_command(raw_source.clone());
                 let admit = || {
                     if self
                         .turn_running
@@ -3586,9 +3593,7 @@ impl BridgeConnection {
                         }
                         drop(_handoff);
                         if let Some(registry) = &self.task_notification_registry {
-                            registry
-                                .update_shell_session_activity(true, true, true)
-                                .await;
+                            registry.update_shell_session_activity(true, true, true);
                         }
                         return;
                     }
@@ -4644,14 +4649,16 @@ mod permission_owner_regression_test;
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
 
     use async_trait::async_trait;
-    use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
+    use bridge::wire::Frame;
+    use client::adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
     use client::protocol::commands::{ClientCommand, ImageRefDto, UiSurfaceDto};
-    use client::protocol::events::ClientEvent;
+    use client::protocol::events::{ClientEvent, ErrorKindDto};
     use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
+    use client::protocol::text::ClientTextDto;
     use lingxi_core::host::{PermissionDecision, PermissionGate};
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use msgqueue::{MessageQueueManager, QueuePriority, QueueSource};
@@ -4665,6 +4672,27 @@ mod tests {
         BridgeModCommandQueue, ModQueueDrain, ModQueueEnqueuePause, PendingModCommands,
         PendingModPrompts, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
     };
+
+    struct NoTurn;
+
+    #[async_trait]
+    impl TurnDriver for NoTurn {
+        async fn run_turn(&self, _: Utf16JsonProjection) {}
+    }
+
+    #[test]
+    fn slash_parse_failure_prefix_preserves_exact_utf16_source() {
+        let source_units = vec![u16::from(b'/'), u16::from(b'x'), 0xd800];
+        let source = Utf16JsonProjection::root_string("/x�".into(), source_units.clone()).unwrap();
+
+        let prefixed = super::prefixed_source_text("could not parse slash command ", &source);
+        let expected = "could not parse slash command "
+            .encode_utf16()
+            .chain(source_units)
+            .collect::<Vec<_>>();
+
+        assert_eq!(prefixed.string_units(""), Some(expected));
+    }
 
     #[test]
     fn bridge_command_source_decode_preserves_isolated_utf16_units() {
@@ -5396,7 +5424,8 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
-                raw: raw.clone().into(),
+                raw: ClientTextDto::from_projection(&raw)
+                    .expect("test slash raw text is a root string"),
                 turn_id: Some(77),
             })
             .await;
@@ -6435,7 +6464,7 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
-                .and_then(|(prompt, _)| prompt.string_at("")),
+                .and_then(|(prompt, _, _)| prompt.string_at("")),
             Some("expanded plugin prompt")
         );
         assert!(!connection.active_turn.is_active());
@@ -6859,23 +6888,29 @@ mod tests {
         sources: Arc<
             Mutex<Vec<Option<orchestrator::native_user_message_source::NativeUserMessageSource>>>,
         >,
+        active_turn: ActiveTurnControl,
+        turn_ids: Arc<Mutex<Vec<Option<u64>>>>,
         /// Released by the test to let the FIRST turn complete.
         release: Arc<Notify>,
         /// Notifies the test each time a turn STARTS.
         started: Arc<Notify>,
         /// Notifies the test each time a turn COMPLETES.
         completed: Arc<Notify>,
+        started_count: Arc<AtomicUsize>,
+        completed_count: Arc<AtomicUsize>,
         first_seen: AtomicBool,
     }
 
     #[async_trait]
     impl TurnDriver for GatedDriver {
         async fn run_turn(&self, prompt: Utf16JsonProjection) {
+            self.turn_ids.lock().await.push(self.active_turn.turn_id());
             self.prompts.lock().await.push(prompt);
             self.sources
                 .lock()
                 .await
                 .push(orchestrator::native_user_message_source::current());
+            self.started_count.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             // Only the FIRST turn parks; follow-up turns run straight through.
             if self
@@ -6885,6 +6920,7 @@ mod tests {
             {
                 self.release.notified().await;
             }
+            self.completed_count.fetch_add(1, Ordering::SeqCst);
             self.completed.notify_one();
         }
     }
@@ -6899,16 +6935,69 @@ mod tests {
         let release = Arc::new(Notify::new());
         let started = Arc::new(Notify::new());
         let completed = Arc::new(Notify::new());
+        let started_count = Arc::new(AtomicUsize::new(0));
+        let completed_count = Arc::new(AtomicUsize::new(0));
+        let turn_ids = Arc::new(Mutex::new(Vec::new()));
+        let unbound_connection = BridgeConnection::new();
+        let active_turn = unbound_connection.active_turn.clone();
         let driver: Arc<dyn TurnDriver> = Arc::new(GatedDriver {
             prompts: prompts.clone(),
             sources: sources.clone(),
+            active_turn,
+            turn_ids: turn_ids.clone(),
             release: release.clone(),
             started: started.clone(),
             completed: completed.clone(),
+            started_count: started_count.clone(),
+            completed_count: completed_count.clone(),
             first_seen: AtomicBool::new(false),
         });
         let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
-        let connection = Arc::new(BridgeConnection::new().bind(gate, driver));
+        let connection = Arc::new(unbound_connection.bind(gate, driver));
+
+        async fn wait_for_turn_signal(
+            stage: &str,
+            signal: &Notify,
+            signal_count: &AtomicUsize,
+            expected_signal_count: usize,
+            connection: &BridgeConnection,
+            prompts: &Mutex<Vec<Utf16JsonProjection>>,
+            counts: (&AtomicUsize, &AtomicUsize),
+        ) {
+            let (started_count, completed_count) = counts;
+            // Notify stores at most one permit. A fast follow-up can complete
+            // before the test consumes the first completion signal, so wait on
+            // the monotonic count predicate as well as the wakeup.
+            let reached = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if signal_count.load(Ordering::SeqCst) >= expected_signal_count {
+                        return;
+                    }
+                    signal.notified().await;
+                }
+            })
+            .await
+            .is_ok();
+            if reached {
+                return;
+            }
+            let prompts = prompts
+                .lock()
+                .await
+                .iter()
+                .map(|prompt| prompt.string_at("").unwrap_or_default().to_owned())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting for {stage} (signal count {}/{}): turn_running={}, active_turn_id={:?}, queue_len={}, prompts={prompts:?}, starts={}, completions={}",
+                signal_count.load(Ordering::SeqCst),
+                expected_signal_count,
+                connection.turn_running.load(Ordering::SeqCst),
+                connection.active_turn.turn_id(),
+                connection.queue.len().await,
+                started_count.load(Ordering::SeqCst),
+                completed_count.load(Ordering::SeqCst),
+            );
+        }
 
         // First prompt — wins the run loop and parks on the barrier.
         connection
@@ -6916,11 +7005,21 @@ mod tests {
                 text: "first".into(),
                 prompt_mode: None,
                 images: Vec::new(),
-                turn_id: None,
+                turn_id: Some(41),
                 visualization_context: None,
             })
             .await;
-        started.notified().await;
+        wait_for_turn_signal(
+            "first turn start",
+            &started,
+            &started_count,
+            1,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
+        assert_eq!(connection.active_turn.turn_id(), Some(41));
 
         // While the first turn is parked, the loop owns `turn_running`; a second
         // prompt must be ENQUEUED, not spawned. Nothing new starts.
@@ -6930,7 +7029,7 @@ mod tests {
                 text: "second".into(),
                 prompt_mode: None,
                 images: Vec::new(),
-                turn_id: None,
+                turn_id: Some(42),
                 visualization_context: None,
             })
             .await;
@@ -6941,22 +7040,63 @@ mod tests {
         );
         // Still only ONE turn has started.
         assert_eq!(prompts.lock().await.len(), 1);
+        assert_eq!(connection.active_turn.turn_id(), Some(41));
 
         // Release the first turn; the loop then drains the queued prompt as a
         // follow-up turn and finally clears `turn_running`.
         release.notify_one();
-        completed.notified().await; // first turn done
-        started.notified().await; // follow-up turn started
-        completed.notified().await; // follow-up turn done
+        wait_for_turn_signal(
+            "first turn completion",
+            &completed,
+            &completed_count,
+            1,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
+        wait_for_turn_signal(
+            "queued follow-up turn start",
+            &started,
+            &started_count,
+            2,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
+        wait_for_turn_signal(
+            "queued follow-up turn completion",
+            &completed,
+            &completed_count,
+            2,
+            &connection,
+            &prompts,
+            (&started_count, &completed_count),
+        )
+        .await;
 
         // Drain settles: queue empty, flag cleared, both prompts ran in order.
         // (Yield until the spawned loop finishes its post-drain bookkeeping.)
-        for _ in 0..100 {
-            if !connection.turn_running.load(Ordering::SeqCst) && connection.queue.is_empty().await
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while connection.turn_running.load(Ordering::SeqCst)
+                || !connection.queue.is_empty().await
             {
-                break;
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
+        })
+        .await
+        .is_ok();
+        if !drained {
+            let queue_len = connection.queue.len().await;
+            panic!(
+                "timed out draining queued prompt: turn_running={}, active_turn_id={:?}, queue_len={}, starts={}, completions={}",
+                connection.turn_running.load(Ordering::SeqCst),
+                connection.active_turn.turn_id(),
+                queue_len,
+                started_count.load(Ordering::SeqCst),
+                completed_count.load(Ordering::SeqCst),
+            );
         }
         assert!(!connection.turn_running.load(Ordering::SeqCst));
         assert!(connection.queue.is_empty().await);
@@ -6968,6 +7108,11 @@ mod tests {
                 .map(|prompt| prompt.string_at("").unwrap_or_default())
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
+        );
+        assert_eq!(
+            turn_ids.lock().await.as_slice(),
+            &[Some(41), Some(42)],
+            "each prompt must run under its own active turn id"
         );
         let sources = sources.lock().await;
         assert_eq!(sources.len(), 2);
@@ -7112,7 +7257,9 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_queue_batch_retains_insertion_order_and_each_origin() {
-        struct BatchRecorder(Arc<Mutex<Vec<Vec<(String, bool)>>>>);
+        struct BatchRecorder(
+            Arc<Mutex<Vec<Vec<(String, bool, Option<orchestrator::PromptIngressKind>, bool)>>>>,
+        );
         #[async_trait]
         impl TurnDriver for BatchRecorder {
             async fn run_turn(&self, _: Utf16JsonProjection) {
@@ -7130,6 +7277,8 @@ mod tests {
                             (
                                 input.text.string_at("").unwrap_or_default().to_owned(),
                                 input.is_meta,
+                                input.prompt_ingress_kind,
+                                input.skip_model_query,
                             )
                         })
                         .collect(),
@@ -7162,8 +7311,13 @@ mod tests {
         assert_eq!(
             *captured.lock().await,
             vec![vec![
-                ("scheduled first".into(), true),
-                ("human second".into(), false)
+                ("scheduled first".into(), true, None, false),
+                (
+                    "human second".into(),
+                    false,
+                    Some(orchestrator::PromptIngressKind::RegularUser),
+                    false,
+                ),
             ]]
         );
     }

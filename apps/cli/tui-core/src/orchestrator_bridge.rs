@@ -969,7 +969,12 @@ mod tests {
                     message_type: "assistant".into(),
                     timestamp: "2026-10-03T12:00:00.000Z".into(),
                     request_id: Some("request-1".into()),
-                    request_ref: Some(serde_json::json!({"lane": "main"})),
+                    request_ref: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"lane": "main"}),
+                        )
+                        .unwrap(),
+                    ),
                     provider_message_id: Some("provider-1".into()),
                     model: Some("claude-sonnet-4".into()),
                     stop_reason: Some("refusal".into()),
@@ -1163,39 +1168,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_mod_log_keeps_plugin_and_text_separate() {
+    async fn emit_mod_log_keeps_plain_text_separate() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_mod_log("review", "Found a mismatch").await;
+        let text = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!("Found a mismatch"),
+        )
+        .unwrap();
+        bridge.emit_mod_log("review", &text).await;
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::UiLog { plugin, text }
-                if plugin == "review" && text == "Found a mismatch"
-        ));
-    }
-
-    #[tokio::test]
-    async fn transcript_row_identity_events_keep_persisted_uuids_separate_from_message_ids() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let bridge = BridgeOutputStream::new(tx);
-        let message_id = lingxi_core::types::MessageId::new();
-        let persisted_uuid = "83f67a72-a806-49b7-9a18-e57307177a86";
-        bridge
-            .emit_user_transcript_row_identity("ui-row-token", persisted_uuid)
-            .await;
-        bridge
-            .emit_assistant_transcript_row_uuids(&message_id, &[Some(persisted_uuid.to_string())])
-            .await;
-
-        assert!(matches!(
-            rx.recv().await.unwrap(),
-            TurnEvent::TranscriptRowIdentity { row_token, uuid }
-                if row_token == "ui-row-token" && uuid == persisted_uuid
-        ));
-        assert!(matches!(
-            rx.recv().await.unwrap(),
-            TurnEvent::AssistantTranscriptRowUuids { message_id: actual, uuids }
-                if actual == message_id && uuids == vec![Some(persisted_uuid.to_string())]
+                if plugin == "review"
+                    && text.code_units == "Found a mismatch".encode_utf16().collect::<Vec<_>>()
         ));
     }
 

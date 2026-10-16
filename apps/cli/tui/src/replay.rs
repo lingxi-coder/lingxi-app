@@ -507,6 +507,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -518,6 +522,7 @@ mod tests {
                 text: text.into(),
                 citations: None,
             }],
+            resumable: None,
             stop_reason: None,
         }
     }
@@ -560,6 +565,7 @@ mod tests {
                     .unwrap(),
                     provider_id: None,
                 }],
+                resumable: None,
                 stop_reason: None,
             },
             ConversationMessage::User {
@@ -575,6 +581,10 @@ mod tests {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         ];
         let out = rebuild_messages(&h);
@@ -627,6 +637,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -654,6 +668,7 @@ mod tests {
                 thinking: "reasoning".into(),
                 signature: None,
             }],
+            resumable: None,
             stop_reason: None,
         }];
         let out = rebuild_messages(&h);
@@ -677,6 +692,7 @@ mod tests {
             content: vec![ContentBlock::RedactedThinking {
                 data: "opaque-payload".into(),
             }],
+            resumable: None,
             stop_reason: None,
         }];
         let out = rebuild_messages(&h);
@@ -700,6 +716,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -732,6 +752,10 @@ mod tests {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         ];
         assert!(rebuild_messages(&h).is_empty());
@@ -1001,6 +1025,7 @@ mod tests {
                     provider_id: None,
                 },
             ],
+            resumable: None,
             stop_reason: None,
         }];
         let out = rebuild_messages(&h);

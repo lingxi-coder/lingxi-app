@@ -528,6 +528,9 @@ pub(super) async fn mount_resumed_tui_inner(
         if let Some(user_model_setting) = state.user_model_setting {
             let session = orch.session();
             let mut session = session.lock().await;
+            // Carry the complete source/effective-source/route binding from
+            // the outgoing runtime; rebuilding it from the visible model would
+            // lose unresolved source identity and its routing anchor.
             session.user_model_setting = Some(user_model_setting);
             session.user_model_setting_provenance = lingxi_core::host::ModelProvenance::UserOrEnv;
             session.user_model_setting_source =

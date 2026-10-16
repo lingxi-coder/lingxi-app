@@ -104,13 +104,15 @@ pub struct BackgroundLaunchOptions {
     #[serde(
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
-        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        skip_serializing_if = "Option::is_none"
     )]
     pub system_prompt: Option<Utf16JsonProjection>,
     #[serde(
         default,
         deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
-        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        skip_serializing_if = "Option::is_none"
     )]
     pub append_system_prompt: Option<Utf16JsonProjection>,
     pub system_prompt_file: Option<PathBuf>,
@@ -1110,6 +1112,33 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn launch_spec_distinguishes_missing_and_explicit_null_prompt_options() {
+        let home = tmpdir();
+        let mut spec = sample("null0001", BackgroundLaunchKind::Fresh);
+        spec.options.system_prompt = None;
+        spec.options.append_system_prompt = Some(Utf16JsonProjection::parse("null").unwrap());
+
+        write_launch_spec(&home, "null0001", &spec).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(launch_spec_path(&home, "null0001")).unwrap())
+                .unwrap();
+        let options = raw["options"]
+            .as_object()
+            .expect("launch options are serialized as an object");
+        assert!(
+            !options.contains_key("system_prompt"),
+            "an absent raw prompt must be represented by an omitted field"
+        );
+        assert!(
+            options
+                .get("append_system_prompt")
+                .is_some_and(serde_json::Value::is_null),
+            "an explicit raw JSON null must remain present"
+        );
+        assert_eq!(read_launch_spec(&home, "null0001").unwrap(), spec);
     }
 
     #[test]

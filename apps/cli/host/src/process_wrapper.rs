@@ -38,16 +38,25 @@ fn parse_flag_settings(
 pub(crate) async fn configure(
     flag_settings: Option<&str>,
     project_dir: &std::path::Path,
+    managed_settings_config: &harness_runtime::desktop::DesktopConfig,
 ) -> Result<(), String> {
     let raw = if let Some(raw) = process_wrapper_from_environment() {
         Some(raw)
     } else {
-        let managed_layers: Vec<lingxi_core::settings::SettingsJson> =
-            harness_runtime::desktop::settings_watch::managed_settings_raw_tiers()
-                .await
-                .into_iter()
-                .filter_map(|raw| serde_json::from_str(&raw).ok())
-                .collect();
+        let managed_overlay =
+            match harness_runtime::desktop::managed_settings_overlay(managed_settings_config).await
+            {
+                Ok(overlay) => overlay,
+                Err(lingxi_core::settings::SettingsError::SourceFailure { effective, .. }) => {
+                    effective
+                }
+                Err(_) => None,
+            };
+        let managed_layers: Vec<lingxi_core::settings::SettingsJson> = managed_overlay
+            .and_then(|source| source.to_json_string().ok())
+            .and_then(|raw| serde_json::from_str::<lingxi_core::settings::SettingsJson>(&raw).ok())
+            .into_iter()
+            .collect();
         let cli_layer = parse_flag_settings(flag_settings)?;
         let empty_env = std::collections::BTreeMap::new();
         lingxi_core::settings::Settings::load_with_layers_from_user_path(

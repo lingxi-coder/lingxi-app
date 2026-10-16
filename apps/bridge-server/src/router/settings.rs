@@ -8,7 +8,6 @@ use client::adapter::controls::lower_conversation_controls;
 use client::adapter::ClientEventSink;
 use client::protocol::commands::PermissionBehaviorDto;
 use client::protocol::commands::WritableScopeDto;
-use client::protocol::controls::NativeProactivityControlStateDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
 use client::protocol::text::ClientTextDto;
@@ -54,25 +53,37 @@ impl EngineCommandRouter {
         // This private action records the already failed invocation and never
         // retries resolution or execution against a potentially changed default.
         if command.action == "record_failure" {
-            let display = match command.payload_json.as_deref()
+            let display = match command
+                .payload_json
+                .as_deref()
                 .ok_or_else(|| "Fusion failure payload is required".to_string())
                 .and_then(parse_fusion_failure)
             {
                 Ok((raw, error)) => harness_runtime::desktop::record_fusion_command_failure(
-                    self.handle.as_ref(), &raw, &error,
-                ).await.unwrap_or_else(|storage| format!("{error}\nCould not save the Fusion failure: {storage}")),
+                    self.handle.as_ref(),
+                    &raw,
+                    &error,
+                )
+                .await
+                .unwrap_or_else(|storage| {
+                    format!("{error}\nCould not save the Fusion failure: {storage}")
+                }),
                 Err(error) => error,
             };
             sink.emit(ClientEvent::SlashCommandResult {
-                turn_id: None, display, is_error: true,
-            }).await;
+                turn_id: None,
+                display: display.into(),
+                is_error: true,
+            })
+            .await;
             return;
         }
         let Some(context) = self.settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
                 message: "Fusion administration unavailable: missing settings context".into(),
-            }).await;
+            })
+            .await;
             return;
         };
         configuration_admin::fusion_admin::handle_command(context, command, sink).await;
@@ -118,17 +129,7 @@ impl EngineCommandRouter {
         };
         let fast_mode = self.handle.fast_mode().await;
         let proactivity = self.handle.native_proactivity_snapshot();
-        let mut controls = lower_conversation_controls(controls);
-        controls.proactivity = (proactivity.opted_in || proactivity.opt_in_available).then(|| {
-            NativeProactivityControlStateDto {
-                opted_in: proactivity.opted_in,
-                selector_gate: proactivity.selector_gate,
-                selector_gate_ever_on: proactivity.selector_gate_ever_on,
-                attachments_enabled: proactivity.attachments_enabled,
-                opt_in_available: proactivity.opt_in_available,
-                level: proactivity.level,
-            }
-        });
+        let controls = lower_conversation_controls(controls, proactivity);
         sink.emit(ClientEvent::ConversationControlsChanged { controls })
             .await;
 
@@ -486,7 +487,6 @@ mod error_text_tests {
     }
 }
 
-
 fn parse_fusion_failure(payload: &str) -> Result<(String, String), String> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -509,11 +509,21 @@ mod fusion_failure_tests {
     #[test]
     fn failure_payload_is_strict_and_bounded() {
         let payload = serde_json::json!({"raw":"/fusion --strategy user:review inspect", "error":"Unavailable"});
-        assert_eq!(parse_fusion_failure(&payload.to_string()).unwrap(), (
-            "/fusion --strategy user:review inspect".into(), "Unavailable".into(),
-        ));
+        assert_eq!(
+            parse_fusion_failure(&payload.to_string()).unwrap(),
+            (
+                "/fusion --strategy user:review inspect".into(),
+                "Unavailable".into(),
+            )
+        );
         assert!(parse_fusion_failure(r#"{"raw":"/fusion inspect"}"#).is_err());
-        assert!(parse_fusion_failure(r#"{"raw":"/fusion inspect","error":"unavailable","strategy":"user:other"}"#).is_err());
-        assert!(parse_fusion_failure(&serde_json::json!({"raw":"/fusion inspect","error":"x".repeat(32_769)}).to_string()).is_err());
+        assert!(parse_fusion_failure(
+            r#"{"raw":"/fusion inspect","error":"unavailable","strategy":"user:other"}"#
+        )
+        .is_err());
+        assert!(parse_fusion_failure(
+            &serde_json::json!({"raw":"/fusion inspect","error":"x".repeat(32_769)}).to_string()
+        )
+        .is_err());
     }
 }

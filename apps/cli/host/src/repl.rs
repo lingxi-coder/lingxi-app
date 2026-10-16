@@ -6,8 +6,8 @@
 use crate::argv::Argv;
 use crate::exit_codes;
 use crate::repl_loop::{
-    step_with_notifications, PolicyHelperRuntimeFailureSignal, SkillBatchTurnFn, StepOutcome,
-    TaskNotificationWake,
+    step_with_notifications_and_unknown_fallback, PolicyHelperRuntimeFailureSignal,
+    SkillBatchTurnFn, StepOutcome, TaskNotificationWake, UnknownSlashFallbackTurnFn,
 };
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
@@ -110,6 +110,8 @@ impl TaskNotificationWake for ReplTaskWake {
                                 text: prompt.unwrap_or_else(|| raw.clone()),
                                 is_meta: true,
                                 turn_companion: false,
+                                prompt_ingress_kind: Some(orchestrator::PromptIngressKind::Other),
+                                skip_model_query: false,
                                 message_origin: None,
                                 prompt_source: None,
                                 trailing_history_rows: Vec::new(),
@@ -530,6 +532,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     let ended_via;
     let exit_code;
     loop {
+        let unknown_fallback_catalog = runtime.dispatcher.headless_command_catalog().await;
         let orch_for_turn = orch.clone();
         let turn_loop_host = loop_host.clone();
         let turn_loop_queue = loop_queue.clone();
@@ -580,7 +583,39 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             })
         });
 
-        let outcome = step_with_notifications(
+        let fallback_orch = orch.clone();
+        let fallback_host = loop_host.clone();
+        let fallback_queue = loop_queue.clone();
+        let fallback_catalog = unknown_fallback_catalog.clone();
+        let unknown_fallback_turn_fn: UnknownSlashFallbackTurnFn =
+            Arc::new(move |prompt, command_name, token| {
+                let o = fallback_orch.clone();
+                let host = fallback_host.clone();
+                let queue = fallback_queue.clone();
+                let catalog = fallback_catalog.clone();
+                Box::pin(async move {
+                    let (request_context, transcript_attachment) =
+                        crate::repl_loop::unknown_command_fallback_context(&command_name, &catalog);
+                    host.refresh_session().await;
+                    let _ = host.begin(None, true);
+                    queue.register_active_turn(token.clone()).await;
+                    let result = orchestrator::native_user_message_source::with_source(
+                        orchestrator::native_user_message_source::human(),
+                        o.run_turn_with_request_context(
+                            prompt,
+                            request_context,
+                            Some(transcript_attachment),
+                            token.clone(),
+                        ),
+                    )
+                    .await;
+                    host.finish(&token).await;
+                    queue.clear_active_turn().await;
+                    result
+                })
+            });
+
+        let outcome = step_with_notifications_and_unknown_fallback(
             stdin_reader.clone() as Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
             &mut err_writer,
             &runtime.dispatcher,
@@ -594,6 +629,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
                 runtime.policy_helper_refusal.clone(),
                 runtime.policy_helper_semantic_worker_failure.clone(),
             ))),
+            &unknown_fallback_turn_fn,
             run_turn_fn,
         )
         .await;

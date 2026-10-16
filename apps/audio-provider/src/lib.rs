@@ -19,33 +19,52 @@ pub mod realtime;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// Session identity and routing context used by `follow_session` audio requests.
 pub struct SessionContext {
+    /// Identifier of the conversation that supplied this audio context.
     pub session_id: String,
+    /// Exact provider profile selected for the session.
     pub profile_id: String,
+    /// Account/quota scope forwarded with requests on the session route.
     pub account_scope: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// Cloud route selection carried by an audio request.
 pub struct CloudSelection {
+    /// Route binding: `follow_session` uses `session`; `explicit_profile` uses `profile_id`.
     pub binding: String,
+    /// Exact provider profile for `explicit_profile`; ignored for `follow_session`.
     pub profile_id: Option<String>,
+    /// Optional provider model identifier, checked against the selected operation's capabilities.
     pub model_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// Strict camelCase request envelope shared by audio capability and media operations.
 pub struct AudioRequest {
+    /// Caller-supplied identity, unique among active operations and accepted by [`AudioProviderHost::cancel`].
     pub operation_id: String,
+    /// Audio operation kind: `recognition`, `speech`, or `realtime`.
     pub kind: String,
+    /// Provider profile and optional model selection.
     pub cloud: CloudSelection,
+    /// Required when `cloud.binding` is `follow_session`.
     pub session: Option<SessionContext>,
+    /// Optional locale hint translated through the selected provider's audio capabilities.
     pub language: Option<String>,
+    /// Optional provider voice identifier for speech synthesis.
     pub voice: Option<String>,
+    /// Requested synthesis rate; currently only finite normal speed (`1.0`) is supported.
     pub rate: Option<f32>,
+    /// Realtime interaction mode, when present: `turn_based` or `interruptible`.
     pub interaction: Option<String>,
+    /// Operation deadline in milliseconds; defaults to 30 seconds and is capped at 30 minutes.
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    /// Maximum accepted input or collected output size in bytes; defaults to 12 MiB.
     #[serde(default = "default_limit")]
     pub max_payload_bytes: usize,
 }
@@ -84,6 +103,10 @@ impl AudioProviderHost {
         }
     }
 
+    /// Build a host from serialized provider profiles and trusted credential sources.
+    ///
+    /// `region` must be `china` or `international`. `keys` supplies secret overrides
+    /// keyed by credential ID; absent keys are read from `storage` when available.
     pub fn new(
         profiles_json: &str,
         region: &str,
@@ -146,6 +169,7 @@ impl AudioProviderHost {
         })
     }
 
+    /// Cancel an active transcription, synthesis, or realtime operation by its request identity.
     pub fn cancel(&self, operation_id: &str) {
         if let Some(cancel) = self
             .pending
@@ -286,6 +310,10 @@ impl AudioProviderHost {
         Ok(sdk::protocol::Secret::new(key))
     }
 
+    /// Return a JSON capability/readiness snapshot for a serialized [`AudioRequest`].
+    ///
+    /// The result describes the selected profile, supported operation, model/voice
+    /// choices, and credential readiness without exposing credential material.
     pub async fn capabilities(&self, input: &str) -> String {
         let result = async {
             let request = self.parse(input)?;
@@ -323,6 +351,11 @@ impl AudioProviderHost {
         result.unwrap_or_else(|error| error).to_string()
     }
 
+    /// Transcribe bounded recorded audio and return the operation result as JSON.
+    ///
+    /// The request kind must be `recognition`; `mime_type` must be one of the
+    /// supported recorded formats (`audio/wav`, `audio/x-wav`, `audio/mp4`,
+    /// `audio/m4a`, `audio/mpeg`, `audio/flac`, or `audio/webm`).
     pub async fn transcribe(&self, input: &str, bytes: Vec<u8>, mime_type: &str) -> String {
         self.run(input, |request, route, options| async move {
             if request.kind != "recognition"
@@ -369,6 +402,10 @@ impl AudioProviderHost {
         .await
     }
 
+    /// Synthesize bounded nonempty text and return playable PCM audio as JSON.
+    ///
+    /// The request kind must be `speech`; the selected route must return mono
+    /// PCM16 audio with a positive sample rate.
     pub async fn synthesize(&self, input: &str, text: &str) -> String {
         self.run(input, |request,route,options| async move {
             if request.kind != "speech" { return Err(failure("invalid_request", "synthesis requires speech configuration")); }
@@ -447,6 +484,7 @@ fn operation(kind: &str) -> Result<audio::AudioOperation, Value> {
         _ => Err(failure("invalid_request", "unknown audio operation kind")),
     }
 }
+/// Construct the standard structured audio error object returned by this host.
 pub fn failure(kind: &str, message: &str) -> Value {
     json!({"error":{"kind":kind,"message":message}})
 }
@@ -454,20 +492,37 @@ fn provider_failure(error: audio::AudioError) -> Value {
     use sdk::providers::openai::audio::AudioError as OpenAiError;
     // Preserve a useful status without returning provider bodies, identifiers,
     // or error messages that could echo credentials supplied in a request.
-    let status = error.source.as_deref().and_then(|source| source.downcast_ref::<OpenAiError>())
+    let status = error
+        .source
+        .as_deref()
+        .and_then(|source| source.downcast_ref::<OpenAiError>())
         .and_then(|source| match source {
             OpenAiError::Provider { status, .. }
-            | OpenAiError::Llm(sdk::protocol::LlmError::ProviderResponse { status, .. }) => Some(*status),
+            | OpenAiError::Llm(sdk::protocol::LlmError::ProviderResponse { status, .. }) => {
+                Some(*status)
+            }
             _ => None,
         });
     let (kind, message) = match error.kind {
-        audio::AudioErrorKind::InvalidRequest => ("invalid_request", "audio request validation failed"),
-        audio::AudioErrorKind::Unsupported => ("unsupported", "selected audio operation is unsupported"),
-        audio::AudioErrorKind::Unavailable => ("unavailable", "selected audio service is unavailable"),
-        audio::AudioErrorKind::MediaTooLarge => ("media_too_large", "audio payload exceeds the provider limit"),
-        audio::AudioErrorKind::Provider => ("provider_error", "selected audio provider request failed"),
+        audio::AudioErrorKind::InvalidRequest => {
+            ("invalid_request", "audio request validation failed")
+        }
+        audio::AudioErrorKind::Unsupported => {
+            ("unsupported", "selected audio operation is unsupported")
+        }
+        audio::AudioErrorKind::Unavailable => {
+            ("unavailable", "selected audio service is unavailable")
+        }
+        audio::AudioErrorKind::MediaTooLarge => (
+            "media_too_large",
+            "audio payload exceeds the provider limit",
+        ),
+        audio::AudioErrorKind::Provider => {
+            ("provider_error", "selected audio provider request failed")
+        }
     };
-    let message = status.map(|status| format!("audio provider returned HTTP {status}"))
+    let message = status
+        .map(|status| format!("audio provider returned HTTP {status}"))
         .unwrap_or_else(|| message.to_owned());
     json!({"error":{"kind":kind,"message":message,"dispatch":error.dispatch}})
 }
@@ -476,51 +531,96 @@ fn provider_failure(error: audio::AudioError) -> Value {
 mod tests {
     use super::*;
 
-
     #[derive(Default)]
-    struct NativeWireCapture { sent: Mutex<Vec<(String, Vec<u8>)>> }
+    struct NativeWireCapture {
+        sent: Mutex<Vec<(String, Vec<u8>)>>,
+    }
     #[async_trait::async_trait]
     impl sdk::Transport for NativeWireCapture {
-        async fn send(&self, request: sdk::HttpRequest) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+        async fn send(
+            &self,
+            request: sdk::HttpRequest,
+        ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
             self.respond(request.url, request.body.to_vec())
         }
-        async fn send_stream(&self, mut request: sdk::HttpStreamRequest) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+        async fn send_stream(
+            &self,
+            mut request: sdk::HttpStreamRequest,
+        ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
             use futures::StreamExt;
             let mut bytes = Vec::new();
-            while let Some(chunk) = request.body.next().await { bytes.extend_from_slice(&chunk?); }
+            while let Some(chunk) = request.body.next().await {
+                bytes.extend_from_slice(&chunk?);
+            }
             self.respond(request.url, bytes)
         }
     }
     impl NativeWireCapture {
-        fn respond(&self, url: String, body: Vec<u8>) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
+        fn respond(
+            &self,
+            url: String,
+            body: Vec<u8>,
+        ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
             use futures::StreamExt;
             let transcription = url.ends_with("/audio/transcriptions");
             self.sent.lock().unwrap().push((url, body));
-            let response = if transcription { bytes::Bytes::from_static(br#"{"text":"audio contract verified"}"#) }
-                else { bytes::Bytes::from_static(&[0, 0, 1, 0]) };
-            Ok(sdk::StreamResponse { status: 200,
-                headers: vec![("content-type".into(), if transcription { "application/json" } else { "audio/pcm" }.into())],
-                body: futures::stream::once(async move { Ok(response) }).boxed() })
+            let response = if transcription {
+                bytes::Bytes::from_static(br#"{"text":"audio contract verified"}"#)
+            } else {
+                bytes::Bytes::from_static(&[0, 0, 1, 0])
+            };
+            Ok(sdk::StreamResponse {
+                status: 200,
+                headers: vec![(
+                    "content-type".into(),
+                    if transcription {
+                        "application/json"
+                    } else {
+                        "audio/pcm"
+                    }
+                    .into(),
+                )],
+                body: futures::stream::once(async move { Ok(response) }).boxed(),
+            })
         }
     }
     #[tokio::test]
     async fn device_locale_is_translated_before_native_audio_dispatch() {
         let wire = Arc::new(NativeWireCapture::default());
-        let profiles = sdk::builtin_providers().unwrap().into_iter()
-            .filter(|p| p.profile_name == "openai").collect::<Vec<_>>();
+        let profiles = sdk::builtin_providers()
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.profile_name == "openai")
+            .collect::<Vec<_>>();
         let client = sdk::LlmClientBuilder::with_transport(wire.clone(), &profiles)
-            .with_region(sdk::protocol::Region::International).build().unwrap();
-        let host = AudioProviderHost { client,
+            .with_region(sdk::protocol::Region::International)
+            .build()
+            .unwrap();
+        let host = AudioProviderHost {
+            client,
             credential_ids: BTreeMap::from([("openai".into(), "openai".into())]),
-            storage: None, bound_services: None,
-            keys: BTreeMap::from([("openai".into(), sdk::protocol::Secret::new("host-test-key".into()))]),
-            pending: Arc::new(Mutex::new(BTreeMap::new())) };
-        let mut synthesis = request("speech"); synthesis["language"] = json!("en-US");
-        let result: Value = serde_json::from_str(&host.synthesize(&synthesis.to_string(), "hello").await).unwrap();
+            storage: None,
+            bound_services: None,
+            keys: BTreeMap::from([(
+                "openai".into(),
+                sdk::protocol::Secret::new("host-test-key".into()),
+            )]),
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+        let mut synthesis = request("speech");
+        synthesis["language"] = json!("en-US");
+        let result: Value =
+            serde_json::from_str(&host.synthesize(&synthesis.to_string(), "hello").await).unwrap();
         assert!(result.get("error").is_none(), "{result}");
         assert_eq!(result["sampleRateHz"], 24000);
-        let mut recognition = request("recognition"); recognition["language"] = json!("en-US");
-        let result: Value = serde_json::from_str(&host.transcribe(&recognition.to_string(), vec![1, 2, 3], "audio/wav").await).unwrap();
+        let mut recognition = request("recognition");
+        recognition["language"] = json!("en-US");
+        let result: Value = serde_json::from_str(
+            &host
+                .transcribe(&recognition.to_string(), vec![1, 2, 3], "audio/wav")
+                .await,
+        )
+        .unwrap();
         assert_eq!(result["text"], "audio contract verified");
         let sent = wire.sent.lock().unwrap();
         let speech: Value = serde_json::from_slice(&sent[0].1).unwrap();
@@ -533,14 +633,23 @@ mod tests {
 
     #[test]
     fn provider_failure_preserves_status_without_echoing_sensitive_details() {
-        let error = audio::AudioError { kind: audio::AudioErrorKind::Provider,
-            dispatch: audio::AudioDispatch::Rejected, message: "private-canary".into(),
-            source: Some(Box::new(sdk::providers::openai::audio::AudioError::Provider {
-                status: 429, request_id: Some("private-canary".into()),
-                body: json!({"error":{"message":"private-canary"}}),
-            })) };
+        let error = audio::AudioError {
+            kind: audio::AudioErrorKind::Provider,
+            dispatch: audio::AudioDispatch::Rejected,
+            message: "private-canary".into(),
+            source: Some(Box::new(
+                sdk::providers::openai::audio::AudioError::Provider {
+                    status: 429,
+                    request_id: Some("private-canary".into()),
+                    body: json!({"error":{"message":"private-canary"}}),
+                },
+            )),
+        };
         let output = provider_failure(error);
-        assert_eq!(output["error"]["message"], "audio provider returned HTTP 429");
+        assert_eq!(
+            output["error"]["message"],
+            "audio provider returned HTTP 429"
+        );
         assert!(!output.to_string().contains("private-canary"));
     }
 

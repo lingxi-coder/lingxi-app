@@ -513,9 +513,11 @@ impl BottomPane {
             .registry_commands
             .iter()
             .find(|row| row.name.code_units == name_units);
-        let exact_builtin = decoded_name
-            .as_deref()
-            .and_then(|name| crate::command::BUILTIN.iter().find(|command| command.name == name));
+        let exact_builtin = decoded_name.as_deref().and_then(|name| {
+            crate::command::BUILTIN
+                .iter()
+                .find(|command| command.name == name)
+        });
         let alias_row = self.registry_commands.iter().find(|row| {
             row.aliases
                 .iter()
@@ -1828,8 +1830,7 @@ impl BottomPane {
                                     &source_insert,
                                     &self.registry_commands,
                                 )
-                }
-                {
+                } {
                     // Buffer already IS the highlighted command — by name or in
                     // full as one of its aliases (`/quit` highlights `/exit
                     // (quit)`) → let Enter run it (claude-code runs the typed
@@ -3820,7 +3821,9 @@ mod tests {
             .map(|item| item.insert.clone())
             .collect::<Vec<_>>();
         assert!(
-            after.iter().any(|item| item == "/plan-z"),
+            after.iter().any(|item| {
+                item == &client::protocol::text::ClientTextDto::from_utf8("/plan-z")
+            }),
             "dynamic registry row missing after refresh: {after:?}"
         );
         assert_ne!(before, "/plan-z");
@@ -3989,15 +3992,17 @@ mod tests {
     #[test]
     fn argument_hint_prefers_canonical_names_over_earlier_aliases() {
         let mut pane = pane();
-        let row = |name: &str, aliases: Vec<String>, hint: &str| RegistrySlashRow {
-            name: name.into(),
-            description: String::new(),
-            menu_description: None,
-            aliases,
-            hidden: false,
-            replaces_builtin: false,
-            argument_hint: Some(hint.into()),
-            argument_names: Vec::new(),
+        let row = |name: &str, aliases: Vec<client::protocol::text::ClientTextDto>, hint: &str| {
+            RegistrySlashRow {
+                name: name.into(),
+                description: client::protocol::text::ClientTextDto::default(),
+                menu_description: None,
+                aliases,
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: Some(hint.into()),
+                argument_names: Vec::new(),
+            }
         };
         pane.set_registry_commands(vec![
             row("/other", vec!["/review".into(), "/model".into()], "wrong"),
@@ -4020,7 +4025,7 @@ mod tests {
             let mut pane = pane();
             pane.set_registry_commands(vec![RegistrySlashRow {
                 name: "/z-deploy".into(),
-                description: String::new(),
+                description: client::protocol::text::ClientTextDto::default(),
                 menu_description: None,
                 aliases: vec!["/ship-deploy".into()],
                 hidden: false,
@@ -4038,7 +4043,8 @@ mod tests {
             assert_eq!(pane.command_argument_hint().as_deref(), Some("<target>"));
             assert!(matches!(
                 pane.handle_key(key(KeyCode::Enter)),
-                BottomPaneOutcome::Submitted(ref submitted) if submitted == expected.trim_end()
+                BottomPaneOutcome::Submitted(ref submitted)
+                    if submitted.string_units("") == Some(expected.trim_end().encode_utf16().collect())
             ));
         }
     }
@@ -4048,7 +4054,7 @@ mod tests {
         let mut pane = pane();
         pane.set_registry_commands(vec![RegistrySlashRow {
             name: "/foo".into(),
-            description: String::new(),
+            description: client::protocol::text::ClientTextDto::default(),
             menu_description: None,
             aliases: vec!["/foobar".into()],
             hidden: false,
@@ -4060,7 +4066,8 @@ mod tests {
         assert_eq!(pane.completion().unwrap().selected_insert(), "/foobar");
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref submitted) if submitted == "/foo"
+            BottomPaneOutcome::Submitted(ref submitted)
+                if submitted.string_units("") == Some("/foo".encode_utf16().collect())
         ));
     }
 
@@ -4069,7 +4076,7 @@ mod tests {
         let mut pane = pane();
         pane.set_registry_commands(vec![RegistrySlashRow {
             name: "/deploy".into(),
-            description: String::new(),
+            description: client::protocol::text::ClientTextDto::default(),
             menu_description: None,
             aliases: Vec::new(),
             hidden: false,
@@ -4209,13 +4216,15 @@ mod tests {
             argument_hint: None,
             argument_names: Vec::new(),
         }]);
-        typ(&mut pane, "/c");
+        typ(&mut pane, "/cm");
 
         assert!(matches!(
             pane.handle_key(key(KeyCode::Tab)),
             BottomPaneOutcome::Consumed
         ));
-        assert_eq!(pane.composer().source_units(), name);
+        let mut completed = name.clone();
+        completed.push(b' ' as u16);
+        assert_eq!(pane.composer().source_units(), completed);
 
         let BottomPaneOutcome::Submitted(submitted) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("the exact highlighted source command should submit");
@@ -5279,8 +5288,8 @@ mod tests {
         drop(resp_rx);
         p.show_ask_user_question(AskUserQuestionExchange {
             questions: vec![tool_api::ask_user_question::AskQuestion {
-                question: "Pick one".to_string(),
-                header: "Pick".to_string(),
+                question: "Pick one".into(),
+                header: "Pick".into(),
                 options: Vec::new(),
                 multi_select: false,
             }],

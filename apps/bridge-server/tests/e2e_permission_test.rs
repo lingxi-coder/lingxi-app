@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client::adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventSink, PermissionRequestSink,
@@ -45,13 +45,13 @@ use client::protocol::permission::{PermissionKindDto, PermissionRequest, Permiss
 use futures_util::{SinkExt, StreamExt};
 use lingxi_core::types::ToolUseId;
 use orchestrator::test_support::{
-    MockApiClient, MockStreamingApiClient, StaticMemoryProvider, content_block_start_text,
-    content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
-    message_start, message_stop, text_delta,
+    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
+    message_delta_stop, message_start, message_stop, text_delta, MockApiClient,
+    MockStreamingApiClient, StaticMemoryProvider,
 };
-use orchestrator::{ConversationOrchestrator, OrchestratorConfig, scripted};
-use tokio_tungstenite::tungstenite::Message;
+use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 mod tool_fixture;
 use tool_fixture::AlwaysOkTool;
@@ -170,17 +170,18 @@ fn build_connection() -> BridgeConnection {
     registry.register_builtin(Arc::new(AlwaysOkTool));
     let tools = Arc::new(registry);
 
-    let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        batched,
-        streaming,
-        tools,
-        orchestrator::test_support::noop_hook_executor(),
-        gate.clone() as Arc<dyn permission::gate::PermissionGate>,
-        output,
-        Arc::new(StaticMemoryProvider::empty()),
-        PathBuf::from("/tmp"),
-    ));
+    let orchestrator =
+        ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            batched,
+            streaming,
+            tools,
+            orchestrator::test_support::noop_hook_executor(),
+            gate.clone() as Arc<dyn permission::gate::PermissionGate>,
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
 
     let driver: Arc<dyn TurnDriver> = Arc::new(OrchestratorTurnDriver { orchestrator });
     connection.bind(gate, driver)
@@ -489,7 +490,7 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
     match next_frame_with_timeout(&mut second, Duration::from_millis(300)).await {
         None => {}
         Some(Frame::Event(ClientEvent::TextDelta { text })) => {
-            panic!("stale first-turn event leaked into the reconnect: {text}");
+            panic!("stale first-turn event leaked into the reconnect: {text:?}");
         }
         Some(Frame::PermissionRequest(req)) => {
             panic!("stale permission request leaked into the reconnect: {req:?}");

@@ -32,7 +32,13 @@ pub struct Cli {}
 /// Run the `setup-token` family.
 ///
 pub async fn run(_cli: &Cli) -> i32 {
-    let forced_method = super::auth::effective_force_login_method().await;
+    let (forced_method, org_pin) = match super::auth::effective_managed_login_policy().await {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("Failed to read managed login policy: {error}");
+            return crate::exit_codes::RUNTIME_ERROR;
+        }
+    };
     if matches!(
         forced_method,
         Some(ForceLoginMethod::Console | ForceLoginMethod::Gateway)
@@ -43,7 +49,6 @@ pub async fn run(_cli: &Cli) -> i32 {
         return crate::exit_codes::RUNTIME_ERROR;
     }
 
-    let org_pin = harness_runtime::desktop::managed_force_login_org_pin().await;
     let org_uuid = match &org_pin {
         ForceLoginOrgPin::Pinned(ids) if ids.len() == 1 => ids.first().cloned(),
         ForceLoginOrgPin::Invalid => {

@@ -837,12 +837,26 @@ async fn serve_stdio(
                         write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                     }
                     "tools/list" => {
-                        let tools = orchestrator.mcp_tool_definitions().await;
-                        let response = tools_list_response(
-                            request_id.unwrap_or_else(source_null),
-                            tools,
-                        )?;
-                        write_protocol_bytes(&writer, response.into_bytes()).await.map_err(|e| e.to_string())?;
+                        let id = request_id.unwrap_or_else(source_null);
+                        match orchestrator.mcp_tool_definitions().await {
+                            Ok(tools) => {
+                                let response = tools_list_response(id, tools)?;
+                                write_protocol_bytes(&writer, response.into_bytes())
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            Err(error) => {
+                                let response = jsonrpc_error_with_source_data(
+                                    id,
+                                    -32603,
+                                    "Failed to list tools",
+                                    Some(error.diagnostic_projection()),
+                                );
+                                write_protocol_frame(&writer, &response)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
                     }
                     "tools/call" => {
                         let id = request_id.unwrap_or_else(source_null);
@@ -1012,13 +1026,22 @@ fn jsonrpc_error(
     message: &str,
     data: Option<serde_json::Value>,
 ) -> ProtocolJson {
+    jsonrpc_error_with_source_data(id, code, message, data.as_ref().map(source_json))
+}
+
+fn jsonrpc_error_with_source_data(
+    id: ProtocolJson,
+    code: i64,
+    message: &str,
+    data: Option<ProtocolJson>,
+) -> ProtocolJson {
     let mut error = source_object(vec![
         ("code", source_json(&serde_json::json!(code))),
         ("message", ProtocolJson::from(message)),
     ]);
     if let Some(data) = data {
         error
-            .set_field("data", source_json(&data))
+            .set_field("data", data)
             .expect("error data field is valid");
     }
     source_object(vec![
@@ -2669,22 +2692,37 @@ async fn mcp_config_warnings_suppressed() -> bool {
         return true;
     }
     // `Y0("mcp")` — `policySettings.strictPluginOnlyCustomization` is `true`, or
-    // an array naming the `mcp` slot. Managed tiers ascend in priority, so the
-    // last tier that sets the key wins.
-    let mut locked = false;
-    for raw in harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
-        match value.get("strictPluginOnlyCustomization") {
-            Some(serde_json::Value::Bool(b)) => locked = *b,
-            Some(serde_json::Value::Array(slots)) => {
-                locked = slots.iter().any(|s| s.as_str() == Some("mcp"));
-            }
-            _ => {}
-        }
+    // an array naming the `mcp` slot. Use the same selected snapshot as other
+    // managed-policy consumers; an incomplete read fails closed and suppresses
+    // warnings rather than treating an unavailable policy as absent.
+    // This standalone command runs without a session runtime. The overlay
+    // service reads the managed snapshot through this config's cache and does
+    // a fresh read on cache miss; managed policy is not scoped by cwd, profile,
+    // or `--settings`.
+    let cfg = crate::init::resolve_desktop_config(
+        &crate::argv::Argv::default(),
+        permission::PermissionMode::Default,
+    );
+    let managed = match harness_runtime::desktop::managed_settings_overlay(&cfg).await {
+        Ok(Some(managed)) => managed,
+        Ok(None) => return false,
+        Err(_) => return true,
+    };
+    let Some(value) = managed.get_property("strictPluginOnlyCustomization") else {
+        return false;
+    };
+    if let Some(locked) = value.as_bool() {
+        return locked;
     }
-    locked
+    let mcp_units = "mcp".encode_utf16().collect::<Vec<_>>();
+    value.array_len().is_some_and(|length| {
+        (0..length).any(|index| {
+            value
+                .get_index(index)
+                .and_then(|slot| slot.code_units())
+                .is_some_and(|units| units == mcp_units.as_slice())
+        })
+    })
 }
 
 /// claude `vSp`'s row filter, in its order: a non-warning row always survives;
@@ -3925,8 +3963,8 @@ mod url_redaction_tests {
 #[cfg(test)]
 mod serve_protocol_tests {
     use super::{
-        credential_accounts_for_server, initialize_response, jsonrpc_error, source_json,
-        tools_list_response, windows_path_to_wsl,
+        credential_accounts_for_server, initialize_response, jsonrpc_error,
+        jsonrpc_error_with_source_data, source_json, tools_list_response, windows_path_to_wsl,
     };
 
     #[test]
@@ -3978,6 +4016,27 @@ mod serve_protocol_tests {
         .to_json_string()
         .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn source_error_data_preserves_exact_utf16_units() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let frame = jsonrpc_error_with_source_data(
+            Utf16JsonProjection::from("req-8"),
+            -32603,
+            "Failed to list tools",
+            Some(Utf16JsonProjection::parse(r#"{"detail":"policy-\ud800"}"#).unwrap()),
+        );
+        assert_eq!(
+            frame.string_units("/error/data/detail"),
+            Some(
+                Utf16JsonProjection::parse(r#""policy-\ud800""#)
+                    .unwrap()
+                    .string_units("")
+                    .unwrap()
+            )
+        );
     }
 
     #[test]

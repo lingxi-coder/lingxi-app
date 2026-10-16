@@ -172,8 +172,10 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                     Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
                         projected_content: Some(text.clone()),
                         text,
+                        images: Vec::new(),
                         source_message_uuid: None,
                         queue_delivery: None,
+                        pending_prompt_identity: None,
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
                             msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
@@ -873,9 +875,11 @@ async fn drain_teammate_prompts(
                 is_fullscreen: true,
                 columns,
             };
-            let (dispatch, settlement) =
-                command_api::with_mod_command_capture(context, dispatcher.dispatch(text.clone()))
-                    .await;
+            let (dispatch, settlement) = command_api::with_mod_command_capture(
+                context,
+                dispatcher.dispatch(text.clone(), cancel.clone()),
+            )
+            .await;
             match dispatch {
                 lingxi_core::host::SlashDispatchResult::Handled { display } => {
                     let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
@@ -917,7 +921,7 @@ async fn drain_teammate_prompts(
                     mod_settle = Some(settle);
                 }
                 lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
-                    let _ = settle.send(Err(display.string_at("").unwrap_or_default().to_owned()));
+                    let _ = settle.send(Err(display));
                     continue;
                 }
                 lingxi_core::host::SlashDispatchResult::ParseFailure { input: _ } => {
@@ -1024,6 +1028,8 @@ async fn drain_teammate_prompts(
                     ),
                 )
                 .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
             } else if let Some(row_token) = transcript_row_token {
                 orchestrator::native_user_message_source::with_source(
                     native_source,
@@ -1038,6 +1044,8 @@ async fn drain_teammate_prompts(
                     ),
                 )
                 .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
             } else {
                 orchestrator::native_user_message_source::with_source(
                     native_source,
@@ -1047,8 +1055,10 @@ async fn drain_teammate_prompts(
                     ),
                 )
                 .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
             };
-            turn_result.map(|_| ()).map_err(|error| error.to_string())
+            turn_result
         };
         if let Err(error) = result {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
@@ -1577,7 +1587,7 @@ pub(crate) struct RemountState {
     pub model: Option<(String, Option<String>)>,
     /// Exact explicit user model source for a hot in-process remount. Configured
     /// source remains owned by the rebuilt runtime's current settings.
-    pub user_model_setting: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    pub user_model_setting: Option<lingxi_core::host::ModelSourceBinding>,
     /// `/fast` toggle. Applied via `set_fast_mode`.
     pub fast_mode: bool,
     /// `/plan` mode. Applied via `set_plan_mode`.
@@ -1710,6 +1720,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     }
     let concrete_orchestrator = tui_build.runtime.orchestrator.clone();
     let orchestrator: Arc<dyn OrchestratorHandle> = concrete_orchestrator.clone();
+    let source_batch_runner: Arc<dyn SourceBatchRunner> = concrete_orchestrator.clone();
     // Boot permission mode + bypass-cycle availability for the indicator (Copy,
     // captured before `tui_build` is partly consumed below).
     let initial_permission_mode = tui_build.initial_permission_mode;
@@ -1824,8 +1835,13 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // before `tui_build` is consumed — threaded into the `ChatWidget` so a typed
     // `/commit` expands its embedded `!`git …`` bodies before submit.
     let shell_expansion = tui_build.runtime.shell_expansion.clone();
-    let session =
-        build_session_info(orchestrator.as_ref(), tui_build.runtime.model_provenance).await;
+    let session = build_session_info(
+        orchestrator.as_ref(),
+        tui_build.runtime.model_provenance,
+        tui_build.managed_model_allowlist,
+        tui_build.managed_model_overrides,
+    )
+    .await;
     // (cc 2.1.218) Persistent prompt history: the GLOBAL
     // `~/.lingxi/history.jsonl` store (rows carry a `project` field), keyed to
     // this session id for the recall ordering + dedupe key. `None` under the
@@ -1950,8 +1966,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 lingxi_home,
                 project_dir,
             },
-            active: Default::default(),
-            managed: harness_runtime::desktop::managed_settings_overlay().await,
+            active: std::sync::Arc::new(std::sync::RwLock::new(tui_build.active_settings.clone())),
+            managed: tui_build.managed_settings.clone(),
+            managed_diagnostics: tui_build.managed_settings_diagnostics.clone(),
         })
     };
     let fusion_settings = std::sync::Arc::new(std::sync::Mutex::new(
@@ -2119,12 +2136,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let submit_turn_gate = teammate_turn_gate.clone();
     let submit_cancel_reason = queue_cancel_reason.clone();
     let submit_orchestrator = orchestrator.clone();
+    let submit_source_batch_runner = source_batch_runner.clone();
     let on_submit = move |prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
                           row_token: String,
                           images: Vec<std::path::PathBuf>,
                           cancel: CancellationToken| {
         let orch = submit_orchestrator.clone();
         let tx = turn_tx.clone();
+        let source_batch_runner = submit_source_batch_runner.clone();
         let queue = submit_queue.clone();
         let pending_slashes = submit_pending_slashes.clone();
         let reservation = PendingSlashReservation::new(&pending_slashes);
@@ -2135,7 +2154,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 &turn_gate,
                 &queue,
                 orch.as_ref(),
-                Some(orch.as_ref()),
+                Some(source_batch_runner.as_ref()),
                 &tx,
                 &pending_slashes,
                 reservation,
@@ -2183,7 +2202,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             drain_teammate_prompts(
                 &queue,
                 orch.as_ref(),
-                Some(orch.as_ref()),
+                Some(source_batch_runner.as_ref()),
                 &tx,
                 &pending_slashes,
             )
@@ -2197,6 +2216,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let queued_prompt_handle = tokio::runtime::Handle::current();
     let queued_prompt_tx = notice_turn_tx.clone();
     let queued_task_registry = tui_build.runtime.task_registry.clone();
+    let queued_source_batch_runner = source_batch_runner.clone();
     let on_queue_prompt = move |prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
                                 row_token: String,
                                 images: Vec<std::path::PathBuf>,
@@ -2206,6 +2226,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let gate = queued_prompt_gate.clone();
         let pending_slashes = queued_pending_slashes.clone();
         let tx = queued_prompt_tx.clone();
+        let source_batch_runner = queued_source_batch_runner.clone();
         let command = tui_prompt_command(prompt);
         pending_slashes
             .transcript_row_tokens
@@ -2239,7 +2260,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 drain_teammate_prompts(
                     &queue,
                     orch.as_ref(),
-                    Some(orch.as_ref()),
+                    Some(source_batch_runner.as_ref()),
                     &tx,
                     &pending_slashes,
                 )
@@ -2313,8 +2334,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // transcript via `TurnEvent::SystemNotice`, and the shared snapshot slot is
     // refreshed so the next `/permissions` open reflects the edit.
     let permission_snapshot_cb = permission_snapshot.clone();
+    let permission_paths_cb = permission_paths.clone();
     let on_permission_action = move |action: tui::bottom_pane::PermissionAction| {
-        let paths = permission_paths.clone();
+        let paths = permission_paths_cb.clone();
         let allow_rules = session_allow_rules.clone();
         let tx = permission_turn_tx.clone();
         let snapshot = permission_snapshot_cb.clone();
@@ -2807,6 +2829,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let dispatch_queue = prompt_queue.clone();
     let dispatch_turn_gate = teammate_turn_gate.clone();
     let dispatch_cancel_reason = queue_cancel_reason.clone();
+    let dispatch_source_batch_runner = source_batch_runner.clone();
     let on_dispatch_slash =
         move |input: lingxi_core::types::utf16_json::Utf16JsonProjection,
               control: tui::chat_widget::PendingSlashDispatch| {
@@ -2816,6 +2839,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let dispatcher = dispatch_dispatcher.clone();
             let orch = dispatch_orch.clone();
             let tx = dispatch_turn_tx.clone();
+            let source_batch_runner = dispatch_source_batch_runner.clone();
             let queue = dispatch_queue.clone();
             let turn_gate = dispatch_turn_gate.clone();
             let cancel_reason = dispatch_cancel_reason.clone();
@@ -2835,7 +2859,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 let fallback_input = input.clone();
                 let Some(result) = unless_cancelled(
                     &token,
-                    command_api::with_mod_command_context(context, dispatcher.dispatch(input)),
+                    command_api::with_mod_command_context(
+                        context,
+                        dispatcher.dispatch(input, token.clone()),
+                    ),
                 )
                 .await
                 else {
@@ -2855,7 +2882,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         drain_teammate_prompts(
                             &queue,
                             orch.as_ref(),
-                            Some(orch.as_ref()),
+                            Some(source_batch_runner.as_ref()),
                             &tx,
                             &pending_slashes,
                         )
@@ -2868,7 +2895,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     &turn_gate,
                     &queue,
                     orch.as_ref(),
-                    Some(orch.as_ref()),
+                    Some(source_batch_runner.as_ref()),
                     &tx,
                     &pending_slashes,
                     reservation,
@@ -2896,16 +2923,20 @@ pub(crate) async fn run_ratatui_with_initial_state(
                             ),
                         )
                         .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
                     }
                     SlashModelTurn::Batch(inputs) => {
                         orchestrator::native_user_message_source::with_source(
                             orchestrator::native_user_message_source::human(),
                             orchestrator::mod_prompt_origin::with_origin(
                                 serde_json::json!({"kind":"composer"}),
-                                orch.run_queued_prompt_batch(inputs, token),
+                                source_batch_runner.run_prompt_batch(inputs, token),
                             ),
                         )
                         .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
                     }
                 };
                 if let Err(e) = turn_result {
@@ -2922,7 +2953,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 drain_teammate_prompts(
                     &queue,
                     orch.as_ref(),
-                    Some(orch.as_ref()),
+                    Some(source_batch_runner.as_ref()),
                     &tx,
                     &pending_slashes,
                 )
@@ -2947,10 +2978,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // only when the widget re-armed `dirty` on a turn boundary, set-only-on-
     // change). The slot is shared with the render thread via `run_app`.
     let resolved_status_lines = read_status_line_configs(
+        &permission_paths.lingxi_home,
+        &permission_paths.cwd,
+        &tui_build.managed_settings,
         tui_build.flag_settings.as_ref(),
         tui_build.status_line_source_scope,
-    )
-    .await;
+    );
     let subagent_status_line = resolved_status_lines.subagent;
     let status_line = tui::status_line::new_slot(resolved_status_lines.main);
     // Seed the boot-known 2.1.206 payload base fields (`Rf()`): session_id +
@@ -3299,6 +3332,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let loop_queue_pump = {
         let queue = prompt_queue.clone();
         let orch = concrete_orchestrator.clone();
+        let source_batch_runner = source_batch_runner.clone();
         let gate = teammate_turn_gate.clone();
         let state = pending_slashes.clone();
         let tx = teammate_turn_tx.clone();
@@ -3307,8 +3341,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
             loop {
                 tokio::select! { _ = shutdown.cancelled() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
                 if let Ok(_guard) = gate.try_lock() {
-                    drain_teammate_prompts(&queue, orch.as_ref(), Some(orch.as_ref()), &tx, &state)
-                        .await;
+                    drain_teammate_prompts(
+                        &queue,
+                        orch.as_ref(),
+                        Some(source_batch_runner.as_ref()),
+                        &tx,
+                        &state,
+                    )
+                    .await;
                 }
             }
         })
@@ -3340,6 +3380,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         });
         let queue = prompt_queue.clone();
         let orch = concrete_orchestrator.clone();
+        let source_batch_runner = source_batch_runner.clone();
         let shutdown = pump_shutdown.clone();
         let drain = tokio::spawn(async move {
             loop {
@@ -3348,7 +3389,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                 }
                 if let Ok(_guard) = teammate_turn_gate.try_lock() {
-                    drain_teammate_prompts(&queue, orch.as_ref(), Some(orch.as_ref()), &teammate_turn_tx, &pending_slashes).await;
+                    drain_teammate_prompts(
+                        &queue,
+                        orch.as_ref(),
+                        Some(source_batch_runner.as_ref()),
+                        &teammate_turn_tx,
+                        &pending_slashes,
+                    )
+                    .await;
                 }
             }
         });
@@ -3526,7 +3574,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let carried_state = {
         let status = summary_orch.get_status_snapshot().await;
         let user_model_setting = {
-            let session = summary_orch.session();
+            let session = concrete_orchestrator.session();
             let session = session.lock().await;
             (session.user_model_setting_source
                 == lingxi_core::session::SessionModelSettingSource::UserSelection)
@@ -4662,7 +4710,10 @@ fn run_fusion_setup_action(
         Ok(()) => (format!("✓ Fusion strategy {name} ({reference}) saved. Run /fusion --strategy {reference} PROMPT to use it."), false),
         Err(error) => (format!("✗ Could not save Fusion strategy {name}: {error}"), true),
     };
-    let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
+    let _ = turn_tx.send(TurnEvent::SystemNotice {
+        body: body.into(),
+        is_error,
+    });
 }
 
 /// Finish the TUI's raw API-key write after the engine has decided whether
@@ -5128,6 +5179,8 @@ fn spawn_status_computer_access_forwarder(
 async fn build_session_info(
     orch: &dyn OrchestratorHandle,
     default_model_provenance: lingxi_core::host::ModelProvenance,
+    model_allowlist: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    model_overrides: std::collections::BTreeMap<String, String>,
 ) -> tui::session::SessionInfo {
     use tui::session::{DoctorInfo, InfoRow, ModelRow, SessionInfo};
 
@@ -5248,12 +5301,6 @@ async fn build_session_info(
     // model switches agree with the prompt actually sent for this session.
     let large_memory_warnings = orch.large_memory_warnings().await.unwrap_or_default();
 
-    // Managed `availableModels` allowlist for the `/model` picker filter (parity
-    // 2.1.207 H-BIN-08): reads the same policy tier the boot default-model
-    // constraint uses. `None` (default install) leaves the picker unfiltered.
-    let (model_allowlist, model_overrides) =
-        harness_runtime::desktop::managed_model_allowlist().await;
-
     SessionInfo {
         doctor: DoctorInfo::capture(mcp_configured, mcp_connected),
         mcp,
@@ -5358,7 +5405,7 @@ struct ResolvedStatusLineConfigs {
 fn read_status_line_configs_from(
     lingxi_home: &std::path::Path,
     project_dir: &std::path::Path,
-    managed_tiers: &[String],
+    managed_settings: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     workspace_trusted: bool,
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     source_scope: (bool, bool, bool),
@@ -5434,35 +5481,27 @@ fn read_status_line_configs_from(
             managed_hooks_only = value;
         }
     }
-    for raw in managed_tiers {
-        let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw)
-        else {
-            continue;
-        };
-        if let Some(value) = map.get("statusLine") {
-            status_line = Some((
-                value.clone(),
-                StatusLineSource::Known(lingxi_core::types::Scope::Managed),
-            ));
-        }
-        if let Some(value) = map.get("subagentStatusLine") {
-            subagent_status_line = Some((
-                value.clone(),
-                StatusLineSource::Known(lingxi_core::types::Scope::Managed),
-            ));
-        }
-        if let Some(value) = map
-            .get("disableAllHooks")
-            .and_then(serde_json::Value::as_bool)
-        {
-            disable_all_hooks = value;
-        }
-        if let Some(value) = map
-            .get("allowManagedHooksOnly")
-            .and_then(serde_json::Value::as_bool)
-        {
-            managed_hooks_only = value;
-        }
+    if let Some(value) = managed_setting_value(managed_settings, "statusLine") {
+        status_line = Some((
+            value,
+            StatusLineSource::Known(lingxi_core::types::Scope::Managed),
+        ));
+    }
+    if let Some(value) = managed_setting_value(managed_settings, "subagentStatusLine") {
+        subagent_status_line = Some((
+            value,
+            StatusLineSource::Known(lingxi_core::types::Scope::Managed),
+        ));
+    }
+    if let Some(value) =
+        managed_setting_value(managed_settings, "disableAllHooks").and_then(|value| value.as_bool())
+    {
+        disable_all_hooks = value;
+    }
+    if let Some(value) = managed_setting_value(managed_settings, "allowManagedHooksOnly")
+        .and_then(|value| value.as_bool())
+    {
+        managed_hooks_only = value;
     }
 
     let policy = StatusLineExecutionPolicy {
@@ -5481,6 +5520,20 @@ fn read_status_line_configs_from(
     ResolvedStatusLineConfigs { main, subagent }
 }
 
+/// Parse one managed-settings member only at the existing typed status-line
+/// consumer boundary. The source projection remains authoritative upstream.
+fn managed_setting_value(
+    settings: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    key: &str,
+) -> Option<serde_json::Value> {
+    settings
+        .subprojection(&format!("/{key}"))
+        .ok()?
+        .to_json_string()
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
+
 /// Live wrapper over [`read_status_line_configs_from`].
 fn workspace_is_trusted(
     global_config_path: Option<&std::path::Path>,
@@ -5491,19 +5544,19 @@ fn workspace_is_trusted(
     })
 }
 
-async fn read_status_line_configs(
+fn read_status_line_configs(
+    lingxi_home: &std::path::Path,
+    project_dir: &std::path::Path,
+    managed_settings: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     flag_settings: Option<&lingxi_core::settings::SettingsJson>,
     source_scope: (bool, bool, bool),
 ) -> ResolvedStatusLineConfigs {
-    let (lingxi_home, project_dir) = settings_dirs();
-    let managed_tiers =
-        harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await;
     let global_config_path = migrations::global_config::global_config_path();
-    let workspace_trusted = workspace_is_trusted(global_config_path.as_deref(), &project_dir);
+    let workspace_trusted = workspace_is_trusted(global_config_path.as_deref(), project_dir);
     read_status_line_configs_from(
-        &lingxi_home,
-        &project_dir,
-        &managed_tiers,
+        lingxi_home,
+        project_dir,
+        managed_settings,
         workspace_trusted,
         flag_settings,
         source_scope,
@@ -6282,6 +6335,7 @@ mod tests {
         async fn dispatch(
             &self,
             _raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _cancellation: CancellationToken,
         ) -> lingxi_core::host::SlashDispatchResult {
             lingxi_core::host::SlashDispatchResult::RunAsTurn {
                 prompt: "expanded plugin prompt".into(),
@@ -8017,6 +8071,7 @@ detached catalog refresh"
 
     #[test]
     fn status_line_configs_share_precedence_and_pre_spawn_policy() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
         use tui_core::status_line_command::StatusLineSource;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -8034,9 +8089,16 @@ detached catalog refresh"
             r#"{"subagentStatusLine":{"type":"command","command":"local-agent"}}"#,
         )
         .unwrap();
+        let no_managed = Utf16JsonProjection::parse("{}").unwrap();
 
-        let configs =
-            read_status_line_configs_from(&home, &project, &[], true, None, (true, true, true));
+        let configs = read_status_line_configs_from(
+            &home,
+            &project,
+            &no_managed,
+            true,
+            None,
+            (true, true, true),
+        );
         assert_eq!(
             configs.main.unwrap().source,
             StatusLineSource::Known(lingxi_core::types::Scope::User)
@@ -8049,9 +8111,10 @@ detached catalog refresh"
         assert_eq!(subagent.command, "local-agent");
         assert!(subagent.should_run(true));
 
-        let managed = vec![
-            r#"{"allowManagedHooksOnly":true,"subagentStatusLine":{"type":"command","command":"managed-agent"}}"#.to_string(),
-        ];
+        let managed = Utf16JsonProjection::parse(
+            r#"{"allowManagedHooksOnly":true,"subagentStatusLine":{"type":"command","command":"managed-agent"}}"#,
+        )
+        .unwrap();
         let configs = read_status_line_configs_from(
             &home,
             &project,
@@ -8071,8 +8134,14 @@ detached catalog refresh"
             "managed-hooks-only must reject a user status command before spawn"
         );
 
-        let configs =
-            read_status_line_configs_from(&home, &project, &[], false, None, (true, true, true));
+        let configs = read_status_line_configs_from(
+            &home,
+            &project,
+            &no_managed,
+            false,
+            None,
+            (true, true, true),
+        );
         assert!(!configs.subagent.unwrap().should_run(true));
 
         let flag = lingxi_core::settings::SettingsJson {
@@ -8085,7 +8154,7 @@ detached catalog refresh"
         let configs = read_status_line_configs_from(
             &home,
             &project,
-            &[],
+            &no_managed,
             true,
             Some(&flag),
             (false, false, false),

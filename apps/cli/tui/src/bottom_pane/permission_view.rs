@@ -448,16 +448,14 @@ mod tests {
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: false,
         });
+        let suggestions = permission_input(serde_json::json!([{
+            "type": "addRules",
+            "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
+            "behavior": "allow",
+            "destination": "session"
+        }]));
         exchange.permission_persistence =
-            permission::allow_suggestion::permission_persistence_suggestion(
-                "Bash",
-                &serde_json::json!([{
-                    "type": "addRules",
-                    "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
-                    "behavior": "allow",
-                    "destination": "session"
-                }]),
-            );
+            permission::allow_suggestion::permission_persistence_suggestion("Bash", &suggestions);
         (exchange, resp_rx)
     }
 

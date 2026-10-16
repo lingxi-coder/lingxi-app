@@ -5,7 +5,7 @@
 //! Its row budget is measured from the live bottom-pane layout, and a session
 //! generation carries `$.ui.invalidate('ui.render')` through the draw loop.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde_json::{json, Value};
 
@@ -401,16 +401,20 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
                 || props
                     .get("flexDirection")
                     .is_some_and(|value| !matches!(value.as_str(), Some("row" | "column")))
-                || props
-                    .get("columnGap")
-                    .is_some_and(|value| value.as_u64().is_none_or(|gap| gap > 16))
+                || props.get("columnGap").is_some_and(|value| {
+                    value
+                        .as_f64()
+                        .and_then(number_as_u64)
+                        .is_none_or(|gap| gap > 16)
+                })
             {
                 return None;
             }
             let row = props.get("flexDirection").and_then(Value::as_str) == Some("row");
             let gap = props
                 .get("columnGap")
-                .and_then(Value::as_u64)
+                .and_then(Value::as_f64)
+                .and_then(number_as_u64)
                 .unwrap_or(1)
                 .min(16) as usize;
             let mut child_lines = Vec::with_capacity(children.len());
@@ -446,6 +450,7 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
 
     fn source(value: &Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
@@ -518,13 +523,13 @@ mod tests {
     #[test]
     fn button_render_and_keypress_keep_the_rendered_action_identity() {
         let button = |key: &str, label: &str, handle: u64, auto_focus: bool| {
-            source(&json!({
+            json!({
                 "type":"Button",
                 "props":{"key":key,"label":label,"hotkey":"1","autoFocus":auto_focus},
                 "children":[],
                 "press":{"plugin":"button-mod","handle":handle,
                     "workerEpoch":"worker-epoch","renderRevision":7}
-            }))
+            })
         };
         let tree = source(&json!({
             "type":"Box",

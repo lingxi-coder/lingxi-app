@@ -53,24 +53,37 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
 
     let tools = Arc::new(tool_api::registry::ToolRegistry::new());
 
-    let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        batched,
-        streaming,
-        tools,
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate) as Arc<dyn permission::gate::PermissionGate>,
-        output,
-        Arc::new(StaticMemoryProvider::empty()),
-        PathBuf::from("/tmp"),
-    ));
+    let orchestrator =
+        ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            batched,
+            streaming.clone(),
+            tools,
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate) as Arc<dyn permission::gate::PermissionGate>,
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
 
-    // The PRODUCTION driver under test.
-    let driver: Arc<dyn TurnDriver> = Arc::new(OrchestratorTurnDriver::new(orchestrator));
+    // The production server wires the connection's event sink into both the
+    // adapter output and the driver's terminal error path. Keep that wiring in
+    // this fixture so a preflight failure is visible instead of being silently
+    // dropped by `OrchestratorTurnDriver::new`.
+    let error_sink: Arc<dyn client::adapter::ClientEventSink> = sink.clone();
+    let driver: Arc<dyn TurnDriver> = Arc::new(OrchestratorTurnDriver::with_error_sink(
+        orchestrator,
+        error_sink,
+    ));
 
     driver.run_turn("say hi".into()).await;
 
     let events = sink.events().await;
+    let captured_calls = streaming.captured_calls().await;
+    let captured_errors = events
+        .iter()
+        .filter(|event| matches!(event, ClientEvent::Error { .. }))
+        .collect::<Vec<_>>();
 
     // The streamed assistant text arrives first.
     let saw_text = events
@@ -78,7 +91,8 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
         .any(|e| matches!(e, ClientEvent::TextDelta { text } if text.display() == "hello from the engine"));
     assert!(
         saw_text,
-        "expected a TextDelta with the streamed text, got: {events:?}"
+        "expected a TextDelta with the streamed text, got: {events:?}; captured errors: {captured_errors:?}; mock stream calls: {}",
+        captured_calls.len()
     );
 
     // The turn ends with `end_turn`.

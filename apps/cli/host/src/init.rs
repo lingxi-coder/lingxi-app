@@ -233,6 +233,19 @@ pub struct TuiBuild {
     >,
     /// Standard runtime bundle.
     pub runtime: Runtime,
+    /// Managed model allowlist snapshot resolved from the same desktop config
+    /// used to build `runtime`. The raw projection preserves Native UTF-16
+    /// entries for the TUI model picker.
+    pub managed_model_allowlist: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Managed provider-id reverse map paired with `managed_model_allowlist`.
+    pub managed_model_overrides: std::collections::BTreeMap<String, String>,
+    /// Active settings baseline, including the exact managed overlay used to
+    /// build the runtime.
+    pub active_settings: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Source-preserving managed settings overlay selected for this runtime.
+    pub managed_settings: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    /// Incomplete managed-source diagnostics retained beside healthy settings.
+    pub managed_settings_diagnostics: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// The resolved boot permission mode (claude-code `initialPermissionModeFromCLI`)
     /// and whether bypass is an available Shift+Tab cycle target — seed the TUI's
     /// below-composer permission-mode indicator.
@@ -350,6 +363,9 @@ pub enum InitError {
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
     InvalidCustomBetas,
+    /// Settings could not be read or projected without losing their source.
+    #[error(transparent)]
+    Settings(#[from] lingxi_core::settings::SettingsError),
     /// Structured output schema could not be compiled for the active request.
     #[error("structured output JSON Schema compilation failed: {0}")]
     StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
@@ -385,6 +401,7 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
             }
             harness_runtime::desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
             harness_runtime::desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
+            harness_runtime::desktop::BuildError::Settings(error) => Self::Settings(error),
             harness_runtime::desktop::BuildError::StructuredOutputSchema(error) => {
                 Self::StructuredOutputSchema(error)
             }
@@ -1819,6 +1836,35 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     cfg.injected_permission_gate =
         Some(gate.clone() as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
+    // Capture the model-picker policy from the exact config snapshot that will
+    // be consumed by desktop::build below. Keep the projection intact so lone
+    // UTF-16 surrogates are not collapsed through Rust Strings.
+    let (managed_model_allowlist, managed_model_overrides) =
+        harness_runtime::desktop::managed_model_allowlist(&cfg).await;
+    let empty_managed = || {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("static empty managed settings is valid JSON")
+    };
+    let (managed_settings, managed_settings_diagnostics) =
+        match harness_runtime::desktop::managed_settings_overlay(&cfg).await {
+            Ok(Some(settings)) => (settings, None),
+            Ok(None) => (empty_managed(), None),
+            Err(lingxi_core::settings::SettingsError::SourceFailure {
+                effective: Some(effective),
+                diagnostics,
+                ..
+            }) => (effective, Some(diagnostics)),
+            Err(error) => return Err(error.into()),
+        };
+    let settings_paths = configuration_admin::settings_bridge::SettingsPaths {
+        lingxi_home: cfg.lingxi_home.clone(),
+        project_dir: cfg.cwd.clone(),
+    };
+    let active_settings = configuration_admin::settings_bridge::active_settings_baseline(
+        &settings_paths,
+        &managed_settings,
+    )?;
+
     let flag_settings = cfg.flag_settings.clone();
     let fusion_cfg = cfg.clone();
     let fusion_layers = Arc::new(move || {
@@ -1854,6 +1900,11 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     Ok(TuiBuild {
         fusion_layers,
         runtime,
+        managed_model_allowlist,
+        managed_model_overrides,
+        active_settings,
+        managed_settings,
+        managed_settings_diagnostics,
         initial_permission_mode: permission_mode,
         bypass_available: !argv.restricted_enabled()
             && (argv.allow_dangerously_skip_permissions

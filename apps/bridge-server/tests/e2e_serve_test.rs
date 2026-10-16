@@ -264,18 +264,46 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
 
     // The 2s budget is the real assertion here: a credential rejection must not
     // enter provider retry backoff. Measured at ~41ms for the whole sequence.
-    let frame = tokio::time::timeout(Duration::from_secs(2), next_frame(&mut ws))
+    let auth_event_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let frame = tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
         .await
         .expect("credential rejection must not enter provider retry backoff");
+    let frame = match frame {
+        Frame::Event(ClientEvent::PromptSuggestionState { enabled, notice }) => {
+            assert!(
+                !enabled,
+                "prompt suggestions should be disabled in this fixture"
+            );
+            assert!(
+                notice.is_none(),
+                "initial prompt-suggestion state must not contain a notice"
+            );
+            tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
+                .await
+                .expect("credential rejection must not enter provider retry backoff")
+        }
+        frame => frame,
+    };
+    let frame = match frame {
+        Frame::Event(ClientEvent::AssistantTranscriptRowUuids { uuids, .. }) => {
+            assert_eq!(uuids.len(), 1, "the rejected turn has one assistant row");
+            assert!(uuids[0].is_some(), "the assistant row has an assigned UUID");
+            tokio::time::timeout_at(auth_event_deadline, next_frame(&mut ws))
+                .await
+                .expect("credential rejection must not enter provider retry backoff")
+        }
+        frame => frame,
+    };
     match frame {
         Frame::Event(ClientEvent::TextDelta { text }) => {
+            let display = text.display();
             assert!(
-                text.display().starts_with("Failed to authenticate."),
+                display.starts_with("Failed to authenticate."),
                 "the turn must carry upstream's auth copy, got {text:?}"
             );
-            assert!(!text.contains("sk-"), "error must not embed a key");
+            assert!(!display.contains("sk-"), "error must not embed a key");
             assert!(
-                !text.contains("api.anthropic.com"),
+                !display.contains("api.anthropic.com"),
                 "error must not expose provider details"
             );
         }
@@ -290,6 +318,15 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
             .await
             .expect("the turn must terminate without backoff")
         {
+            Frame::Event(ClientEvent::TerminalApiError {
+                api_error_status,
+                terminal_reason,
+                stop_reason,
+            }) => {
+                assert_eq!(api_error_status, Some(401));
+                assert_eq!(terminal_reason, "api_error");
+                assert_eq!(stop_reason, "stop_sequence");
+            }
             Frame::Event(ClientEvent::CostUpdate {
                 api_calls,
                 total_usd,

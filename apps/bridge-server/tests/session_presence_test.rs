@@ -245,7 +245,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
     let mut old_generation = lingxi_core::host::live_sessions::outbound_peer_message(
         "sender",
         "source",
-        "owned by A",
+        &"owned by A".into(),
         None,
     );
     old_generation.msg_id = Some("old-generation".into());

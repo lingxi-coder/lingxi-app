@@ -28,7 +28,6 @@ use std::sync::Arc;
 
 use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
-use client::adapter::ClientEventSink;
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 #[tokio::main]

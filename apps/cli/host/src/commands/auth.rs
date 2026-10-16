@@ -139,7 +139,13 @@ async fn run_login(args: &LoginArgs) -> i32 {
         eprintln!("Error: --console and --claudeai cannot be used together.");
         return RUNTIME_ERROR;
     }
-    let forced_method = effective_force_login_method().await;
+    let (forced_method, org_pin) = match effective_managed_login_policy().await {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("Login failed: managed settings could not be read: {error}");
+            return RUNTIME_ERROR;
+        }
+    };
     if forced_method == Some(ForceLoginMethod::Gateway) {
         eprintln!(
             "{}",
@@ -153,7 +159,6 @@ async fn run_login(args: &LoginArgs) -> i32 {
         Some(ForceLoginMethod::Gateway) => unreachable!(),
         None => args.console,
     };
-    let org_pin = harness_runtime::desktop::managed_force_login_org_pin().await;
     let org_uuid = match &org_pin {
         ForceLoginOrgPin::Pinned(ids) if ids.len() == 1 => ids.first().cloned(),
         _ => None,
@@ -535,19 +540,73 @@ pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle,
     ))
 }
 
-pub(crate) async fn effective_force_login_method() -> Option<ForceLoginMethod> {
-    let mut method = None;
-    for raw in harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await {
-        let Ok(settings) =
-            serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(&raw)
-        else {
-            continue;
-        };
-        if settings.force_login_method.is_some() {
-            method = settings.force_login_method_parsed();
-        }
+pub(crate) async fn effective_managed_login_policy(
+) -> Result<(Option<ForceLoginMethod>, ForceLoginOrgPin), lingxi_core::settings::SettingsError> {
+    // These standalone commands run before a session runtime exists. The H
+    // overlay service uses this config's managed-policy cache; on a cache miss
+    // it performs a fresh managed snapshot read, independent of cwd/profile or
+    // settings-scope fields.
+    let cfg = crate::init::resolve_desktop_config(
+        &crate::argv::Argv::default(),
+        permission::PermissionMode::Default,
+    );
+    let Some(managed) = harness_runtime::desktop::managed_settings_overlay(&cfg).await? else {
+        return Ok((None, ForceLoginOrgPin::Unset));
+    };
+
+    // The overlay is the same selected managed snapshot used by the runtime's
+    // policy consumers. Parse both login controls from this one read so a
+    // policy refresh cannot split method selection from the org membership
+    // guard. Read only these fields from the source carrier so an unrelated
+    // UTF-16 value elsewhere in managed settings cannot invalidate the policy
+    // object during a serde_json conversion.
+    let method = force_login_method_from_projection(&managed);
+    let org_pin = force_login_org_pin_from_projection(&managed);
+    Ok((method, org_pin))
+}
+
+fn force_login_method_from_projection(
+    managed: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<ForceLoginMethod> {
+    let units = managed
+        .get_property("forceLoginMethod")?
+        .code_units()?
+        .to_vec();
+    let value = String::from_utf16(&units).ok()?;
+    lingxi_core::settings::enterprise::parse_force_login_method(&value)
+}
+
+fn force_login_org_pin_from_projection(
+    managed: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> ForceLoginOrgPin {
+    let Some(value) = managed.get_property("forceLoginOrgUUID") else {
+        return ForceLoginOrgPin::Unset;
+    };
+    if value.is_null() {
+        return ForceLoginOrgPin::Unset;
     }
-    method
+    if let Some(units) = value.code_units() {
+        return String::from_utf16(units)
+            .map(|org| ForceLoginOrgPin::Pinned(vec![org]))
+            .unwrap_or(ForceLoginOrgPin::Invalid);
+    }
+    let Some(length) = value.array_len() else {
+        return ForceLoginOrgPin::Invalid;
+    };
+    if length == 0 {
+        return ForceLoginOrgPin::EmptyArray;
+    }
+    let mut orgs = Vec::with_capacity(length);
+    for index in 0..length {
+        let Some(units) = value.get_index(index).and_then(|entry| entry.code_units()) else {
+            return ForceLoginOrgPin::Invalid;
+        };
+        let Ok(org) = String::from_utf16(units) else {
+            return ForceLoginOrgPin::Invalid;
+        };
+        orgs.push(org);
+    }
+    ForceLoginOrgPin::Pinned(orgs)
 }
 
 /// Resolve the API provider label, mirroring claude's `getAPIProvider()`:
@@ -578,8 +637,41 @@ fn env_truthy(var: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_manual_auth_code, status_json};
+    use super::{
+        force_login_method_from_projection, force_login_org_pin_from_projection,
+        parse_manual_auth_code, status_json, ForceLoginMethod, ForceLoginOrgPin,
+    };
     use std::path::Path;
+
+    #[test]
+    fn managed_login_policy_fields_ignore_unrelated_utf16_source_values() {
+        let managed = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"otherSetting":"\ud800","forceLoginMethod":"console","forceLoginOrgUUID":["org-a","org-b"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            force_login_method_from_projection(&managed),
+            Some(ForceLoginMethod::Console)
+        );
+        assert_eq!(
+            force_login_org_pin_from_projection(&managed),
+            ForceLoginOrgPin::Pinned(vec!["org-a".into(), "org-b".into()])
+        );
+    }
+
+    #[test]
+    fn malformed_managed_org_pin_remains_fail_closed() {
+        let managed = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"forceLoginOrgUUID":["org-a",5]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            force_login_org_pin_from_projection(&managed),
+            ForceLoginOrgPin::Invalid
+        );
+    }
 
     /// M8: `code#state` splitting mirrors claude's
     /// `f.trim().split("#")` + `!m || !g` validity check.

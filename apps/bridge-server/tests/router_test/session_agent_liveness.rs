@@ -179,7 +179,7 @@ async fn session_agent_idle_and_resume_observations_win_over_lagging_task_snapsh
     live.on_event(allocation(id)).await;
     live.on_event(SubagentObservation::Completed {
         agent_id: id,
-        content: serde_json::json!("done"),
+        content: Utf16JsonProjection::from("done"),
         usage: Default::default(),
         total_tool_use_count: 0,
         total_duration_ms: 0,

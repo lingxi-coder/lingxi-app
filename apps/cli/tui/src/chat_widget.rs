@@ -3235,7 +3235,7 @@ impl ChatWidget {
         let rows = crate::session::connected_model_rows_restricted(
             &self.session.models,
             &self.connect_availability,
-            self.session.model_allowlist.as_deref(),
+            self.session.model_allowlist.as_ref(),
             Some(&self.session.model_overrides),
         );
         self.bottom_pane.show_model_picker(rows);
@@ -4070,7 +4070,7 @@ impl ChatWidget {
         let rows = crate::session::connected_model_rows_restricted(
             &self.session.models,
             &self.connect_availability,
-            self.session.model_allowlist.as_deref(),
+            self.session.model_allowlist.as_ref(),
             Some(&self.session.model_overrides),
         );
         self.bottom_pane
@@ -4688,6 +4688,16 @@ impl ChatWidget {
                 .map(|argument| argument.to_string().into())
                 .collect(),
         };
+        let parent_cancellation = self
+            .pending_slash_dispatches
+            .iter()
+            .rev()
+            .find(|dispatch| dispatch.is_pending())
+            .map(|dispatch| &dispatch.cancellation)
+            .or(self.current_turn.as_ref());
+        let cancellation = parent_cancellation
+            .map(CancellationToken::child_token)
+            .unwrap_or_else(CancellationToken::new);
         // The TUI event loop is synchronous (off the async runtime, on a
         // `spawn_blocking` thread), so a throwaway current-thread runtime is
         // safe. Build it fallibly: a failed runtime must surface a recoverable
@@ -4701,7 +4711,22 @@ impl ChatWidget {
             Ok(runtime) => runtime,
             Err(err) => return self.show_system_text(&format!("/{name} failed: {err}"), true),
         };
-        match runtime.block_on(handler.handle(&parsed)) {
+        if cancellation.is_cancelled() {
+            return ChatOutcome::Continue;
+        }
+        let result = runtime.block_on(handler.handle_with_cancel(&parsed, cancellation.clone()));
+        if cancellation.is_cancelled() {
+            return ChatOutcome::Continue;
+        }
+        match result {
+            CommandResult::Failed { source } => {
+                let message = source.message_projection();
+                let message = message
+                    .string_units("")
+                    .expect("settings failure message is a root-string projection");
+                let message = String::from_utf16_lossy(&message);
+                self.show_system_text(&format!("/{name} failed: {message}"), true)
+            }
             CommandResult::InjectMessage { content } => {
                 // (#3) Expand embedded `!`git …`` / ` ```! ` bodies through the
                 // real host runner + policy-backed gate BEFORE submitting, 1:1
@@ -4724,7 +4749,12 @@ impl ChatWidget {
                             .iter()
                             .map(|s| (*s).to_string())
                             .collect();
-                        let shell_ctx = provider.build(&allowed, None);
+                        let shell_ctx = provider.build_for_call(
+                            &allowed,
+                            None,
+                            None,
+                            Some(cancellation.clone()),
+                        );
                         let slash_command =
                             lingxi_core::types::utf16_json::Utf16JsonProjection::from(format!(
                                 "/{name}"
@@ -4734,19 +4764,33 @@ impl ChatWidget {
                             &shell_ctx,
                             &slash_command,
                             None,
+                            cancellation.clone(),
                         )) {
-                            Ok(expanded) => self.submit_core_prompt(name, args, expanded),
-                            Err(e) => self.show_system_text(&format!("/{name} failed: {e}"), true),
+                            Ok(expanded) if !cancellation.is_cancelled() => {
+                                self.submit_core_prompt(name, args, expanded, cancellation)
+                            }
+                            Ok(_) => ChatOutcome::Continue,
+                            Err(_) if cancellation.is_cancelled() => ChatOutcome::Continue,
+                            Err(error) => {
+                                self.show_system_text(&format!("/{name} failed: {error}"), true)
+                            }
                         }
                     }
-                    _ => self.submit_core_prompt(name, args, content),
+                    _ => {
+                        if cancellation.is_cancelled() {
+                            ChatOutcome::Continue
+                        } else {
+                            self.submit_core_prompt(name, args, content, cancellation)
+                        }
+                    }
                 }
             }
             CommandResult::Done {
                 display: Some(text),
             } => self.show_system_text(text.string_at("").unwrap_or_default(), false),
             CommandResult::Done { display: None } => ChatOutcome::Continue,
-            // Only InjectMessage/Done commands are wired; guard the rest.
+            // The TUI bridge cannot route command effects; keep their optional
+            // display visible rather than treating them as a prompt turn.
             CommandResult::EmitEffects { display, .. } => match display {
                 Some(text) => self.show_system_text(text.string_at("").unwrap_or_default(), false),
                 None => ChatOutcome::Continue,
@@ -4769,6 +4813,7 @@ impl ChatWidget {
         name: &str,
         args: &str,
         content: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancellation: CancellationToken,
     ) -> ChatOutcome {
         let invocation = if args.is_empty() {
             format!("/{name}")
@@ -4782,10 +4827,9 @@ impl ChatWidget {
         });
         self.transcript.track_latest_user_row(row_token.clone());
         self.sync_focus_projection();
-        let token = CancellationToken::new();
-        self.current_turn = Some(token.clone());
+        self.current_turn = Some(cancellation.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(content, row_token, self.take_pending_images(), token)
+        ChatOutcome::Submit(content, row_token, self.take_pending_images(), cancellation)
     }
 
     /// Render read-only command output into the transcript as a `system`
@@ -4853,11 +4897,29 @@ impl ChatWidget {
 
     /// `/insights`: inject the session-analysis report prompt.
     pub(crate) fn cmd_insights(&mut self, args: &str) -> ChatOutcome {
-        self.run_core_command(
-            "insights",
-            args,
-            &command_api::builtins::insights::InsightsHandler::new(),
-        )
+        let Some(registry) = self.command_registry.clone() else {
+            return self
+                .show_system_text("/insights is unavailable (no command registry wired)", true);
+        };
+        let handler = match registry.try_read() {
+            Ok(registry) => registry.get_handler(
+                &lingxi_core::types::utf16_json::Utf16JsonProjection::from("insights"),
+            ),
+            Err(_) => None,
+        };
+        let Some(handler) = handler else {
+            return self.show_system_text(
+                "/insights is unavailable (configured report provider missing)",
+                true,
+            );
+        };
+        if !handler.is_enabled() {
+            return self.show_system_text(
+                "/insights is unavailable (workspace or local policy does not permit reports)",
+                true,
+            );
+        }
+        self.run_core_command("insights", args, handler.as_ref())
     }
 
     /// `/version`: show the running version string.
@@ -4974,13 +5036,9 @@ impl ChatWidget {
         });
         let usage = match usage {
             Ok(usage) => usage,
-            Err(lingxi_core::host::HandleError::Settings(diagnostic)) => {
+            Err(lingxi_core::settings::SettingsError::SourceFailure { message, .. }) => {
                 let mut units = "/context failed: ".encode_utf16().collect::<Vec<_>>();
-                units.extend(
-                    diagnostic
-                        .string_units("/message")
-                        .expect("settings diagnostics carry their source message"),
-                );
+                units.extend(message.string_units("").unwrap_or_default());
                 let message = String::from_utf16_lossy(&units);
                 return self.show_system_text(&message, true);
             }
@@ -6071,7 +6129,6 @@ impl ChatWidget {
         text: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ChatOutcome {
         let units = text.string_units("").unwrap_or_default();
-        let display = text.string_at("").unwrap_or_default().to_owned();
         // Bash mode consumes a UTF-8 process command. It is entered only when
         // the complete source line can be represented exactly as Rust text.
         if let Ok(typed_line) = String::from_utf16(&units) {
@@ -8732,8 +8789,8 @@ mod tests {
         };
         // The model payload is the full expanded handler template …
         assert!(
-            payload.contains("git status"),
-            "model receives the expanded /commit-push-pr template: {payload}"
+            source_contains(&payload, "git status"),
+            "model receives the expanded /commit-push-pr template: {payload:?}"
         );
         // … while the transcript shows only the compact invocation.
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
@@ -8761,6 +8818,52 @@ mod tests {
             "the direct TUI path must report host identity",
         );
         assert!(!systext.is_error(), "version output is not an error");
+    }
+
+    #[test]
+    fn core_bridge_failed_renders_the_source_message_as_an_error() {
+        struct FailedHandler;
+
+        #[async_trait::async_trait]
+        impl command_api::model::BuiltinCommandHandler for FailedHandler {
+            async fn handle(
+                &self,
+                _args: &command_api::parser::ParsedSlashCommand,
+            ) -> command_api::model::CommandResult {
+                command_api::model::CommandResult::Failed {
+                    source: lingxi_core::settings::SettingsError::source_failure(
+                        "test_source",
+                        "source failure detail".into(),
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                            r#"{"detail":"preserved diagnostic"}"#,
+                        )
+                        .expect("valid diagnostic JSON"),
+                        None,
+                    ),
+                }
+            }
+
+            fn name(&self) -> &str {
+                "failed-test"
+            }
+
+            fn description(&self) -> &str {
+                "test source failure"
+            }
+        }
+
+        let mut widget = widget();
+        assert!(matches!(
+            widget.run_core_command("failed-test", "", &FailedHandler),
+            ChatOutcome::Continue
+        ));
+        let error = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert_eq!(error.body(), "/failed-test failed: source failure detail");
+        assert!(error.is_error());
+        assert!(
+            !widget.turn_running(),
+            "a failed handler must not submit a turn"
+        );
     }
 
     #[test]
@@ -8818,11 +8921,23 @@ mod tests {
             &self,
             args: &command_api::parser::ParsedSlashCommand,
         ) -> command_api::model::CommandResult {
+            let raw_args = args
+                .raw_args
+                .string_at("")
+                .expect("test raw arguments are valid source text");
+            let positional_args = args
+                .positional_args
+                .iter()
+                .map(|argument| {
+                    argument
+                        .string_at("")
+                        .expect("test positional arguments are valid source text")
+                })
+                .collect::<Vec<_>>();
             command_api::model::CommandResult::Done {
-                display: Some(format!(
-                    "raw=[{}] positional={:?}",
-                    args.raw_args, args.positional_args
-                )),
+                display: Some(
+                    format!("raw=[{}] positional={:?}", raw_args, positional_args).into(),
+                ),
             }
         }
         fn name(&self) -> &str {
@@ -9447,6 +9562,58 @@ mod tests {
     }
 
     #[test]
+    fn insights_uses_the_registered_runtime_report_provider() {
+        struct TestInsightsProvider;
+
+        #[async_trait::async_trait]
+        impl command_api::builtins::insights::InsightsReportProvider for TestInsightsProvider {
+            fn command_availability(
+                &self,
+            ) -> command_api::builtins::insights::InsightsCommandAvailability {
+                command_api::builtins::insights::InsightsCommandAvailability {
+                    workspace_available: Some(true),
+                    allow_insights: Some(true),
+                }
+            }
+
+            async fn generate_report(
+                &self,
+            ) -> Result<
+                command_api::builtins::insights::InsightsReport,
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > {
+                Ok(command_api::builtins::insights::InsightsReport {
+                    insights_json: r#"{"source":"runtime-provider"}"#.into(),
+                    report_url: "file:///tmp/runtime-provider.html".into(),
+                    html_path: "/tmp/runtime-provider.html".into(),
+                    facets_directory: "/tmp/runtime-provider-facets".into(),
+                    summary_header: "runtime-provider header\n".into(),
+                    summary_text: "runtime-provider summary".into(),
+                    auto_mode_recommendation: None,
+                })
+            }
+        }
+
+        let mut registry = command_api::CommandRegistry::new();
+        assert!(command_api::builtins::register_insights_command(
+            &mut registry,
+            std::sync::Arc::new(TestInsightsProvider),
+        ));
+
+        let mut widget = widget();
+        widget.set_command_registry(std::sync::Arc::new(tokio::sync::RwLock::new(registry)));
+        let ChatOutcome::Submit(prompt, _, _, _) = widget.cmd_insights("") else {
+            panic!("a registered, available insights provider should submit its report prompt");
+        };
+        let prompt = prompt.string_at("").expect("root prompt string");
+        assert!(prompt.contains("runtime-provider"), "{prompt}");
+        assert!(
+            prompt.contains("file:///tmp/runtime-provider.html"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
     fn command_catalog_refresh_event_updates_open_popup_without_losing_input() {
         let mut widget = widget();
         for ch in "/pla".chars() {
@@ -9472,9 +9639,11 @@ mod tests {
             .expect("completion remains open")
             .items()
             .iter()
-            .map(|item| item.insert.as_str())
+            .map(|item| item.insert.display())
             .collect::<Vec<_>>();
-        assert!(candidates.contains(&"/plan-plugin"));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate == "/plan-plugin"));
     }
 
     /// A registry-backed command (`/loop`, a user command, a skill) that is NOT
@@ -9487,8 +9656,8 @@ mod tests {
         let mut widget = widget();
         let mut reg = command_api::CommandRegistry::new();
         reg.register_command(command_api::SlashCommand {
-            name: "loop".to_string(),
-            description: "run a task on a loop".to_string(),
+            name: "loop".into(),
+            description: "run a task on a loop".into(),
             source: command_api::CommandSource::Bundled,
             kind: command_api::SlashCommandKind::Bundled {
                 frontmatter: command_api::CommandFrontmatter::default(),
@@ -9505,7 +9674,10 @@ mod tests {
         else {
             panic!("a registry-backed command must route to DispatchSlash");
         };
-        assert_eq!(input.string_at(""), Some("/loop 5m go"));
+        assert_eq!(
+            input.string_units(""),
+            Some("/loop 5m go".encode_utf16().collect::<Vec<_>>())
+        );
         // Dispatch alone does not start a model turn.
         assert!(!widget.turn_running());
         // The raw invocation is echoed as the user's turn message.
@@ -9768,15 +9940,15 @@ mod tests {
     fn explicit_fusion_strategy_dispatches_even_without_a_default() {
         let mut widget = widget();
         widget.set_fusion_settings(fusion_settings(false));
+        let expected = "/fusion --fast --strategy project:review review locking"
+            .encode_utf16()
+            .collect::<Vec<_>>();
         let Some(ChatOutcome::DispatchSlash(input, _)) =
-            widget.handle_slash("/fusion --fast --strategy project:review review locking")
+            widget.handle_slash("/fusion --fast --strategy project:review review locking".into())
         else {
             panic!("explicit strategy must reach the runtime resolver");
         };
-        assert_eq!(
-            input,
-            "/fusion --fast --strategy project:review review locking"
-        );
+        assert_eq!(input.string_units(""), Some(expected));
         assert!(!setup_view_is_open(&widget));
     }
 
@@ -9789,10 +9961,12 @@ mod tests {
         ] {
             let mut widget = widget();
             widget.set_fusion_settings(fusion_settings(false));
-            let Some(ChatOutcome::DispatchSlash(dispatched, _)) = widget.handle_slash(input) else {
+            let expected = input.encode_utf16().collect::<Vec<_>>();
+            let Some(ChatOutcome::DispatchSlash(dispatched, _)) = widget.handle_slash(input.into())
+            else {
                 panic!("maintenance must reach the runtime without opening setup: {input}");
             };
-            assert_eq!(dispatched, input);
+            assert_eq!(dispatched.string_units(""), Some(expected));
             assert!(!setup_view_is_open(&widget));
         }
     }
@@ -9801,12 +9975,15 @@ mod tests {
     fn a_configured_fusion_run_still_dispatches_untouched() {
         let mut widget = widget();
         widget.set_fusion_settings(fusion_settings(true));
+        let expected = "/fusion review the locking"
+            .encode_utf16()
+            .collect::<Vec<_>>();
         let Some(ChatOutcome::DispatchSlash(input, _)) =
             widget.handle_slash("/fusion review the locking".into())
         else {
             panic!("a configured session must dispatch, not open the wizard");
         };
-        assert_eq!(input, "/fusion review the locking");
+        assert_eq!(input.string_units(""), Some(expected));
         assert!(!setup_view_is_open(&widget));
     }
 
@@ -9829,17 +10006,61 @@ mod tests {
     /// touching the host shell.
     struct FakeExpansionProvider {
         deny: bool,
+        cancel_during_run: bool,
+        build_cancellation:
+            std::sync::Arc<std::sync::Mutex<Option<lingxi_core::host::CancellationToken>>>,
+        runner_cancellation:
+            std::sync::Arc<std::sync::Mutex<Option<lingxi_core::host::CancellationToken>>>,
     }
 
-    struct MarkerRunner;
+    impl FakeExpansionProvider {
+        fn new(deny: bool, cancel_during_run: bool) -> Self {
+            Self {
+                deny,
+                cancel_during_run,
+                build_cancellation: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                runner_cancellation: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+
+        fn context(&self) -> command_api::ShellExpansionCtx {
+            command_api::ShellExpansionCtx {
+                runner: std::sync::Arc::new(MarkerRunner {
+                    cancellation: self.runner_cancellation.clone(),
+                    cancel_during_run: self.cancel_during_run,
+                }),
+                permission_gate: std::sync::Arc::new(FixedGate { allow: !self.deny }),
+            }
+        }
+    }
+
+    struct MarkerRunner {
+        cancellation:
+            std::sync::Arc<std::sync::Mutex<Option<lingxi_core::host::CancellationToken>>>,
+        cancel_during_run: bool,
+    }
 
     #[async_trait::async_trait]
     impl command_api::ShellRunner for MarkerRunner {
         async fn run(
             &self,
-            _command: &str,
+            _command: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _shell: Option<command_api::FrontmatterShell>,
+            cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<command_api::ShellOut, command_api::ShellRunError> {
+            *self
+                .cancellation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cancellation.clone());
+            if self.cancel_during_run {
+                cancellation.cancel();
+                return Err(command_api::ShellRunError {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    interrupted: true,
+                    generic_message: None,
+                });
+            }
             Ok(command_api::ShellOut {
                 stdout: "EXPANDED_MARKER".to_string(),
                 stderr: String::new(),
@@ -9855,29 +10076,48 @@ mod tests {
     impl command_api::ShellPermissionGate for FixedGate {
         fn check(
             &self,
-            _command: &str,
+            _command: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _shell: Option<command_api::FrontmatterShell>,
         ) -> command_api::ShellPermissionDecision {
             if self.allow {
                 command_api::ShellPermissionDecision::Allow
             } else {
                 command_api::ShellPermissionDecision::Deny {
-                    message: Some("denied by test".to_string()),
+                    message: Some("denied by test".into()),
                 }
             }
         }
     }
 
+    #[async_trait::async_trait]
     impl command_api::ShellExpansionProvider for FakeExpansionProvider {
+        async fn git_worktree_context(&self) -> command_api::GitWorktreeContext {
+            command_api::GitWorktreeContext {
+                cwd: "/tmp".into(),
+                inside: false,
+            }
+        }
+
         fn build(
             &self,
             _allowed_tools: &[String],
             _shell: Option<command_api::FrontmatterShell>,
         ) -> command_api::ShellExpansionCtx {
-            command_api::ShellExpansionCtx {
-                runner: std::sync::Arc::new(MarkerRunner),
-                permission_gate: std::sync::Arc::new(FixedGate { allow: !self.deny }),
-            }
+            self.context()
+        }
+
+        fn build_for_call(
+            &self,
+            _allowed_tools: &[String],
+            _shell: Option<command_api::FrontmatterShell>,
+            _owner: Option<String>,
+            cancellation: Option<lingxi_core::host::CancellationToken>,
+        ) -> command_api::ShellExpansionCtx {
+            *self
+                .build_cancellation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = cancellation;
+            self.context()
         }
     }
 
@@ -9888,23 +10128,59 @@ mod tests {
     #[test]
     fn tui_prompt_command_expands_embedded_shell_before_submit() {
         let mut widget = widget();
-        widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: false }));
-        let ChatOutcome::Submit(payload, _, _, _token) = widget.cmd_commit_push_pr("") else {
+        let expansion = std::sync::Arc::new(FakeExpansionProvider::new(false, false));
+        widget.set_shell_expansion(expansion.clone());
+        let ChatOutcome::Submit(payload, _, _, token) = widget.cmd_commit_push_pr("") else {
             panic!("/commit-push-pr must submit a turn");
         };
         assert!(
-            payload.contains("EXPANDED_MARKER"),
-            "embedded !`git …` replaced by runner output: {payload}"
+            source_contains(&payload, "EXPANDED_MARKER"),
+            "embedded !`git …` replaced by runner output: {payload:?}"
         );
         assert!(
-            !payload.contains("!`git status`"),
-            "literal placeholder is gone after expansion: {payload}"
+            !source_contains(&payload, "!`git status`"),
+            "literal placeholder is gone after expansion: {payload:?}"
         );
         assert_eq!(
             cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body(),
             "/commit-push-pr",
             "transcript still shows the compact invocation"
         );
+        let build_token = expansion
+            .build_cancellation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the production call builder receives the turn cancellation");
+        let runner_token = expansion
+            .runner_cancellation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the shell runner receives the same cancellation lifetime");
+        token.cancel();
+        assert!(build_token.is_cancelled());
+        assert!(runner_token.is_cancelled());
+    }
+
+    #[test]
+    fn cancelling_shell_expansion_does_not_submit_or_render_a_failure() {
+        let mut widget = widget();
+        let expansion = std::sync::Arc::new(FakeExpansionProvider::new(false, true));
+        widget.set_shell_expansion(expansion.clone());
+
+        assert!(matches!(
+            widget.cmd_commit_push_pr(""),
+            ChatOutcome::Continue
+        ));
+        assert!(widget.current_turn.is_none());
+        assert!(cells(&widget).is_empty());
+        assert!(expansion
+            .build_cancellation
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(lingxi_core::host::CancellationToken::is_cancelled));
     }
 
     /// (#3) A permission-denied embedded command aborts the WHOLE prompt: the
@@ -9913,7 +10189,7 @@ mod tests {
     #[test]
     fn tui_prompt_command_denied_expansion_does_not_submit() {
         let mut widget = widget();
-        widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: true }));
+        widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider::new(true, false)));
         let outcome = widget.cmd_commit_push_pr("");
         assert!(
             matches!(outcome, ChatOutcome::Continue),
@@ -9945,6 +10221,20 @@ mod tests {
         out
     }
 
+    fn source_contains(
+        source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        needle: &str,
+    ) -> bool {
+        let Some(units) = source.string_units("") else {
+            return false;
+        };
+        let needle = needle.encode_utf16().collect::<Vec<_>>();
+        needle.is_empty()
+            || units
+                .windows(needle.len())
+                .any(|window| window == needle.as_slice())
+    }
+
     /// Downcast transcript cell `idx` (committed order, active last) to its
     /// concrete cell type.
     fn cell<T: 'static>(widget: &ChatWidget, idx: usize) -> &T {
@@ -9956,9 +10246,17 @@ mod tests {
 
     fn tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (resp_tx, resp_rx) = oneshot::channel();
+        let tool_input =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"command":"ls -la"}"#)
+                .expect("valid tool input JSON");
+        let permission_suggestions =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls -la"}],"behavior":"allow","destination":"session"}]"#,
+            )
+            .expect("valid permission suggestion JSON");
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: "Bash".to_string(),
-            tool_input: serde_json::json!({ "command": "ls -la" }),
+            tool_input,
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: false,
         };
@@ -9971,12 +10269,7 @@ mod tests {
                 permission_persistence:
                     permission::allow_suggestion::permission_persistence_suggestion(
                         "Bash",
-                        &serde_json::json!([{
-                            "type": "addRules",
-                            "rules": [{"toolName": "Bash", "ruleContent": "ls -la"}],
-                            "behavior": "allow",
-                            "destination": "session"
-                        }]),
+                        &permission_suggestions,
                     ),
                 auto_mode_prompt: None,
                 background_owned: false,
@@ -9999,9 +10292,13 @@ mod tests {
     fn background_owned_tool_exchange(
     ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (resp_tx, resp_rx) = oneshot::channel();
+        let tool_input = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"url":"https://example.com"}"#,
+        )
+        .expect("valid tool input JSON");
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: "WebFetch".to_string(),
-            tool_input: serde_json::json!({ "url": "https://example.com" }),
+            tool_input,
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: false,
         };
@@ -13336,6 +13633,7 @@ mod tests {
     fn compaction_summary_displays_utf16_only_at_widget_boundary() {
         use crate::history_cell::system::CompactBoundaryCell;
         let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
         widget.apply_turn_event(TurnEvent::CompactionCompleted {
             messages_before: 12,
             messages_after: 4,

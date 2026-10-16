@@ -23,6 +23,116 @@ fn source_string(value: impl Into<Utf16JsonProjection>) -> Utf16JsonProjection {
     value.into()
 }
 
+fn mark_settings_keys_applied(
+    settings: Option<&crate::settings_bridge::SettingsContext>,
+    keys: &[&str],
+    operation: &'static str,
+) -> Result<(), Utf16JsonProjection> {
+    let result = match settings {
+        Some(settings) => settings
+            .mark_keys_applied(keys)
+            .map_err(|error| error.diagnostic_projection()),
+        None => Ok(()),
+    };
+    if result.is_err() {
+        tracing::warn!(
+            operation = operation,
+            "hot reload completed but active settings baseline could not be updated"
+        );
+    }
+    result
+}
+
+fn settings_reload_error_details(diagnostic: &Utf16JsonProjection) -> String {
+    let message = diagnostic
+        .subprojection("/message")
+        .unwrap_or_else(|_| diagnostic.clone());
+    Utf16JsonProjection::object(vec![
+        ("reloadError".to_owned(), message),
+        ("reloadErrorDiagnostic".to_owned(), diagnostic.clone()),
+    ])
+    .expect("reload error details are a valid JSON object")
+    .to_json_string()
+    .expect("reload error details preserve valid source JSON")
+}
+
+#[cfg(test)]
+mod settings_reload_error_source_tests {
+    use super::*;
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn plain_refresh_error_retains_its_source_string_in_operation_details() {
+        let diagnostic = Utf16JsonProjection::parse(r#""refresh \ud800 failed""#).unwrap();
+        let details =
+            Utf16JsonProjection::parse(&settings_reload_error_details(&diagnostic)).unwrap();
+        assert_eq!(
+            details.string_units("/reloadError"),
+            diagnostic.string_units("")
+        );
+        assert_eq!(
+            details.string_units("/reloadErrorDiagnostic"),
+            diagnostic.string_units("")
+        );
+    }
+
+    #[test]
+    fn failed_settings_baseline_update_retains_lone_utf16_in_operation_details() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("home");
+        let project = temporary.path().join("project");
+        let project_settings = project.join(".lingxi");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&project_settings).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"policyHelpers":{"defaultSettings":{"custom":[]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_settings.join("settings.json"),
+            r#"{"policyHelpers":{"defaultSettings":{"custom":{"length":{"toString":"\ud800"}}}}}"#,
+        )
+        .unwrap();
+
+        let settings = crate::settings_bridge::SettingsContext {
+            fusion_layers: None,
+            paths: crate::settings_bridge::SettingsPaths {
+                lingxi_home: home,
+                project_dir: project,
+            },
+            active: Arc::new(RwLock::new(crate::settings_bridge::empty_settings_source())),
+            managed: crate::settings_bridge::empty_settings_source(),
+            managed_diagnostics: None,
+        };
+        let diagnostic = mark_settings_keys_applied(
+            Some(&settings),
+            &["policyHelpers"],
+            "source-fidelity regression",
+        )
+        .expect_err("cross-layer Native array length coercion must fail");
+
+        assert_eq!(diagnostic.string_at("/kind"), Some("settings_projection"));
+        assert_eq!(
+            diagnostic.string_units("/sourceValue/toString"),
+            Some(vec![0xd800]),
+            "the settings diagnostic must retain the raw lone UTF-16 unit"
+        );
+        let details_json = settings_reload_error_details(&diagnostic);
+        let details = Utf16JsonProjection::parse(&details_json).unwrap();
+        assert_eq!(
+            details.string_at("/reloadError"),
+            diagnostic.string_at("/message"),
+            "the existing reloadError remains readable"
+        );
+        assert_eq!(
+            details.string_units("/reloadErrorDiagnostic/sourceValue/toString"),
+            Some(vec![0xd800]),
+            "the operation details must preserve sourceValue through JSON serialization"
+        );
+    }
+}
+
 #[cfg(test)]
 mod skill_identity_source_tests {
     use super::*;
@@ -208,6 +318,7 @@ mod skill_identity_source_tests {
         ));
 
         let settings = crate::settings_bridge::SettingsContext {
+            fusion_layers: None,
             paths: crate::settings_bridge::SettingsPaths {
                 lingxi_home: home_dir,
                 project_dir,
@@ -1246,21 +1357,26 @@ impl EngineCommandRouter {
                     });
                 match result {
                     Ok(()) => {
-                        let effect = if self.is_turn_active() {
-                            ConfigurationEffectDto::RestartRequired
+                        let (effect, details_json) = if self.is_turn_active() {
+                            (ConfigurationEffectDto::RestartRequired, None)
                         } else {
                             match self.refresh_mcp_runtime().await {
-                                Ok(()) => {
-                                    if let Some(settings) = self.settings.as_ref() {
-                                        settings.mark_keys_applied(&[
-                                            "enabledMcpjsonServers",
-                                            "disabledMcpjsonServers",
-                                            "enableAllProjectMcpServers",
-                                        ]);
-                                    }
-                                    ConfigurationEffectDto::Applied
-                                }
-                                Err(_) => ConfigurationEffectDto::RestartRequired,
+                                Ok(()) => match mark_settings_keys_applied(
+                                    self.settings.as_ref(),
+                                    &[
+                                        "enabledMcpjsonServers",
+                                        "disabledMcpjsonServers",
+                                        "enableAllProjectMcpServers",
+                                    ],
+                                    "project MCP approval",
+                                ) {
+                                    Ok(()) => (ConfigurationEffectDto::Applied, None),
+                                    Err(error) => (
+                                        ConfigurationEffectDto::RestartRequired,
+                                        Some(settings_reload_error_details(&error)),
+                                    ),
+                                },
+                                Err(_) => (ConfigurationEffectDto::RestartRequired, None),
                             }
                         };
                         self.emit_configuration_operation(
@@ -1270,7 +1386,7 @@ impl EngineCommandRouter {
                             ConfigurationOperationStatusDto::Succeeded,
                             effect,
                             Some("Saved project MCP approval.".to_string()),
-                            None,
+                            details_json,
                         )
                         .await;
                         self.emit_mcp_configuration_snapshot(sink).await;
@@ -1450,17 +1566,23 @@ impl EngineCommandRouter {
                         } else {
                             match self.refresh_plugins_runtime().await {
                                 Ok(()) => {
-                                    if let Some(settings) = self.settings.as_ref() {
-                                        settings.mark_keys_applied(&[
+                                    match mark_settings_keys_applied(
+                                        self.settings.as_ref(),
+                                        &[
                                             "enabledPlugins",
                                             "pluginConfigs",
                                             "extraKnownMarketplaces",
-                                        ]);
+                                        ],
+                                        "plugin operation",
+                                    ) {
+                                        Ok(()) => (ConfigurationEffectDto::Applied, None),
+                                        Err(error) => {
+                                            (ConfigurationEffectDto::RestartRequired, Some(error))
+                                        }
                                     }
-                                    (ConfigurationEffectDto::Applied, None)
                                 }
                                 Err(error) => {
-                                    (ConfigurationEffectDto::RestartRequired, Some(error))
+                                    (ConfigurationEffectDto::RestartRequired, Some(error.into()))
                                 }
                             }
                         };
@@ -1471,9 +1593,7 @@ impl EngineCommandRouter {
                             ConfigurationOperationStatusDto::Succeeded,
                             effect,
                             Some(operation_message),
-                            reload_error.map(|error| {
-                                serde_json::json!({ "reloadError": error }).to_string()
-                            }),
+                            reload_error.map(|error| settings_reload_error_details(&error)),
                         )
                         .await;
                         self.emit_settings_snapshot(sink).await;
@@ -1543,17 +1663,23 @@ impl EngineCommandRouter {
                         } else {
                             match self.refresh_plugins_runtime().await {
                                 Ok(()) => {
-                                    if let Some(settings) = self.settings.as_ref() {
-                                        settings.mark_keys_applied(&[
+                                    match mark_settings_keys_applied(
+                                        self.settings.as_ref(),
+                                        &[
                                             "enabledPlugins",
                                             "pluginConfigs",
                                             "extraKnownMarketplaces",
-                                        ]);
+                                        ],
+                                        "plugin settings save",
+                                    ) {
+                                        Ok(()) => (ConfigurationEffectDto::Applied, None),
+                                        Err(error) => {
+                                            (ConfigurationEffectDto::RestartRequired, Some(error))
+                                        }
                                     }
-                                    (ConfigurationEffectDto::Applied, None)
                                 }
                                 Err(error) => {
-                                    (ConfigurationEffectDto::RestartRequired, Some(error))
+                                    (ConfigurationEffectDto::RestartRequired, Some(error.into()))
                                 }
                             }
                         };
@@ -1564,9 +1690,7 @@ impl EngineCommandRouter {
                             ConfigurationOperationStatusDto::Succeeded,
                             effect,
                             Some("Saved plugin settings.".to_string()),
-                            reload_error.map(|error| {
-                                serde_json::json!({ "reloadError": error }).to_string()
-                            }),
+                            reload_error.map(|error| settings_reload_error_details(&error)),
                         )
                         .await;
                         self.emit_settings_snapshot(sink).await;
@@ -1731,8 +1855,8 @@ impl EngineCommandRouter {
                 });
                 match result {
                     Ok(candidate) => {
-                        let effect = if self.is_turn_active() {
-                            ConfigurationEffectDto::RestartRequired
+                        let (effect, details_json) = if self.is_turn_active() {
+                            (ConfigurationEffectDto::RestartRequired, None)
                         } else if let Some(registry) = self.hook_registry.as_ref() {
                             let matchers = {
                                 let mut registry = registry.write().await;
@@ -1747,12 +1871,19 @@ impl EngineCommandRouter {
                                     );
                                 }
                             }
-                            if let Some(settings) = self.settings.as_ref() {
-                                settings.mark_keys_applied(&["hooks"]);
+                            match mark_settings_keys_applied(
+                                self.settings.as_ref(),
+                                &["hooks"],
+                                "hook save",
+                            ) {
+                                Ok(()) => (ConfigurationEffectDto::Applied, None),
+                                Err(error) => (
+                                    ConfigurationEffectDto::RestartRequired,
+                                    Some(settings_reload_error_details(&error)),
+                                ),
                             }
-                            ConfigurationEffectDto::Applied
                         } else {
-                            ConfigurationEffectDto::RestartRequired
+                            (ConfigurationEffectDto::RestartRequired, None)
                         };
                         self.emit_configuration_operation(
                             sink,
@@ -1761,7 +1892,7 @@ impl EngineCommandRouter {
                             ConfigurationOperationStatusDto::Succeeded,
                             effect,
                             Some("Saved hooks configuration.".to_string()),
-                            None,
+                            details_json,
                         )
                         .await;
                         self.emit_settings_snapshot(sink).await;

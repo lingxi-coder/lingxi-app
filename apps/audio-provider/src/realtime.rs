@@ -43,12 +43,19 @@ impl Drop for Registration {
 
 /// Host execution boundary: platforms reserve their ordinary Agent turn owner.
 pub struct NativeRealtimeRun {
+    /// Authoritative prompt, history, and tool snapshot prepared for this Agent session.
     pub prepared: orchestrator::RealtimeAgentContext,
+    /// Provider control handle used by the Agent runner to close or interrupt the conversation.
     pub control: RealtimeControl,
+    /// Provider events consumed by the Agent runtime while the conversation is active.
     pub events: RealtimeEvents,
+    /// Host-supplied audio, commit, interruption, and playback-completion inputs for the Agent.
     pub inputs: mpsc::Receiver<RealtimeAgentInput>,
+    /// Agent-produced realtime events returned to the host for client delivery.
     pub output: mpsc::Sender<RealtimeEvent>,
+    /// Per-session limits applied to Agent tool execution.
     pub limits: RealtimeAgentLimits,
+    /// Cooperative cancellation token signaled when the host closes or aborts the session.
     pub cancel: CancellationToken,
 }
 #[derive(Default)]
@@ -368,6 +375,10 @@ impl NativeRealtimeSession {
             format: self.input_format.clone(),
         }))
     }
+    /// Commit queued audio input and request the provider to continue its response.
+    ///
+    /// Both events are reserved and queued together; the continue event is a
+    /// no-op for providers that start turns automatically.
     pub fn commit_input(&self) -> Result<(), Value> {
         self.active()?;
         let permits = self
@@ -428,6 +439,7 @@ impl NativeRealtimeSession {
             )),
         }
     }
+    /// Acknowledge that the host finished playing an output item, if it has an identity.
     pub fn playback_completed(&self, item_id: Option<String>) -> Result<(), Value> {
         if item_id.as_deref().is_some_and(|id| id.trim().is_empty()) {
             return Err(failure(
@@ -441,6 +453,10 @@ impl NativeRealtimeSession {
     pub async fn wait_closed(&self) {
         self.completion.wait().await;
     }
+    /// Gracefully close the provider conversation and wait for Agent ownership to release.
+    ///
+    /// If provider close does not complete within the close deadline, the session
+    /// is aborted and an `unavailable` error is returned.
     pub async fn close(&self) -> Result<(), Value> {
         if self.closing.swap(true, Ordering::AcqRel) {
             self.wait_closed().await;
@@ -474,6 +490,7 @@ impl NativeRealtimeSession {
         self.cancel.cancel();
     }
 
+    /// Cancel the Agent immediately, abort the provider conversation, and await cleanup.
     pub async fn abort(&self) {
         self.closing.store(true, Ordering::Release);
         self.cancel.cancel();

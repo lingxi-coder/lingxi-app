@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::computer_access::{AccessTier, ComputerAccessRequest, RequestedApp};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -24,8 +25,8 @@ use serde_json::json;
 use std::sync::Arc;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_computer_use::ComputerAccessResolver;
 
@@ -43,10 +44,17 @@ impl Tool for AccessRequestingTool {
     fn name(&self) -> &str {
         "AccessRequest"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| Utf16JsonProjection::plain(json!({"type": "object"})));
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -54,22 +62,22 @@ impl Tool for AccessRequestingTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         false
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         // The generic gate is irrelevant to this suite (a `NoOpPermissionGate`
@@ -85,15 +93,19 @@ impl Tool for AccessRequestingTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "AccessRequest".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+        Utf16JsonProjection::from("")
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -114,21 +126,13 @@ impl Tool for AccessRequestingTool {
             tcc_state: None,
         };
         let response = self.access_resolver.resolve(request).await;
-        Ok(ToolCallResult {
-            data_projection: None,
-            model_content_projection: None,
-            data: json!({
+        Ok(ToolCallResult::from_data(Utf16JsonProjection::plain(
+            json!({
                 "granted_apps": response.granted_apps,
                 "clipboard_read": response.clipboard_read,
                 "clipboard_write": response.clipboard_write,
                 "system_key_combos": response.system_key_combos,
             }),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-            mcp_meta_projection: None,
-        })
+        )))
     }
 }

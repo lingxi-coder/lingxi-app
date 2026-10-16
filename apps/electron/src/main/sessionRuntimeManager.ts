@@ -580,7 +580,6 @@ export class SessionRuntimeManager {
       sessionId: ref.sessionId,
       projectPath: ref.projectPath,
       envelopeEvents: true,
-      registerIpc: false,
       launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),

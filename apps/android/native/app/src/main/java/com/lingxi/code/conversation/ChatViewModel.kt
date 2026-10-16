@@ -2456,7 +2456,7 @@ class ChatViewModel(
                         id = replacement.taskId,
                         tool = "Shell",
                         status = toolStatus,
-                        inputSummary = replacement.command,
+                        syntheticShellCommand = replacement.command,
                         elapsedMs = replacement.durationMs,
                     )
                     current.copy(

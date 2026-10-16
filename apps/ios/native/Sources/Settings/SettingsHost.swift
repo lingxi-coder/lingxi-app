@@ -6,7 +6,6 @@ enum SettingsPage: Hashable {
     case group(SettingsGroup)
     case general, customProviders, fusion, permissions, toolsAgent, hooks, plugins, diagnostics, about, archivedChats, projectsTrust
     case providerList(ProviderKindBox)
-    case providerPicker(ProviderKindBox)
     case providerEdit(ProviderKindBox, String)
     case voice, linuxRuntime, knowledge, memory, workflows
     case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
@@ -23,7 +22,7 @@ extension SettingsPage {
         switch self {
         case .voice: true
         case .group(let group): group == .models || group == .voice
-        case .providerList(let box), .providerPicker(let box), .providerEdit(let box, _): box.kind == .llm
+        case .providerList(let box), .providerEdit(let box, _): box.kind == .llm
         default: false
         }
     }
@@ -416,10 +415,6 @@ struct SettingsHost: View {
         case .archivedChats: return String(localized: "settings_parity_archived")
         case .projectsTrust: return String(localized: "settings_parity_projects_trust")
         case .providerList(let b): return b.kind.title
-        case .providerPicker(let b):
-            return b.kind == .llm ? String(localized: "settings_title_add_llm")
-                : b.kind == .search ? String(localized: "settings_title_add_search")
-                : String(localized: "settings_title_add_fetch")
         case .providerEdit(let b, let id):
             if b.kind == .llm {
                 return providerRepository.state(for: id)?.profile.name ?? String(localized: "settings_title_edit")

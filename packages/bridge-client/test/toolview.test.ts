@@ -1,10 +1,6 @@
 /**
- * Tests for the ONE client-side tool-view fallback (`src/toolview.ts`).
- *
- * These pin the DEGRADED path only — what a client shows when an older engine
- * sends no `header`/`display`. The non-degraded path is the engine's derivation
- * and is pinned in Rust; nothing here should grow into a second implementation
- * of it.
+ * Tests for tool labels and input detail shown on permission surfaces, plus the
+ * minimal header used when a result arrives without its start event.
  */
 
 import assert from 'node:assert/strict';
@@ -12,8 +8,7 @@ import { test } from 'node:test';
 
 import {
   composeToolTitle,
-  fallbackToolBody,
-  fallbackToolHeader,
+  orphanToolHeader,
   redactSensitiveText,
   toolInputDetail,
   toolInputPreview,
@@ -34,62 +29,16 @@ test('the verb table matches the engine english() labels', () => {
   assert.equal(VERB_LABEL.generic, null);
 });
 
-test('fallbackToolHeader derives verb, label and primary for table tools', () => {
-  const edit = fallbackToolHeader('Edit', '{"file_path":"src/host.rs"}');
-  assert.equal(edit.verb, 'update');
-  assert.equal(edit.label, 'Update');
-  assert.equal(edit.primary, 'src/host.rs');
-  assert.equal(edit.title, 'Update(src/host.rs)');
-
-  const write = fallbackToolHeader('Write', '{"file_path":"new.rs"}');
-  assert.equal(write.verb, 'create');
-  assert.equal(write.title, 'Write(new.rs)');
-
-  const grep = fallbackToolHeader('Grep', '{"pattern":"fn main","path":"src"}');
-  assert.equal(grep.verb, 'search');
-  assert.equal(grep.title, 'Search(fn main)');
-});
-
-test('fallbackToolHeader gives Bash its shell label and $ sub-line, newlines collapsed', () => {
-  const header = fallbackToolHeader('Bash', JSON.stringify({ command: 'cargo test\n  --all' }));
-  assert.equal(header.verb, 'shell');
-  assert.equal(header.label, 'Running 1 shell command…');
-  assert.equal(header.primary, undefined);
-  assert.deepEqual(header.sub_line, { prefix: '$', text: 'cargo test --all' });
-});
-
-test('fallbackToolHeader names an MCP call by its tool with a server qualifier', () => {
-  const direct = fallbackToolHeader('mcp__github__create_issue', '{"name":"Bug"}');
-  assert.equal(direct.label, 'create_issue');
-  assert.equal(direct.qualifier, ' (github MCP)');
-  assert.equal(direct.title, 'create_issue(Bug) (github MCP)');
-
-  // The generic dispatcher carries the namespaced name in the INPUT.
-  const dispatched = fallbackToolHeader('MCP', '{"full_name":"mcp__linear__list_issues"}');
-  assert.equal(dispatched.label, 'list_issues');
-  assert.equal(dispatched.title, 'list_issues (linear MCP)');
-});
-
-test('an unknown tool keeps its own name and probes the generic key order', () => {
-  const header = fallbackToolHeader('SomeFutureTool', '{"query":"q","file_path":"f.rs"}');
-  assert.equal(header.verb, 'generic');
-  assert.equal(header.label, 'SomeFutureTool');
-  // file_path outranks query — the Rust GENERIC_PRIMARY_KEYS order.
-  assert.equal(header.title, 'SomeFutureTool(f.rs)');
-});
-
-test('a subagent type becomes the Task label, except the two generic types', () => {
-  assert.equal(fallbackToolHeader('Task', '{"subagent_type":"code-reviewer","description":"review"}').label, 'code-reviewer');
-  assert.equal(fallbackToolHeader('Task', '{"subagent_type":"general-purpose","description":"review"}').label, 'Task');
-  assert.equal(fallbackToolHeader('Task', '{"subagent_type":"worker","description":"review"}').label, 'Task');
-});
-
-test('malformed or empty payloads never throw and never invent a primary', () => {
-  const broken = fallbackToolHeader('Read', 'not json at all');
-  assert.equal(broken.title, 'Read');
-  assert.equal(fallbackToolHeader('Read', '').title, 'Read');
-  assert.equal(fallbackToolHeader('Read', '[1,2,3]').title, 'Read');
-  assert.equal(fallbackToolHeader('', '{}').label, 'tool');
+test('orphanToolHeader uses only the tool name when a result has no paired start', () => {
+  assert.deepEqual(orphanToolHeader('Read'), {
+    verb: 'read', label: 'Read', title: 'Read',
+  });
+  assert.deepEqual(orphanToolHeader('Bash'), {
+    verb: 'shell', label: 'Running shell command', title: 'Running shell command',
+  });
+  assert.deepEqual(orphanToolHeader(''), {
+    verb: 'generic', label: 'tool', title: 'tool',
+  });
 });
 
 test('toolInputPreview follows one probe order for every caller', () => {
@@ -101,17 +50,12 @@ test('toolInputPreview follows one probe order for every caller', () => {
   assert.equal(toolInputPreview('nonsense'), undefined);
 });
 
-test('a tool named after an Object.prototype member never throws', () => {
-  // `Object.freeze({…})` keeps the prototype, so `PRIMARY_KEYS[name]` used to
-  // resolve to an inherited FUNCTION and `for (const key of keys)` threw
-  // "keys is not iterable" — inside a React setState updater, from a module
-  // that promises it never throws.
+test('an orphan tool named after an Object.prototype member remains literal', () => {
   for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
-    const header = fallbackToolHeader(name, '{"file_path":"src/host.rs"}');
+    const header = orphanToolHeader(name);
     assert.equal(header.verb, 'generic', `${name} should fall through to the generic verb`);
     assert.equal(header.label, name);
-    // It falls through to GENERIC_PRIMARY_KEYS like any other unknown tool.
-    assert.equal(header.title, `${name}(src/host.rs)`);
+    assert.equal(header.title, name);
   }
 });
 
@@ -164,21 +108,4 @@ test('redactSensitiveText masks keys, bearer tokens and inline assignments', () 
   assert.match(redactSensitiveText('sk-ant-abcdefghijklmn'), /\[REDACTED\]/);
   assert.equal(redactSensitiveText('Bearer abc.def-ghi='), 'Bearer [REDACTED]');
   assert.equal(redactSensitiveText('token=hunter2'), 'token=[REDACTED]');
-});
-
-test('fallbackToolBody unwraps a JSON string, pretty-prints objects and clamps', () => {
-  assert.equal(fallbackToolBody('"plain text"'), 'plain text');
-  assert.equal(fallbackToolBody('{"a":1}'), '{\n  "a": 1\n}');
-  assert.equal(fallbackToolBody('raw non-json'), 'raw non-json');
-  assert.equal(fallbackToolBody(''), undefined);
-  assert.equal(fallbackToolBody('"   "'), undefined);
-
-  const huge = JSON.stringify('y'.repeat(5_000));
-  const body = fallbackToolBody(huge);
-  assert.equal(body?.length, 2_000);
-  assert.ok(body?.endsWith('…'));
-});
-
-test('fallbackToolBody redacts secrets in tool output', () => {
-  assert.doesNotMatch(fallbackToolBody('"token=super-secret-value"') ?? '', /super-secret-value/);
 });

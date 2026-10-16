@@ -1204,17 +1204,12 @@ export class HostController {
     const revision = ++this.bootstrapRevision;
     const activeSession = this.settings.getPublic().activeSession;
     const activeRuntime = this.currentRuntime();
-    const legacy = this.bridge as unknown as {
-      pendingAskUserQuestions?: readonly AskUserQuestionRequestDto[];
-      connectionState?: ConnectionState;
-    };
-    const pendingAskUserQuestions = activeRuntime?.pendingAskUserQuestions ?? legacy.pendingAskUserQuestions ?? [];
+    const pendingAskUserQuestions = activeRuntime?.pendingAskUserQuestions ?? [];
     // Same source `diagnosticReport` below already reads for its
     // `bridgeRuntime` field — reused here rather than recomputed, so the
     // About page's engine version and the exported diagnostic report can
     // never disagree.
-    const engineVersions = activeRuntime?.runtimeVersions
-      ?? (this.bridge as unknown as { runtimeVersions?: BridgeRuntimeVersions }).runtimeVersions;
+    const engineVersions = activeRuntime?.runtimeVersions;
     const snapshot = {
       revision,
       scheduledWorkspace: this.settings.scheduledWorkspace,
@@ -1231,7 +1226,7 @@ export class HostController {
         ? { credentialBrokerAvailable: this.brokerStorageError === undefined }
         : {}),
       ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
-      connection: activeRuntime?.connectionState ?? legacy.connectionState ?? { status: 'idle' },
+      connection: activeRuntime?.connectionState ?? { status: 'idle' },
       versions: {
         app: app?.getVersion?.() ?? 'unknown',
         electron: process.versions.electron,
@@ -1271,8 +1266,7 @@ export class HostController {
       providerCredentials: this.providerCredentialSnapshot()
         .map(({ codexAccountEmail: _email, ...metadata }) => metadata),
       connection: this.currentRuntime()?.connectionState ?? { status: 'idle' },
-      bridgeRuntime: this.currentRuntime()?.runtimeVersions
-        ?? (this.bridge as unknown as { runtimeVersions?: unknown }).runtimeVersions,
+      bridgeRuntime: this.currentRuntime()?.runtimeVersions,
       diagnostics: this.diagnostics.snapshot(),
     }, null, 2)}\n`;
   }
@@ -1293,48 +1287,39 @@ export class HostController {
 
   private currentRuntime() {
     const ref = this.settings.getPublic().activeSession;
-    const manager = this.bridge as unknown as { get?: (sessionId: string) => ReturnType<SessionRuntimeManager['get']> };
-    return ref && manager.get ? manager.get(ref.sessionId) : undefined;
+    return ref ? this.bridge.get(ref.sessionId) : undefined;
   }
 
   private runtimeSummaries(): SessionRuntimeSummary[] {
-    const manager = this.bridge as unknown as { runtimeSummaries?: SessionRuntimeSummary[] };
-    return manager.runtimeSummaries ? manager.runtimeSummaries.map((summary) => ({
+    return this.bridge.runtimeSummaries.map((summary) => ({
       ...summary,
       connection: { ...summary.connection },
-    })) : [];
+    }));
   }
 
   private hasActiveWork(projectPath?: string): boolean {
     if (projectPath) return this.bridge.hasActiveWork(projectPath);
     const active = this.settings.getPublic().activeProject;
     if (active && this.bridge.hasActiveWork(active)) return true;
-    return Boolean((this.bridge as unknown as { turnActive?: boolean }).turnActive);
+    return this.bridge.runtimeSummaries.some((runtime) => runtime.turnActive || runtime.pendingInteractions > 0);
   }
 
   private providerCredentialSnapshot(): ProviderCredentialMetadata[] {
     const runtime = this.currentRuntime();
-    const legacy = this.bridge as unknown as {
-      connectionState?: ConnectionState;
-      activeCredentialProviderIds?: readonly string[];
-      persistedCredentialProviderIds?: readonly string[];
-      providerCredentialStorageEncrypted?: boolean;
-      providerCredentialPreviews?: Readonly<Record<string, string>>;
-    };
     const activeProviders = new Set(
-      (runtime?.connectionState ?? legacy.connectionState)?.status === 'connected'
-        ? runtime?.activeCredentialProviderIds ?? legacy.activeCredentialProviderIds ?? []
+      runtime?.connectionState.status === 'connected'
+        ? runtime.activeCredentialProviderIds
         : [],
     );
     const persistedProviders = this.credentialBroker
       ? new Set(this.brokerConfiguredProviders)
-      : new Set(runtime?.persistedCredentialProviderIds ?? legacy.persistedCredentialProviderIds ?? []);
+      : new Set(runtime?.persistedCredentialProviderIds ?? []);
     const engineStorageEncrypted = this.credentialBroker
       ? this.brokerStorageError === undefined
-      : runtime?.providerCredentialStorageEncrypted ?? legacy.providerCredentialStorageEncrypted ?? false;
+      : runtime?.providerCredentialStorageEncrypted ?? false;
     const credentialPreviews = this.credentialBroker
       ? Object.fromEntries(this.brokerCredentialPreviews)
-      : runtime?.providerCredentialPreviews ?? legacy.providerCredentialPreviews ?? {};
+      : runtime?.providerCredentialPreviews ?? {};
     return this.credentialProviderIds().map((providerId) => {
       if (providerId === CODEX_PROVIDER_ID && !this.credentialBroker) {
         return { providerId, configured: false, encryptionAvailable: false,
@@ -1523,18 +1508,10 @@ export class HostController {
       this.settings.addProject(workspace);
       // Adding a project is metadata-only after the first project. The first
       // project gets one host-owned runtime so the app has an initial session.
-      const manager = this.bridge as unknown as {
-        newSession?: (projectPath: string) => Promise<SessionRef>;
-        restart?: () => Promise<void>;
-      };
-      if (wasEmpty && manager.newSession) {
+      if (wasEmpty) {
         const ref = await this.bridge.newSession(workspace);
         this.settings.activateProject(workspace);
         this.settings.setActiveSessionDraft(ref);
-      } else if (wasEmpty) {
-        // Compatibility for the pre-manager unit-test double. Production
-        // always takes the session-owned branch above.
-        await manager.restart?.();
       }
     } else {
       this.settings.activateProject(workspace);
@@ -1747,8 +1724,7 @@ export class HostController {
   }
 
   private isProjectClosing(projectPath: string): boolean {
-    const manager = this.bridge as unknown as { isProjectClosing?: (path: string) => boolean };
-    return this.closingProjects.has(projectPath) || manager.isProjectClosing?.(projectPath) === true;
+    return this.closingProjects.has(projectPath) || this.bridge.isProjectClosing(projectPath);
   }
 
   async restoreProjectSession(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {

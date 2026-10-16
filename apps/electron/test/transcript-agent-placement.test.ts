@@ -63,9 +63,10 @@ test('a restored transcript anchors its agents at the calls that spawned them', 
   const uuid = '7a1c9e0e-0000-4000-8000-00000000abcd';
   const state = conversationFromMessages([
     { role: 'user', blocks: [{ type: 'text', text: 'look into this' }] },
-    { role: 'assistant', blocks: [{ type: 'tool_use', id: 'toolu_spawn', tool: 'Agent', input_json: '{"description":"review"}' }] },
+    { role: 'assistant', blocks: [{ type: 'tool_use', id: 'toolu_spawn', tool: 'Agent', input_json: '{"description":"review"}',
+      header: { verb: 'task', label: 'Task', title: 'Task' } }] },
     { role: 'user', blocks: [{ type: 'tool_result', id: 'toolu_spawn', tool: 'Agent', is_error: false,
-      result_json: JSON.stringify({ status: 'async_launched', agentId: uuid }) }] },
+      result_json: JSON.stringify({ status: 'async_launched', agentId: uuid }), display: { body_lines: 0 } }] },
     { role: 'assistant', blocks: [{ type: 'text', text: 'while that runs…' }] },
   ]);
   const agents = [agent(`agent:${uuid}`, 'completed'), agent('main')];

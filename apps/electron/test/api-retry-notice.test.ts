@@ -27,7 +27,8 @@ test('the next thing the turn does ends the wait', () => {
   for (const done of [
     { type: 'text_delta', text: 'hi' },
     { type: 'thinking_delta', text: 'hm' },
-    { type: 'tool_use_started', id: 't', tool: 'Read', input_json: '{}' },
+    { type: 'tool_use_started', id: 't', tool: 'Read', input_json: '{}',
+      header: { verb: 'read', label: 'Read', title: 'Read' } },
     { type: 'turn_started' },
     { type: 'error', kind: 'transport', message: 'x' },
     { type: 'turn_ended', cost: null },

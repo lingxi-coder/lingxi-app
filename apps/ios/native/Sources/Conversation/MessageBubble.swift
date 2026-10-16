@@ -306,17 +306,14 @@ private struct StructuredAIBlocks: View {
                     EmptyView()
                 case let .compactBoundary(messagesBefore, messagesAfter, _):
                     compactBoundary(before: messagesBefore, after: messagesAfter)
-                case let .toolUse(id, tool, inputSummary, inputJson, header):
-                    // The engine's derived header, localized. `inputSummary` is
-                    // the older-engine fallback, never a re-derivation.
+                case let .toolUse(id, tool, inputJson, header):
                     if let plan = PlanDocument.tool(tool, json: inputJson) {
                         PlanDocumentCard(document: plan)
                     } else {
                     StructuredToolBlock(
                         id: id,
-                        title: header.map(ToolDisplayText.title)
-                            ?? String(localized: "chat_tool_call_title \(tool)"),
-                        summary: header?.subLine?.text ?? inputSummary,
+                        title: ToolDisplayText.title(header),
+                        summary: header.subLine?.text,
                         detail: inputJson,
                         icon: ToolDisplayText.icon(header: header, tool: tool),
                         iconColor: ToolDisplayText.iconColor(
@@ -328,16 +325,16 @@ private struct StructuredAIBlocks: View {
                         onToggle: { onToggleToolBlock(id) }
                     )
                     }
-                case let .toolResult(id, tool, isError, summary, _, _, _, _, display):
+                case let .toolResult(id, tool, isError, _, display):
                     StructuredToolBlock(
                         id: id,
                         title: isError
                             ? String(localized: "chat_tool_failed \(tool)")
                             : String(localized: "chat_tool_returned \(tool)"),
-                        summary: display.flatMap(ToolDisplayText.headline) ?? summary,
-                        detail: display?.body,
-                        diff: display?.diff,
-                        detailWasTruncated: display?.bodyTruncated ?? false,
+                        summary: ToolDisplayText.headline(display),
+                        detail: display.body,
+                        diff: display.diff,
+                        detailWasTruncated: display.bodyTruncated,
                         icon: isError ? .warning : ToolDisplayText.icon(header: nil, tool: tool),
                         iconColor: isError
                             ? t.danger

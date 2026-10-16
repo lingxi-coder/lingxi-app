@@ -11,7 +11,8 @@ import { tokens } from '../src/renderer/theme/tokens';
 test('Stage appends file summary only after the turn ends, following the final answer', () => {
   let state = reduceEvents(emptyConversation(), [
     { type: 'turn_started' },
-    { type: 'tool_use_started', id: 'edit', tool: 'Edit', input_json: '{}' },
+    { type: 'tool_use_started', id: 'edit', tool: 'Edit', input_json: '{}',
+      header: { verb: 'update', label: 'Update', title: 'Update' } },
     { type: 'tool_use_result', id: 'edit', tool: 'Edit', is_error: false, result_json: '{}', display: {
       body_lines: 0, diff: { file_path: 'src/app.ts', additions: 4, removals: 2, gutter_width: 1, truncated_rows: 0, rows: [] },
     } },

@@ -70,6 +70,35 @@ class RetainedTurnEventDecoderTest {
         assertNull(retainedTurnEventToReply("""{"type":"turn_ended"}"""))
     }
 
+    @Test
+    fun retainedToolEventsPreserveRequiredHeaderAndDisplay() {
+        val started = retainedTurnEventToReply(
+            """{"type":"tool_use_started","id":"tool-1","tool":"Read","input_json":"{}","header":{"verb":"read","label":"Read","title":"Read"}}""",
+        ) as ReplyEvent.ToolActivity
+        assertEquals("Read", started.header?.title)
+
+        val result = retainedTurnEventToReply(
+            """{"type":"tool_use_result","id":"tool-1","tool":"Read","result_json":"{}","is_error":false,"display":{"headline":"Read complete","body":"🚀 source","body_lines":1,"diff":{"file_path":"a.rs","language":"rust","gutter_width":1,"additions":1,"removals":0,"truncated_rows":0,"rows":[{"kind":"add","line_no":1,"hunk":0,"word_diffed":false,"segments":[{"text":"🚀 source","class":"plain","bold":false,"italic":false,"underline":false,"emph":false}]}]}}}""",
+        ) as ReplyEvent.ToolActivity
+        assertEquals("Read complete", result.display?.headline)
+        assertEquals("🚀 source", result.display?.body)
+        assertEquals("🚀 source", result.display?.diff?.rows?.single()?.text)
+    }
+
+    @Test
+    fun retainedToolEventsWithoutCurrentCarriersAreNotProjected() {
+        assertNull(
+            retainedTurnEventToReply(
+                """{"type":"tool_use_started","id":"tool-1","tool":"Read","input_json":"{}"}""",
+            ),
+        )
+        assertNull(
+            retainedTurnEventToReply(
+                """{"type":"tool_use_result","id":"tool-1","tool":"Read","result_json":"{}","is_error":false}""",
+            ),
+        )
+    }
+
     private fun blessedTurnEndedSnapshot(): File =
         RuntimeProtocolFixtures.snapshot("event/turn_ended.json")
 }

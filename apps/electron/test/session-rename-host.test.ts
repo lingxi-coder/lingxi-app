@@ -20,6 +20,7 @@ test('rename persists and returns a title without starting or dispatching to an 
   const bridge = {
     registerWindow() {}, registerIpc() {},
     get: () => ({ projectPath: directory, connectionState: { status: 'connected' } }),
+    isProjectClosing: () => false,
     withBackgroundSession: () => { throw new Error('rename must not wait on engine readiness'); },
   };
   const row = () => {

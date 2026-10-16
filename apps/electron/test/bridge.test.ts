@@ -1650,7 +1650,8 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
   assert.equal(manager.turnActive, true, 'the engine-initiated turn owns the slot');
 
   await handlers.get('permission')!({ request_id: 22, kind: { type: 'exit_plan_mode' } });
-  handlers.get('event')!({ type: 'tool_use_started', id: 'rewake', tool: 'Bash', view: {} });
+  handlers.get('event')!({ type: 'tool_use_started', id: 'rewake', tool: 'Bash', input_json: '{}',
+    header: { verb: 'shell', label: 'Running shell command', title: 'Running shell command' } });
 
   assert.ok((manager as any).pendingPermissionIds.has(22), 'its permission prompts reach the user');
   assert.equal(
@@ -2526,7 +2527,6 @@ for (const interruption of ['cancel', 'restart'] as const) {
     const key = deferred<string>();
     const calls: string[] = [];
     const runtime = new SessionRuntime({
-      registerIpc: false,
       launchConfig: () => ({ workspace: '/workspace', trusted: true }),
       resolveProviderCredential: () => key.promise,
     });
@@ -3185,7 +3185,6 @@ test('Mod UI requests and event frames stay bound to their session and request i
       launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
       sessionId,
       projectPath: '/workspace',
-      registerIpc: false,
       envelopeEvents: true,
     });
     runtime.registerWindow(webContents as any, 'app://desktop/index.html');
@@ -3344,7 +3343,6 @@ test('Mod UI requests beyond the outstanding window wait in order for earlier re
     launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
     sessionId,
     projectPath: '/workspace',
-    registerIpc: false,
     envelopeEvents: true,
   });
   const commands: any[] = [];
@@ -3378,7 +3376,7 @@ test('Mod UI requests beyond the outstanding window wait in order for earlier re
 });
 
 test('live and pending Side Chats prevent implicit stop, restart and archive', async () => {
-  const runtime = new SessionRuntime({ registerIpc: false, launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   let stopped = 0;
   (runtime as any).stopBridge = async () => { stopped++; };
   (runtime as any).pendingSideCreates.add('create-1');
@@ -3396,7 +3394,7 @@ test('live and pending Side Chats prevent implicit stop, restart and archive', a
 });
 
 test('Side Chat envelopes bypass parent turn state and retain independent identity', () => {
-  const runtime = new SessionRuntime({ registerIpc: false, launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   const client = new EventEmitter();
   const events: unknown[] = [];
   (runtime as any).broadcastClientEvent = (event: unknown) => events.push(event);

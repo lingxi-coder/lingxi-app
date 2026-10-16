@@ -25,8 +25,7 @@ import com.lingxi.code.bindings.client.ToolVerbDto
  *
  * NOTHING here re-parses `input_json` / `result_json` to rebuild a header. That
  * four-way drift (TUI / iOS / Android / Electron each summarizing tool JSON its
- * own way) is exactly what the shared derivation deletes. [summarizeToolInput]
- * survives ONLY as the fallback for an older engine that sends no `header`.
+ * own way) is exactly what the shared derivation deletes.
  *
  * Deliberately Android-free apart from the `@Immutable` stability annotations
  * (a plain JVM-resolvable Compose annotation, no runtime), so every mapper is
@@ -299,8 +298,8 @@ fun planWindow(tasks: List<PlanTaskUi>, max: Int = MAX_VISIBLE_PLAN_TASKS): Plan
  * `ChatState.expandedToolCalls`, which lives in the ViewModel precisely because
  * both lists that render these recycle their rows.
  *
- * [fallbackSummary] is the OLD `summarizeToolInput` one-liner, kept so an engine
- * that predates `header` still renders something.
+ * [syntheticShellCommand] is a locally known command for synthetic shell rows
+ * that have no engine start header.
  */
 @Immutable
 data class ToolCallUi(
@@ -309,7 +308,7 @@ data class ToolCallUi(
     val header: ToolHeaderUi? = null,
     val display: ToolResultDisplayUi? = null,
     val status: AgentToolStatus = AgentToolStatus.Running,
-    val fallbackSummary: String? = null,
+    val syntheticShellCommand: String? = null,
     val planMarkdown: String? = null,
     val questionAnswers: List<AnsweredQuestion>? = null,
     /** The app a `LocalApp` publish stored; the row is drawn as its card. */

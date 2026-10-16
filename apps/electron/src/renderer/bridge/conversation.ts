@@ -38,9 +38,9 @@ import { spawnResultAgentId } from '../components/transcriptAgentPlacement';
  * 1. **Never re-derive Product presentation from `input_json`/`result_json`.**
  *    The engine derives the header and result block ONCE and ships them; four
  *    clients re-parsing the payload is exactly the drift this deletes. A
- *    parsed copy is retained only for Native UI render-site props. The shared
- *    `fallbackToolHeader`/`fallbackToolBody` remain the path for an older
- *    engine that sends neither derived field.
+ *    parsed copy is retained only for Native UI render-site props. Current
+ *    engine DTOs require both derived fields; an orphan result uses a local
+ *    header only because its start event was missed.
  * 2. **Return the IDENTICAL state object when nothing changed.**
  *    `tool_heartbeat` arrives at ~1 Hz per in-flight tool and the Stage is not
  *    virtualized; a fresh state object every second repaints the whole
@@ -52,7 +52,7 @@ import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto
 // which imports `node:fs`/`node:os`. A type-only import of the barrel is erased,
 // but a VALUE import of it drags Node builtins into the renderer bundle and the
 // browser build fails outright.
-import { fallbackToolBody, fallbackToolHeader } from '@lingxi/bridge-client/toolview';
+import { orphanToolHeader } from '@lingxi/bridge-client/toolview';
 import { isSupportedImageMediaType } from '../../shared/imageInput';
 
 import type { CommandRunItem, RunItem } from '../model/runItem';
@@ -715,8 +715,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         tool: event.tool,
         status: 'running',
         nativeInput: parseNativeToolJson(event.input_json),
-        // The engine derived this once. Only an older engine leaves it absent.
-        view: event.header ?? fallbackToolHeader(event.tool, event.input_json),
+        view: event.header,
         ...(blockKey === null ? {} : { blockKey }),
         ...(transcriptUuid ? { transcriptUuid } : {}),
       };
@@ -758,9 +757,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         status: event.is_error ? ('error' as const) : ('done' as const),
         agentId: spawnResultAgentId(event.tool, event.result_json),
         nativeOutput: parseNativeToolJson(event.result_json),
-        ...(event.display
-          ? { result: event.display }
-          : { note: fallbackToolBody(event.result_json) }),
+        result: event.display,
       };
       const items = state.items.slice();
       let toolIndex = state.toolIndex;
@@ -786,7 +783,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
           tool: event.tool,
           // `tool_use_result` carries no header and we never saw the input —
           // the tool name is all there is to build one from.
-          view: fallbackToolHeader(event.tool, '{}'),
+          view: orphanToolHeader(event.tool),
           ...settled,
         });
         toolIndex = { ...state.toolIndex, [event.id]: at };
@@ -1302,7 +1299,7 @@ export function conversationFromMessages(
             tool: block.tool,
             status: 'running',
             nativeInput: parseNativeToolJson(block.input_json),
-            view: block.header ?? fallbackToolHeader(block.tool, block.input_json),
+            view: block.header,
           });
           toolIndex.set(block.id, idx);
           break;
@@ -1313,9 +1310,7 @@ export function conversationFromMessages(
             status: block.is_error ? ('error' as const) : ('done' as const),
             agentId: spawnResultAgentId(block.tool, block.result_json),
             nativeOutput: parseNativeToolJson(block.result_json),
-            ...(block.display
-              ? { result: block.display }
-              : { note: fallbackToolBody(block.result_json) }),
+            result: block.display,
           };
           const previous = idx === undefined ? undefined : items[idx];
           if (idx !== undefined && previous?.type === 'tool') {
@@ -1326,7 +1321,7 @@ export function conversationFromMessages(
               id: block.id,
               tool: block.tool,
               // A result with no matching call: the header is all we can build.
-              view: fallbackToolHeader(block.tool, '{}'),
+              view: orphanToolHeader(block.tool),
               ...settled,
             });
           }

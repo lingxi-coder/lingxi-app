@@ -57,6 +57,7 @@ test('archive pauses only execution-dependent schedules before persistence, and 
       };
       const bridge = {
         get: () => runtime,
+        isProjectClosing: () => false,
         withBackgroundSession: async (_ref: unknown, _empty: unknown, _model: unknown, operation: (runtime: any) => Promise<unknown>) => operation(runtime),
         closeSession: async () => { assert.equal(settings.isSessionArchived(ref), true); calls.push('close'); },
       };
@@ -111,7 +112,7 @@ test('opening an archived chat restores it only after the existing session resum
     settings.setSessionArchived(ref, true, 'Saved chat');
     let fail = true;
     const row = { uuid: sessionId, empty_session: false };
-    const bridge = { get: () => undefined, openSession: async () => { if (fail) throw new Error('resume failed'); } };
+    const bridge = { get: () => undefined, isProjectClosing: () => false, openSession: async () => { if (fail) throw new Error('resume failed'); } };
     const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { find: async () => row, list: async () => ({ sessions: [row] }), invalidate: () => undefined } as any);
     (host as any).bootstrap = () => ({ settings: settings.getPublic() });
     await assert.rejects((host as any).openSessionAndActivateInternal(ref), /resume failed/);
@@ -133,7 +134,7 @@ test('failure to create the replacement keeps the durable archive and cleared ac
     settings.addProject(projectPath);
     settings.setActiveSession(ref);
     const runtime = { projectPath, connectionState: { status: 'connected' }, beginArchive: () => () => {}, manageCron: async () => [] };
-    const bridge = { get: () => runtime, withBackgroundSession: async (_ref: unknown, _empty: unknown, _model: unknown, operation: (runtime: any) => Promise<unknown>) => operation(runtime), closeSession: async () => {}, newSession: async () => { throw new Error('fixture launch failure'); } };
+    const bridge = { get: () => runtime, isProjectClosing: () => false, withBackgroundSession: async (_ref: unknown, _empty: unknown, _model: unknown, operation: (runtime: any) => Promise<unknown>) => operation(runtime), closeSession: async () => {}, newSession: async () => { throw new Error('fixture launch failure'); } };
     const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [] }), invalidate: () => undefined } as any);
     await assert.rejects((host as any).archiveSessionInternal(ref), /Chat was archived.*fixture launch failure/);
     assert.equal(settings.getPublic().activeSession, undefined);
@@ -150,6 +151,7 @@ test('removing a project pauses active schedules with a reason before removing i
     const calls: string[] = [];
     const bridge = {
       hasActiveWork: () => false,
+      isProjectClosing: () => false,
       closeProject: async () => { calls.push('close'); assert.equal(settings.hasProject(project), true); },
     };
     const host = new HostController(settings, bridge as any, new DiagnosticBuffer());

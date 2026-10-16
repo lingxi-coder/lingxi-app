@@ -535,10 +535,6 @@ internal fun shouldStopConversationService(
     }
 }
 
-/** Resolve both the current action field and the legacy extra for redelivery. */
-internal fun conversationServiceAction(intent: Intent?): String? =
-    intent?.action ?: intent?.getStringExtra(ConversationTurnService.EXTRA_ACTION)
-
 /**
  * Process-level owner used only when Android redelivers the foreground service
  * after reclaiming the app process. It reconstructs the same workspace engine,
@@ -1118,10 +1114,7 @@ class ConversationTurnService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Notification Stop is a private explicit service Intent and carries
-        // its verb in Intent.action. Keep reading the legacy extra as a
-        // compatibility fallback for redelivered starts from older builds.
-        val action = conversationServiceAction(intent)
+        val action = intent?.action
         val promotionToken = intent?.getLongExtra(EXTRA_PROMOTION_TOKEN, NO_PROMOTION_TOKEN)
             ?: NO_PROMOTION_TOKEN
         if (action == ACTION_CANCEL) {
@@ -1237,7 +1230,6 @@ class ConversationTurnService : Service() {
         internal const val ACTION_START = "start"
         internal const val ACTION_UPDATE = "update"
         internal const val ACTION_CANCEL = "cancel"
-        internal const val EXTRA_ACTION = "conversation_action"
         internal const val EXTRA_PROMOTION_TOKEN = "conversation_promotion_token"
         internal const val EXTRA_SESSION_ID = "conversation_session_id"
         internal const val EXTRA_TURN_ID = "conversation_turn_id"
@@ -1259,7 +1251,6 @@ class ConversationTurnService : Service() {
             snapshot: ConversationBackgroundSnapshot?,
         ): Intent = Intent(context, ConversationTurnService::class.java)
             .setAction(action)
-            .putExtra(EXTRA_ACTION, action)
             .apply {
                 if (snapshot != null) {
                     putExtra(EXTRA_SESSION_ID, snapshot.sessionId)

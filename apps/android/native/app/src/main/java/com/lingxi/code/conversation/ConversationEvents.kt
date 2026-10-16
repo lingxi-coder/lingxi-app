@@ -3,7 +3,18 @@ package com.lingxi.code.conversation
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientTextDto
+import com.lingxi.code.bindings.client.CodeSegmentDto
+import com.lingxi.code.bindings.client.DiffLineKindDto
+import com.lingxi.code.bindings.client.DiffRowDto
 import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.HeadlineKindDto
+import com.lingxi.code.bindings.client.StructuredDiffDto
+import com.lingxi.code.bindings.client.SyntaxClassDto
+import com.lingxi.code.bindings.client.ToolHeaderDto
+import com.lingxi.code.bindings.client.ToolIconDto
+import com.lingxi.code.bindings.client.ToolResultDisplayDto
+import com.lingxi.code.bindings.client.ToolSubLineDto
+import com.lingxi.code.bindings.client.ToolVerbDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.toUi
 import kotlinx.coroutines.flow.Flow
@@ -33,17 +44,16 @@ sealed interface ReplyEvent {
         val id: String? = null,
         val tool: String? = null,
         val status: AgentToolStatus? = null,
-        /** LEGACY input scrape — the fallback when [header] is null (older engine). */
-        val inputSummary: String? = null,
+        /** Command text for a locally synthesized shell row with no engine start header. */
+        val syntheticShellCommand: String? = null,
         val planMarkdown: String? = null,
         val questionAnswers: List<AnsweredQuestion>? = null,
         val localApp: PublishedLocalApp? = null,
         val elapsedMs: Long? = null,
         /**
          * The engine's PRE-DERIVED call header, carried straight through from
-         * `ToolUseStarted.header`. Absent on an older engine, and absent on the
-         * result/heartbeat events (which carry no header) — the reducer keeps the
-         * one the call already delivered.
+         * `ToolUseStarted.header`. Result and heartbeat events carry no header,
+         * so the reducer keeps the one the start event already delivered.
          */
         val header: ToolHeaderUi? = null,
         /**
@@ -176,11 +186,8 @@ fun clientEventToReply(
                 id = event.id,
                 tool = event.tool,
                 status = AgentToolStatus.Running,
-                // The legacy scrape stays ONLY as the older-engine fallback; when
-                // `header` is present the renderer ignores it entirely.
-                inputSummary = summarizeToolInput(event.inputJson),
                 planMarkdown = toolPlanMarkdown(event.tool, event.inputJson),
-                header = event.header?.toUi(),
+                header = event.header.toUi(),
             )
         }
     is ClientEvent.ToolHeartbeat ->
@@ -214,7 +221,7 @@ fun clientEventToReply(
                 id = event.id,
                 tool = event.tool,
                 status = if (event.isError) AgentToolStatus.Failed else AgentToolStatus.Completed,
-                display = event.display?.toUi(),
+                display = event.display.toUi(),
                 planMarkdown = if (!event.isError) toolPlanMarkdown(event.tool, event.resultJson) else null,
                 questionAnswers = if (!event.isError) parseQuestionAnswers(event.tool, event.resultJson) else null,
                 localApp = if (!event.isError) parseLocalAppResult(event.tool, event.resultJson) else null,
@@ -287,7 +294,7 @@ internal fun retainedTurnEventToReply(
                 id = event.optString("id"),
                 tool = event.optString("tool"),
                 inputJson = event.optString("input_json", "{}"),
-                header = null,
+                header = retainedToolHeader(event.getJSONObject("header")) ?: return@runCatching null,
             ),
             strings,
         )
@@ -305,7 +312,7 @@ internal fun retainedTurnEventToReply(
                 tool = event.optString("tool"),
                 resultJson = event.optString("result_json", "{}"),
                 isError = event.optBoolean("is_error"),
-                display = null,
+                display = retainedToolResultDisplay(event.getJSONObject("display")) ?: return@runCatching null,
             ),
             strings,
         )
@@ -328,6 +335,148 @@ internal fun retainedTurnEventToReply(
         else -> null
     }
 }.getOrNull()
+
+private fun retainedToolHeader(value: JSONObject): ToolHeaderDto? {
+    val verb = value.enumValue<ToolVerbDto>("verb") ?: return null
+    val label = value.requiredString("label") ?: return null
+    val title = value.requiredString("title") ?: return null
+    val icon = value.optionalEnumValue<ToolIconDto>("icon")
+    if (value.has("icon") && !value.isNull("icon") && icon == null) return null
+    val count = value.optionalUInt("count")
+    if (value.has("count") && !value.isNull("count") && count == null) return null
+    val subLine = value.optJSONObject("sub_line")?.let { line ->
+        val prefix = line.requiredString("prefix") ?: return null
+        val text = line.requiredString("text") ?: return null
+        ToolSubLineDto(prefix = prefix, text = text)
+    }
+    if (value.has("sub_line") && !value.isNull("sub_line") && value.optJSONObject("sub_line") == null) return null
+    val primary = value.optionalString("primary")
+    if (value.has("primary") && !value.isNull("primary") && primary == null) return null
+    val qualifier = value.optionalString("qualifier")
+    if (value.has("qualifier") && !value.isNull("qualifier") && qualifier == null) return null
+    return ToolHeaderDto(
+        verb = verb,
+        icon = icon,
+        label = label,
+        primary = primary,
+        qualifier = qualifier,
+        count = count,
+        subLine = subLine,
+        title = title,
+    )
+}
+
+private fun retainedToolResultDisplay(value: JSONObject): ToolResultDisplayDto? {
+    val bodyLines = value.requiredUInt("body_lines") ?: return null
+    val headline = value.optionalString("headline")
+    if (value.has("headline") && !value.isNull("headline") && headline == null) return null
+    val headlineKind = value.optionalEnumValue<HeadlineKindDto>("headline_kind")
+    if (value.has("headline_kind") && !value.isNull("headline_kind") && headlineKind == null) return null
+    val headlineArgs = if (!value.has("headline_args")) {
+        emptyList()
+    } else {
+        val array = value.optJSONArray("headline_args") ?: return null
+        buildList {
+            for (index in 0 until array.length()) add(array.optUInt(index) ?: return null)
+        }
+    }
+    val diff = value.optJSONObject("diff")?.let(::retainedStructuredDiff)
+    if (value.has("diff") && !value.isNull("diff") && diff == null) return null
+    val body = value.optionalString("body")
+    if (value.has("body") && !value.isNull("body") && body == null) return null
+    val bodyTruncated = value.booleanOrDefault("body_truncated") ?: return null
+    val collapsed = value.booleanOrDefault("collapsed") ?: return null
+    return ToolResultDisplayDto(
+        headline = headline,
+        headlineKind = headlineKind,
+        headlineArgs = headlineArgs,
+        diff = diff,
+        body = body,
+        bodyLines = bodyLines,
+        bodyTruncated = bodyTruncated,
+        collapsed = collapsed,
+    )
+}
+
+private fun retainedStructuredDiff(value: JSONObject): StructuredDiffDto? {
+    val gutterWidth = value.requiredUInt("gutter_width") ?: return null
+    val additions = value.requiredUInt("additions") ?: return null
+    val removals = value.requiredUInt("removals") ?: return null
+    val truncatedRows = value.requiredUInt("truncated_rows") ?: return null
+    val rows = value.optJSONArray("rows") ?: return null
+    val parsedRows = buildList {
+        for (rowIndex in 0 until rows.length()) {
+            val row = rows.optJSONObject(rowIndex) ?: return null
+            val kind = row.enumValue<DiffLineKindDto>("kind") ?: return null
+            val lineNo = row.requiredUInt("line_no") ?: return null
+            val hunk = row.requiredUInt("hunk") ?: return null
+            val wordDiffed = row.booleanOrDefault("word_diffed") ?: return null
+            val segments = row.optJSONArray("segments") ?: return null
+            val parsedSegments = buildList {
+                for (segmentIndex in 0 until segments.length()) {
+                    val segment = segments.optJSONObject(segmentIndex) ?: return null
+                    val text = segment.requiredString("text") ?: return null
+                    val syntax = segment.enumValue<SyntaxClassDto>("class") ?: return null
+                    val rgb = segment.optionalUInt("rgb")
+                    if (segment.has("rgb") && !segment.isNull("rgb") && rgb == null) return null
+                    val bold = segment.booleanOrDefault("bold") ?: return null
+                    val italic = segment.booleanOrDefault("italic") ?: return null
+                    val underline = segment.booleanOrDefault("underline") ?: return null
+                    val emph = segment.booleanOrDefault("emph") ?: return null
+                    add(CodeSegmentDto(text, syntax, rgb, bold, italic, underline, emph))
+                }
+            }
+            add(DiffRowDto(kind, lineNo, hunk, wordDiffed, parsedSegments))
+        }
+    }
+    return StructuredDiffDto(
+        filePath = value.optionalString("file_path").also {
+            if (value.has("file_path") && !value.isNull("file_path") && it == null) return null
+        },
+        language = value.optionalString("language").also {
+            if (value.has("language") && !value.isNull("language") && it == null) return null
+        },
+        gutterWidth = gutterWidth,
+        additions = additions,
+        removals = removals,
+        truncatedRows = truncatedRows,
+        rows = parsedRows,
+    )
+}
+
+private inline fun <reified T : Enum<T>> JSONObject.enumValue(key: String): T? {
+    val value = requiredString(key) ?: return null
+    return enumValues<T>().firstOrNull { it.name.equals(value, ignoreCase = true) || it.name.lowercase() == value }
+}
+
+private inline fun <reified T : Enum<T>> JSONObject.optionalEnumValue(key: String): T? =
+    if (!has(key) || isNull(key)) null else enumValue(key)
+
+private fun JSONObject.optionalString(key: String): String? =
+    if (!has(key) || isNull(key)) null else optString(key).takeIf { opt(key) is String }
+
+private fun JSONObject.requiredString(key: String): String? =
+    if (!has(key) || isNull(key)) null else opt(key) as? String
+
+private fun JSONObject.requiredUInt(key: String): UInt? =
+    if (!has(key) || isNull(key)) null else optUInt(key)
+
+private fun JSONObject.optionalUInt(key: String): UInt? =
+    if (!has(key) || isNull(key)) null else optUInt(key)
+
+private fun JSONObject.optUInt(key: String): UInt? = optUInt(opt(key))
+
+private fun org.json.JSONArray.optUInt(index: Int): UInt? = optUInt(opt(index))
+
+private fun optUInt(value: Any?): UInt? {
+    val number = value as? Number ?: return null
+    val double = number.toDouble()
+    if (!double.isFinite() || double < 0.0 || double > UInt.MAX_VALUE.toDouble() || double % 1.0 != 0.0) return null
+    return number.toLong().toUInt()
+}
+
+private fun JSONObject.booleanOrDefault(key: String): Boolean? =
+    if (!has(key)) false else opt(key) as? Boolean
 
 /**
  * The `type` tag of a retained `turn_ended` envelope's `outcome`.

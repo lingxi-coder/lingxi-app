@@ -340,10 +340,10 @@ class SessionStateTest {
             listOf(
                 MessageBlockDto.Text("正文".toClientTextDto()),
                 MessageBlockDto.Text("   ".toClientTextDto()), // blank → dropped
-                MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}", header = null),
+                MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}", header = currentToolHeaderFixture("Bash")),
                 MessageBlockDto.ToolResult(
                     id = "t1", tool = "bash", resultJson = "ok", isError = false,
-                    oldString = null, newString = null, filePath = null, display = null,
+                    display = currentToolDisplayFixture(),
                 ),
                 MessageBlockDto.RedactedThinking(data = "opaque"),
                 MessageBlockDto.CompactBoundary(

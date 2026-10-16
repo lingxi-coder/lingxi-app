@@ -97,6 +97,8 @@ test('workspace preview IPC is fenced to the exact active session and its projec
   const bridge = {
     registerIpc: () => undefined,
     registerWindow: () => undefined,
+    runtimeSummaries: [],
+    isProjectClosing: () => false,
     get: (requested: string) => requested === sessionId
       ? { projectPath: project, connectionState: { status: 'connected' as const } }
       : undefined,
@@ -298,6 +300,7 @@ test('session clear accepts Claude Code name syntax and labels the session being
     registerWindow: () => undefined,
     get: (requestedSessionId: string) => requestedSessionId === sessionId ? runtime : undefined,
     hasActiveWork: () => false,
+    isProjectClosing: () => false,
     closeSession: async () => undefined,
     newSession: async () => ({ projectPath: project, sessionId: replacementId }),
   };
@@ -356,7 +359,11 @@ test('failed first-session startup still exposes the saved project in bootstrap'
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-add-failed-settings-'));
   const workspace = mkdtempSync(join(tmpdir(), 'lingxi-add-failed-project-'));
   const settings = new SettingsStore(userData);
-  const bridge = { newSession: async () => { throw new Error('engine startup failed'); } };
+  const bridge = {
+    newSession: async () => { throw new Error('engine startup failed'); },
+    get: () => undefined,
+    runtimeSummaries: [],
+  };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer());
   try {
     await assert.rejects(() => (host as any).selectWorkspace(workspace, true), /engine startup failed/);
@@ -404,6 +411,7 @@ test('failed session resume does not change the selected project or active sessi
   settings.setActiveSession({ projectPath: first, sessionId: firstSession });
   const bridge = {
     get: () => undefined,
+    isProjectClosing: () => false,
     openSession: async () => { throw new Error('resume failed'); },
   };
   const catalog = {
@@ -446,6 +454,7 @@ test('navigation mutations execute in invocation order and the last open wins', 
   const bridge = {
     get: () => undefined,
     isProjectClosing: () => false,
+    runtimeSummaries: [],
     openSession: async (ref: { sessionId: string }) => {
       calls.push(ref.sessionId);
       await gates.get(ref.sessionId)?.promise;
@@ -496,6 +505,7 @@ test('historical startup opens the catalog session before persisting it active',
   const calls: string[] = [];
   const bridge = {
     get: () => undefined,
+    isProjectClosing: () => false,
     openSession: async (ref: { sessionId: string }) => { calls.push(`open:${ref.sessionId}`); },
     newSession: async () => { throw new Error('must restore history instead of creating'); },
   };
@@ -548,7 +558,7 @@ test('session open rejects a UUID absent from the selected project catalog', asy
   let opened = false;
   const host = new HostController(
     settings,
-    { get: () => undefined, openSession: async () => { opened = true; } } as any,
+    { get: () => undefined, isProjectClosing: () => false, openSession: async () => { opened = true; } } as any,
     new DiagnosticBuffer(),
     { list: async () => ({ sessions: [] }), find: async () => undefined } as any,
   );
@@ -580,6 +590,8 @@ test('session open accepts a matching UUID outside the bounded project list', as
     settings,
     {
       get: () => undefined,
+      isProjectClosing: () => false,
+      runtimeSummaries: [],
       openSession: async (
         ref: { projectPath: string; sessionId: string },
         empty?: boolean,
@@ -627,6 +639,8 @@ test('host passes zero-count catalog rows to the empty-session open path', async
     settings,
     {
       get: () => undefined,
+      isProjectClosing: () => false,
+      runtimeSummaries: [],
       openSession: async (ref: { projectPath: string; sessionId: string }, empty?: boolean) => { opened = { ref, empty }; },
     } as any,
     new DiagnosticBuffer(),
@@ -656,6 +670,8 @@ test('zero-visible historical rows still use resume_session path', async () => {
     settings,
     {
       get: () => undefined,
+      isProjectClosing: () => false,
+      runtimeSummaries: [],
       openSession: async (_ref: unknown, empty?: boolean) => { emptyMode = empty; },
     } as any,
     new DiagnosticBuffer(),
@@ -692,6 +708,8 @@ test('opening an already-connected runtime does not require a persisted catalog 
     settings,
     {
       get: () => ({ projectPath: project, connectionState: { status: 'connected' } }),
+      isProjectClosing: () => false,
+      runtimeSummaries: [],
       openSession: async () => { opened = true; },
     } as any,
     new DiagnosticBuffer(),
@@ -722,16 +740,7 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
     getPublic: () => ({ version: 1, activeProject: workspace, projects: [workspace], pinnedSessions: [] }),
     credentialMetadata: () => ({ configured: false, encryptionAvailable: true }),
   };
-  const bridge = {
-    connectionState: { status: 'idle' as const },
-    runtimeVersions: {
-      serverName: 'lingxi-bridge-server/0.9.0',
-      serverProtocol: '0.2.0',
-      clientProtocol: '1.0.0',
-    },
-    turnActive: false,
-    restart: async () => undefined,
-  };
+  const bridge = { get: () => undefined, runtimeSummaries: [] };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
   const bootstrap = await (host as any).bootstrap();
@@ -752,7 +761,7 @@ test('bootstrap surfaces an explicit recovery state when the persisted workspace
     state: 'missing',
     message: `stored project is unavailable: ${workspace}`,
   });
-  assert.deepEqual(report.bridgeRuntime, bridge.runtimeVersions);
+  assert.equal(report.bridgeRuntime, undefined);
   assert.match(diagnostics.snapshot()[0]?.message ?? '', /workspace path is not a directory/);
 });
 
@@ -761,7 +770,7 @@ test('bootstrap treats a credential already supplied to the running engine as co
   const settings = {
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
     credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
     providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
       providerId,
@@ -769,11 +778,11 @@ test('bootstrap treats a credential already supplied to the running engine as co
       encryptionAvailable: false,
     })),
   };
-  const bridge = {
+  const runtime = {
     connectionState: { status: 'connected' as const },
     activeCredentialProviderIds: ['deepseek'],
-    turnActive: false,
   };
+  const bridge = { get: () => runtime, runtimeSummaries: [] };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
   const bootstrap = await (host as any).bootstrap();
@@ -792,7 +801,7 @@ test('bootstrap does not treat launch credentials as configured when the engine 
   const settings = {
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
     credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
     providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
       providerId,
@@ -800,11 +809,11 @@ test('bootstrap does not treat launch credentials as configured when the engine 
       encryptionAvailable: false,
     })),
   };
-  const bridge = {
+  const runtime = {
     connectionState: { status: 'error' as const, message: 'bridge-server binary not found' },
     activeCredentialProviderIds: ['deepseek'],
-    turnActive: false,
   };
+  const bridge = { get: () => runtime, runtimeSummaries: [] };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
   const bootstrap = await (host as any).bootstrap();
@@ -822,7 +831,7 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
   const settings = {
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
     credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
     providerCredentialMetadataFor: (providerIds: readonly string[]) => providerIds.map((providerId) => ({
       providerId,
@@ -830,14 +839,14 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
       encryptionAvailable: false,
     })),
   };
-  const bridge = {
+  const runtime = {
     connectionState: { status: 'connected' as const },
     activeCredentialProviderIds: ['deepseek'],
     persistedCredentialProviderIds: ['deepseek'],
     providerCredentialStorageEncrypted: true,
     providerCredentialPreviews: { deepseek: '••••abcd' },
-    turnActive: false,
   };
+  const bridge = { get: () => runtime, runtimeSummaries: [] };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
   const bootstrap = await (host as any).bootstrap();
@@ -856,11 +865,11 @@ test('bootstrap replays pending AskUserQuestion requests after a renderer reload
   const settings = {
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+    getPublic: () => ({ version: 1, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' } }),
     credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
     providerCredentialMetadataFor: () => [],
   };
-  const bridge = {
+  const runtime = {
     connectionState: { status: 'connected' as const },
     pendingAskUserQuestions: [{
       request_id: 7,
@@ -872,13 +881,13 @@ test('bootstrap replays pending AskUserQuestion requests after a renderer reload
       }],
       timeout_secs: 60,
     }],
-    turnActive: false,
   };
+  const bridge = { get: () => runtime, runtimeSummaries: [] };
   const host = new HostController(settings as any, bridge as any, diagnostics);
 
   const bootstrap = await (host as any).bootstrap();
 
-  assert.deepEqual(bootstrap.pendingAskUserQuestions, bridge.pendingAskUserQuestions);
+  assert.deepEqual(bootstrap.pendingAskUserQuestions, runtime.pendingAskUserQuestions);
 });
 
 test('project session catalogs are patched independently and preserved in bootstrap', async () => {
@@ -908,7 +917,7 @@ test('project session catalogs are patched independently and preserved in bootst
     },
     invalidate: () => undefined,
   };
-  const host = new HostController(settings as any, { turnActive: false } as any, new DiagnosticBuffer(), catalog as any);
+  const host = new HostController(settings as any, { get: () => undefined, runtimeSummaries: [], hasActiveWork: () => false } as any, new DiagnosticBuffer(), catalog as any);
 
   await (host as any).loadProjectSessions(projectA);
   await (host as any).loadProjectSessions(projectB);
@@ -937,7 +946,7 @@ test('host catalog generations keep only the newest deferred response', async ()
     credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
     providerCredentialMetadataFor: () => [],
   };
-  const host = new HostController(settings as any, { turnActive: false } as any, new DiagnosticBuffer(), catalog as any);
+  const host = new HostController(settings as any, { get: () => undefined, runtimeSummaries: [], hasActiveWork: () => false } as any, new DiagnosticBuffer(), catalog as any);
   const row = (title: string) => ({
     uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     title,
@@ -972,7 +981,7 @@ test('provider credential IPC uses the broker path, hot-syncs cached sessions, a
   const bridge = {
     registerIpc: () => undefined,
     registerWindow: () => undefined,
-    turnActive: false,
+    runtimeSummaries: [],
     hasActiveWork: () => false,
     invalidateLaunchConfigCache: () => undefined,
     refreshCachedProviderCredential: async (providerId: string, credential: string) => {
@@ -1049,12 +1058,15 @@ test('custom provider credentials use the current runtime configuration and rema
     getPublic: () => ({ version: 1, activeSession: { sessionId: 'custom-session' }, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
   };
   const operations: string[] = [];
-  const runtime = { customProviderIds: ['my-provider'] };
+  const runtime = {
+    connectionState: { status: 'connected' as const },
+    customProviderIds: ['my-provider'],
+  };
   const bridge = {
     get: () => runtime,
     registerIpc: () => undefined,
     registerWindow: () => undefined,
-    turnActive: false,
+    runtimeSummaries: [],
     hasActiveWork: () => false,
     invalidateLaunchConfigCache: () => undefined,
     refreshCachedProviderCredential: async (providerId: string, credential: string) => {
@@ -1123,7 +1135,7 @@ test('custom provider credentials use the current runtime configuration and rema
   ]);
 });
 
-test('broker-backed bootstrap ignores legacy runtime credential status', async () => {
+test('broker-backed bootstrap reads configured status from the broker', async () => {
   const settings = {
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
@@ -1131,13 +1143,7 @@ test('broker-backed bootstrap ignores legacy runtime credential status', async (
     credentialMetadata: () => ({ configured: false, encryptionAvailable: false }),
     providerCredentialMetadataFor: () => [],
   };
-  const bridge = {
-    connectionState: { status: 'connected' as const },
-    persistedCredentialProviderIds: ['deepseek'],
-    providerCredentialStorageEncrypted: true,
-    providerCredentialPreviews: { deepseek: '••••legacy' },
-    turnActive: false,
-  };
+  const bridge = { get: () => undefined, runtimeSummaries: [] };
   const broker = {
     health: async () => ({ protocolVersion: 1, buildVersion: 'test' }),
     listStatus: async () => [],
@@ -1289,7 +1295,7 @@ test('Codex login keeps tokens in broker and signs out through the token manager
   codexTokens.subscribe((session) => served.push(session?.access_token));
   const host = new HostController(
     { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
-    { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
+    { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false, runtimeSummaries: [],
       get: () => ({ connectionState: { status: 'disconnected' } }),
       invalidateLaunchConfigCache() {},
       restart: async () => { throw new Error('a sign-in must not restart the engine'); },

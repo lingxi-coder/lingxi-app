@@ -81,8 +81,6 @@ export interface BridgeManagerOptions {
   projectPath?: string;
   /** Wrap renderer-bound payloads in `{ sessionId, event }`. */
   envelopeEvents?: boolean;
-  /** Direct unit-test/legacy mode can keep the old runtime IPC registration. */
-  registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
   /** Main-process device service. Engine audio is dispatched here directly. */
   audioService?: DesktopAudioService;
@@ -153,7 +151,7 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;

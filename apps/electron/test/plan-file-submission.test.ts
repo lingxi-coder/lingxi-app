@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { emptySubmittedPlanState, reduceSubmittedPlanEvent, reduceSubmittedPlanMessages } from '../src/renderer/bridge/submittedPlan';
 import type { ClientEvent, MessageDto } from '@lingxi/bridge-client';
 const body = '# 环境切换修改方案\n\n## 修复\n完整正文\n\n## 验证\n完成';
+const HEADER = { verb: 'generic' as const, label: 'Plan tool', title: 'Plan tool' };
+const DISPLAY = { body_lines: 0 };
 const blocks: MessageDto['blocks'] = [
- {type:'tool_use',id:'write',tool:'Write',input_json:JSON.stringify({file_path:'.lingxi/plans/environment-org-switch-fix.md',content:body})},
- {type:'tool_result',id:'write',tool:'Write',result_json:'{}',is_error:false},
- {type:'tool_use',id:'exit',tool:'ExitPlanMode',input_json:'{}'},
- {type:'tool_result',id:'exit',tool:'ExitPlanMode',result_json:JSON.stringify({plan:null,model_content:'User has approved exiting plan mode. You can now proceed.'}),is_error:false},
+ {type:'tool_use',id:'write',tool:'Write',input_json:JSON.stringify({file_path:'.lingxi/plans/environment-org-switch-fix.md',content:body}),header:HEADER},
+ {type:'tool_result',id:'write',tool:'Write',result_json:'{}',is_error:false,display:DISPLAY},
+ {type:'tool_use',id:'exit',tool:'ExitPlanMode',input_json:'{}',header:HEADER},
+ {type:'tool_result',id:'exit',tool:'ExitPlanMode',result_json:JSON.stringify({plan:null,model_content:'User has approved exiting plan mode. You can now proceed.'}),is_error:false,display:DISPLAY},
 ];
 test('history uses a successful explicit plan-file write when ExitPlanMode carries no body',()=>{
  const state=reduceSubmittedPlanMessages(emptySubmittedPlanState(),[{role:'assistant',blocks}], 'session');

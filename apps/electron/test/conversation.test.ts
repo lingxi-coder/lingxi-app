@@ -55,6 +55,11 @@ const READ_HEADER: ToolHeaderDto = {
   title: 'Read(src/main.rs)',
 };
 
+const GENERIC_HEADER: ToolHeaderDto = { verb: 'generic', label: 'Tool', title: 'Tool' };
+const SHELL_HEADER: ToolHeaderDto = {
+  verb: 'shell', label: 'Running 1 shell command…', title: 'Running 1 shell command…',
+};
+
 const DIFF: StructuredDiffDto = {
   file_path: 'src/main.rs',
   language: 'rs',
@@ -102,7 +107,7 @@ test('turn_started flips running on; turn_ended flips it off and appends a meta 
 test('every item carries a distinct stable id, so the Stage never keys on an index', () => {
   let s = appendUserPrompt(emptyConversation(), 'go');
   s = reduceEvent(s, { type: 'thinking_delta', thinking: 'hmm' });
-  s = reduceEvent(s, { type: 'tool_use_started', id: 'toolu_1', tool: 'Read', input_json: '{}' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'toolu_1', tool: 'Read', input_json: '{}', header: READ_HEADER });
   s = reduceEvent(s, { type: 'text_delta', text: 'done' });
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
   const ids = s.items.map((item) => item.id);
@@ -245,38 +250,11 @@ test('tool_use_started stores the engine header verbatim; tool_use_result stores
   card = firstTool(s);
   assert.equal(card.status, 'done');
   assert.equal(card.result, DISPLAY);
-  // With a `display`, the degraded body must NOT also be computed.
-  assert.equal(card.note, undefined);
-});
-
-test('an older engine (no header/display) still renders through the shared fallback', () => {
-  let s = emptyConversation();
-  s = reduceEvent(s, {
-    type: 'tool_use_started',
-    id: 'tu-1',
-    tool: 'Read',
-    input_json: '{"file_path":"src/main.rs"}',
-  });
-  let card = firstTool(s);
-  assert.equal(card.view.verb, 'read');
-  assert.equal(card.view.title, 'Read(src/main.rs)');
-
-  s = reduceEvent(s, {
-    type: 'tool_use_result',
-    id: 'tu-1',
-    tool: 'Read',
-    result_json: '"file contents"',
-    is_error: false,
-  });
-  card = firstTool(s);
-  assert.equal(card.result, undefined);
-  assert.equal(card.note, 'file contents');
-  assert.equal(toolHasBody(card), true);
 });
 
 test('a result with neither body nor diff offers no disclosure at all', () => {
   let s = reduceEvent(emptyConversation(), {
-    type: 'tool_use_started', id: 'tu-1', tool: 'TodoWrite', input_json: '{}',
+    type: 'tool_use_started', id: 'tu-1', tool: 'TodoWrite', input_json: '{}', header: GENERIC_HEADER,
   });
   s = reduceEvent(s, {
     type: 'tool_use_result',
@@ -293,7 +271,8 @@ test('a result with neither body nor diff offers no disclosure at all', () => {
 test('a tool that interrupts streaming text reopens a fresh line afterwards', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'text_delta', text: 'before' });
-  s = reduceEvent(s, { type: 'tool_use_started', id: 'x', tool: 'Bash', input_json: '{"command":"ls"}' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'x', tool: 'Bash', input_json: '{"command":"ls"}',
+    header: { ...SHELL_HEADER, sub_line: { prefix: '$', text: 'ls' } } });
   s = reduceEvent(s, { type: 'text_delta', text: 'after' });
   const lines = s.items.filter((i) => i.type === 'narration') as Narration[];
   assert.deepEqual(lines.map((l) => l.text), ['before', 'after']);
@@ -308,7 +287,7 @@ test('tool_heartbeat returns the IDENTICAL state whenever nothing changed', () =
   // tool. A fresh state object per beat repaints the whole transcript once a
   // second, so identity — not deep equality — is the contract.
   let s = reduceEvent(emptyConversation(), {
-    type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 5"}',
+    type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 5"}', header: SHELL_HEADER,
   });
 
   // 1. Unknown tool id.
@@ -325,14 +304,14 @@ test('tool_heartbeat returns the IDENTICAL state whenever nothing changed', () =
 
   // 4. A settled tool ignores late heartbeats entirely.
   s = reduceEvent(ticked, {
-    type: 'tool_use_result', id: 'tu-1', tool: 'Bash', result_json: '""', is_error: false,
+    type: 'tool_use_result', id: 'tu-1', tool: 'Bash', result_json: '""', is_error: false, display: { body_lines: 0 },
   });
   assert.equal(reduceEvent(s, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 9_000 }), s);
 });
 
 test('a heartbeat leaves every untouched item at its original identity', () => {
   let s = appendUserPrompt(emptyConversation(), 'go');
-  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{}' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{}', header: SHELL_HEADER });
   const untouched = s.items[0];
   const after = reduceEvent(s, { type: 'tool_heartbeat', id: 'tu-1', tool: 'Bash', elapsed_ms: 3_000 });
   assert.equal(after.items[0], untouched, 'React.memo relies on untouched items keeping identity');
@@ -590,8 +569,8 @@ test('an actionable /loop tick keeps separate quiet runs independently expandabl
 
 test('failing tool_use_result marks the card errored without a duplicate error line', () => {
   let s = emptyConversation();
-  s = reduceEvent(s, { type: 'tool_use_started', id: 't', tool: 'Bash', input_json: '{"command":"x"}' });
-  s = reduceEvent(s, { type: 'tool_use_result', id: 't', tool: 'Bash', result_json: '""', is_error: true });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 't', tool: 'Bash', input_json: '{"command":"x"}', header: SHELL_HEADER });
+  s = reduceEvent(s, { type: 'tool_use_result', id: 't', tool: 'Bash', result_json: '""', is_error: true, display: DISPLAY });
   const card = firstTool(s);
   assert.equal(card.status, 'error');
   assert.equal(s.lastError, 'Bash failed');
@@ -951,22 +930,23 @@ test('session_resumed keeps a persisted slash command and its display result vis
   );
 });
 
-test('a resumed tool_use without a header falls back to the shared summarizer', () => {
+test('a resumed tool_use renders the current wire header and result display', () => {
   const s = reduceEvent(emptyConversation(), {
     type: 'session_resumed',
     session_id: 'abc',
     messages: [{
       role: 'assistant',
       blocks: [
-        { type: 'tool_use', id: 'x', tool: 'Bash', input_json: '{"command":"cargo test"}' },
-        { type: 'tool_result', id: 'x', tool: 'Bash', result_json: '"passed"', is_error: false },
+        { type: 'tool_use', id: 'x', tool: 'Bash', input_json: '{"command":"cargo test"}',
+          header: { ...SHELL_HEADER, sub_line: { prefix: '$', text: 'cargo test' } } },
+        { type: 'tool_result', id: 'x', tool: 'Bash', result_json: '"passed"', is_error: false, display: DISPLAY },
       ],
     }],
   });
   const tool = firstTool(s);
   assert.equal(tool.view.label, 'Running 1 shell command…');
   assert.deepEqual(tool.view.sub_line, { prefix: '$', text: 'cargo test' });
-  assert.equal(tool.note, 'passed');
+  assert.equal(tool.result, DISPLAY);
 });
 
 test('session_started and session_ended clear stale conversation state', () => {
@@ -1004,18 +984,6 @@ test('a session change is identifiable, because item ids are NOT unique across o
   assert.equal(resumed.items[0]?.id, aItems.items[0]?.id);
 });
 
-test('the degraded fallback redacts common credential shapes', () => {
-  let s = reduceEvent(emptyConversation(), {
-    type: 'tool_use_started', id: 'secret', tool: 'Bash', input_json: '{"command":"curl -H Authorization:Bearer sk-ant-example123456789"}',
-  });
-  s = reduceEvent(s, {
-    type: 'tool_use_result', id: 'secret', tool: 'Bash', result_json: '"token=super-secret-value"', is_error: false,
-  });
-  const tool = firstTool(s);
-  assert.doesNotMatch(tool.view.sub_line?.text ?? '', /sk-ant-example/);
-  assert.doesNotMatch(tool.note ?? '', /super-secret-value/);
-});
-
 // ── A turn boundary settles every in-flight tool card ────────────────────────
 
 test('turn_ended settles a tool card that never reported a result', () => {
@@ -1023,7 +991,7 @@ test('turn_ended settles a tool card that never reported a result', () => {
   // `running` card — `tool_heartbeat` ignores it and the result is not coming —
   // so the Stage shimmered a live clock over work that had stopped.
   let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 1 });
-  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 900"}' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 900"}', header: SHELL_HEADER });
   assert.equal(firstTool(s).status, 'running');
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
   assert.equal(firstTool(s).status, 'done');
@@ -1032,7 +1000,7 @@ test('turn_ended settles a tool card that never reported a result', () => {
 
 test('a cancelled turn settles its in-flight card as interrupted, not successful', () => {
   let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 2 });
-  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 900"}' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{"command":"sleep 900"}', header: SHELL_HEADER });
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'cancelled' }, cost: COST });
   assert.equal(firstTool(s).status, 'error');
 });
@@ -1042,7 +1010,7 @@ test('an error during a turn settles in-flight cards; one between turns touches 
   // path has to settle too — but only while a turn is actually in flight, or
   // an unrelated listing failure would fail a card it has nothing to do with.
   let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 3 });
-  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{}' });
+  s = reduceEvent(s, { type: 'tool_use_started', id: 'tu-1', tool: 'Bash', input_json: '{}', header: SHELL_HEADER });
   s = reduceEvent(s, { type: 'error', message: 'engine died' });
   assert.equal(firstTool(s).status, 'error');
   assert.equal(s.lastError, 'engine died');
@@ -1050,8 +1018,8 @@ test('an error during a turn settles in-flight cards; one between turns touches 
   // Between turns: a settled transcript must not be rewritten by a listing error.
   const settled = reduceEvents(emptyConversation(), [
     { type: 'turn_started', turn_id: 4 },
-    { type: 'tool_use_started', id: 'tu-2', tool: 'Read', input_json: '{}' },
-    { type: 'tool_use_result', id: 'tu-2', tool: 'Read', result_json: '"ok"', is_error: false },
+    { type: 'tool_use_started', id: 'tu-2', tool: 'Read', input_json: '{}', header: READ_HEADER },
+    { type: 'tool_use_result', id: 'tu-2', tool: 'Read', result_json: '"ok"', is_error: false, display: DISPLAY },
     { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST },
   ]);
   const after = reduceEvent(settled, { type: 'error', message: 'could not list models' });
@@ -1065,7 +1033,7 @@ test('a resumed transcript settles a tool_use that has no tool_result', () => {
   const s = conversationFromMessages([{
     role: 'assistant',
     blocks: [
-      { type: 'tool_use', id: 'live', tool: 'Bash', input_json: '{"command":"sleep 900"}' },
+      { type: 'tool_use', id: 'live', tool: 'Bash', input_json: '{"command":"sleep 900"}', header: SHELL_HEADER },
     ],
   }]);
   const tool = firstTool(s);
@@ -1098,17 +1066,17 @@ test('tool_use_result with no matching start upserts the card and keeps its disp
   assert.equal(tool.result, DISPLAY);
   // Addressable afterwards, exactly like a paired card.
   assert.equal(s.toolIndex['orphan'], s.items.indexOf(tool));
-  // The header is the degraded fallback — no start event means no input.
+  // A result carries no start header or input, so show only its tool name.
   assert.equal(tool.view.label, 'Read');
 });
 
 test('an unpaired FAILING result upserts the card without a duplicate error line', () => {
   const s = reduceEvent(emptyConversation(), {
-    type: 'tool_use_result', id: 'orphan', tool: 'Bash', result_json: '"boom"', is_error: true,
+    type: 'tool_use_result', id: 'orphan', tool: 'Bash', result_json: '"boom"', is_error: true, display: DISPLAY,
   });
   const tool = firstTool(s);
   assert.equal(tool.status, 'error');
-  assert.equal(tool.note, 'boom');
+  assert.equal(tool.result, DISPLAY);
   assert.equal(s.lastError, 'Bash failed');
   assert.equal(s.items.length, 1);
   assert.equal(s.items[0]?.type, 'tool');
@@ -1156,8 +1124,8 @@ test('retry retraction removes only the identified completed assistant attempt',
 
 test('success for one Edit does not complete a later Edit of the same file', () => {
   let state = emptyConversation();
-  const start = (id: string) => ({ type: 'tool_use_started' as const, id, tool: 'Edit', input_json: '{"file_path":"ModelStoreScreen.kt"}' });
-  const result = (id: string) => ({ type: 'tool_use_result' as const, id, tool: 'Edit', result_json: '"updated successfully"', is_error: false });
+  const start = (id: string) => ({ type: 'tool_use_started' as const, id, tool: 'Edit', input_json: '{"file_path":"ModelStoreScreen.kt"}', header: READ_HEADER });
+  const result = (id: string) => ({ type: 'tool_use_result' as const, id, tool: 'Edit', result_json: '"updated successfully"', is_error: false, display: DISPLAY });
   state = reduceEvent(state, start('edit-imports'));
   state = reduceEvent(state, result('edit-imports'));
   state = reduceEvent(state, start('edit-layout'));

@@ -40,26 +40,26 @@ afterEach(() => {
   for (const path of temporaryDirectories.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-test('settings parser fails closed and migrates legacy workspaces into bounded projects', () => {
+test('settings parser fails closed and reads only the current project fields', () => {
   assert.deepEqual(parseSettings({ version: 999, lastWorkspace: '/unsafe' }), defaultSettings());
   const parsed = parseSettings({
     version: 1,
-    lastWorkspace: '/p/active',
-    recentWorkspaces: ['/p/0', '/p/active', ...Array.from({ length: 80 }, (_, i) => `/p/${i + 1}`)],
+    projects: ['/p/0', '/p/active'],
+    activeProject: '/p/active',
+    lastWorkspace: '/obsolete/active',
+    recentWorkspaces: ['/obsolete/0', '/obsolete/active'],
   });
-  assert.equal(parsed.projects.length, MAX_PROJECTS);
+  assert.deepEqual(parsed.projects, ['/p/0', '/p/active']);
   assert.equal(parsed.activeProject, '/p/active');
-  assert.deepEqual(parsed.projects.slice(0, 2), ['/p/active', '/p/0']);
   assert.deepEqual(parsed.pinnedSessions, []);
 
-  const explicitlyEmpty = parseSettings({
+  const removedFieldsOnly = parseSettings({
     version: 1,
-    projects: [],
-    lastWorkspace: '/legacy/should-not-return',
-    recentWorkspaces: ['/legacy/should-not-return'],
+    lastWorkspace: '/obsolete/should-not-return',
+    recentWorkspaces: ['/obsolete/should-not-return'],
   });
-  assert.deepEqual(explicitlyEmpty.projects, []);
-  assert.equal(explicitlyEmpty.activeProject, undefined);
+  assert.deepEqual(removedFieldsOnly.projects, []);
+  assert.equal(removedFieldsOnly.activeProject, undefined);
 });
 
 test('local Insights policy defaults enabled and only accepts booleans', () => {
@@ -128,7 +128,7 @@ test('sidebar preferences persist only valid manual session orders', () => {
   assert.deepEqual(settings.sidebar!.manualSessionOrder[project], [sessionId]);
 });
 
-test('thought collapse preference is omitted for legacy settings and rejects invalid stored values', () => {
+test('thought collapse preference remains optional and rejects invalid stored values', () => {
   assert.equal(new SettingsStore(temporaryDirectory()).getPublic().collapseThoughtsByDefault, undefined);
   for (const value of [undefined, null, 'false', 'true', 0, 1, {}, []]) {
     const userData = temporaryDirectory();

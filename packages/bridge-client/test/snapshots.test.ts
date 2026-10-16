@@ -381,20 +381,29 @@ function validateMessageBlock(v: unknown): void {
       );
       break;
     case 'tool_use':
+      exactObjectKeys(
+        o,
+        ['type', 'id', 'tool', 'input_json', 'header'],
+        [],
+        'MessageBlockDto.tool_use',
+      );
       assert.ok(isString(o['id']) && isString(o['tool']) && isString(o['input_json']));
-      if ('header' in o) validateToolHeader(o['header']);
+      validateToolHeader(o['header']);
       break;
     case 'tool_result':
+      exactObjectKeys(
+        o,
+        ['type', 'id', 'tool', 'result_json', 'is_error', 'display'],
+        [],
+        'MessageBlockDto.tool_result',
+      );
       assert.ok(
         isString(o['id']) &&
           isString(o['tool']) &&
           isString(o['result_json']) &&
           isBool(o['is_error']),
       );
-      for (const opt of ['old_string', 'new_string', 'file_path']) {
-        if (opt in o) assert.ok(isString(o[opt]));
-      }
-      if ('display' in o) validateToolResultDisplay(o['display']);
+      validateToolResultDisplay(o['display']);
       break;
     default:
       assert.fail(`unknown MessageBlockDto type: ${String(o['type'])}`);
@@ -1154,20 +1163,24 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isString(o['text']));
       break;
     case 'tool_use_started':
+      exactObjectKeys(o, ['type', 'id', 'tool', 'input_json', 'header'], [], `event snapshot ${name}`);
       assert.ok(isString(o['id']) && isString(o['tool']) && isString(o['input_json']));
-      if ('header' in o) validateToolHeader(o['header']);
+      validateToolHeader(o['header']);
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'tool_heartbeat':
       assert.ok(isString(o['id']) && isString(o['tool']) && isNumber(o['elapsed_ms']));
       break;
     case 'tool_use_result':
+      exactObjectKeys(o, ['type', 'id', 'tool', 'result_json', 'is_error', 'display'], [], `event snapshot ${name}`);
       assert.ok(
         isString(o['id']) &&
           isString(o['tool']) &&
           isString(o['result_json']) &&
           isBool(o['is_error']),
       );
-      if ('display' in o) validateToolResultDisplay(o['display']);
+      validateToolResultDisplay(o['display']);
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'plan_updated':
       assert.ok(Array.isArray(o['tasks']));
@@ -2097,6 +2110,61 @@ test('a widened settings_snapshot validates its four new optional fields, and re
 
 test('message block_set snapshot parses as MessageDto', () => {
   validateMessage(loadSnapshot('message', 'block_set.json'));
+});
+
+test('tool_result uses only the current display diff carrier', () => {
+  const block = {
+    type: 'tool_result',
+    id: 'tool-1',
+    tool: 'Edit',
+    result_json: '{"result":"ok"}',
+    is_error: false,
+    display: {
+      diff: {
+        file_path: 'src/host.rs',
+        language: 'rust',
+        gutter_width: 2,
+        additions: 1,
+        removals: 0,
+        truncated_rows: 1,
+        rows: [],
+      },
+      body_lines: 0,
+    },
+  };
+  validateMessageBlock(block);
+
+  for (const retiredField of ['old_string', 'new_string', 'file_path']) {
+    assert.throws(
+      () => validateMessageBlock({ ...block, [retiredField]: 'retired value' }),
+      /unknown key/,
+      `${retiredField} is no longer part of MessageBlockDto.tool_result`,
+    );
+  }
+  validateMessageBlock({
+    type: 'tool_use',
+    id: 'tool-2',
+    tool: 'Edit',
+    input_json: '{"file_path":"src/host.rs"}',
+    header: { verb: 'update', label: 'Update', primary: 'src/host.rs', title: 'Update(src/host.rs)' },
+  });
+  assert.throws(() => validateMessageBlock({
+    type: 'tool_use', id: 'tool-2', tool: 'Edit', input_json: '{}',
+  }), /unknown key/);
+  assert.throws(() => validateMessageBlock({
+    type: 'tool_result', id: 'tool-3', tool: 'Edit', result_json: '{}', is_error: false,
+  }), /unknown key/);
+});
+
+test('tool call carriers are required on transcript and streaming events', () => {
+  const header = { verb: 'read', label: 'Read', title: 'Read(file.txt)' };
+  const display = { body_lines: 0 };
+  const start = { type: 'tool_use_started', id: 'tool-1', tool: 'Read', input_json: '{}', header } as const;
+  const result = { type: 'tool_use_result', id: 'tool-1', tool: 'Read', result_json: '"ok"', is_error: false, display } as const;
+  assert.deepEqual(validateClientEvent(start), start);
+  assert.deepEqual(validateClientEvent(result), result);
+  assert.throws(() => validateClientEvent({ ...start, header: undefined }), /tool header/);
+  assert.throws(() => validateClientEvent({ ...result, display: undefined }), /tool result display/);
 });
 
 test('permission snapshots parse as PermissionRequest / PermissionResolved', () => {

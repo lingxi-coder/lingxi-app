@@ -17,7 +17,7 @@ const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 function fixture(t: TestContext) {
   const diagnostics = new DiagnosticBuffer();
   const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/permission-scope', trusted: true }),
-    projectPath: '/permission-scope', sessionId: '11111111-2222-4333-8444-555555555555', diagnostics, registerIpc: false });
+    projectPath: '/permission-scope', sessionId: '11111111-2222-4333-8444-555555555555', diagnostics });
   const internal = runtime as any;
   const pending = new Map<number, ReturnType<typeof deferred<Scope>>>();
   const queried: number[] = [];

@@ -521,7 +521,7 @@ visionDelegationEnabled: true
                 tool: "Workflow",
                 resultJson: #"{"status":"async_launched","taskId":"wmo6xnbac"}"#,
                 isError: false,
-                display: nil
+                display: currentToolDisplay()
             ))
 
             await fulfillment(of: [refreshed], timeout: 1)

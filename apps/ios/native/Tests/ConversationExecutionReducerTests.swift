@@ -415,7 +415,7 @@ import SwiftUI
                     id: "task-1",
                     tool: "bash",
                     inputJson: #"{"command":"echo ok","cwd":"/workspace"}"#,
-                    header: nil
+                    header: currentToolHeader()
                 ))
             source.applyForTesting(.toolHeartbeat(id: "task-1", tool: "bash", elapsedMs: 320))
             source.applyForTesting(
@@ -424,7 +424,7 @@ import SwiftUI
                     tool: "bash",
                     resultJson: #"{"data":{"stdout":"ok\n","stderr":"","exit_code":0,"duration_ms":480,"truncated":false}}"#,
                     isError: false,
-                    display: nil
+                    display: currentToolDisplay()
                 ))
 
             guard case let .run(run)? = source.model.items.first(where: {
@@ -453,7 +453,7 @@ import SwiftUI
             source.applyForTesting(.thinkingDelta(thinking: "inspect ", signature: nil))
             source.applyForTesting(.thinkingDelta(thinking: "workspace", signature: nil))
             source.applyForTesting(.toolUseStarted(
-                id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil))
+                id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: currentToolHeader()))
             source.applyForTesting(.textDelta(text: "result text".clientTextDto))
             source.applyForTesting(.systemNotice(message: "waiting".clientTextDto, isError: false))
 
@@ -485,14 +485,14 @@ import SwiftUI
                 id: "tool-a",
                 tool: "Read",
                 inputJson: #"{"path":"a"}"#,
-                header: nil
+                header: currentToolHeader()
             ))
             source.applyForTesting(.textDelta(text: "B".clientTextDto))
             source.applyForTesting(.messageComplete(
                 stopReason: "tool_use",
                 message: MessageDto(role: "assistant", blocks: [
                     .text(text: "A".clientTextDto),
-                    .toolUse(id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil),
+                    .toolUse(id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: currentToolHeader()),
                     .text(text: "B".clientTextDto),
                 ])
             ))
@@ -661,16 +661,16 @@ import SwiftUI
                 id: "t1",
                 tool: "Read",
                 inputJson: #"{"path":"/tmp/a"}"#,
-                header: nil
+                header: currentToolHeader()
             ))
             source.applyForTesting(.textDelta(text: "正文".clientTextDto))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
                 message: MessageDto(role: "assistant", blocks: [
                     .thinking(thinking: "推理", signature: nil),
-                    .toolUse(id: "t1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: nil),
+                    .toolUse(id: "t1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: currentToolHeader()),
                     .text(text: "正文".clientTextDto),
-                    .toolResult(id: "t1", tool: "Read", resultJson: #"{"result":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
+                    .toolResult(id: "t1", tool: "Read", resultJson: #"{"result":"ok"}"#, isError: false, display: currentToolDisplay()),
                 ])))
 
             XCTAssertEqual(source.model.messages.count, 1)
@@ -735,7 +735,7 @@ import SwiftUI
                     id: "task-2",
                     tool: "bash",
                     inputJson: #"{"command":"pwd"}"#,
-                    header: nil
+                    header: currentToolHeader()
                 ))
             source.expectSessionResumeForTesting("new-session")
             source.applyForTesting(.sessionResumed(sessionId: "new-session", mode: .code, messages: []))
@@ -745,7 +745,7 @@ import SwiftUI
                     tool: "bash",
                     resultJson: #"{"data":{"stdout":"stale","stderr":"","exit_code":0}}"#,
                     isError: false,
-                    display: nil
+                    display: currentToolDisplay()
                 ))
 
             XCTAssertTrue(source.model.messages.isEmpty)
@@ -778,7 +778,7 @@ import SwiftUI
                 id: "tool-a",
                 tool: "WebSearch",
                 inputJson: #"{"query":"weather"}"#,
-                header: nil
+                header: currentToolHeader()
             ))
             source.cancel()
             await flushTasks()
@@ -849,13 +849,13 @@ import SwiftUI
                 id: "search-1",
                 tool: "WebSearch",
                 inputJson: #"{"query":"Wuhan weather today"}"#,
-                header: nil
+                header: currentToolHeader()
             ))
             source.applyForTesting(.toolUseStarted(
                 id: "shell-1",
                 tool: "Bash",
                 inputJson: #"{"command":"sleep 30"}"#,
-                header: nil
+                header: currentToolHeader()
             ))
 
             source.cancelForTesting()
@@ -1120,7 +1120,25 @@ import SwiftUI
                         sessionId: "session-a",
                         turnId: 702,
                         sequence: 2,
-                        eventJson: #"{"type":"tool_use_started","id":"tool-702","tool":"Read","input_json":"{}"}"#
+                        eventJson: #"{"type":"tool_use_started","id":"tool-702","tool":"Read","input_json":"{}","header":{"verb":"read","label":"Read","title":"Read"}}"#
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "session-a",
+                        turnId: 702,
+                        sequence: 3,
+                        eventJson: #"{"type":"tool_use_result","id":"tool-702","tool":"Read","result_json":"{}","is_error":false,"display":{"headline":"Retained display","body":"retained body","body_lines":1,"diff":{"file_path":"/tmp/a.rs","language":"rust","gutter_width":1,"additions":1,"removals":0,"truncated_rows":0,"rows":[{"kind":"add","line_no":1,"hunk":0,"word_diffed":false,"segments":[{"text":"🚀 source","class":"plain","bold":false,"italic":false,"underline":false,"emph":false}]}]}}}"#
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "session-a",
+                        turnId: 702,
+                        sequence: 4,
+                        eventJson: #"{"type":"tool_use_started","id":"incomplete-tool","tool":"Read","input_json":"{}"}"#
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "session-a",
+                        turnId: 702,
+                        sequence: 5,
+                        eventJson: #"{"type":"tool_use_result","id":"incomplete-tool","tool":"Read","result_json":"{}","is_error":false}"#
                     ))
                 case .resumeTurn:
                     break
@@ -1137,7 +1155,7 @@ import SwiftUI
                     MessageDto(role: "user", blocks: [.text(text: "run".clientTextDto)]),
                     MessageDto(role: "assistant", blocks: [
                         .text(text: "terminal answer".clientTextDto),
-                        .toolUse(id: "tool-702", tool: "Read", inputJson: "{}", header: nil),
+                        .toolUse(id: "tool-702", tool: "Read", inputJson: "{}", header: currentToolHeader()),
                     ]),
                     MessageDto(role: "user", blocks: [
                         .toolResult(
@@ -1145,10 +1163,7 @@ import SwiftUI
                             tool: "Read",
                             resultJson: #"{"result":"ok"}"#,
                             isError: false,
-                            oldString: nil,
-                            newString: nil,
-                            filePath: nil,
-                            display: nil
+                            display: currentToolDisplay()
                         ),
                     ]),
                 ]
@@ -1172,6 +1187,23 @@ import SwiftUI
                 "retained terminal tool events must not duplicate the restored run"
             )
             XCTAssertFalse(source.model.streaming)
+            guard case let .run(restoredRun)? = source.model.items.first(where: {
+                if case .run = $0 { return true }
+                return false
+            }) else { return XCTFail("expected the restored run") }
+            XCTAssertEqual(
+                restoredRun.tools.count,
+                1,
+                "retained events without current header/display carriers are ignored"
+            )
+            XCTAssertEqual(restoredRun.tools.first?.header?.title, "Read")
+            XCTAssertEqual(restoredRun.tools.first?.display?.headline, "Retained display")
+            XCTAssertEqual(restoredRun.tools.first?.display?.body, "retained body")
+            XCTAssertEqual(
+                restoredRun.tools.first?.display?.diff?.rows.first?.segments.first?.text,
+                "🚀 source",
+                "the durable event's complete current display must survive replay"
+            )
         }
 
         func testEmptyUnconfirmedActiveSessionStillRequestsProcessRestoreReplay() async {
@@ -1842,16 +1874,17 @@ import SwiftUI
             XCTAssertTrue(source.model.expandedToolCalls.isEmpty)
         }
 
-        func testOlderEngineWithoutHeaderOrDisplayKeepsTheLegacySummaries() {
+        func testCurrentToolHeaderAndDisplayAreStoredFromTheWire() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 63, sessionId: "session-a")
             source.applyForTesting(.turnStarted(turnId: 63))
             source.applyForTesting(.toolUseStarted(
                 id: "old-1", tool: "Read",
-                inputJson: #"{"file_path":"/tmp/a"}"#, header: nil))
+                inputJson: #"{"file_path":"/tmp/a"}"#, header: currentToolHeader("Read")))
             source.applyForTesting(.toolUseResult(
                 id: "old-1", tool: "Read",
-                resultJson: #"{"message":"read 3 lines"}"#, isError: false, display: nil))
+                resultJson: #"{"message":"read 3 lines"}"#, isError: false,
+                display: currentToolDisplay(headline: "read 3 lines")))
 
             guard case let .run(run)? = source.model.items.first(where: {
                 if case .run = $0 { return true }
@@ -1859,10 +1892,9 @@ import SwiftUI
             }) else {
                 return XCTFail("expected a run render item")
             }
-            XCTAssertNil(run.tools.first?.header)
-            XCTAssertNil(run.tools.first?.display)
-            XCTAssertEqual(run.tools.first?.inputSummary, "/tmp/a")
-            XCTAssertEqual(run.tools.first?.outputSummary, "read 3 lines")
+            XCTAssertEqual(run.tools.first?.header?.title, "Read")
+            XCTAssertEqual(run.tools.first?.display?.headline, "read 3 lines")
+            XCTAssertNil(run.tools.first?.inputSummary, "current non-shell events do not scrape input_json")
         }
     }
 

@@ -24,6 +24,9 @@ function removalFixture(t: TestContext) {
   const bridge = {
     registerIpc: () => undefined,
     registerWindow: () => undefined,
+    isProjectClosing: () => false,
+    get: () => undefined,
+    runtimeSummaries: [],
     hasActiveWork: (path: string) => {
       calls.activeWork.push(path);
       return activeProjects.has(path);

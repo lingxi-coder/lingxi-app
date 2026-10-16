@@ -101,9 +101,6 @@ object ConversationNotificationRoute {
         val route = cancelRouteSpec(sessionId, turnId)
         return Intent(context, ConversationTurnService::class.java)
             .setAction(route.action)
-            // Keep the legacy extra during rollout; the service prefers
-            // Intent.action and only falls back to this value on redelivery.
-            .putExtra(ConversationTurnService.EXTRA_ACTION, route.action)
             .putExtra(ConversationTurnService.EXTRA_SESSION_ID, route.sessionId)
             .apply {
                 if (route.turnId != null) {

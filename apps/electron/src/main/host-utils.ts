@@ -220,13 +220,9 @@ export function parseSettings(value: unknown): PersistedSettings {
     settings.modelPickerVisibility = parseModelPickerVisibility(value['modelPickerVisibility']);
   }
 
-  const legacyActive = boundedString(value['lastWorkspace'], 32_768);
   const persistedProjects = boundedStringArray(value['projects'], MAX_PROJECTS);
-  const legacyProjects = boundedStringArray(value['recentWorkspaces'], MAX_PROJECTS);
-  settings.projects = Array.isArray(value['projects'])
-    ? persistedProjects
-    : boundedStringArray([legacyActive, ...legacyProjects], MAX_PROJECTS);
-  const requestedActive = boundedString(value['activeProject'], 32_768) ?? legacyActive;
+  settings.projects = persistedProjects;
+  const requestedActive = boundedString(value['activeProject'], 32_768);
   settings.activeProject = requestedActive && settings.projects.includes(requestedActive)
     ? requestedActive
     : settings.projects[0];

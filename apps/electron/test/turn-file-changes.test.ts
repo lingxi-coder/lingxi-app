@@ -7,10 +7,11 @@ const diff = (path = 'src/app.ts', additions = 2, removals = 1): StructuredDiffD
   file_path: path, additions, removals, gutter_width: 2, truncated_rows: 0,
   rows: [{ kind: 'add', line_no: 1, hunk: 0, segments: [{ text: 'updated', class: 'plain' }] }],
 });
+const header = { verb: 'update' as const, label: 'Update', title: 'Update' };
 const end = (formatted = ''): ClientEvent => ({ type: 'turn_ended', outcome: { type: 'end_turn' },
   cost: { formatted, total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 1, session_duration_secs: 1 },
 });
-const start = (id: string): ClientEvent => ({ type: 'tool_use_started', id, tool: 'Edit', input_json: '{}' });
+const start = (id: string): ClientEvent => ({ type: 'tool_use_started', id, tool: 'Edit', input_json: '{}', header });
 const result = (id: string, value = diff(), is_error = false): ClientEvent => ({
   type: 'tool_use_result', id, tool: 'Edit', is_error, result_json: '{}', display: { body_lines: 0, diff: value },
 });
@@ -56,7 +57,7 @@ test('orphan confirmed result contributes once; duplicate result does not double
 });
 test('historical edits are not attributed to the next live turn', () => {
   const history = conversationFromMessages([{ role: 'assistant', blocks: [
-    { type: 'tool_use', id: 'past', tool: 'Edit', input_json: '{}' },
+    { type: 'tool_use', id: 'past', tool: 'Edit', input_json: '{}', header },
   ] }, { role: 'user', blocks: [
     { type: 'tool_result', id: 'past', tool: 'Edit', is_error: false, result_json: '{}', display: { body_lines: 0, diff: diff() } },
   ] }]);

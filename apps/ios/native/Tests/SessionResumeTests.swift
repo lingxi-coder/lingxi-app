@@ -63,7 +63,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
-                MessageDto(role: "assistant", blocks: [.toolUse(id: "missing-result", tool: "Read", inputJson: "{}", header: nil)])
+                MessageDto(role: "assistant", blocks: [.toolUse(id: "missing-result", tool: "Read", inputJson: "{}", header: currentToolHeader())])
             ]))
             let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
                 if case let .run(run) = item { return run }; return nil
@@ -543,7 +543,7 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agentId: agentID,
                 row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [
-                    .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: nil)
+                    .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: currentToolHeader())
                 ]))
             ))
             let liveRun = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
@@ -556,7 +556,7 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agentId: agentID,
                 row: agentRow(index: 1, message: MessageDto(role: "user", blocks: [
-                    .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil)
+                    .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, display: currentToolDisplay())
                 ]))
             ))
 
@@ -593,10 +593,10 @@ visionDelegationEnabled: true)
             source.selectAgent(agentID)
 
             let use = MessageDto(role: "assistant", blocks: [
-                .toolUse(id: "tool-snapshot", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: nil)
+                .toolUse(id: "tool-snapshot", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: currentToolHeader())
             ])
             let result = MessageDto(role: "user", blocks: [
-                .toolResult(id: "tool-snapshot", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil)
+                .toolResult(id: "tool-snapshot", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, display: currentToolDisplay())
             ])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
@@ -1233,10 +1233,9 @@ visionDelegationEnabled: true)
                 .thinking(thinking: "推理", signature: nil),
                 .compactBoundary(messagesBefore: 8, messagesAfter: 2,
                                  summary: "hidden compact summary"),
-                .toolUse(id: "t1", tool: "Read", inputJson: "{\"path\":\"a\"}", header: nil),
+                .toolUse(id: "t1", tool: "Read", inputJson: "{\"path\":\"a\"}", header: currentToolHeader()),
                 .toolResult(id: "t1", tool: "", resultJson: "\"ok\"",
-                            isError: false, oldString: nil, newString: nil, filePath: nil,
-                            display: nil),
+                            isError: false, display: currentToolDisplay()),
             ])
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [assistant]))
@@ -1301,7 +1300,7 @@ visionDelegationEnabled: true)
                         id: "tool-restore",
                         tool: "Read",
                         inputJson: #"{"file_path":"a.rs"}"#,
-                        header: nil),
+                        header: currentToolHeader()),
                 ]),
                 MessageDto(role: "user", blocks: [
                     .toolResult(
@@ -1309,10 +1308,42 @@ visionDelegationEnabled: true)
                         tool: "Read",
                         resultJson: #"{"result":"ok"}"#,
                         isError: false,
-                        oldString: nil,
-                        newString: nil,
-                        filePath: nil,
-                        display: nil),
+                        display: ToolResultDisplayDto(
+                            headline: "Added 1 line",
+                            headlineKind: .added,
+                            headlineArgs: [1],
+                            diff: StructuredDiffDto(
+                                filePath: "src/host.rs",
+                                language: "rust",
+                                gutterWidth: 2,
+                                additions: 1,
+                                removals: 0,
+                                truncatedRows: 1,
+                                rows: [
+                                    DiffRowDto(
+                                        kind: .add,
+                                        lineNo: 8,
+                                        hunk: 3,
+                                        wordDiffed: false,
+                                        segments: [
+                                            CodeSegmentDto(
+                                                text: "new line",
+                                                class: .plain,
+                                                rgb: nil,
+                                                bold: false,
+                                                italic: false,
+                                                underline: false,
+                                                emph: false
+                                            ),
+                                        ]
+                                    ),
+                                ]
+                            ),
+                            body: "new line",
+                            bodyLines: 1,
+                            bodyTruncated: true,
+                            collapsed: true
+                        )),
                 ]),
                 MessageDto(role: "assistant", blocks: [.text(text: "检查完成".clientTextDto)]),
             ]
@@ -1339,6 +1370,9 @@ visionDelegationEnabled: true)
             XCTAssertEqual(run.status, .restored)
             XCTAssertEqual(run.tools.map(\.id), ["tool-restore"])
             XCTAssertEqual(run.tools.first?.status, .completed)
+            XCTAssertEqual(run.tools.first?.display?.diff?.filePath, "src/host.rs")
+            XCTAssertEqual(run.tools.first?.display?.diff?.rows.first?.hunk, 3)
+            XCTAssertEqual(run.tools.first?.display?.diff?.truncatedRows, 1)
         }
 
         func testSessionResumedPreservesNarrativeToolInterleavingWithinOneAssistantMessage() {
@@ -1346,11 +1380,11 @@ visionDelegationEnabled: true)
             let messages: [MessageDto] = [
                 MessageDto(role: "assistant", blocks: [
                     .text(text: "A".clientTextDto),
-                    .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a"}"#, header: nil),
-                    .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"result":"a"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
+                    .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a"}"#, header: currentToolHeader()),
+                    .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"result":"a"}"#, isError: false, display: currentToolDisplay()),
                     .text(text: "B".clientTextDto),
-                    .toolUse(id: "tool-2", tool: "Edit", inputJson: #"{"path":"b"}"#, header: nil),
-                    .toolResult(id: "tool-2", tool: "Edit", resultJson: #"{"result":"b"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil),
+                    .toolUse(id: "tool-2", tool: "Edit", inputJson: #"{"path":"b"}"#, header: currentToolHeader()),
+                    .toolResult(id: "tool-2", tool: "Edit", resultJson: #"{"result":"b"}"#, isError: false, display: currentToolDisplay()),
                     .text(text: "C".clientTextDto),
                 ]),
             ]
@@ -1385,7 +1419,7 @@ visionDelegationEnabled: true)
                         id: "cancelled-tool",
                         tool: "Shell",
                         inputJson: #"{"command":"long job"}"#,
-                        header: nil),
+                        header: currentToolHeader()),
                 ]),
                 MessageDto(role: "user", blocks: [
                     .toolResult(
@@ -1393,10 +1427,7 @@ visionDelegationEnabled: true)
                         tool: "Shell",
                         resultJson: #"{"error":"interrupted","tool_denial_kind":"interrupted"}"#,
                         isError: true,
-                        oldString: nil,
-                        newString: nil,
-                        filePath: nil,
-                        display: nil),
+                        display: currentToolDisplay()),
                 ]),
                 MessageDto(role: "assistant", blocks: [.text(text: "已改用其他方法".clientTextDto)]),
             ]
@@ -1425,12 +1456,11 @@ visionDelegationEnabled: true)
             let source = makeSource()
             let assistant = MessageDto(role: "assistant", blocks: [
                 .text(text: "我来读一下".clientTextDto),
-                .toolUse(id: "t9", tool: "Read", inputJson: "{\"file_path\":\"a.rs\"}", header: nil),
+                .toolUse(id: "t9", tool: "Read", inputJson: "{\"file_path\":\"a.rs\"}", header: currentToolHeader()),
             ])
             let toolTurn = MessageDto(role: "user", blocks: [
                 .toolResult(id: "t9", tool: "Read", resultJson: "{\"result\":\"ok\"}",
-                            isError: false, oldString: nil, newString: nil, filePath: nil,
-                            display: nil),
+                            isError: false, display: currentToolDisplay()),
             ])
             let followUp = MessageDto(role: "user", blocks: [.text(text: "继续".clientTextDto)])
 

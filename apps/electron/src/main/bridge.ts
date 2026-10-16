@@ -30,7 +30,7 @@ import type {
   VisualizationStateWriteDto,
   VisualizationThemeDto,
 } from '@lingxi/bridge-client';
-import type { IpcMainInvokeEvent, WebContents } from 'electron';
+import type { WebContents } from 'electron';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -61,25 +61,12 @@ import {
   urlOrigin,
 } from './bridgeEvents.js';
 import {
-  CH_ANSWER_ASK_USER_QUESTION,
-  CH_APPROVE,
-  CH_APPROVE_COMPUTER_ACCESS,
-  CH_CANCEL,
-  CH_CANCEL_ASK_USER_QUESTION,
-  CH_COMMAND,
   CH_COMPUTER_ACCESS,
-  CH_CONNECTION_STATE,
-  CH_DENY,
-  CH_DENY_COMPUTER_ACCESS,
   CH_EVENT,
-  CH_MOD_UI_CONTROL,
   CH_MOD_UI_FRAME,
   CH_MOD_UI_INVALIDATE,
-  CH_MOD_UI_OPERATION,
   CH_PERMISSION,
-  CH_SEND_PROMPT,
   CH_STATE_CHANGED,
-  ipcMain,
 } from './bridgeIpc.js';
 import type {
   BridgeLaunchConfig,
@@ -195,7 +182,6 @@ export class SessionRuntime {
   private client: BridgeClient | null = null;
   private state: ConnectionState = { status: 'idle' };
   private disposed = false;
-  private ipcRegistered = false;
   private restartChain: Promise<void> = Promise.resolve();
   private generation = 0;
   private launchDir: string | null = null;
@@ -930,7 +916,6 @@ export class SessionRuntime {
     if (this.disposed) throw new Error('SessionRuntime is disposed');
     if (this.startPromise) return this.startPromise;
     if (this.state.status === 'connected') return;
-    if (this.opts.registerIpc !== false) this.registerIpc();
     const startedAt = Date.now();
     const starting = this.restartChain.catch(() => undefined).then(async () => {
       try {
@@ -1045,7 +1030,6 @@ export class SessionRuntime {
   }
 
   restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
-    if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) throw new Error('session runtime is no longer open');
       // This runs after any earlier queued lifecycle work and immediately
@@ -1067,7 +1051,6 @@ export class SessionRuntime {
   }
 
   stop(): Promise<void> {
-    if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
       this.assertNoLiveSideChats();
@@ -2084,14 +2067,6 @@ export class SessionRuntime {
     pending.resolve(event);
   }
 
-  private assertSender(event: IpcMainInvokeEvent): void {
-    const origins = this.targets.get(event.sender);
-    const senderFrame = event.senderFrame;
-    if (!origins || !senderFrame || senderFrame !== event.sender.mainFrame) throw new Error('unauthorized IPC sender');
-    const origin = urlOrigin(senderFrame.url);
-    if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
-  }
-
   sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
     if (this.archiving) throw new Error('This chat is being archived.');
@@ -2228,97 +2203,6 @@ export class SessionRuntime {
     this.requireClient().cancelAskUserQuestion(id);
     this.clearPendingAskUserQuestion(id);
     this.notifyActivityChanged();
-  }
-
-  private registerIpc(): void {
-    if (this.ipcRegistered) return;
-    this.ipcRegistered = true;
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown, images: unknown, turnId?: unknown) => {
-      this.assertSender(event);
-      // The engine owns provider credential resolution. The Electron host must
-      // not reject a prompt merely because no secret crossed its stdin boundary;
-      // CLI/TUI may already have populated the shared secure store.
-      return this.sendPrompt(text, images, turnId);
-    });
-    ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
-      this.assertSender(event);
-      const id = validateRequestId(requestId);
-      const permissionResponse = validatePermissionResponse(response);
-      if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
-      this.requireClient().approvePermission(id, permissionResponse);
-      this.clearPendingPermission(id);
-    });
-    ipcMain.handle(CH_DENY, (event: IpcMainInvokeEvent, requestId: unknown) => {
-      this.assertSender(event);
-      const id = validateRequestId(requestId);
-      if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
-      this.requireClient().denyPermission(id);
-      this.clearPendingPermission(id);
-    });
-    ipcMain.handle(CH_APPROVE_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
-      this.assertSender(event);
-      const id = validateRequestId(requestId);
-      const computerAccessResponse = validateComputerAccessResponse(response);
-      if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
-      this.requireClient().approveComputerAccess(id, computerAccessResponse);
-      this.pendingComputerAccessIds.delete(id);
-    });
-    ipcMain.handle(CH_DENY_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, requestId: unknown) => {
-      this.assertSender(event);
-      const id = validateRequestId(requestId);
-      if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
-      this.requireClient().denyComputerAccess(id);
-      this.pendingComputerAccessIds.delete(id);
-    });
-    ipcMain.handle(CH_ANSWER_ASK_USER_QUESTION, (event: IpcMainInvokeEvent, requestId: unknown, answers: unknown) => {
-      this.assertSender(event);
-      const id = validateRequestId(requestId);
-      const validatedAnswers = validateAskUserQuestionAnswers(answers);
-      if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
-      this.requireClient().answerAskUserQuestion(id, validatedAnswers);
-      this.clearPendingAskUserQuestion(id);
-    });
-    ipcMain.handle(CH_CANCEL_ASK_USER_QUESTION, (event: IpcMainInvokeEvent, requestId: unknown) => {
-      this.assertSender(event);
-      const id = validateRequestId(requestId);
-      if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
-      this.requireClient().cancelAskUserQuestion(id);
-      this.clearPendingAskUserQuestion(id);
-    });
-    ipcMain.handle(CH_CANCEL, (event: IpcMainInvokeEvent, turnId: unknown) => {
-      this.assertSender(event);
-      this.cancelTurn(turnId);
-    });
-    ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
-      this.assertSender(event);
-      await this.dispatchCommand(command);
-    });
-    ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
-      this.assertSender(event);
-      if (sessionId !== this.sessionId) throw new Error('Mod UI session mismatch');
-      return this.dispatchModUiControl(request);
-    });
-    ipcMain.handle(CH_MOD_UI_OPERATION, (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
-      this.assertSender(event);
-      if (sessionId !== this.sessionId) throw new Error('Mod UI session mismatch');
-      return this.dispatchModUiOperation(operation);
-    });
-    ipcMain.handle(CH_CONNECTION_STATE, (event: IpcMainInvokeEvent) => {
-      this.assertSender(event);
-      return this.state;
-    });
-  }
-
-  private unregisterIpc(): void {
-    if (!this.ipcRegistered) return;
-    for (const channel of [
-      CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
-      CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION,
-      CH_CANCEL, CH_COMMAND, CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION, CH_CONNECTION_STATE,
-    ]) {
-      ipcMain.removeHandler(channel);
-    }
-    this.ipcRegistered = false;
   }
 
   /** Renderer UI control is a narrow typed lane, separate from generic `command()`. */
@@ -2841,7 +2725,7 @@ export class SessionRuntime {
     }
   }
 
-  /** Mod UI events always carry a session envelope, including legacy runtimes. */
+  /** Mod UI events always carry a session envelope. */
   private broadcastModUiEvent(channel: string, event: unknown): void {
     const envelope = { sessionId: this.sessionId, event };
     for (const webContents of this.targets.keys()) {
@@ -3055,7 +2939,6 @@ export class SessionRuntime {
     }
     await this.stopBridge();
     this.unsubscribeAudioService?.();
-    this.unregisterIpc();
     this.targets.clear();
   }
 }

@@ -64,7 +64,16 @@ final class MockConversationSource: ConversationSource {
                 tool: "shell",
                 status: terminalToolStatus,
                 inputSummary: "pwd",
-                outputSummary: cancelledRun ? "Shell 已取消" : "Shell 完成",
+                display: ConversationToolResultDisplay(
+                    headline: cancelledRun ? "Shell 已取消" : "Shell 完成",
+                    headlineKind: nil,
+                    headlineArgs: [],
+                    diff: nil,
+                    body: nil,
+                    bodyLines: 0,
+                    bodyTruncated: false,
+                    collapsed: false
+                ),
                 elapsedMs: 42
             )
             let webSearchTrace = ConversationToolTrace(
@@ -72,7 +81,6 @@ final class MockConversationSource: ConversationSource {
                 tool: "WebSearch",
                 status: .cancelled,
                 inputSummary: "Wuhan weather today",
-                outputSummary: nil,
                 elapsedMs: 1_234
             )
             let readTrace = ConversationToolTrace(
@@ -80,7 +88,10 @@ final class MockConversationSource: ConversationSource {
                 tool: "Read",
                 status: .completed,
                 inputSummary: "/workspace/ui-test/README.md",
-                outputSummary: "Read completed",
+                display: ConversationToolResultDisplay(
+                    headline: "Read completed", headlineKind: nil, headlineArgs: [], diff: nil,
+                    body: nil, bodyLines: 0, bodyTruncated: false, collapsed: false
+                ),
                 elapsedMs: 18
             )
             let searchTrace = ConversationToolTrace(
@@ -88,7 +99,10 @@ final class MockConversationSource: ConversationSource {
                 tool: "Grep",
                 status: .completed,
                 inputSummary: "ConversationTimelineView",
-                outputSummary: "Search completed",
+                display: ConversationToolResultDisplay(
+                    headline: "Search completed", headlineKind: nil, headlineArgs: [], diff: nil,
+                    body: nil, bodyLines: 0, bodyTruncated: false, collapsed: false
+                ),
                 elapsedMs: 29
             )
             let toolTraces = cancelledRun ? [webSearchTrace, shellTrace] : [shellTrace, readTrace, searchTrace]
@@ -172,7 +186,7 @@ final class MockConversationSource: ConversationSource {
             if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_ANSWERED_QUESTION"] == "1" {
                 let trace = ConversationToolTrace(
                     id: "ui-answered-question", tool: "AskUserQuestion", status: .completed,
-                    inputSummary: nil, outputSummary: nil, elapsedMs: 12,
+                    inputSummary: nil, elapsedMs: 12,
                     questionAnswers: [.init(question: "这次统一语音服务，要不要同时纳入 provider 原生实时语音对话（双向音频、打断、会话管理）？",
                                              answer: "同时纳入原生实时对话")])
                 source.model.items = [.run(ConversationExecutionRun(
@@ -314,7 +328,7 @@ final class MockConversationSource: ConversationSource {
                 guard let question = model.pendingQuestions.first(where: { $0.requestId == requestId }) else { return }
                 let trace = ConversationToolTrace(
                     id: "mock-ask:\(requestId)", tool: "AskUserQuestion", status: .completed,
-                    inputSummary: nil, outputSummary: nil, elapsedMs: nil,
+                    inputSummary: nil, elapsedMs: nil,
                     questionAnswers: question.questions.map { item in
                         let questionUnits = item.sourceQuestionCodeUnits ?? Array(item.question.utf16)
                         let answer = answers.pairs.last(where: { $0.question.codeUnits == questionUnits })?.answer.displayText

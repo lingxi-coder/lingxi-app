@@ -14,7 +14,6 @@ struct SettingsPages: View {
         case .group(.voice):              VoicePage(store: store)
         case .group(let group):           SettingsGroupPage(group: group, host: host)
         case .providerList(let b):        ProviderListPage(store: store, host: host, kind: b.kind)
-        case .providerPicker(let b):      ProviderPickerPage(store: store, host: host, kind: b.kind)
         case .providerEdit(let b, let id): ProviderEditPage(store: store, host: host, kind: b.kind, providerId: id)
         case .voice:                      VoicePage(store: store)
         case .linuxRuntime:               LinuxRuntimePage(store: store, onOpenTerminal: host.openTerminal)

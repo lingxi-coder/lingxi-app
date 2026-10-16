@@ -18,7 +18,7 @@ test('terminal IPC validates sender, scope and window attachment without a conne
   settings.setActiveSessionDraft(scope);
   const handlers = new Map<string, (...args: any[]) => any>();
   const ipc = { handle: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), removeHandler: (name: string) => handlers.delete(name) };
-  const bridge = { registerWindow() {}, registerIpc() {}, get: (id: string) => id === sessionId ? { projectPath: project, connectionState: { status: 'idle' } } : { projectPath: '/another' } };
+  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, get: (id: string) => id === sessionId ? { projectPath: project, connectionState: { status: 'idle' } } : { projectPath: '/another' } };
   const rows = new Map<string, TerminalSnapshot>();
   const input: string[] = [];
   const manager = {
@@ -75,7 +75,7 @@ test('the host tells the terminal manager when a chat or project goes away', asy
   };
   const replacement = { projectPath: project, sessionId: '22222222-3333-4444-8555-666666666666' };
   const bridge = {
-    registerWindow() {}, registerIpc() {}, hasActiveWork: () => false,
+    registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, hasActiveWork: () => false,
     get: () => ({ projectPath: project, connectionState: { status: 'idle' }, pendingInteractions: 0, pendingAskUserQuestions: [] }),
     closeSession: async () => { calls.push('closeSession'); },
     closeProject: async () => { calls.push('closeProject:bridge'); },
@@ -129,7 +129,7 @@ test('a shell opened in the draft scope follows the chat the New-chat action cre
   const migrations: string[] = [];
   const handlers = new Map<string, (...args: any[]) => any>();
   const ipc = { handle: (name: string, fn: (...args: any[]) => any) => handlers.set(name, fn), removeHandler: (name: string) => handlers.delete(name) };
-  const bridge = { registerWindow() {}, registerIpc() {}, newSession: async () => created, get: () => undefined };
+  const bridge = { registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, newSession: async () => created, get: () => undefined };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
   host.attachTerminals({
     setOutputPaused() {}, onEvent: () => () => {},

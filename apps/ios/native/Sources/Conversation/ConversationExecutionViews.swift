@@ -76,8 +76,7 @@ struct ConversationExecutionRunCard: View {
 
                         if !run.tools.isEmpty {
                             // One renderer for every tool row, live or restored: it consumes
-                            // the engine's derived header/display and falls back to the old
-                            // summaries only when an older engine ships neither.
+                            // the current engine-derived header and result display.
                             VStack(alignment: .leading, spacing: 8) {
                                 ForEach(run.tools) { tool in
                                     ToolCallView(

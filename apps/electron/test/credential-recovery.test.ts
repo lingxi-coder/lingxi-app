@@ -21,7 +21,7 @@ test('bootstrap recovers persisted Codex status after a keychain error without r
     resolve: async () => undefined,
   };
   const host = new HostController(settings as any, {
-    connectionState: { status: 'idle' }, turnActive: false,
+    get: () => undefined, runtimeSummaries: [],
   } as any, new DiagnosticBuffer(), undefined, undefined, undefined, broker as any);
   const read = async () => (await (host as any).bootstrap()).providerCredentials
     .find((entry: { providerId: string }) => entry.providerId === 'openai-chatgpt');

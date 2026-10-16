@@ -45,15 +45,11 @@ enum class AgentRunNoticeKind {
 data class AgentToolRunState(
     val id: String,
     val tool: String,
-    /**
-     * The LEGACY one-line input summary from [summarizeToolInput]. Retained
-     * only as the fallback for an engine that predates [header]; the derived
-     * header supersedes it entirely.
-     */
-    val summary: String? = null,
+    /** Command text for a locally synthesized shell row with no engine header. */
+    val syntheticShellCommand: String? = null,
     val status: AgentToolStatus = AgentToolStatus.Running,
     val elapsedMs: Long? = null,
-    /** Engine-derived call header (`ToolUseStarted.header`). Null on an older engine. */
+    /** Engine-derived start header; null when a result/heartbeat arrives without its start. */
     val header: ToolHeaderUi? = null,
     /** Engine-derived `⎿` block (`ToolUseResult.display`). Null until the call returns. */
     val display: ToolResultDisplayUi? = null,
@@ -68,7 +64,7 @@ data class AgentToolRunState(
         header = header,
         display = display,
         status = status,
-        fallbackSummary = summary,
+        syntheticShellCommand = syntheticShellCommand,
         planMarkdown = planMarkdown,
         questionAnswers = questionAnswers,
         localApp = localApp,
@@ -166,7 +162,7 @@ internal fun AgentRunState.reduceTool(event: ReplyEvent.ToolActivity): AgentRunS
     val replacement = AgentToolRunState(
         id = id,
         tool = tool,
-        summary = event.inputSummary ?: existing?.summary,
+        syntheticShellCommand = event.syntheticShellCommand ?: existing?.syntheticShellCommand,
         planMarkdown = event.planMarkdown ?: existing?.planMarkdown,
         questionAnswers = event.questionAnswers ?: existing?.questionAnswers,
         localApp = event.localApp ?: existing?.localApp,
@@ -260,59 +256,6 @@ internal fun AgentRunState.finish(outcome: AgentRunOutcome): AgentRunState {
     )
 }
 
-/**
- * LEGACY one-line input summary, scraped from `input_json` by regex.
- *
- * The engine now derives the real header once and ships it on
- * `ToolUseStarted.header` — client-side re-parsing of tool JSON is precisely the
- * four-way drift that change deletes. This survives ONLY as the fallback for an
- * engine build that predates the field, and must not grow new keys or callers.
- */
-internal fun summarizeToolInput(inputJson: String): String? {
-    for (key in SAFE_TOOL_INPUT_KEYS) {
-        val match = Regex(
-            "\"${Regex.escape(key)}\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"",
-        ).find(inputJson) ?: continue
-        return match.groupValues[1]
-            .decodeJsonString()
-            .replace(Regex("\\s+"), " ")
-            .trim()
-            .take(MAX_TOOL_SUMMARY_CHARS)
-            .takeIf(String::isNotEmpty)
-    }
-    return null
-}
-
-private fun String.decodeJsonString(): String {
-    val output = StringBuilder(length)
-    var index = 0
-    while (index < length) {
-        val char = this[index++]
-        if (char != '\\' || index >= length) {
-            output.append(char)
-            continue
-        }
-        when (val escaped = this[index++]) {
-            '"', '\\', '/' -> output.append(escaped)
-            'n' -> output.append('\n')
-            'r' -> output.append('\r')
-            't' -> output.append('\t')
-            else -> output.append(escaped)
-        }
-    }
-    return output.toString()
-}
-
-private val SAFE_TOOL_INPUT_KEYS = listOf(
-    "path",
-    "file_path",
-    "query",
-    "pattern",
-    "url",
-    "command",
-    "prompt",
-    "description",
-)
 private const val MAX_REASONING_CHARS = 64 * 1024
 
 /**
@@ -321,5 +264,4 @@ private const val MAX_REASONING_CHARS = 64 * 1024
  */
 internal const val MAX_TOOL_ROWS = 50
 private const val MAX_NOTICE_ROWS = 20
-private const val MAX_TOOL_SUMMARY_CHARS = 160
 private const val AUTO_SCROLL_REASONING_CHARS = 256

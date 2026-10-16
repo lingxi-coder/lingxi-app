@@ -63,7 +63,7 @@ struct ToolCallView: View {
             }
             if !compact || isExpanded {
                 resultBlock
-                legacyFallback
+                syntheticShellDetails
             }
         }
         // Desktop tool rows are borderless and use a 40pt disclosure target;
@@ -200,7 +200,7 @@ struct ToolCallView: View {
                 }
             }
         } else {
-            // Older engine: no header on the wire. Fall back to the raw name.
+            // Orphan or synthetic trace with no observed tool-start header.
             Text(trace.tool)
                 .font(.footnote.weight(.semibold))
                 .foregroundColor(t.text)
@@ -284,9 +284,7 @@ struct ToolCallView: View {
     /// The engine's `collapsed` hint is still useful metadata, but the client
     /// keeps the interaction consistent for short and long outputs alike.
     private var isCollapsible: Bool {
-        guard let display = trace.display else {
-            return !(trace.outputSummary ?? "").isEmpty || !(trace.inputSummary ?? "").isEmpty
-        }
+        guard let display = trace.display else { return !(trace.inputSummary ?? "").isEmpty }
         return display.diff != nil
             || !(display.body ?? "").isEmpty
             || display.bodyTruncated
@@ -303,21 +301,18 @@ struct ToolCallView: View {
         }
     }
 
-    // MARK: legacy fallback (older engine — no header / no display)
+    // MARK: locally-known shell command for synthetic rows
 
     @ViewBuilder
-    private var legacyFallback: some View {
-        if trace.header == nil, let input = trace.inputSummary, !input.isEmpty {
+    private var syntheticShellDetails: some View {
+        if trace.tool.caseInsensitiveCompare("Shell") == .orderedSame,
+           trace.header == nil,
+           let input = trace.inputSummary,
+           !input.isEmpty {
             Text(input)
                 .font(.footnote)
                 .foregroundColor(t.text2)
                 .lineLimit(3)
-        }
-        if trace.display == nil, let output = trace.outputSummary, !output.isEmpty {
-            Text(output)
-                .font(.caption)
-                .foregroundColor(t.text3)
-                .lineLimit(4)
         }
     }
 
@@ -334,9 +329,8 @@ struct ToolCallView: View {
 /// the headline kind IS free text (`failed` / `plain`).
 enum ToolDisplayText {
 
-    /// Maps the engine's stable tool verb to a compact action glyph. For older
-    /// engines without a header, the raw tool name is used as a best-effort
-    /// compatibility fallback.
+    /// Maps the engine's stable tool verb to a compact action glyph. An orphan
+    /// or synthetic row without a start header uses the raw tool name.
     static func icon(header: ConversationToolHeader?, tool: String) -> LXIconName {
         if let header {
             return iconName(for: header.icon(for: tool))

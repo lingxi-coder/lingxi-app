@@ -289,8 +289,7 @@ struct ConversationToolSubLine: Equatable, Hashable {
 /// `ToolHeaderDto`.
 struct ConversationToolHeader: Equatable, Hashable {
     let verb: ConversationToolVerb
-    /// Optional semantic icon from the current engine. `nil` is expected from
-    /// older engines and falls back to `verb`/raw tool name via `icon(for:)`.
+    /// Optional semantic icon; absent icons use the current verb/name mapping.
     let icon: ConversationToolIcon?
     /// English label. Localizing clients compose from `verb` instead — EXCEPT
     /// when the engine set an override the verb cannot express (a subagent
@@ -801,24 +800,17 @@ enum ConversationMessageBlock: Equatable {
     case toolUse(
         id: String,
         tool: String,
-        inputSummary: String,
         inputJson: String,
-        /// Engine-derived header; `nil` on an older engine, where `inputSummary`
-        /// (the legacy client-side summarizer) is the fallback.
-        header: ConversationToolHeader?
+        /// Engine-derived header carried by current MessageBlockDto.ToolUse.
+        header: ConversationToolHeader
     )
     case toolResult(
         id: String,
         tool: String,
         isError: Bool,
-        summary: String,
         resultJson: String,
-        oldString: String?,
-        newString: String?,
-        filePath: String?,
-        /// Engine-derived `⎿` block; `nil` on an older engine. Supersedes the
-        /// three legacy diff fields above, which carry only the raw pair.
-        display: ConversationToolResultDisplay?
+        /// Engine-derived `⎿` block carried by current MessageBlockDto.ToolResult.
+        display: ConversationToolResultDisplay
     )
 }
 
@@ -891,12 +883,8 @@ struct ConversationToolTrace: Identifiable, Equatable {
     let id: String
     var tool: String
     var status: ConversationToolStatus
-    /// LEGACY fallback, produced by `summarizeToolInput` when the engine ships
-    /// no `header`. Never used to rebuild a header when one is present.
+    /// Locally known shell command for synthetic rows that have no engine start event.
     var inputSummary: String?
-    /// LEGACY fallback, produced by `summarizeToolResult` when the engine ships
-    /// no `display`.
-    var outputSummary: String?
     var elapsedMs: UInt64?
     /// The engine-derived header. Present on a current engine.
     var header: ConversationToolHeader? = nil
@@ -1115,42 +1103,6 @@ enum ConversationExecutionParsing {
     static func isShellTool(_ name: String) -> Bool {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized == "shell" || normalized == "bash" || normalized == "terminal"
-    }
-
-    static func summarizeToolInput(_ inputJson: String) -> String? {
-        guard let object = jsonObject(from: inputJson) else {
-            return inputJson.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-        }
-        for key in ["command", "cmd", "path", "file_path", "cwd", "query", "pattern", "url"] {
-            if let value = stringValue(object[key])?.nilIfBlank {
-                return value
-            }
-        }
-        if let first = object.keys.sorted().first,
-           let value = stringValue(object[first])?.nilIfBlank {
-            return value
-        }
-        return inputJson.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-    }
-
-    static func summarizeToolResult(_ resultJson: String, isError: Bool, tool: String) -> String {
-        if isShellTool(tool) {
-            if let finished = shellFinished(id: tool, resultJson: resultJson, isError: isError) {
-                return shellStatusLabel(finished.status)
-            }
-        }
-        guard let object = nestedDataObject(from: resultJson) ?? jsonObject(from: resultJson) else {
-            return isError ? String(localized: "chat_tool_result_failed") : String(localized: "chat_tool_result_completed")
-        }
-        if let error = stringValue(object["error"])?.nilIfBlank {
-            return error
-        }
-        for key in ["message", "summary", "result", "output"] {
-            if let value = stringValue(object[key])?.nilIfBlank {
-                return value
-            }
-        }
-        return isError ? String(localized: "chat_tool_result_failed") : String(localized: "chat_tool_result_completed")
     }
 
     static func isCancellationResult(_ resultJson: String) -> Bool {

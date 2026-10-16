@@ -9,12 +9,14 @@ import { narrationPlans } from '../../src/renderer/bridge/planDocuments';
 import { emptySubmittedPlanState, reduceSubmittedPlanMessages } from '../../src/renderer/bridge/submittedPlan';
 import type { RunItem } from '../../src/renderer/model/runItem';
 const markdown = '# 环境切换 / org info 失效 — 修改方案\n\n## 必须成立的不变量\n\nHttpClientConfig 的所有端点必须属于同一环境。组织信息必须与环境一致。\n\n## 实现步骤\n\n- 初始化环境时保留变化信号，避免重复初始化吞掉切换。\n- 切换时清除旧组织信息，再应用新环境端点。\n- 用不可变快照保障并发读取的一致性。\n\n## 验证\n\n- 检查 dev → prod 和 prod → dev。\n- 验证旧异步请求不会覆盖新状态。\n\n## 默认范围\n\n保留现有会话和用户数据。';
+const toolHeader = { verb: 'generic' as const, label: 'Plan tool', title: 'Plan tool' };
+const toolDisplay = { body_lines: 0 };
 const history: RunItem[] = [{ id: 'proposal', type: 'narration', role: 'assistant', text: markdown }];
 const restored = reduceSubmittedPlanMessages(emptySubmittedPlanState(), [{ role: 'assistant', blocks: [
-  { type: 'tool_use', id: 'write', tool: 'Write', input_json: JSON.stringify({ file_path: '.lingxi/plans/fix.md', content: markdown }) },
-  { type: 'tool_result', id: 'write', tool: 'Write', result_json: '{}', is_error: false },
-  { type: 'tool_use', id: 'exit', tool: 'ExitPlanMode', input_json: '{}' },
-  { type: 'tool_result', id: 'exit', tool: 'ExitPlanMode', result_json: '{"plan":null,"plan_mode":false}', is_error: false },
+  { type: 'tool_use', id: 'write', tool: 'Write', input_json: JSON.stringify({ file_path: '.lingxi/plans/fix.md', content: markdown }), header: toolHeader },
+  { type: 'tool_result', id: 'write', tool: 'Write', result_json: '{}', is_error: false, display: toolDisplay },
+  { type: 'tool_use', id: 'exit', tool: 'ExitPlanMode', input_json: '{}', header: toolHeader },
+  { type: 'tool_result', id: 'exit', tool: 'ExitPlanMode', result_json: '{"plan":null,"plan_mode":false}', is_error: false, display: toolDisplay },
 ] }], 'restored');
 function Fixture() {
   const [open, setOpen] = useState(false);

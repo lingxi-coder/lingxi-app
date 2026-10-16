@@ -14,7 +14,6 @@ async function controller(t: TestContext, nextGeneration = false) {
   const replies: ClientCommand[] = [];
   let historyQueries = 0;
   const runtime = new SessionRuntime({
-    registerIpc: false,
     launchConfig: () => ({ workspace: '/fixture', trusted: true }),
     onCronRunRequested: async () => ({ sessionId: 'target-chat', summary: 'complete' }),
   });

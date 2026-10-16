@@ -463,7 +463,7 @@ struct ConversationSummarySheet: View {
                     switch block {
                     case let .text(text):
                         return PlanDocument.segments(text).compactMap { if case let .plan(plan) = $0 { return plan }; return nil }
-                    case let .toolUse(_, tool, _, input, _):
+                    case let .toolUse(_, tool, input, _):
                         return PlanDocument.tool(tool, json: input).map { [$0] } ?? []
                     default: return []
                     }

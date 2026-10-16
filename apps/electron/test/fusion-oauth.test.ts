@@ -15,7 +15,6 @@ function fixture(resolveOpenAiOAuth = async () => session as typeof session | un
     return true;
   };
   const runtime = new SessionRuntime({
-    registerIpc: false,
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     resolveOpenAiOAuth,
     resolveProviderCredential: async id => { calls.push(`key:${id}`); return undefined; },

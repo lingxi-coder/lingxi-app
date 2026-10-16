@@ -32,16 +32,14 @@ export interface ToolRunItem {
   /** Agent identity returned by a creation tool, retained for timeline placement. */
   readonly agentId?: string;
   readonly status: ToolRunStatus;
-  /** Pre-derived header (engine `header`, or the shared degraded fallback). */
+  /** Pre-derived header, or the tool-name header for an orphan result. */
   readonly view: ToolHeaderDto;
-  /** Pre-derived result block. Absent while running, or on an older engine. */
+  /** Pre-derived result block. Absent while the tool is still running. */
   readonly result?: ToolResultDisplayDto;
   /** Raw parsed tool input retained for Native ToolUse render props. */
   readonly nativeInput?: UiJsonValue;
   /** Raw parsed tool output retained for Native ToolUse/ToolResult render props. */
   readonly nativeOutput?: UiJsonValue;
-  /** Degraded plain-text body used only when {@link result} is absent. */
-  readonly note?: string;
   /** Persisted outer JSONL row UUID, resolved by assistant-block identity events. */
   readonly transcriptUuid?: string;
   /** Host-only content-block key used until the completed row UUID arrives. */
@@ -391,10 +389,7 @@ export function commandDefaultOpen(item: CommandRunItem): boolean {
  * lie, and `Read`-style calls with an empty result are common.
  */
 export function toolHasBody(item: ToolRunItem): boolean {
-  if (item.result) {
-    return Boolean(item.result.diff) || Boolean(item.result.body);
-  }
-  return Boolean(item.note);
+  return Boolean(item.result?.diff) || Boolean(item.result?.body);
 }
 
 /**

@@ -153,7 +153,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     : <span>{view.title}</span>;
 
   const headline = result?.headline;
-  const body = result?.body ?? item.note;
+  const body = result?.body;
   const jsonBody = body === undefined ? undefined : standaloneJsonForDisplay(body);
   const diff = result?.diff;
 

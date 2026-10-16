@@ -91,6 +91,7 @@ impl LocalApiStub {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(CLI_TIMEOUT)).unwrap();
                         let request = read_http_request(&mut stream).unwrap();
                         write_http_response(&mut stream, status, &response_body, &content_type)

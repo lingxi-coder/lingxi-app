@@ -1,7 +1,6 @@
 package com.lingxi.code.conversation
 
 import android.app.PendingIntent
-import android.content.Intent
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.model.SessionMode
@@ -37,11 +36,6 @@ class ConversationNotificationRouteInstrumentedTest {
         assertEquals("code", intent.getStringExtra(ConversationTurnService.EXTRA_SESSION_MODE))
         assertEquals("global", intent.getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY))
         assertNull(intent.data)
-        assertEquals(
-            ConversationTurnService.ACTION_CANCEL,
-            intent.getStringExtra(ConversationTurnService.EXTRA_ACTION),
-        )
-        assertEquals(ConversationTurnService.ACTION_CANCEL, conversationServiceAction(intent))
 
         val pending = PendingIntent.getService(
             context,
@@ -53,12 +47,4 @@ class ConversationNotificationRouteInstrumentedTest {
         pending.cancel()
     }
 
-    @Test
-    fun legacyExtraStillDispatchesWhenActionIsAbsent() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val legacy = Intent(context, ConversationTurnService::class.java)
-            .putExtra(ConversationTurnService.EXTRA_ACTION, ConversationTurnService.ACTION_CANCEL)
-
-        assertEquals(ConversationTurnService.ACTION_CANCEL, conversationServiceAction(legacy))
-    }
 }

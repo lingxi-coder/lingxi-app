@@ -197,7 +197,6 @@ final class ConversationRenderLayoutTests: XCTestCase {
             tool: name,
             status: .completed,
             inputSummary: nil,
-            outputSummary: nil,
             elapsedMs: nil
         )
     }

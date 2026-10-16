@@ -1345,9 +1345,9 @@ class ChatViewModelReducerTest {
             ReplyEvent.ToolActivity(
                 label = "调用工具 Read…",
                 id = "tool-1",
-                tool = "Read",
+                tool = "Shell",
                 status = AgentToolStatus.Running,
-                inputSummary = "/workspace/index.html",
+                syntheticShellCommand = "/workspace/index.html",
             ),
         )
         vm.reduce(
@@ -1362,7 +1362,7 @@ class ChatViewModelReducerTest {
 
         val tools = vm.state.value.agentRun!!.tools
         assertEquals(1, tools.size)
-        assertEquals("/workspace/index.html", tools.single().summary)
+        assertEquals("/workspace/index.html", tools.single().syntheticShellCommand)
         assertEquals(AgentToolStatus.Completed, tools.single().status)
         assertEquals(120L, tools.single().elapsedMs)
     }
@@ -2335,7 +2335,7 @@ class ChatViewModelReducerTest {
                 id = "sh1",
                 tool = "bash",
                 inputJson = """{"command":"echo ok","cwd":"/workspace"}""",
-                header = null,
+                header = currentToolHeaderFixture(label = "Bash"),
             ),
             ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost()),
         )

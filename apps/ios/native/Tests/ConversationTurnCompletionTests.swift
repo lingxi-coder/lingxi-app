@@ -397,7 +397,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                         sessionId: "test-session",
                         turnId: turnID,
                         sequence: 3,
-                        eventJson: #"{"type":"tool_use_started","id":"replayed-tool","tool":"Read","input_json":"{}"}"#
+                        eventJson: #"{"type":"tool_use_started","id":"replayed-tool","tool":"Read","input_json":"{}","header":{"verb":"read","label":"Read","title":"Read"}}"#
                     ))
                 case .resumeTurn:
                     throw ResumeFailure.rejected
@@ -651,7 +651,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
                 id: "ordered-tool",
                 tool: "Read",
                 inputJson: #"{"path":"a"}"#,
-                header: nil
+                header: currentToolHeader()
             ))
             listener.enqueueForTesting(.textDelta(text: "after tool".clientTextDto))
             await listener.waitUntilIdle()
@@ -733,17 +733,14 @@ final class ConversationTurnCompletionTests: XCTestCase {
                     stopReason: "end_turn",
                     message: MessageDto(role: "assistant", blocks: [
                         .thinking(thinking: "private reasoning", signature: nil),
-                        .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: nil),
+                        .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: currentToolHeader()),
                         .text(text: "  spoken answer  ".clientTextDto),
                         .toolResult(
                             id: "tool-1",
                             tool: "Read",
                             resultJson: #"{"result":"secret tool output"}"#,
                             isError: false,
-                            oldString: nil,
-                            newString: nil,
-                            filePath: nil,
-                            display: nil
+                            display: currentToolDisplay()
                         ),
                     ])
                 )
@@ -949,7 +946,6 @@ final class ConversationBackgroundExecutionControllerTests: XCTestCase {
                     tool: "Shell",
                     status: .running,
                     inputSummary: nil,
-                    outputSummary: nil,
                     elapsedMs: nil
                 )]
             )),

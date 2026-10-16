@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '25.0.0';
+export const CLIENT_PROTOCOL_VERSION = '26.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -903,7 +903,7 @@ export type MessageBlockDto =
       id: string;
       tool: string;
       input_json: string;
-      header?: ToolHeaderDto;
+      header: ToolHeaderDto;
     }
   | {
       type: 'tool_result';
@@ -911,11 +911,7 @@ export type MessageBlockDto =
       tool: string;
       result_json: string;
       is_error: boolean;
-      /** Legacy raw diff pair; `display.diff` supersedes it. */
-      old_string?: string;
-      new_string?: string;
-      file_path?: string;
-      display?: ToolResultDisplayDto;
+      display: ToolResultDisplayDto;
     }
   /** An inline visualization placed by a reference line; no `reference` renders "unavailable". */
   | { type: 'visualization'; reference?: VisualizationRefDto };
@@ -1659,7 +1655,7 @@ export type ClientEvent =
       id: string;
       tool: string;
       input_json: string;
-      header?: ToolHeaderDto;
+      header: ToolHeaderDto;
     }
   | { type: 'tool_heartbeat'; id: string; tool: string; elapsed_ms: number }
   | {
@@ -1668,7 +1664,7 @@ export type ClientEvent =
       tool: string;
       result_json: string;
       is_error: boolean;
-      display?: ToolResultDisplayDto;
+      display: ToolResultDisplayDto;
     }
   | { type: 'plan_updated'; tasks: PlanTaskDto[] }
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }

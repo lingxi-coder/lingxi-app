@@ -14,6 +14,8 @@ import type {
   AudioOwnerDto,
   AudioReadinessStateDto,
   ClientEvent,
+  ToolHeaderDto,
+  ToolResultDisplayDto,
   FusionCatalogDto,
   MessageDto,
   PermissionRequest,
@@ -81,6 +83,86 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name);
 }
 
+const TOOL_VERBS = ['update', 'create', 'read', 'search', 'shell', 'output', 'kill', 'fetch', 'task', 'todo', 'skill', 'generic'];
+const TOOL_ICONS = ['read', 'search', 'list', 'edit', 'terminal', 'globe', 'workflow', 'list_checks', 'sparkles', 'plug', 'output', 'stop', 'wrench'];
+const HEADLINE_KINDS = ['added', 'removed', 'added_removed', 'lines_read', 'lines_read_partial', 'files_found', 'files_found_truncated', 'lines_found', 'matches_found', 'interrupted', 'no_content', 'failed', 'plain'];
+const DIFF_LINE_KINDS = ['add', 'remove', 'context'];
+const SYNTAX_CLASSES = ['plain', 'keyword', 'type_name', 'function', 'string_lit', 'number', 'comment', 'punctuation', 'operator', 'variable', 'constant', 'attribute'];
+
+function toolHeader(value: unknown, name: string): ToolHeaderDto {
+  const input = object(value, name);
+  exactKeys(input, ['verb', 'icon', 'label', 'primary', 'qualifier', 'count', 'sub_line', 'title'], name);
+  if (!TOOL_VERBS.includes(String(input['verb']))) throw new Error(`invalid ${name} verb`);
+  if (input['icon'] !== undefined && !TOOL_ICONS.includes(String(input['icon']))) throw new Error(`invalid ${name} icon`);
+  string(input['label'], `${name} label`);
+  string(input['title'], `${name} title`);
+  optionalString(input['primary'], `${name} primary`);
+  optionalString(input['qualifier'], `${name} qualifier`);
+  if (input['count'] !== undefined) integer(input['count'], `${name} count`);
+  if (input['sub_line'] !== undefined) {
+    const subLine = object(input['sub_line'], `${name} sub-line`);
+    exactKeys(subLine, ['prefix', 'text'], `${name} sub-line`);
+    string(subLine['prefix'], `${name} sub-line prefix`);
+    string(subLine['text'], `${name} sub-line text`);
+  }
+  return input as unknown as ToolHeaderDto;
+}
+
+function toolResultDisplay(value: unknown, name: string): ToolResultDisplayDto {
+  const input = object(value, name);
+  exactKeys(input, ['headline', 'headline_kind', 'headline_args', 'diff', 'body', 'body_lines', 'body_truncated', 'collapsed'], name);
+  optionalString(input['headline'], `${name} headline`);
+  if (input['headline_kind'] !== undefined && !HEADLINE_KINDS.includes(String(input['headline_kind']))) {
+    throw new Error(`invalid ${name} headline kind`);
+  }
+  if (input['headline_args'] !== undefined) {
+    if (!Array.isArray(input['headline_args'])) throw new Error(`invalid ${name} headline args`);
+    input['headline_args'].forEach((value, index) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`invalid ${name} headline arg ${index}`);
+    });
+  }
+  if (input['diff'] !== undefined) structuredDiff(input['diff'], `${name} diff`);
+  optionalString(input['body'], `${name} body`);
+  integer(input['body_lines'], `${name} body lines`);
+  if (input['body_truncated'] !== undefined) boolean(input['body_truncated'], `${name} body truncated`);
+  if (input['collapsed'] !== undefined) boolean(input['collapsed'], `${name} collapsed`);
+  return input as unknown as ToolResultDisplayDto;
+}
+
+function structuredDiff(value: unknown, name: string): void {
+  const input = object(value, name);
+  exactKeys(input, ['file_path', 'language', 'gutter_width', 'additions', 'removals', 'truncated_rows', 'rows'], name);
+  optionalString(input['file_path'], `${name} file path`);
+  optionalString(input['language'], `${name} language`);
+  integer(input['gutter_width'], `${name} gutter width`);
+  integer(input['additions'], `${name} additions`);
+  integer(input['removals'], `${name} removals`);
+  integer(input['truncated_rows'], `${name} truncated rows`);
+  if (!Array.isArray(input['rows'])) throw new Error(`invalid ${name} rows`);
+  for (const [rowIndex, value] of input['rows'].entries()) {
+    const row = object(value, `${name} row ${rowIndex}`);
+    exactKeys(row, ['kind', 'line_no', 'hunk', 'word_diffed', 'segments'], `${name} row ${rowIndex}`);
+    if (!DIFF_LINE_KINDS.includes(String(row['kind']))) throw new Error(`invalid ${name} row kind`);
+    integer(row['line_no'], `${name} line number`);
+    integer(row['hunk'], `${name} hunk`);
+    if (row['word_diffed'] !== undefined) boolean(row['word_diffed'], `${name} word diffed`);
+    if (!Array.isArray(row['segments'])) throw new Error(`invalid ${name} row segments`);
+    for (const [segmentIndex, value] of row['segments'].entries()) {
+      const segment = object(value, `${name} segment ${segmentIndex}`);
+      exactKeys(segment, ['text', 'class', 'rgb', 'bold', 'italic', 'underline', 'emph'], `${name} segment ${segmentIndex}`);
+      if (typeof segment['text'] !== 'string' || !SYNTAX_CLASSES.includes(String(segment['class']))) {
+        throw new Error(`invalid ${name} segment`);
+      }
+      if (segment['rgb'] !== undefined && (typeof segment['rgb'] !== 'number' || !Number.isSafeInteger(segment['rgb']))) {
+        throw new Error(`invalid ${name} segment RGB`);
+      }
+      for (const flag of ['bold', 'italic', 'underline', 'emph']) {
+        if (segment[flag] !== undefined) boolean(segment[flag], `${name} segment ${flag}`);
+      }
+    }
+  }
+}
+
 const VISUALIZATION_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** A visualization reference: `[A-Za-z0-9_-]{1,64}` id and a positive revision. */
@@ -125,12 +207,14 @@ function conversationMessage(value: unknown): MessageDto {
         string(block['id'], 'session agent tool use id');
         string(block['tool'], 'session agent tool name');
         string(block['input_json'], 'session agent tool input');
+        toolHeader(block['header'], 'session agent tool header');
         break;
       case 'tool_result':
         string(block['id'], 'session agent tool result id');
         string(block['tool'], 'session agent tool result name');
         if (typeof block['result_json'] !== 'string') throw new Error('invalid session agent tool result');
         boolean(block['is_error'], 'session agent tool result error');
+        toolResultDisplay(block['display'], 'session agent tool result display');
         break;
       case 'visualization':
         exactKeys(block, ['type', 'reference'], 'session agent visualization block');
@@ -1133,6 +1217,25 @@ export function validateClientEvent(value: unknown): ClientEvent {
         ...(reference === undefined ? {} : { reference }),
       };
     }
+    case 'tool_use_started':
+      exactKeys(input, ['type', 'id', 'tool', 'input_json', 'header'], 'client event');
+      return {
+        type,
+        id: string(input['id'], 'tool use id'),
+        tool: string(input['tool'], 'tool name'),
+        input_json: string(input['input_json'], 'tool input JSON'),
+        header: toolHeader(input['header'], 'tool header'),
+      };
+    case 'tool_use_result':
+      exactKeys(input, ['type', 'id', 'tool', 'result_json', 'is_error', 'display'], 'client event');
+      return {
+        type,
+        id: string(input['id'], 'tool result id'),
+        tool: string(input['tool'], 'tool name'),
+        result_json: string(input['result_json'], 'tool result JSON'),
+        is_error: boolean(input['is_error'], 'tool result error'),
+        display: toolResultDisplay(input['display'], 'tool result display'),
+      };
     case 'prompt_suggestion':
       exactKeys(input, ['type', 'suggestion', 'uuid', 'session_id'], 'client event');
       return {

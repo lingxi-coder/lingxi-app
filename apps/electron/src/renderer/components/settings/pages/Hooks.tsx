@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import type { HookAdminCommandDto, HookDto } from '@lingxi/bridge-client';
+import type { HookDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -80,11 +80,6 @@ function selectionGroup(selection: HookSelection): number | null {
   return selection.kind === 'group' || selection.kind === 'handler' ? selection.groupIndex : null;
 }
 
-function callHookAdmin(bridge: PageContentProps['bridge'], command: HookAdminCommandDto | Record<string, unknown>) {
-  const admin = (bridge as { hookAdmin?: (payload: unknown) => Promise<unknown> }).hookAdmin;
-  return typeof admin === 'function' ? admin(command) : Promise.resolve();
-}
-
 function hooksDocumentFromDetails(raw: string | null | undefined): HookDocumentEnvelope | null {
   const parsed = parseEventEnvelope<Partial<HookDocumentEnvelope> | null>(raw, null);
   if (!parsed || typeof parsed.scope !== 'string' || typeof parsed.revision_sha256 !== 'string') return null;
@@ -131,7 +126,6 @@ function runtimeSummary(hook: HookDto): string {
 
 export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLayer }: PageContentProps) {
   const t = useT();
-  const adminAvailable = typeof (bridge as { hookAdmin?: unknown }).hookAdmin === 'function';
   const hookOperation = bridge.configurationOperations?.hook ?? null;
   const [document, setDocument] = useState<HookDocumentEnvelope | null>(null);
   const [selection, setSelection] = useState<HookSelection>({ kind: 'all' });
@@ -149,33 +143,14 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
   }, [hookOperation?.details_json]);
 
   useEffect(() => {
-    if (!adminAvailable) {
-      const own = asRecord(snapshot?.layers?.[editingLayer]?.hooks);
-      const effective = asRecord(snapshot?.effective?.hooks);
-      setDocument({
-        scope: editingLayer,
-        revision_sha256: '',
-        own_json: prettyJson(own),
-        effective_json: prettyJson(effective),
-      });
-      return;
-    }
     setLoading(true);
-    void callHookAdmin(bridge, { action: 'get_document', scope: editingLayer })
+    void bridge.hookAdmin({ action: 'get_document', scope: editingLayer })
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法读取 hooks 文档。'))
       .finally(() => setLoading(false));
-  }, [adminAvailable, bridge.hookAdmin, editingLayer]);
+  }, [bridge.hookAdmin, editingLayer]);
 
-  const ownObject = useMemo(() => parseObject(document?.own_json ?? '{}'), [document?.own_json]);
-  const ownHooks = useMemo(() => {
-    const legacyNested = asRecord(ownObject.hooks);
-    return Object.keys(legacyNested).length > 0 ? legacyNested : ownObject;
-  }, [ownObject]);
-  const effectiveObject = useMemo(() => parseObject(document?.effective_json ?? '{}'), [document?.effective_json]);
-  const effectiveHooks = useMemo(() => {
-    const legacyNested = asRecord(effectiveObject.hooks);
-    return Object.keys(legacyNested).length > 0 ? legacyNested : effectiveObject;
-  }, [effectiveObject]);
+  const ownHooks = useMemo(() => parseObject(document?.own_json ?? '{}'), [document?.own_json]);
+  const effectiveHooks = useMemo(() => parseObject(document?.effective_json ?? '{}'), [document?.effective_json]);
   const draftHooks = useMemo(() => parseObject(draftText), [draftText]);
   const availableEvents = HOOK_EVENTS.filter((event) => !(event in draftHooks));
   const eventSummaries = useMemo(() => hookEvents(draftHooks), [draftHooks]);
@@ -287,7 +262,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
     }
     setPageError(null);
     setLoading(true);
-    void callHookAdmin(bridge, {
+    void bridge.hookAdmin({
       action: 'validate_document',
       operation_id: nextConfigurationOperationId(),
       payload_json: JSON.stringify({ scope: editingLayer, hooks }),
@@ -307,14 +282,14 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
     }
     setPageError(null);
     setLoading(true);
-    void callHookAdmin(bridge, {
+    void bridge.hookAdmin({
       action: 'save_document',
       operation_id: nextConfigurationOperationId(),
       scope: editingLayer,
       revision: document.revision_sha256,
       payload_json: JSON.stringify({ scope: editingLayer, hooks }),
     })
-      .then(() => callHookAdmin(bridge, { action: 'get_document', scope: editingLayer }))
+      .then(() => bridge.hookAdmin({ action: 'get_document', scope: editingLayer }))
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 hooks。'))
       .finally(() => setLoading(false));
   };
@@ -532,7 +507,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
           <button type="button" disabled={loading} onClick={validateHooks} style={ghostButtonStyle(t, loading)}>
             预检
           </button>
-          <button type="button" disabled={loading || !dirty || !adminAvailable || !document.revision_sha256} onClick={saveHooks} className="hooks-save" style={ghostButtonStyle(t, loading || !dirty || !adminAvailable || !document.revision_sha256)}>
+          <button type="button" disabled={loading || !dirty || !document.revision_sha256} onClick={saveHooks} className="hooks-save" style={ghostButtonStyle(t, loading || !dirty || !document.revision_sha256)}>
             保存
           </button>
           <button type="button" disabled={loading || !dirty} onClick={discardDraft} style={ghostButtonStyle(t, loading || !dirty, true)}>

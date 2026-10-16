@@ -56,8 +56,8 @@ import com.lingxi.code.theme.LingXiTheme
  * This composable NEVER touches `input_json` / `result_json`. Everything it
  * shows arrives on the wire already derived once, engine-side; re-deriving it
  * here is the four-way drift this whole change exists to delete. The one
- * exception is [ToolCallUi.fallbackSummary] — the OLD `summarizeToolInput`
- * one-liner, rendered only when an older engine sent no `header` at all.
+ * exception is [ToolCallUi.syntheticShellCommand] — locally known command text
+ * for a synthetic shell row that has no engine start event.
  *
  * ### Collapse state is NOT held here
  *
@@ -145,10 +145,8 @@ internal fun ToolCallView(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                // Older engine, no header: the legacy one-line input summary is
-                // all we have. Kept deliberately as the compatibility floor.
-                if (call.header == null) {
-                    call.fallbackSummary?.let {
+                if (call.tool.equals("Shell", ignoreCase = true) && call.header == null) {
+                    call.syntheticShellCommand?.let {
                         Text(
                             text = it,
                             color = t.text3,

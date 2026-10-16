@@ -48,7 +48,7 @@ struct SessionDetailsView: View {
                     id: "tool:\(run.id):\(tool.id)",
                     title: tool.tool,
                     detail: [tool.header.map(ToolDisplayText.title), tool.inputSummary,
-                             tool.display?.body ?? tool.outputSummary]
+                             tool.display?.body]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n"),
                     status: tool.status.label,
                     accent: taskColor(tool.status)
@@ -75,7 +75,7 @@ struct SessionDetailsView: View {
                     switch block {
                     case let .text(text):
                         return PlanDocument.segments(text).compactMap { if case let .plan(plan) = $0 { return plan }; return nil }
-                    case let .toolUse(_, tool, _, input, _):
+                    case let .toolUse(_, tool, input, _):
                         return PlanDocument.tool(tool, json: input).map { [$0] } ?? []
                     default: return []
                     }

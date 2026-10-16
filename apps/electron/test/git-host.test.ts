@@ -12,7 +12,7 @@ test('Git IPC requires known session and trusted main frame, works without model
  const settings=new SettingsStore(join(dir,'settings'));settings.addProject(project);
  const scope={projectPath:project,sessionId:'11111111-2222-4333-8444-555555555555'};settings.setActiveSessionDraft(scope);
  const handlers=new Map<string,Function>();const ipc={handle:(key:string,fn:Function)=>handlers.set(key,fn),removeHandler:(key:string)=>handlers.delete(key)};
- const bridge={registerIpc(){},registerWindow(){},get:(id:string)=>id===scope.sessionId?{projectPath:project,connectionState:{status:'idle'}}:{projectPath:'/different'}};
+ const bridge={registerIpc(){},registerWindow(){},isProjectClosing:()=>false,get:(id:string)=>id===scope.sessionId?{projectPath:project,connectionState:{status:'idle'}}:{projectPath:'/different'}};
  let watched=0,closed=0,calls=0;let repository=false;
  const service={onChanged:()=>()=>{},watch:async()=>{watched++;return()=>{closed++;};},request:async(_scope:unknown,request:any)=>{calls++;if(request.kind==='init')repository=true;return{status:{repository}};}};
  const host=new HostController(settings,bridge as any,new DiagnosticBuffer(),undefined,ipc as any);host.attachGit(service as any);
@@ -51,6 +51,7 @@ test('removing a project releases the Git watch it left running', async () => {
   const ipc = { handle: (key: string, fn: Function) => handlers.set(key, fn), removeHandler: (key: string) => handlers.delete(key) };
   const bridge = {
     registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
+    isProjectClosing: () => false,
     get: () => ({ projectPath: project, connectionState: { status: 'idle' } }),
     closeProject: async () => undefined,
   };

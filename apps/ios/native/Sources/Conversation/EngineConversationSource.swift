@@ -1,4 +1,5 @@
 import Combine
+import CoreFoundation
 import Foundation
 import OSLog
 import SwiftUI
@@ -783,7 +784,7 @@ final class EngineConversationSource: ConversationSource {
     private func upsertTool(
         id: String,
         tool: String,
-        fallbackSummary: String?,
+        syntheticInputSummary: String?,
         mutate: (inout ConversationToolTrace) -> Void
     ) {
         updateActiveRun { run in
@@ -796,8 +797,7 @@ final class EngineConversationSource: ConversationSource {
                     id: id,
                     tool: tool,
                     status: .running,
-                    inputSummary: fallbackSummary,
-                    outputSummary: nil,
+                    inputSummary: syntheticInputSummary,
                     elapsedMs: nil
                 )
                 mutate(&trace)
@@ -2566,7 +2566,6 @@ final class EngineConversationSource: ConversationSource {
                 merged.tool = trace.tool.isEmpty ? merged.tool : trace.tool
                 merged.status = trace.status
                 merged.inputSummary = trace.inputSummary ?? merged.inputSummary
-                merged.outputSummary = trace.outputSummary ?? merged.outputSummary
                 merged.elapsedMs = trace.elapsedMs ?? merged.elapsedMs
                 merged.header = trace.header ?? merged.header
                 merged.display = trace.display ?? merged.display
@@ -3271,10 +3270,8 @@ final class EngineConversationSource: ConversationSource {
                 "tool started id=\(id, privacy: .public) name=\(tool, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public)"
             )
             guard accepted else { return }
-            // The engine derived the header once; we render THAT. The old
-            // client-side summarizer below survives only as the fallback for
-            // an engine too old to send one.
-            let derivedHeader = header.map(Self.toolHeader(from:))
+            // The current protocol requires the engine-derived header.
+            let derivedHeader = Self.toolHeader(from: header)
             // A tool starts a new timeline phase. The next text delta must
             // open a distinct message row rather than append across the tool.
             streamingIndex = nil
@@ -3295,7 +3292,7 @@ final class EngineConversationSource: ConversationSource {
                     card.cwd = started.cwd
                     card.status = .running
                 })
-                upsertTool(id: id, tool: "Shell", fallbackSummary: started.command) { trace in
+                upsertTool(id: id, tool: "Shell", syntheticInputSummary: started.command) { trace in
                     trace.tool = "Shell"
                     trace.status = .running
                     trace.inputSummary = started.command
@@ -3304,11 +3301,9 @@ final class EngineConversationSource: ConversationSource {
                 model.statusLine = String(localized: "chat_shell_running")
                 model.updateMainAgent(status: "working", latestActivity: model.statusLine)
             } else {
-                let summary = ConversationExecutionParsing.summarizeToolInput(inputJson)
-                upsertTool(id: id, tool: tool, fallbackSummary: summary) { trace in
+                upsertTool(id: id, tool: tool, syntheticInputSummary: nil) { trace in
                     trace.tool = tool
                     trace.status = .running
-                    trace.inputSummary = summary
                     trace.planDocument = PlanDocument.tool(tool, json: inputJson)
                     trace.header = derivedHeader
                 }
@@ -3333,7 +3328,7 @@ final class EngineConversationSource: ConversationSource {
                 }, mutate: { card in
                     card.durationMs = elapsedMs
                 })
-                upsertTool(id: id, tool: "Shell", fallbackSummary: nil) { trace in
+                upsertTool(id: id, tool: "Shell", syntheticInputSummary: nil) { trace in
                     trace.tool = "Shell"
                     trace.status = .running
                     trace.elapsedMs = elapsedMs
@@ -3341,7 +3336,7 @@ final class EngineConversationSource: ConversationSource {
                 model.statusLine = String(localized: "chat_shell_running")
                 model.updateMainAgent(status: "working", latestActivity: model.statusLine)
             } else {
-                upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
+                upsertTool(id: id, tool: tool, syntheticInputSummary: nil) { trace in
                     trace.tool = tool
                     trace.status = .running
                     trace.elapsedMs = elapsedMs
@@ -3356,9 +3351,8 @@ final class EngineConversationSource: ConversationSource {
                 "tool result id=\(id, privacy: .public) name=\(tool, privacy: .public) is_error=\(isError, privacy: .public) turn=\(self.currentTurnId ?? 0, privacy: .public) accepted=\(accepted, privacy: .public)"
             )
             guard accepted else { return }
-            // The pre-derived `⎿` block (headline / diff / clamped body).
-            // `summarizeToolResult` below stays only as the older-engine path.
-            let derivedDisplay = display.map(Self.resultDisplay(from:))
+            // The current protocol requires the engine-derived result block.
+            let derivedDisplay = Self.resultDisplay(from: display)
             let wasCancelled = ConversationExecutionParsing.isCancellationResult(resultJson)
             if ConversationExecutionParsing.isShellTool(tool) {
                 let finished = ConversationExecutionParsing.shellFinished(id: id, resultJson: resultJson, isError: isError)
@@ -3384,30 +3378,24 @@ final class EngineConversationSource: ConversationSource {
                         card.status = resolvedShellStatus
                     }
                 })
-                upsertTool(id: id, tool: "Shell", fallbackSummary: nil) { trace in
+                upsertTool(id: id, tool: "Shell", syntheticInputSummary: nil) { trace in
                     trace.tool = "Shell"
                     trace.status = resolvedShellStatus.asToolStatus
                     trace.display = derivedDisplay
                     trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
-                    trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
                     trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
                 }
                 model.statusLine = ConversationExecutionParsing.shellStatusLabel(resolvedShellStatus)
                 model.updateMainAgent(status: "working", latestActivity: model.statusLine)
             } else {
-                upsertTool(id: id, tool: tool, fallbackSummary: nil) { trace in
+                upsertTool(id: id, tool: tool, syntheticInputSummary: nil) { trace in
                     trace.tool = tool
                     trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
                     trace.display = derivedDisplay
                     trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
-                    trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
-                        resultJson,
-                        isError: isError,
-                        tool: tool
-                    )
                 }
                 model.statusLine = wasCancelled
                     ? String(localized: "chat_tool_cancelled \(tool)")
@@ -4685,26 +4673,16 @@ final class EngineConversationSource: ConversationSource {
             return .toolUse(
                 id: id,
                 tool: tool,
-                // Legacy fallback only — the header is what renders when present.
-                inputSummary: ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson,
                 inputJson: inputJson,
-                header: header.map(toolHeader(from:))
+                header: toolHeader(from: header)
             )
-        case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath, display):
+        case let .toolResult(id, tool, resultJson, isError, display):
             return .toolResult(
                 id: id,
                 tool: tool,
                 isError: isError,
-                summary: ConversationExecutionParsing.summarizeToolResult(
-                    resultJson,
-                    isError: isError,
-                    tool: tool
-                ),
                 resultJson: resultJson,
-                oldString: oldString,
-                newString: newString,
-                filePath: filePath,
-                display: display.map(resultDisplay(from:))
+                display: resultDisplay(from: display)
             )
         @unknown default:
             return nil
@@ -4722,6 +4700,119 @@ final class EngineConversationSource: ConversationSource {
         var wireIndices: [UInt64?] = []
     }
 
+    /// Canonicalize the current ToolResultDisplayDto for restored-message
+    /// identity. Its string fields are encoded as UTF-16 code units so display
+    /// text and diff paths are not normalized or lossy-rendered.
+    private static func toolResultDisplaySignature(_ dto: ToolResultDisplayDto) -> String {
+        func text(_ value: String?) -> String {
+            guard let value else { return "n;" }
+            let units = Array(value.utf16)
+            let hex = units.map { unit -> String in
+                let digits = String(unit, radix: 16)
+                return String(repeating: "0", count: max(0, 4 - digits.count)) + digits
+            }
+            return "s\(units.count):\(hex.joined(separator: ","));"
+        }
+
+        func headlineKind(_ kind: HeadlineKindDto?) -> String? {
+            guard let kind else { return nil }
+            switch kind {
+            case .added: return "added"
+            case .removed: return "removed"
+            case .addedRemoved: return "added_removed"
+            case .linesRead: return "lines_read"
+            case .linesReadPartial: return "lines_read_partial"
+            case .filesFound: return "files_found"
+            case .filesFoundTruncated: return "files_found_truncated"
+            case .linesFound: return "lines_found"
+            case .matchesFound: return "matches_found"
+            case .interrupted: return "interrupted"
+            case .noContent: return "no_content"
+            case .failed: return "failed"
+            case .plain: return "plain"
+            @unknown default: return "unknown"
+            }
+        }
+
+        func diffLineKind(_ kind: DiffLineKindDto) -> String {
+            switch kind {
+            case .add: return "add"
+            case .remove: return "remove"
+            case .context: return "context"
+            @unknown default: return "unknown"
+            }
+        }
+
+        func syntaxClass(_ kind: SyntaxClassDto) -> String {
+            switch kind {
+            case .plain: return "plain"
+            case .keyword: return "keyword"
+            case .typeName: return "type_name"
+            case .function: return "function"
+            case .stringLit: return "string_lit"
+            case .number: return "number"
+            case .comment: return "comment"
+            case .punctuation: return "punctuation"
+            case .`operator`: return "operator"
+            case .variable: return "variable"
+            case .constant: return "constant"
+            case .attribute: return "attribute"
+            @unknown default: return "unknown"
+            }
+        }
+
+        let diff: String
+        if let structured = dto.diff {
+            let rows = structured.rows.map { row in
+                let segments = row.segments.map { segment in
+                    [
+                        text(segment.text),
+                        text(syntaxClass(segment.`class`)),
+                        text(segment.rgb.map { String($0) }),
+                        text(segment.bold ? "1" : "0"),
+                        text(segment.italic ? "1" : "0"),
+                        text(segment.underline ? "1" : "0"),
+                        text(segment.emph ? "1" : "0"),
+                    ].joined()
+                }.joined()
+                return [
+                    text(diffLineKind(row.kind)),
+                    text(String(row.lineNo)),
+                    text(String(row.hunk)),
+                    text(row.wordDiffed ? "1" : "0"),
+                    text(String(row.segments.count)),
+                    segments,
+                ].joined()
+            }.joined()
+            diff = [
+                "diff:some;",
+                text(structured.filePath),
+                text(structured.language),
+                text(String(structured.gutterWidth)),
+                text(String(structured.additions)),
+                text(String(structured.removals)),
+                text(String(structured.truncatedRows)),
+                text(String(structured.rows.count)),
+                rows,
+            ].joined()
+        } else {
+            diff = "diff:none;"
+        }
+
+        return [
+            "display:some;",
+            text(dto.headline),
+            text(headlineKind(dto.headlineKind)),
+            text(String(dto.headlineArgs.count)),
+            dto.headlineArgs.map { text(String($0)) }.joined(),
+            diff,
+            text(dto.body),
+            text(String(dto.bodyLines)),
+            text(dto.bodyTruncated ? "1" : "0"),
+            text(dto.collapsed ? "1" : "0"),
+        ].joined()
+    }
+
     /// Canonical identity for one wire message. The protocol currently has
     /// no message id, so all fields that can distinguish a replayed message
     /// are length-prefixed into a collision-resistant key.
@@ -4737,8 +4828,15 @@ final class EngineConversationSource: ConversationSource {
                 return "compact|\(before)|\(after)|\(field(summary))"
             case let .toolUse(id, tool, inputJson, _):
                 return "tool-use|\(field(id))|\(field(tool))|\(field(inputJson))"
-            case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath, _):
-                return "tool-result|\(field(id))|\(field(tool))|\(field(resultJson))|\(isError)|\(field(oldString ?? ""))|\(field(newString ?? ""))|\(field(filePath ?? ""))"
+            case let .toolResult(id, tool, resultJson, isError, display):
+                return [
+                    "tool-result",
+                    field(id),
+                    field(tool),
+                    field(resultJson),
+                    String(isError),
+                    field(toolResultDisplaySignature(display)),
+                ].joined(separator: "|")
             case let .visualization(reference):
                 return "visualization|\(field(reference?.id ?? ""))|\(reference?.revision ?? 0)"
             @unknown default: return "unknown"
@@ -4969,7 +5067,7 @@ final class EngineConversationSource: ConversationSource {
                     flushNarrative()
                     ensurePendingRun()
                     appendActivity(.tool(id: id))
-                    let lowered = header.map(toolHeader(from:))
+                    let lowered = toolHeader(from: header)
                     let trace = ConversationToolTrace(
                         planDocument: PlanDocument.tool(tool, json: inputJson),
                         id: id,
@@ -4977,10 +5075,7 @@ final class EngineConversationSource: ConversationSource {
                         // Temporarily running until the matching result is
                         // seen; finalization marks an orphan as failed.
                         status: .running,
-                        inputSummary: lowered == nil
-                            ? (ConversationExecutionParsing.summarizeToolInput(inputJson) ?? inputJson)
-                            : nil,
-                        outputSummary: nil,
+                        inputSummary: nil,
                         elapsedMs: nil,
                         header: lowered,
                         display: nil
@@ -4991,7 +5086,7 @@ final class EngineConversationSource: ConversationSource {
                         pendingRun?.tools.append(trace)
                     }
 
-                case let .toolResult(id, tool, resultJson, isError, _, _, _, display):
+                case let .toolResult(id, tool, resultJson, isError, display):
                     flushNarrative()
                     ensurePendingRun()
                     if pendingRun?.activities.contains(where: {
@@ -5000,15 +5095,11 @@ final class EngineConversationSource: ConversationSource {
                     }) != true {
                         appendActivity(.tool(id: id))
                     }
-                    let lowered = display.map(resultDisplay(from:))
+                    let lowered = resultDisplay(from: display)
                     let status: ConversationToolStatus =
                         ConversationExecutionParsing.isCancellationResult(resultJson)
                             ? .cancelled
                             : (isError ? .failed : .completed)
-                    let fallback = lowered == nil
-                        ? ConversationExecutionParsing.summarizeToolResult(
-                            resultJson, isError: isError, tool: tool)
-                        : nil
                     if let index = pendingRun?.tools.firstIndex(where: { $0.id == id }),
                        let existing = pendingRun?.tools[index] {
                         var merged = existing
@@ -5017,7 +5108,6 @@ final class EngineConversationSource: ConversationSource {
                         merged.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         merged.localApp = isError ? nil : PublishedLocalApp.parse(tool: tool, json: resultJson)
                         merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
-                        merged.outputSummary = fallback
                         pendingRun?.tools[index] = merged
                     } else {
                         let trace = ConversationToolTrace(
@@ -5025,7 +5115,6 @@ final class EngineConversationSource: ConversationSource {
                             tool: tool,
                             status: status,
                             inputSummary: nil,
-                            outputSummary: fallback,
                             elapsedMs: nil,
                             header: nil,
                             display: lowered,
@@ -5097,13 +5186,13 @@ final class EngineConversationSource: ConversationSource {
                 return String(localized: "chat_redacted_thinking")
             case .compactBoundary:
                 return String(localized: "chat_compacted_label")
-            case let .toolUse(_, tool, _, _, header):
+            case let .toolUse(_, tool, _, header):
                 // Prefer the engine's derived title so the compatibility
                 // transcript (voice / setup surfaces) reads the same as the UI.
-                return header.map(ToolDisplayText.title)
-                    ?? String(localized: "chat_tool_calling \(tool)")
-            case let .toolResult(_, _, isError, summary, _, _, _, _, display):
-                let body = display.flatMap(ToolDisplayText.headline) ?? summary
+                return ToolDisplayText.title(header)
+            case let .toolResult(_, tool, isError, _, display):
+                let body = ToolDisplayText.headline(display)
+                    ?? String(localized: isError ? "chat_tool_result_failed" : "chat_tool_result_completed")
                 return isError ? body : String(localized: "chat_tool_result_summary \(body)")
             }
         }
@@ -5465,12 +5554,13 @@ final class EngineConversationSource: ConversationSource {
         case "tool_use_started":
             if let id = object["id"] as? String,
                let tool = object["tool"] as? String,
-               let inputJSON = object["input_json"] as? String {
+               let inputJSON = object["input_json"] as? String,
+               let header = retainedToolHeader(object["header"]) {
                 apply(.toolUseStarted(
                     id: id,
                     tool: tool,
                     inputJson: inputJSON,
-                    header: nil
+                    header: header
                 ))
             }
         case "tool_heartbeat":
@@ -5487,13 +5577,14 @@ final class EngineConversationSource: ConversationSource {
             if let id = object["id"] as? String,
                let tool = object["tool"] as? String,
                let resultJSON = object["result_json"] as? String,
-               let isError = object["is_error"] as? Bool {
+               let isError = object["is_error"] as? Bool,
+               let display = retainedToolResultDisplay(object["display"]) {
                 apply(.toolUseResult(
                     id: id,
                     tool: tool,
                     resultJson: resultJSON,
                     isError: isError,
-                    display: nil
+                    display: display
                 ))
             }
         // The engine journals every forwarded live-turn event verbatim
@@ -5545,6 +5636,287 @@ final class EngineConversationSource: ConversationSource {
         // not an entry in this switch.
         default:
             break
+        }
+    }
+
+    /// Durable turn rows contain the original serialized `ClientEvent`, not a
+    /// reduced/core event. Rebuild the current required carrier from its JSON
+    /// object so replay has the same presentation data as the live path.
+    private func retainedToolHeader(_ value: Any?) -> ToolHeaderDto? {
+        guard let object = value as? [String: Any],
+              let verbName = object["verb"] as? String,
+              let verb = Self.toolVerbDto(verbName),
+              let label = object["label"] as? String,
+              let title = object["title"] as? String
+        else { return nil }
+
+        let icon: ToolIconDto?
+        if let iconName = object["icon"] as? String {
+            guard let parsed = Self.toolIconDto(iconName) else { return nil }
+            icon = parsed
+        } else {
+            icon = nil
+        }
+        let primary: String?
+        if let raw = object["primary"] {
+            guard let parsed = raw as? String else { return nil }
+            primary = parsed
+        } else { primary = nil }
+        let qualifier: String?
+        if let raw = object["qualifier"] {
+            guard let parsed = raw as? String else { return nil }
+            qualifier = parsed
+        } else { qualifier = nil }
+        let count: UInt32?
+        if let raw = object["count"] {
+            guard let parsed = Self.retainedUInt32(raw) else { return nil }
+            count = parsed
+        } else { count = nil }
+        let subLine: ToolSubLineDto?
+        if let raw = object["sub_line"] {
+            guard let line = raw as? [String: Any],
+                  let prefix = line["prefix"] as? String,
+                  let text = line["text"] as? String
+            else { return nil }
+            subLine = ToolSubLineDto(prefix: prefix, text: text)
+        } else { subLine = nil }
+
+        return ToolHeaderDto(
+            verb: verb,
+            icon: icon,
+            label: label,
+            primary: primary,
+            qualifier: qualifier,
+            count: count,
+            subLine: subLine,
+            title: title
+        )
+    }
+
+    private func retainedToolResultDisplay(_ value: Any?) -> ToolResultDisplayDto? {
+        guard let object = value as? [String: Any],
+              let rawBodyLines = object["body_lines"],
+              let bodyLines = Self.retainedUInt32(rawBodyLines)
+        else { return nil }
+
+        let headline: String?
+        if let raw = object["headline"] {
+            guard let parsed = raw as? String else { return nil }
+            headline = parsed
+        } else { headline = nil }
+        let headlineKind: HeadlineKindDto?
+        if let raw = object["headline_kind"] as? String {
+            guard let parsed = Self.headlineKindDto(raw) else { return nil }
+            headlineKind = parsed
+        } else if object["headline_kind"] == nil {
+            headlineKind = nil
+        } else { return nil }
+        let headlineArgs: [UInt32]
+        if let values = object["headline_args"] as? [Any] {
+            var parsed: [UInt32] = []
+            for value in values {
+                guard let number = Self.retainedUInt32(value) else { return nil }
+                parsed.append(number)
+            }
+            headlineArgs = parsed
+        } else if object["headline_args"] == nil {
+            headlineArgs = []
+        } else { return nil }
+        let diff: StructuredDiffDto?
+        if let raw = object["diff"] {
+            guard let parsed = Self.retainedStructuredDiff(raw) else { return nil }
+            diff = parsed
+        } else { diff = nil }
+        let body: String?
+        if let raw = object["body"] {
+            guard let parsed = raw as? String else { return nil }
+            body = parsed
+        } else { body = nil }
+        let bodyTruncated = Self.retainedBool(object["body_truncated"]) ?? false
+        if object["body_truncated"] != nil && Self.retainedBool(object["body_truncated"]) == nil { return nil }
+        let collapsed = Self.retainedBool(object["collapsed"]) ?? false
+        if object["collapsed"] != nil && Self.retainedBool(object["collapsed"]) == nil { return nil }
+
+        return ToolResultDisplayDto(
+            headline: headline,
+            headlineKind: headlineKind,
+            headlineArgs: headlineArgs,
+            diff: diff,
+            body: body,
+            bodyLines: bodyLines,
+            bodyTruncated: bodyTruncated,
+            collapsed: collapsed
+        )
+    }
+
+    private static func retainedStructuredDiff(_ value: Any) -> StructuredDiffDto? {
+        guard let object = value as? [String: Any],
+              let rawGutter = object["gutter_width"], let gutter = retainedUInt32(rawGutter),
+              let rawAdditions = object["additions"], let additions = retainedUInt32(rawAdditions),
+              let rawRemovals = object["removals"], let removals = retainedUInt32(rawRemovals),
+              let rawTruncatedRows = object["truncated_rows"], let truncatedRows = retainedUInt32(rawTruncatedRows),
+              let rowValues = object["rows"] as? [Any]
+        else { return nil }
+        let filePath: String?
+        if let raw = object["file_path"] {
+            guard let parsed = raw as? String else { return nil }
+            filePath = parsed
+        } else { filePath = nil }
+        let language: String?
+        if let raw = object["language"] {
+            guard let parsed = raw as? String else { return nil }
+            language = parsed
+        } else { language = nil }
+
+        var rows: [DiffRowDto] = []
+        for value in rowValues {
+            guard let row = value as? [String: Any],
+                  let kindName = row["kind"] as? String,
+                  let kind = Self.diffLineKindDto(kindName),
+                  let rawLineNo = row["line_no"], let lineNo = retainedUInt32(rawLineNo),
+                  let rawHunk = row["hunk"], let hunk = retainedUInt32(rawHunk),
+                  let segmentValues = row["segments"] as? [Any]
+            else { return nil }
+            let wordDiffed: Bool
+            if let raw = row["word_diffed"] {
+                guard let parsed = Self.retainedBool(raw) else { return nil }
+                wordDiffed = parsed
+            } else { wordDiffed = false }
+            var segments: [CodeSegmentDto] = []
+            for value in segmentValues {
+                guard let segment = value as? [String: Any],
+                      let text = segment["text"] as? String,
+                      let className = segment["class"] as? String,
+                      let syntax = Self.syntaxClassDto(className)
+                else { return nil }
+                let rgb: UInt32?
+                if let raw = segment["rgb"] {
+                    guard let parsed = Self.retainedUInt32(raw) else { return nil }
+                    rgb = parsed
+                } else { rgb = nil }
+                let bold = Self.retainedBool(segment["bold"]) ?? false
+                if segment["bold"] != nil && Self.retainedBool(segment["bold"]) == nil { return nil }
+                let italic = Self.retainedBool(segment["italic"]) ?? false
+                if segment["italic"] != nil && Self.retainedBool(segment["italic"]) == nil { return nil }
+                let underline = Self.retainedBool(segment["underline"]) ?? false
+                if segment["underline"] != nil && Self.retainedBool(segment["underline"]) == nil { return nil }
+                let emph = Self.retainedBool(segment["emph"]) ?? false
+                if segment["emph"] != nil && Self.retainedBool(segment["emph"]) == nil { return nil }
+                segments.append(CodeSegmentDto(
+                    text: text, class: syntax, rgb: rgb, bold: bold,
+                    italic: italic, underline: underline, emph: emph
+                ))
+            }
+            rows.append(DiffRowDto(
+                kind: kind, lineNo: lineNo, hunk: hunk,
+                wordDiffed: wordDiffed, segments: segments
+            ))
+        }
+        return StructuredDiffDto(
+            filePath: filePath, language: language, gutterWidth: gutter,
+            additions: additions, removals: removals,
+            truncatedRows: truncatedRows, rows: rows
+        )
+    }
+
+    private static func retainedUInt32(_ value: Any) -> UInt32? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded(.towardZero) == number.doubleValue,
+              number.doubleValue >= 0,
+              number.doubleValue <= Double(UInt32.max)
+        else { return nil }
+        return number.uint32Value
+    }
+
+    private static func retainedBool(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID()
+        else { return nil }
+        return number.boolValue
+    }
+
+    private static func toolVerbDto(_ name: String) -> ToolVerbDto? {
+        switch name {
+        case "update": return .update
+        case "create": return .create
+        case "read": return .read
+        case "search": return .search
+        case "shell": return .shell
+        case "output": return .output
+        case "kill": return .kill
+        case "fetch": return .fetch
+        case "task": return .task
+        case "todo": return .todo
+        case "skill": return .skill
+        case "generic": return .generic
+        default: return nil
+        }
+    }
+
+    private static func toolIconDto(_ name: String) -> ToolIconDto? {
+        switch name {
+        case "read": return .read
+        case "search": return .search
+        case "list": return .list
+        case "edit": return .edit
+        case "terminal": return .terminal
+        case "globe": return .globe
+        case "workflow": return .workflow
+        case "list_checks": return .listChecks
+        case "sparkles": return .sparkles
+        case "plug": return .plug
+        case "output": return .output
+        case "stop": return .stop
+        case "wrench": return .wrench
+        default: return nil
+        }
+    }
+
+    private static func headlineKindDto(_ name: String) -> HeadlineKindDto? {
+        switch name {
+        case "added": return .added
+        case "removed": return .removed
+        case "added_removed": return .addedRemoved
+        case "lines_read": return .linesRead
+        case "lines_read_partial": return .linesReadPartial
+        case "files_found": return .filesFound
+        case "files_found_truncated": return .filesFoundTruncated
+        case "lines_found": return .linesFound
+        case "matches_found": return .matchesFound
+        case "interrupted": return .interrupted
+        case "no_content": return .noContent
+        case "failed": return .failed
+        case "plain": return .plain
+        default: return nil
+        }
+    }
+
+    private static func diffLineKindDto(_ name: String) -> DiffLineKindDto? {
+        switch name {
+        case "add": return .add
+        case "remove": return .remove
+        case "context": return .context
+        default: return nil
+        }
+    }
+
+    private static func syntaxClassDto(_ name: String) -> SyntaxClassDto? {
+        switch name {
+        case "plain": return .plain
+        case "keyword": return .keyword
+        case "type_name": return .typeName
+        case "function": return .function
+        case "string_lit": return .stringLit
+        case "number": return .number
+        case "comment": return .comment
+        case "punctuation": return .punctuation
+        case "operator": return .operator
+        case "variable": return .variable
+        case "constant": return .constant
+        case "attribute": return .attribute
+        default: return nil
         }
     }
 

@@ -1150,14 +1150,6 @@ private struct ProviderModelsPage: View {
     }
 }
 
-// Compatibility wrappers for deep links created by older settings snapshots.
-struct ProviderPickerPage: View {
-    @Bindable var store: SettingsStore
-    let host: SettingsHost
-    let kind: ProviderKind
-    var body: some View { ProviderListPage(store: store, host: host, kind: kind) }
-}
-
 struct ProviderEditPage: View {
     @Bindable var store: SettingsStore
     let host: SettingsHost

@@ -36,7 +36,7 @@ test(cancelledBeforeBinding
   let targetClient: ReturnType<typeof transport> | undefined;
   let service!: ScheduledTaskService;
   const source = new SessionRuntime({
-    registerIpc: false, sessionId: sourceId, projectPath: workspace,
+    sessionId: sourceId, projectPath: workspace,
     launchConfig: () => ({ workspace, trusted: true }),
     onCronRunRequested: (runtime, event) => service.run(runtime, event.run_id, event.task),
   });
@@ -57,7 +57,7 @@ test(cancelledBeforeBinding
     withBackgroundSession: async (ref: { sessionId: string }, _empty: boolean, _model: unknown, operation: (runtime: SessionRuntime) => Promise<unknown>) => {
       executions++;
       target = new SessionRuntime({
-        registerIpc: false, sessionId: ref.sessionId, projectPath: workspace,
+        sessionId: ref.sessionId, projectPath: workspace,
         launchConfig: () => ({ workspace, trusted: true }),
       });
       targetClient = transport();

@@ -64,7 +64,8 @@ test('message boundaries preserve prompt ownership through tool rounds and only 
   h.emit({ type: 'message_complete', stop_reason: 'tool_use' });
   assert.equal(h.speech.filter((event) => event.type === 'completion').length, 0);
   assert.equal(h.context.activeTrackedTurns.current.size, 1);
-  h.emit({ type: 'tool_use_started', id: 'tool', tool: 'Read' });
+  h.emit({ type: 'tool_use_started', id: 'tool', tool: 'Read', input_json: '{}',
+    header: { verb: 'read', label: 'Read', title: 'Read' } });
   h.emit({ type: 'text_delta', text: 'The final answer.' });
   h.emit({ type: 'message_identity', message_id: 'last' });
   h.emit({ type: 'message_complete', stop_reason: 'end_turn' });
@@ -112,7 +113,8 @@ test('Flow waits for the turn terminal before relistening and speaks accepted me
   h.emit({ type: 'message_complete', stop_reason: 'tool_use' }); await flush();
   assert.equal(operations.filter((operation) => operation.type === 'speak').length, 0);
   assert.equal(timers.length, 0);
-  h.emit({ type: 'tool_use_started', id: 'read', tool: 'Read' }); await flush();
+  h.emit({ type: 'tool_use_started', id: 'read', tool: 'Read', input_json: '{}',
+    header: { verb: 'read', label: 'Read', title: 'Read' } }); await flush();
   h.emit({ type: 'text_delta', text: 'The file is fixed.' }); h.emit({ type: 'message_complete', stop_reason: 'end_turn' }); await flush();
   assert.equal(timers.length, 0); assert.equal(listening, 1);
   h.emit({ type: 'turn_ended', outcome: { type: 'end_turn' } }); await flush();

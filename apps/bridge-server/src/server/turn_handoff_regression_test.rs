@@ -545,6 +545,15 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
         // A raw slash command is rejected before dispatch only on a connection
         // with the session driver's command path bound.
         connection.driver = Some(Arc::new(IdleTurnDriver));
+        let is_slash = matches!(&command, ClientCommand::RunSlashCommand { .. });
+        let mut captured = if is_slash {
+            Some(captured_sink().await)
+        } else {
+            None
+        };
+        if let Some((_, _, sink)) = captured.as_ref() {
+            assert!(connection.claim_outbound(sink).await);
+        }
         let handoff = connection.turn_handoff.lock().await;
         // Drain ownership is temporarily false while queued work is inspected.
         connection.turn_running.store(false, Ordering::SeqCst);
@@ -560,6 +569,27 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
             .await
             .unwrap();
         assert_eq!(router.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            connection.queue.is_empty().await,
+            "busy session transitions must be refused, not queued"
+        );
+        if let Some((endpoint, mut socket, _)) = captured.take() {
+            match next_frame(&mut socket).await {
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id: None,
+                    is_error: true,
+                    display,
+                }) => assert_eq!(
+                    display.string_at("").as_deref(),
+                    Some("this command requires an idle session")
+                ),
+                frame => {
+                    panic!("busy slash transition must report an idle-session error, got {frame:?}")
+                }
+            }
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+        }
     }
 }
 

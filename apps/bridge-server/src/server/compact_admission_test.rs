@@ -102,6 +102,14 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
         // turn driver. Without one, RunSlashCommand is rejected before it
         // reaches the handoff gate this regression exercises.
         connection.driver = Some(Arc::new(IdleTurnDriver));
+        let mut captured = if slash {
+            Some(super::connection_regression_test::captured_sink().await)
+        } else {
+            None
+        };
+        if let Some((_, _, sink)) = captured.as_ref() {
+            assert!(connection.claim_outbound(sink).await);
+        }
         let command = || {
             if slash {
                 ClientCommand::RunSlashCommand {
@@ -130,6 +138,21 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
             .await
             .expect("settled active ownership must reject without entering the router");
         assert_eq!(router.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            connection.queue.is_empty().await,
+            "busy compact must be rejected, not queued for a later turn"
+        );
+        if let Some((_, socket, _)) = captured.as_mut() {
+            assert!(matches!(
+                super::connection_regression_test::next_frame(socket).await,
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id: Some(17),
+                    is_error: true,
+                    display,
+                }) if display.string_at("").as_deref()
+                    == Some("this command requires an idle session")
+            ));
+        }
 
         // Once the drain owner really becomes idle, both command surfaces must
         // dispatch normally; the admission lock must not remain held on refusal.
@@ -156,5 +179,17 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
                 .unwrap();
         }
         assert_eq!(router.calls.load(Ordering::SeqCst), 1);
+        if let Some((endpoint, mut socket, _)) = captured {
+            assert!(matches!(
+                super::connection_regression_test::next_frame(socket).await,
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id: Some(17),
+                    is_error: false,
+                    ..
+                })
+            ));
+            socket.close(None).await.unwrap();
+            endpoint.shutdown().await;
+        }
     }
 }

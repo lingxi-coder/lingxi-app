@@ -1338,6 +1338,7 @@ export class SessionRuntime {
         || Object.keys(launch.pluginSecrets ?? {}).length > 0,
       trusted: launch.trusted,
       allowInsights: launch.allowInsights,
+      allowTeamOnboarding: launch.allowTeamOnboarding,
       scheduledController: launch.scheduledController,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });

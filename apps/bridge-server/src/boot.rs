@@ -85,6 +85,8 @@ pub struct BridgeArgs {
     pub trusted_workspace: bool,
     /// Private parent-provided local policy verdict for `/insights`.
     pub insights_policy_gate: Option<bool>,
+    /// Private parent-provided local policy verdict for `/team-onboarding`.
+    pub team_onboarding_policy_gate: Option<bool>,
     /// Own versioned scheduled tasks for this scope independently of chat runtimes.
     pub scheduled_controller: bool,
     /// Enforce the packaged desktop credential boundary: trusted workspace
@@ -153,6 +155,19 @@ impl BridgeArgs {
                             return Err(
                                 "--host-insights-policy-gate requires true or false".to_string()
                             )
+                        }
+                    });
+                }
+                "--host-team-onboarding-policy-gate" => {
+                    let value = it.next().ok_or_else(|| {
+                        "--host-team-onboarding-policy-gate requires true or false".to_string()
+                    })?;
+                    out.team_onboarding_policy_gate = Some(match value.as_ref() {
+                        "true" => true,
+                        "false" => false,
+                        _ => {
+                            return Err("--host-team-onboarding-policy-gate requires true or false"
+                                .to_string())
                         }
                     });
                 }
@@ -681,6 +696,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.verified_computer_profiles = Vec::new();
         __desktop_config.host_workspace_trusted = Some(trusted);
         __desktop_config.insights_policy_gate = args.insights_policy_gate;
+        __desktop_config.team_onboarding_policy_gate = args.team_onboarding_policy_gate;
         __desktop_config.mod_render_surface =
             Some(harness_runtime::desktop::ModRenderSurface::Desktop);
         __desktop_config.native_settings_agent_context =
@@ -2481,6 +2497,24 @@ mod tests {
         );
         assert!(BridgeArgs::parse(["--host-insights-policy-gate", "yes"]).is_err());
         assert!(!usage().contains("--host-insights-policy-gate"));
+    }
+
+    #[test]
+    fn parse_private_team_onboarding_policy_verdict_without_public_help_switch() {
+        assert_eq!(
+            BridgeArgs::parse(["--host-team-onboarding-policy-gate", "true"])
+                .unwrap()
+                .team_onboarding_policy_gate,
+            Some(true)
+        );
+        assert_eq!(
+            BridgeArgs::parse(["--host-team-onboarding-policy-gate", "false"])
+                .unwrap()
+                .team_onboarding_policy_gate,
+            Some(false)
+        );
+        assert!(BridgeArgs::parse(["--host-team-onboarding-policy-gate", "yes"]).is_err());
+        assert!(!usage().contains("--host-team-onboarding-policy-gate"));
     }
 
     #[test]

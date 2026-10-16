@@ -115,6 +115,11 @@ export class SettingsStore {
     return this.settings.allowInsights ?? true;
   }
 
+  /** Local team-onboarding policy; default allow does not imply workspace trust. */
+  getTeamOnboardingAllowed(): boolean {
+    return this.settings.allowTeamOnboarding ?? true;
+  }
+
   addProject(canonical: string): void {
     this.settings = withAddedProject(this.settings, canonical);
     this.persist();

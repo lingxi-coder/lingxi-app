@@ -47,6 +47,8 @@ export interface BridgeLaunchConfig {
   trusted: boolean;
   /** Local host policy verdict forwarded to the private bridge process. */
   allowInsights?: boolean;
+  /** Local host policy verdict forwarded to the private bridge process. */
+  allowTeamOnboarding?: boolean;
   scheduledController?: boolean;
   model?: string;
   apiBaseUrl?: string;

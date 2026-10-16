@@ -134,6 +134,7 @@ const NATIVE_295_BUILTIN_COMMAND_NAMES = [
   'stop',
   'subtask',
   'tasks',
+  'team-onboarding',
   'teleport',
   'terminal-setup',
   'theme',

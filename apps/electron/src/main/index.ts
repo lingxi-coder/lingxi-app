@@ -409,6 +409,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         sessionId: ref.sessionId,
         trusted: settings.isTrustedWorkspace(workspace),
         allowInsights: settings.getInsightsAllowed(),
+        allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         ...(openaiOAuth ? { openaiOAuth } : {}),

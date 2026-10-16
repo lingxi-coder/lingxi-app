@@ -69,6 +69,13 @@ test('local Insights policy defaults enabled and only accepts booleans', () => {
   assert.equal(parseSettings({ version: 1, allowInsights: 'false' }).allowInsights, true);
 });
 
+test('local team-onboarding policy defaults enabled and only accepts booleans', () => {
+  assert.equal(defaultSettings().allowTeamOnboarding, true);
+  assert.equal(parseSettings({ version: 1 }).allowTeamOnboarding, true);
+  assert.equal(parseSettings({ version: 1, allowTeamOnboarding: false }).allowTeamOnboarding, false);
+  assert.equal(parseSettings({ version: 1, allowTeamOnboarding: 'false' }).allowTeamOnboarding, true);
+});
+
 test('SettingsStore exposes the local Insights policy without publishing it to renderer settings', () => {
   const userData = temporaryDirectory();
   assert.equal(new SettingsStore(userData).getInsightsAllowed(), true);
@@ -76,6 +83,15 @@ test('SettingsStore exposes the local Insights policy without publishing it to r
   const store = new SettingsStore(userData);
   assert.equal(store.getInsightsAllowed(), false);
   assert.equal('allowInsights' in store.getPublic(), false);
+});
+
+test('SettingsStore exposes the local team-onboarding policy only to the host', () => {
+  const userData = temporaryDirectory();
+  assert.equal(new SettingsStore(userData).getTeamOnboardingAllowed(), true);
+  writeFileSync(join(userData, 'settings.v1.json'), JSON.stringify({ version: 1, allowTeamOnboarding: false }));
+  const store = new SettingsStore(userData);
+  assert.equal(store.getTeamOnboardingAllowed(), false);
+  assert.equal('allowTeamOnboarding' in store.getPublic(), false);
 });
 
 test("parseSettings keeps 'system' and still rejects garbage", () => {
@@ -350,6 +366,14 @@ test('private bridge arguments carry explicit local Insights policy without a us
   assert.deepEqual(allowed.slice(-2), ['--host-insights-policy-gate', 'true']);
   assert.deepEqual(denied.slice(-2), ['--host-insights-policy-gate', 'false']);
   assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true }).includes('--host-insights-policy-gate'));
+});
+
+test('private bridge arguments preserve an explicit team-onboarding deny', () => {
+  const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowTeamOnboarding: true });
+  const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowTeamOnboarding: false });
+  assert.deepEqual(allowed.slice(-2), ['--host-team-onboarding-policy-gate', 'true']);
+  assert.deepEqual(denied.slice(-2), ['--host-team-onboarding-policy-gate', 'false']);
+  assert.ok(!buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true }).includes('--host-team-onboarding-policy-gate'));
 });
 
 test('packaged bridge arguments enforce stdin-only credentials without embedding secrets', () => {

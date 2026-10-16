@@ -82,6 +82,8 @@ export interface PersistedSettings {
   theme?: 'dark' | 'light' | 'system';
   /** Local host policy for the source-backed `/insights` command gate. */
   allowInsights?: boolean;
+  /** Local host policy for the local `/team-onboarding` prompt. */
+  allowTeamOnboarding?: boolean;
   collapseThoughtsByDefault?: boolean;
   model?: string;
   /** Explicit model selections are scoped to their owning session. */
@@ -131,6 +133,7 @@ export function defaultSettings(): PersistedSettings {
   return {
     version: SETTINGS_VERSION,
     allowInsights: true,
+    allowTeamOnboarding: true,
     projects: [],
     pinnedSessions: [],
     trustedWorkspaces: {},
@@ -175,6 +178,9 @@ export function parseSettings(value: unknown): PersistedSettings {
       : undefined;
   if (typeof value['allowInsights'] === 'boolean') {
     settings.allowInsights = value['allowInsights'];
+  }
+  if (typeof value['allowTeamOnboarding'] === 'boolean') {
+    settings.allowTeamOnboarding = value['allowTeamOnboarding'];
   }
   if (typeof value['collapseThoughtsByDefault'] === 'boolean') {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
@@ -638,6 +644,8 @@ export function buildBridgeArguments(config: {
   trusted: boolean;
   /** Private parent-to-bridge verdict for the local Insights command gate. */
   allowInsights?: boolean;
+  /** Private parent-to-bridge verdict for the local team-onboarding command. */
+  allowTeamOnboarding?: boolean;
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
 }): string[] {
@@ -652,6 +660,9 @@ export function buildBridgeArguments(config: {
   if (config.trusted) args.push('--trusted-workspace');
   if (typeof config.allowInsights === 'boolean') {
     args.push('--host-insights-policy-gate', String(config.allowInsights));
+  }
+  if (typeof config.allowTeamOnboarding === 'boolean') {
+    args.push('--host-team-onboarding-policy-gate', String(config.allowTeamOnboarding));
   }
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');

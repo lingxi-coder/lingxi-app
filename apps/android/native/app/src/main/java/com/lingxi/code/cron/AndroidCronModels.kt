@@ -1,5 +1,6 @@
 package com.lingxi.code.cron
 
+import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import android.content.Context
 import com.lingxi.code.R
 import com.lingxi.code.bindings.runtime.CronTaskDto
@@ -23,7 +24,7 @@ data class CronScope(
             projectId = null,
             projectName = context.applicationContext.getString(R.string.common_none),
             workspacePath = java.io.File(context.applicationContext.filesDir, "scheduled/workspace").apply { mkdirs() }.canonicalPath,
-            guestPath = "/workspace/global",
+            guestPath = MobileLinuxGuestPaths.workspace("global"),
         )
     }
 }

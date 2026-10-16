@@ -24,10 +24,10 @@ class FetchRootfsTests(unittest.TestCase):
         self.output = self.root / "output"
         pins = self.sdk / "docs/toolchains/runtime-pins.json"
         pins.parent.mkdir(parents=True)
-        pins.write_text(json.dumps({"alpine": {"version": "3.24.2"}}), encoding="utf-8")
+        pins.write_text(json.dumps({"alpine": {"version": "3.24.2"}, "rootfs_version": "3.24.2-user1"}), encoding="utf-8")
         self.payload = b"verified release payload"
         for abi in ("arm64-v8a", "x86_64"):
-            evidence = self.sdk / "docs/mobile-linux/releases/3.24.2" / abi
+            evidence = self.sdk / "docs/mobile-linux/releases/3.24.2-user1" / abi
             evidence.mkdir(parents=True)
             (evidence / "rootfs-manifest.json").write_text(json.dumps({"archive": {
                 "filename": "rootfs.tar.gz", "size_bytes": len(self.payload),
@@ -64,7 +64,7 @@ class FetchRootfsTests(unittest.TestCase):
         self.assertEqual(before, after)
         for abi in ("arm64-v8a", "x86_64"):
             self.assertEqual((self.output / abi / "rootfs-manifest.json").read_bytes(),
-                             (self.sdk / "docs/mobile-linux/releases/3.24.2" / abi / "rootfs-manifest.json").read_bytes())
+                             (self.sdk / "docs/mobile-linux/releases/3.24.2-user1" / abi / "rootfs-manifest.json").read_bytes())
 
     def test_output_cannot_mutate_sdk_source(self):
         with self.assertRaisesRegex(ValueError, "overlaps immutable SDK"):

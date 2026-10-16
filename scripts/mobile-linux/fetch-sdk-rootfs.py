@@ -17,7 +17,7 @@ def fetch(output):
     resolved = resolve_sdk()
     sdk = Path(resolved["root"]).resolve()
     pins = json.loads((sdk / "docs/toolchains/runtime-pins.json").read_text(encoding="utf-8"))
-    version = pins["alpine"]["version"]
+    version = pins["rootfs_version"]
     config = Path(__file__).resolve().parents[1] / "lib/mobile-linux-rootfs-release.json"
     tag = json.loads(config.read_text(encoding="utf-8"))["tag"]
     repository = json.loads((config.parent / "mobile-linux-packages.json").read_text(encoding="utf-8"))["repository"].removesuffix(".git")

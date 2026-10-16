@@ -414,7 +414,7 @@ import SwiftUI
                 .toolUseStarted(
                     id: "task-1",
                     tool: "bash",
-                    inputJson: #"{"command":"echo ok","cwd":"/workspace"}"#,
+                    inputJson: #"{"command":"echo ok","cwd":"/home/lingxi/lingxi"}"#,
                     header: currentToolHeader()
                 ))
             source.applyForTesting(.toolHeartbeat(id: "task-1", tool: "bash", elapsedMs: 320))
@@ -437,7 +437,7 @@ import SwiftUI
             XCTAssertEqual(run.status, .running, "tool events do not end the turn")
             XCTAssertEqual(run.shellCards.count, 1)
             XCTAssertEqual(run.shellCards[0].command, "echo ok")
-            XCTAssertEqual(run.shellCards[0].cwd, "/workspace")
+            XCTAssertEqual(run.shellCards[0].cwd, "/home/lingxi/lingxi")
             XCTAssertEqual(run.shellCards[0].stdout, "ok\n")
             XCTAssertEqual(run.shellCards[0].durationMs, 480)
             XCTAssertEqual(run.shellCards[0].status, .completed)

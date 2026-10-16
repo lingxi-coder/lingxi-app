@@ -31,7 +31,7 @@ final class TerminalBufferTests: XCTestCase {
     func testHistoryNavigationReturnsPreviousAndNextCommand() {
         let descriptor = TerminalRuntimeDescriptor(
             config: nil,
-            workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/workspace/demo", displayName: "Demo")
+            workspace: TerminalWorkspaceDescriptor(hostPath: nil, guestPath: "/home/lingxi/lingxi/demo", displayName: "Demo")
         )
         let model = TerminalSessionModel(descriptor: descriptor, client: FakeTerminalRuntimeClient())
         model.history = ["ls", "pwd", "git status"]

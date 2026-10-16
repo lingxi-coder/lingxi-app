@@ -227,7 +227,12 @@ extension TerminalRuntimeDescriptor {
 
         switch requestedCwd {
         case let .guestPath(path):
-            let normalized = normalizeGuestPath(path)
+            // Historical tool cards can contain the former project prefix.
+            // Translate the stored route once; only the current path is sent
+            // to the runtime, whose namespace has no legacy alias.
+            let currentPath = path == "/workspace" ? LXISHGuestPaths.workspaceRoot
+                : path.hasPrefix("/workspace/") ? LXISHGuestPaths.workspaceRoot + String(path.dropFirst("/workspace".count)) : path
+            let normalized = normalizeGuestPath(currentPath)
             guard isWithinWorkspace(normalized, workspaceGuestPath: workspaceGuestPath) else {
                 return (nil, String(localized: "terminal_cwd_outside_workspace \(path)"))
             }

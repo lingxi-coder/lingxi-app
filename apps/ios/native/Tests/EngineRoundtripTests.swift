@@ -326,7 +326,7 @@ import XCTest
                 text: ClientTextDto(codeUnits: Array("Reply with exactly: hello from lingxi".utf16)),
                 promptMode: nil,
                 images: [],
-                turnId: nil))
+                turnId: nil, visualizationContext: nil))
 
             // Wait for the streamed terminal event to reach the listener over the
             // UniFFI callback.  Generous timeout: the engine spins up its runtime
@@ -381,14 +381,13 @@ import XCTest
             }
         }
 
-        /// SHIP-BLOCKER #2, KEYLESS: prove the out-of-band model-state path end to
-        /// end — `ListModels`→`ModelList` (real ids, NOT branded mock ids) and
-        /// `SetModel`→`ModelChanged` — over the same UniFFI listener, with NO text
-        /// turn and NO key. The engine's `list_available_models` returns a real
-        /// fallback catalog keyless, so this is hermetic.
-        func testModelCatalogAndSwitchRoundTripKeyless() async throws {
+        /// The real catalog is readable before a provider is configured, but
+        /// changing to an unauthenticated provider must fail without confirming
+        /// a model switch. This test never reads developer credentials.
+        func testModelCatalogAndUnauthenticatedSwitchRoundTripKeyless() async throws {
             let gotList = expectation(description: "engine delivers a ModelList over the listener")
-            let gotChanged = expectation(description: "engine delivers a ModelChanged over the listener")
+            let gotChanged = expectation(description: "an unauthenticated switch emits no ModelChanged")
+            gotChanged.isInverted = true
             let listener = ModelListener(gotList: gotList, gotChanged: gotChanged)
 
             let sandbox = FileManager.default.temporaryDirectory
@@ -406,7 +405,7 @@ import XCTest
                 handle = try buildIosEngine(
                     apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
                         ?? "https://api.anthropic.com",
-                    apiKey: ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? "",
+                    apiKey: "",
                     model: "",
                     appSandboxRoot: sandbox.path,
                     listener: listener,
@@ -443,13 +442,16 @@ import XCTest
                                "catalog must contain only REAL engine ids, found mock id: \(id)")
             }
 
-            // SetModel→ModelChanged: pick a different real id from the catalog and
-            // confirm the engine echoes it back (a turn would then send THIS id).
             let target = list.models.first(where: { $0 != list.current }) ?? list.models[0]
-            try await handle.submit(command: .setModel(model: target.clientTextDto))
-            await fulfillment(of: [gotChanged], timeout: 30)
-            XCTAssertEqual(listener.changedModel, target,
-                           "ModelChanged must echo the SetModel id (the real id a turn will send)")
+            do {
+                try await handle.submit(command: .setModel(model: target.clientTextDto))
+                XCTFail("switching without configured credentials must be rejected")
+            } catch {
+                XCTAssertTrue(String(describing: error).contains("Authentication failed"), "\(error)")
+            }
+            await fulfillment(of: [gotChanged], timeout: 0.2)
+            XCTAssertNil(listener.changedModel)
+
         }
 
         /// Assert a terminal-error `message` is a REAL transport outcome, not the

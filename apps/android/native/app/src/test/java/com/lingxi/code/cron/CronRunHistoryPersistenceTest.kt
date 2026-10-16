@@ -33,7 +33,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun unfinishedOccurrenceDeduplicatesAndTerminalRunAllowsNextOccurrence() {
-        val scope = CronScope("global", null, "全局", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "全局", root.path, "/home/lingxi/lingxi/global")
         val first = store.enqueue(scope, "task", "prompt", 900L)
 
         assertNotNull(first)
@@ -45,7 +45,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun atomicIndexRoundTripsAndBoundsResultBytes() {
-        val scope = CronScope("global", null, "全局", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "全局", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markTerminal(
             run.runId,
@@ -62,7 +62,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun checksumFailureRecoversLastGoodBackupAndQuarantinesPrimary() {
-        val scope = CronScope("global", null, "全局", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "全局", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markTerminal(run.runId, CronRunStatus.Succeeded, resultText = "durable")
         File(root, "index.json").writeText(
@@ -83,7 +83,7 @@ class CronRunHistoryPersistenceTest {
     }
     @Test
     fun executionIdentityAndNotificationClaimSurviveReload() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.attachExecution(run.runId, "session-1", "provider/model", "failed")
         store.markTerminal(run.runId, CronRunStatus.Failed, errorMessage = "failed")
@@ -97,7 +97,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun restartRecoversSavedTerminalNotificationsOnceUsingPersistedPolicy() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         fun terminal(task: String, policy: String, status: CronRunStatus): String {
             val run = store.enqueue(scope, task, "saved prompt", 900L)!!
             store.attachExecution(run.runId, notificationPolicy = policy)
@@ -126,7 +126,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun failedNotificationClaimWriteRemainsRecoverable() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markTerminal(run.runId, CronRunStatus.Succeeded)
         // Block the write the CLAIM depends on, which lives in index.json.
@@ -156,7 +156,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun workerTerminalRedeliveryAndRecoveryShareDurableClaim() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markTerminal(run.runId, CronRunStatus.Succeeded)
         var posts = 0
@@ -167,7 +167,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun pauseCancelsQueuedButPreservesRunning() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val queued = store.enqueue(scope, "queued-task", "prompt", 900L)!!
         val running = store.enqueue(scope, "running-task", "prompt", 900L)!!
         store.markRunning(running.runId, 1)
@@ -189,7 +189,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun runningTaskCoalescesOnlyOnePendingOccurrence() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val running = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markRunning(running.runId, 1)
         assertNotNull(store.enqueue(scope, "task", "prompt", 1_800L))
@@ -199,7 +199,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun interruptedOccurrenceCannotBeDispatchedAgain() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         val run = store.enqueue(scope, "task", "prompt", 900L)!!
         store.markTerminal(run.runId, CronRunStatus.Interrupted, errorMessage = "process interrupted")
         assertNull(store.enqueue(scope, "task", "prompt", 900L))
@@ -208,7 +208,7 @@ class CronRunHistoryPersistenceTest {
 
     @Test
     fun generatedSessionIndexOutlivesRunRetention() {
-        val scope = CronScope("global", null, "None", root.path, "/workspace/global")
+        val scope = CronScope("global", null, "None", root.path, "/home/lingxi/lingxi/global")
         repeat(25) { index ->
             val run = store.enqueue(scope, "task", "prompt", index.toLong())!!
             store.attachExecution(run.runId, sessionId = "session-$index")

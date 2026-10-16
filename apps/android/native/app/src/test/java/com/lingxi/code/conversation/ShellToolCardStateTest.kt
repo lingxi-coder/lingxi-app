@@ -9,12 +9,12 @@ class ShellToolCardStateTest {
     fun startParsesCommandAndCwd() {
         val update = shellStarted(
             id = "task-1",
-            inputJson = """{"command":"printf hello","cwd":"/workspace"}""",
+            inputJson = """{"command":"printf hello","cwd":"/home/lingxi/lingxi"}""",
         )
 
         assertEquals("task-1", update.taskId)
         assertEquals("printf hello", update.command)
-        assertEquals("/workspace", update.cwd)
+        assertEquals("/home/lingxi/lingxi", update.cwd)
     }
 
     @Test

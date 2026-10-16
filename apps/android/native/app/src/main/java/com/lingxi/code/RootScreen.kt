@@ -1,5 +1,6 @@
 package com.lingxi.code
 
+import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import com.lingxi.code.conversation.blocksEngineReconnect
 
 import android.content.pm.PackageManager
@@ -428,7 +429,7 @@ fun RootScreen(
         ConversationScope.Scheduled -> com.lingxi.code.project.ProjectWorkspace(
             projectId = "b51bca68-b85f-4caa-8881-07dd33eba24d",
             hostPath = com.lingxi.code.cron.CronScope.global(appContext).workspacePath,
-            guestPath = "/workspace/global",
+            guestPath = MobileLinuxGuestPaths.workspace("global"),
         )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
     }

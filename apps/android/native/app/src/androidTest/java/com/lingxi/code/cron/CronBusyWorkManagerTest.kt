@@ -36,7 +36,7 @@ class CronBusyWorkManagerTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(context.cacheDir, "cron-busy-work-${UUID.randomUUID()}")
         val history = CronRunHistoryStore(root)
-        val scope = CronScope("test-a", "test-a", "Test A", root.path, "/workspace/test-a")
+        val scope = CronScope("test-a", "test-a", "Test A", root.path, "/home/lingxi/lingxi/test-a")
         val busy = history.enqueue(scope, "busy", "fixture", 1000L)!!
         val unrelated = history.enqueue(scope.copy(scopeId = "test-b", projectId = "test-b"), "other", "fixture", 1000L)!!
         val unrelatedFinished = CountDownLatch(1)

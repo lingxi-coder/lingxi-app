@@ -189,14 +189,14 @@ final class CronRepositoryTests: XCTestCase {
             projectID: nil,
             projectName: "全局",
             projectCwd: nil,
-            guestWorkspacePath: "/workspace/global"
+            guestWorkspacePath: "/home/lingxi/lingxi/global"
         )
         let project = CronScope(
             scopeID: "project-a",
             projectID: "project-a",
             projectName: "项目 A",
             projectCwd: "/tmp/project-a",
-            guestWorkspacePath: "/workspace/project-a"
+            guestWorkspacePath: "/home/lingxi/lingxi/project-a"
         )
         let globalTask = CronTaskRecord(
             id: "global-task",
@@ -1240,7 +1240,7 @@ final class CronRepositoryTests: XCTestCase {
             projectID: "project-a",
             projectName: "项目 A",
             projectCwd: "/tmp/project-a",
-            guestWorkspacePath: "/workspace/project-a"
+            guestWorkspacePath: "/home/lingxi/lingxi/project-a"
         )
         let run = makeRun(
             runID: "success-1",

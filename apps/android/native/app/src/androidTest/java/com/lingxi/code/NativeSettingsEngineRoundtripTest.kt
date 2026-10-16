@@ -27,8 +27,8 @@ import java.util.UUID
 class NativeSettingsEngineRoundtripTest {
     @Test fun keylessLayerWritesReadBackAndSurviveEngineRebuild() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val root = File(context.cacheDir, "native-settings-${UUID.randomUUID()}").apply { mkdirs() }
-        val workspace = File(root, "projects/${UUID.randomUUID()}/workspace").apply { mkdirs() }
+        val root = File(context.cacheDir, "native-settings-${UUID.randomUUID()}").apply { mkdirs() }.canonicalFile
+        val workspace = File(root, "projects/${UUID.randomUUID()}/workspace").apply { mkdirs() }.canonicalFile
         val userFile = File(root, ".lingxi/settings.json").apply {
             parentFile!!.mkdirs(); writeText("""{"viewMode":"focus"}""")
         }
@@ -45,7 +45,9 @@ class NativeSettingsEngineRoundtripTest {
                         apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),
-                        mobileLinux = null,
+                        mobileLinux = com.lingxi.code.settings.LinuxRuntimeBridge.configForWorkspace(
+                            context, com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
+                            com.lingxi.code.project.ProjectWorkspace(workspace.parentFile!!.name, workspace.absolutePath)),
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
                         override suspend fun onEvent(event: ClientEvent) {

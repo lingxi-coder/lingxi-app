@@ -1,5 +1,6 @@
 package com.lingxi.code.cron
 
+import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import android.content.Context
 import org.json.JSONObject
 import java.io.File
@@ -42,7 +43,7 @@ internal class CronScopeScanner(context: Context) {
                     projectId = directory.name,
                     projectName = projectName,
                     workspacePath = canonicalWorkspace.path,
-                    guestPath = "/workspace/${directory.name}",
+                    guestPath = MobileLinuxGuestPaths.workspace(directory.name),
                 )
             }.getOrNull()
             if (scope != null) scopes += scope

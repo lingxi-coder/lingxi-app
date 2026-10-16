@@ -87,7 +87,7 @@ final class MockConversationSource: ConversationSource {
                 id: "ui-read",
                 tool: "Read",
                 status: .completed,
-                inputSummary: "/workspace/ui-test/README.md",
+                inputSummary: "/home/lingxi/lingxi/ui-test/README.md",
                 display: ConversationToolResultDisplay(
                     headline: "Read completed", headlineKind: nil, headlineArgs: [], diff: nil,
                     body: nil, bodyLines: 0, bodyTruncated: false, collapsed: false

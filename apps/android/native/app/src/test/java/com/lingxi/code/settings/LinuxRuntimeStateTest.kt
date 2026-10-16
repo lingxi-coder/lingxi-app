@@ -169,7 +169,7 @@ class LinuxRuntimeStateTest {
             stagedRoot = null,
             archiveSha256 = null,
             installedSizeBytes = 4096UL,
-            writableGuestPaths = listOf("/root", "/workspace"),
+            writableGuestPaths = listOf("/root", "/home/lingxi/lingxi"),
             lastError = null,
         )
 

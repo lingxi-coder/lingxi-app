@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class ConversationNavigationTests: XCTestCase {
     func testTerminalRouteCwdParsesGuestAbsoluteAndWorkspaceRelativePaths() {
-        XCTAssertEqual(TerminalRouteCwd("/workspace/project-a/src"), .guestPath("/workspace/project-a/src"))
+        XCTAssertEqual(TerminalRouteCwd("/home/lingxi/lingxi/project-a/src"), .guestPath("/home/lingxi/lingxi/project-a/src"))
         XCTAssertEqual(TerminalRouteCwd("src/features"), .workspaceRelative("src/features"))
         XCTAssertNil(TerminalRouteCwd("   "))
         XCTAssertNil(TerminalRouteCwd(nil))
@@ -16,7 +16,7 @@ final class ConversationNavigationTests: XCTestCase {
         let request = ConversationShellLaunchRequest(
             taskId: "task-1",
             command: "npm test",
-            cwd: .guestPath("/workspace/project-a/app")
+            cwd: .guestPath("/home/lingxi/lingxi/project-a/app")
         )
 
         navigation.openTerminal(shellRequest: request, projectID: "project-a", sessionID: "shell-task-1")
@@ -27,7 +27,7 @@ final class ConversationNavigationTests: XCTestCase {
         XCTAssertEqual(sessionID, "shell-task-1")
         XCTAssertEqual(initialCommand, "npm test")
         XCTAssertEqual(projectID, "project-a")
-        XCTAssertEqual(requestedCwd, .guestPath("/workspace/project-a/app"))
+        XCTAssertEqual(requestedCwd, .guestPath("/home/lingxi/lingxi/project-a/app"))
     }
 
     func testShellCardLaunchRequestUsesTypedCwdForTerminalButton() {

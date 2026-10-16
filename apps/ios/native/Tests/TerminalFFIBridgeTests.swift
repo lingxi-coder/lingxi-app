@@ -10,7 +10,7 @@ final class TerminalFFIBridgeTests: XCTestCase {
         let config = TerminalRuntimeConfig(
             mode: .mobileLinux,
             managedRoot: "/managed",
-            workspaceHostPath: "/workspace-host",
+            workspaceHostPath: "/home/lingxi/lingxi-host",
             stableWorkspaceId: "project",
             abi: "arm64",
             rootfsVersion: "1.0.0",
@@ -20,7 +20,7 @@ final class TerminalFFIBridgeTests: XCTestCase {
         let request = TerminalPtyOpenRequest(
             command: "/bin/sh",
             args: ["-i"],
-            cwd: "/workspace/project",
+            cwd: "/home/lingxi/lingxi/project",
             env: [:],
             cols: 80,
             rows: 24,
@@ -75,6 +75,20 @@ final class TerminalFFIBridgeTests: XCTestCase {
         XCTAssertEqual(descriptor.invalidRequestedCwdMessage, "请求的 cwd 超出 workspace：/tmp")
     }
 
+    func testHistoricalGuestCwdRouteUsesCurrentWorkspacePath() {
+        let id = "12345678-1234-4abc-8def-1234567890ab"
+        let project = ProjectSnapshot(
+            record: ProjectRecord(id: id, name: "Project", storageKind: .internal,
+                                  createdAt: .distantPast, updatedAt: .distantPast),
+            workspace: ProjectWorkspace(projectId: id, hostURL: URL(fileURLWithPath: "/tmp/project")), sessions: [])
+        var runtime = LinuxRuntimeState()
+        runtime.selectedMode = .mobileLinux
+        let descriptor = TerminalRuntimeDescriptor.make(appSandboxRoot: "/tmp/app", project: project,
+            linuxRuntime: runtime, requestedCwd: .guestPath("/workspace/\(id)/src"))
+        XCTAssertEqual(descriptor.launchCwd, "/home/lingxi/lingxi/\(id)/src")
+        XCTAssertNil(descriptor.invalidRequestedCwdMessage)
+    }
+
     func testDescriptorMakeFallsBackToLinuxRuntimeDraftCommand() {
         let project = ProjectSnapshot(
             record: ProjectRecord(
@@ -104,7 +118,7 @@ final class TerminalFFIBridgeTests: XCTestCase {
 
         XCTAssertEqual(descriptor.initialCommand, "python3 --version")
         XCTAssertEqual(descriptor.requestedCwdDisplay, "src")
-        XCTAssertEqual(descriptor.launchCwd, "/workspace/12345678-1234-4abc-8def-1234567890ab/src")
+        XCTAssertEqual(descriptor.launchCwd, "/home/lingxi/lingxi/12345678-1234-4abc-8def-1234567890ab/src")
     }
 }
 
@@ -144,7 +158,7 @@ private final class FakeTerminalRuntimeBridge: TerminalRuntimeFFIBridge, @unchec
             stagedRoot: nil,
             archiveSha256: nil,
             installedSizeBytes: nil,
-            writableGuestPaths: ["/workspace/project"],
+            writableGuestPaths: ["/home/lingxi/lingxi/project"],
             lastError: nil
         )
     }
@@ -222,7 +236,7 @@ private final class FakeTerminalRuntimeHandle: @unchecked Sendable, TerminalRunt
             stagedRoot: nil,
             archiveSha256: nil,
             installedSizeBytes: nil,
-            writableGuestPaths: ["/workspace/project"],
+            writableGuestPaths: ["/home/lingxi/lingxi/project"],
             lastError: nil
         )
     }

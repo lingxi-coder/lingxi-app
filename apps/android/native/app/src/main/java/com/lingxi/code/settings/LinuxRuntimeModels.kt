@@ -1,5 +1,6 @@
 package com.lingxi.code.settings
 
+import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import androidx.annotation.StringRes
 import com.lingxi.code.R
 import com.lingxi.code.bindings.android.AndroidMobileLinuxConfigFfi
@@ -192,7 +193,7 @@ fun linuxRuntimeUiStateFrom(
             LinuxRuntimeMountUiState(
                 id = "managed-$index",
                 guestPath = guestPath,
-                summaryRes = if (guestPath == "/workspace") {
+                summaryRes = if (guestPath == MobileLinuxGuestPaths.WORKSPACE_ROOT) {
                     R.string.settings_linux_mount_workspace_summary
                 } else {
                     R.string.settings_linux_mount_managed_summary

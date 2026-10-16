@@ -17,7 +17,7 @@ pub struct IosMobileLinuxConfigFfi {
     /// Explicit host workspace root exposed to the guest. Must not be the app
     /// sandbox root, `.lingxi`, or any provider/config subtree.
     pub workspace_host_path: String,
-    /// Stable guest workspace id used to produce `/workspace/<id>`.
+    /// Stable guest workspace id used to produce `/home/lingxi/lingxi/<id>`.
     pub stable_workspace_id: String,
     /// ABI name for the rootfs payload (`arm64` on device).
     pub abi: String,

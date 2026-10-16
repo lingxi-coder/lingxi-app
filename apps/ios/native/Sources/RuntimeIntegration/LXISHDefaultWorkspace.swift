@@ -4,9 +4,9 @@ import Foundation
 enum LXISHDefaultWorkspace {
     static let defaultsKey = "lingxi.mobile-linux.workspace.default.id"
 
-    /// `/root` is mounted by the runtime unconditionally (the persistent home
+    /// `~/lingxi` is mounted by the runtime unconditionally (the persistent home
     /// layer) and is always writable, so it is a valid cwd even with no project.
-    static let guestHome = LXISHGuestPaths.home
+    static let guestHome = LXISHGuestPaths.workspaceRoot
 
     static func stableID(defaults: UserDefaults = .standard) -> String {
         if let persisted = defaults.string(forKey: defaultsKey),

@@ -23,9 +23,9 @@ pub struct IosIshRuntimeConfig {
     pub managed_root: PathBuf,
     /// Canonical app sandbox root used to protect `.lingxi` and config trees.
     pub app_sandbox_root: PathBuf,
-    /// Host workspace path exposed as the default `/workspace/<id>` mount.
+    /// Host workspace path exposed as the default `/home/lingxi/lingxi/<id>` mount.
     pub workspace_host_path: PathBuf,
-    /// Stable guest workspace identifier appended under `/workspace`.
+    /// Stable guest workspace identifier appended under `/home/lingxi/lingxi`.
     pub stable_workspace_id: String,
     /// Guest ABI label surfaced in status responses.
     pub abi: String,
@@ -281,9 +281,13 @@ fn validate_mount(
     let lingxi_root = normalize_host_path(&config.lingxi_root(), ".lingxi root")?;
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
 
-    if guest_path_has_prefix(&mount.guest_path, mobile_linux_api::guest_paths::HOME) {
+    if ["/", "/home"].contains(&mount.guest_path.as_str())
+        || (guest_path_has_prefix(&mount.guest_path, mobile_linux_api::guest_paths::HOME)
+            && !matches!(mount.purpose, MountPurpose::Workspace))
+        || guest_path_has_prefix(&mount.guest_path, mobile_linux_api::guest_paths::ADMIN_HOME)
+    {
         return Err(MobileLinuxError::InvalidRequest(
-            "request mounts may not replace the runtime-managed persistent /root".to_string(),
+            "request mounts may not replace the runtime-managed persistent guest homes".to_string(),
         ));
     }
 
@@ -490,7 +494,7 @@ mod tests {
             normalize_host_path(&config.workspace_host_path, "workspace_host_path")
                 .expect("normalized workspace path")
         );
-        assert_eq!(mount.guest_path, "/workspace/default");
+        assert_eq!(mount.guest_path, "/home/lingxi/lingxi/default");
     }
 
     #[test]
@@ -505,7 +509,7 @@ mod tests {
         let error = validate_mount(
             &MountSpec {
                 host_path: config.workspace_host_path.clone(),
-                guest_path: "/workspace/../etc".to_string(),
+                guest_path: "/home/lingxi/lingxi/../etc".to_string(),
                 read_only: false,
                 purpose: MountPurpose::Workspace,
             },

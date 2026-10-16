@@ -36,7 +36,7 @@ class ProjectRepositoryInstrumentedTest {
             File(projectDir, PROJECT_WORKSPACE_DIR).canonicalPath,
             created.workspace.hostPath,
         )
-        assertEquals("/workspace/${created.record.id}", created.workspace.guestPath)
+        assertEquals("/home/lingxi/lingxi/${created.record.id}", created.workspace.guestPath)
         assertTrue(File(projectDir, PROJECT_MANIFEST_FILE).isFile)
         assertTrue(File(projectDir, PROJECT_SESSION_INDEX_FILE).isFile)
         assertTrue(File(projectDir, PROJECT_SYNC_BASELINE_FILE).isFile)

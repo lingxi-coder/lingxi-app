@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::wire::Frame;
-use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
+use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::audio_bridge::new_audio_bridge;
 use bridge_server::server::BridgeConnection;
 use client::protocol::audio::{
@@ -42,8 +42,8 @@ use lingxi_core::host::audio::{
     AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationSuccess, AudioOwner,
     AudioRecordingHandle, AudioService,
 };
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 const TEST_TOKEN: &str = "audio-e2e-token-32chars000000000";
 

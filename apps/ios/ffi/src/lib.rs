@@ -50,7 +50,6 @@
 //! the iOS-local exports) so the symbols land in the final `staticlib`/cdylib.
 
 #![forbid(unsafe_code)]
-
 // Documentation debt, not a decision that docs do not matter: this crate had
 // 140 undocumented public item(s) when `missing_docs` was measured across the
 // workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
@@ -74,17 +73,16 @@
 mod audio_provider;
 #[cfg(feature = "uniffi")]
 pub use audio_provider::{
-    build_ios_audio_provider_host, build_ios_session_audio_provider_host, IosAudioProviderHost,
-    start_ios_realtime_audio, IosRealtimeAudioListener, IosRealtimeAudioSession,
+    build_ios_audio_provider_host, build_ios_session_audio_provider_host, start_ios_realtime_audio,
+    IosAudioProviderHost, IosRealtimeAudioListener, IosRealtimeAudioSession,
 };
-
 
 #[cfg(feature = "uniffi")]
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
-    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle,
-    MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto,
-    MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
+    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
+    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileSessionMode,
+    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
     SessionModeDto,
 };
@@ -165,9 +163,9 @@ pub use host::build_ios_engine;
 #[cfg(feature = "uniffi")]
 pub use host::build_ios_engine_with_config;
 #[cfg(feature = "uniffi")]
-pub use host::create_ios_side_chat;
-#[cfg(feature = "uniffi")]
 pub use host::build_mobile_engine;
+#[cfg(feature = "uniffi")]
+pub use host::create_ios_side_chat;
 pub use host::PlatformImpls;
 #[cfg(test)]
 use linux_conversion::event_to_ffi;

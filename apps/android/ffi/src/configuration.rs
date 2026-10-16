@@ -231,8 +231,7 @@ pub(super) fn android_project_cwd(
         && is_lowercase_uuid(components[1])
         && components[2] == "workspace";
     let is_scheduled_workspace = components == ["scheduled", "workspace"];
-    let valid = (is_managed_project || is_scheduled_workspace)
-        && workspace.is_dir();
+    let valid = (is_managed_project || is_scheduled_workspace) && workspace.is_dir();
     if !valid {
         return Err(MobileEngineError::Internal(
             "Android conversation workspace must match \

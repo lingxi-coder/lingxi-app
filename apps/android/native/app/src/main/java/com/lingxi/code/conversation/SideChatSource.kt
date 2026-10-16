@@ -129,7 +129,7 @@ internal class SideChatSource(private val handle: MobileEngineHandle) : Conversa
         submitClientCommand(sideChatCancelCommand(turnId))
         backgroundStopPending = false
     }
-    override suspend fun setModel(id: String) = submitClientCommand(ClientCommand.SetModel(id))
+    override suspend fun setModel(id: String) = submitClientCommand(ClientCommand.SetModel(id.toClientTextDto()))
     override suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) =
         submitClientCommand(ClientCommand.ApprovePermission(requestId, response))
     override suspend fun denyPermission(requestId: ULong) = submitClientCommand(ClientCommand.DenyPermission(requestId))

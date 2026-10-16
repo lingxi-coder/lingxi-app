@@ -78,7 +78,7 @@ class SlashCommandCatalogTest {
         val command = catalogCommand(argumentNames = listOf(malformedArgument))
         assertEquals(0xD800.toUShort(), command.argumentNames.single().codeUnits.last())
 
-        val source = object : ConversationSource {
+        val source = object : ConversationSource, BackgroundRetainableConversationSource {
             override fun engineSourceForBackgroundRetention(): EngineConversationSource? = null
         }
         val model = ChatViewModel(source)

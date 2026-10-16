@@ -2654,6 +2654,17 @@ textarea, input { font-family: inherit; }
   pointer-events: none;
 }
 .context-window-heading { color: #a3a3a3; }
+.context-window-details {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #363636;
+  color: #c7c7c7;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+}
 
 /* Goal surfaces share the composer's quiet, neutral hierarchy. */
 .goal-message-objective { white-space: pre-wrap; overflow-wrap: anywhere; }

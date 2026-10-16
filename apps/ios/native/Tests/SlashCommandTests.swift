@@ -571,6 +571,35 @@ import XCTest
             XCTAssertEqual(source.model.messages.last?.text, "review result")
             XCTAssertEqual(source.model.turnCompletion?.outcome, .completed)
         }
+
+        func testSelectedSlashCommandSendsOriginalUtf16Identity() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.slashCommandCatalog(commands: [
+                SlashCommandDto(
+                    name: ClientTextDto(codeUnits: [0xD800]),
+                    description: "Custom skill".clientTextDto,
+                    source: "user",
+                    aliases: [],
+                    argumentHint: nil,
+                    argumentNames: [],
+                    menuDescription: nil,
+                    hidden: false
+                ),
+            ]))
+            let selected = try XCTUnwrap(source.model.slashCommands.first { $0.sourceNameCodeUnits == [0xD800] })
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+
+            let token = try XCTUnwrap(source.send("/� argument", images: [], selectedSlashCommand: selected))
+            await flushTasks()
+
+            guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
+                return XCTFail("expected exact selected slash command")
+            }
+            XCTAssertEqual(raw.codeUnits, [0x002F, 0xD800] + Array(" argument".utf16))
+            XCTAssertEqual(turnId, token.clientTurnId)
+        }
     }
 
 #endif

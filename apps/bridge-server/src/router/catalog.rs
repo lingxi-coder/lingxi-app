@@ -137,7 +137,9 @@ impl EngineCommandRouter {
                 } else {
                     cmd.argument_names
                         .iter()
-                        .map(|name| ClientTextDto::from_projection(name).expect("argument name is text"))
+                        .map(|name| {
+                            ClientTextDto::from_projection(name).expect("argument name is text")
+                        })
                         .collect()
                 },
                 menu_description: cmd.menu_description,

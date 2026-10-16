@@ -1233,16 +1233,30 @@ fn build_model_details(m: &lingxi_core::host::ModelListing) -> Vec<String> {
                 details.push(format!("价格: {} / 1M tok", price_bits.join(" · ")));
             }
             for tier in &pricing.tiers {
-                let threshold = format_token_count(Some(tier.context_threshold_tokens))
-                    .unwrap_or_else(|| tier.context_threshold_tokens.to_string());
+                let threshold = tier.context_threshold_tokens.to_string();
                 details.push(format!(
-                    "长上下文层级: >{threshold} 输入 {} 输出 {}",
+                    "输入区间: ≥{threshold} 至 {}（整次请求） 输入 {} 输出 {}",
+                    tier.max_input_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "无已知上界".into()),
                     format_price(tier.input_per_million).unwrap_or_else(|| "未提供".to_string()),
                     format_price(tier.output_per_million).unwrap_or_else(|| "未提供".to_string())
                 ));
             }
         }
         None => details.push("价格: 未提供".to_string()),
+    }
+
+    if let Some(context) = &m.metadata.context_budget {
+        details.push(format!(
+            "上下文策略: {}，应用输入预算: {}，标准价格输入上限: {}",
+            context.policy,
+            format_token_count(context.effective_input_budget).unwrap_or_else(|| "未知".into()),
+            context
+                .standard_price_input_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "未提供".into())
+        ));
     }
 
     if let Some(reasoning) = reasoning_summary(&m.reasoning) {

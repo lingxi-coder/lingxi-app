@@ -104,6 +104,21 @@ class ChatViewModel(
 ) : ViewModel() {
     internal val sideChats = SideChatManager(viewModelScope)
 
+    internal val supportsSideChats: Boolean get() = source is EngineConversationSource
+
+    internal fun openSideChats() {
+        if (sideChats.chats.value.isNotEmpty()) sideChats.visible.value = true
+        else createSideChat()
+    }
+
+    internal fun createSideChat() {
+        if (sideChats.isCreating.value) return
+        val parent = source as? EngineConversationSource ?: return
+        sideChats.create(parent, "") {
+            reportHostError(sideChats.error.value ?: "Unable to create side chat")
+        }
+    }
+
     /** Provider reconnect token is independent from workspace-source swaps. */
     private var reconnectGeneration: Int = sourceGeneration
 

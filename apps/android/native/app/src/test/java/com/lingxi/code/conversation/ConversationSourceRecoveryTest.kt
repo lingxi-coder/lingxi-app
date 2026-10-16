@@ -3,11 +3,20 @@ package com.lingxi.code.conversation
 import android.content.SharedPreferences
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
+import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.settings.LinuxRuntimeMode
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,6 +24,84 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ConversationSourceRecoveryTest {
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun pendingRecoveryForwardsPromptModeAndCompleteSubmission() = kotlinx.coroutines.test.runTest {
+        val pending = CompletableDeferred<ConversationSource?>()
+        val source = RecoveringConversationSource(
+            pending,
+            DefaultConversationStrings,
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
+        )
+        val delegate = RecordingRecoveredSource()
+        val prompt = RecoveredPrompt(
+            text = "echo \uD800",
+            images = listOf(ImageRefDto("image/png", "AA==")),
+            turnId = 42L,
+            visualization = VisualizationRef("chart", 3u),
+            mode = PromptModeDto.BASH,
+        )
+        try {
+            val replies = async {
+                source.submit(prompt.text, prompt.images, prompt.turnId, prompt.visualization, prompt.mode).toList()
+            }
+            runCurrent()
+            assertFalse(replies.isCompleted)
+            assertTrue(delegate.prompts.isEmpty())
+
+            pending.complete(delegate)
+
+            assertEquals(listOf(ReplyEvent.End), replies.await())
+            assertEquals(listOf(prompt), delegate.prompts)
+            source.submit("follow up", emptyList(), 43L, prompt.visualization).toList()
+            assertEquals(RecoveredPrompt("follow up", emptyList(), 43L, prompt.visualization, null), delegate.prompts.last())
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
+    fun recoveredSourcePreservesExactSlashIdentityAndResult() = kotlinx.coroutines.test.runTest {
+        val delegate = RecordingRecoveredSource()
+        val source = RecoveringConversationSource(
+            CompletableDeferred<ConversationSource?>(delegate),
+            DefaultConversationStrings,
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
+        )
+        val raw = "/skill\uD800 argument".toClientTextDto()
+        try {
+            val commandSource: SlashCommandConversationSource = source
+            assertEquals(
+                listOf(ReplyEvent.CommandOutput("done", false, 44uL)),
+                commandSource.submitSlashCommand(raw, 44L).toList(),
+            )
+            assertEquals(listOf(raw to 44L), delegate.slashCommands)
+            assertTrue(delegate.prompts.isEmpty())
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
+    fun failedRecoveryTerminatesPromptAndSlashStreams() = kotlinx.coroutines.test.runTest {
+        val source = RecoveringConversationSource(
+            CompletableDeferred<ConversationSource?>().apply { complete(null) },
+            DefaultConversationStrings,
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
+        )
+        try {
+            val prompt = source.submit("echo hi", emptyList(), 45L, null, PromptModeDto.BASH).toList()
+            val slash = source.submitSlashCommand("/help".toClientTextDto(), 46L).toList()
+            for (replies in listOf(prompt, slash)) {
+                assertEquals(2, replies.size)
+                assertTrue(replies.first() is ReplyEvent.Error)
+                assertEquals(ReplyEvent.End, replies.last())
+            }
+        } finally {
+            source.close()
+        }
+    }
 
     @Test
     fun failedRecoveryRejectsModelSelection() = kotlinx.coroutines.test.runTest {
@@ -327,6 +414,35 @@ class ConversationSourceRecoveryTest {
         safeToResume = true,
         reason = null,
     )
+}
+
+private data class RecoveredPrompt(
+    val text: String,
+    val images: List<ImageRefDto>,
+    val turnId: Long,
+    val visualization: VisualizationRef?,
+    val mode: PromptModeDto?,
+)
+
+private class RecordingRecoveredSource : ConversationSource, SlashCommandConversationSource {
+    val prompts = mutableListOf<RecoveredPrompt>()
+    val slashCommands = mutableListOf<Pair<ClientTextDto, Long>>()
+
+    override fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> {
+        prompts += RecoveredPrompt(text, images, turnId, visualizationContext, promptMode)
+        return flowOf(ReplyEvent.End)
+    }
+
+    override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> {
+        slashCommands += raw to turnId
+        return flowOf(ReplyEvent.CommandOutput("done", false, turnId.toULong()))
+    }
 }
 
 private class FakeSharedPreferences : SharedPreferences {

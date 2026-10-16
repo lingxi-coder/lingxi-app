@@ -646,8 +646,8 @@ struct Composer: View {
 
     @ViewBuilder
     private var contextWindow: some View {
-        if let snapshot = ComposerContextUsage(usage: contextUsage, capacity: availableModelDetails[activeModelId]?.contextWindowTokens) {
-            ComposerContextWindow(snapshot: snapshot)
+        if let snapshot = ComposerContextUsage(usage: contextUsage, capacity: availableModelDetails[activeModelId]?.contextBudget?.effectiveInputBudget) {
+            ComposerContextWindow(snapshot: snapshot, details: availableModelDetails[activeModelId])
         }
     }
 
@@ -903,6 +903,7 @@ struct ComposerContextUsage: Equatable {
 private struct ComposerContextWindow: View {
     @Environment(\.theme) private var t
     let snapshot: ComposerContextUsage
+    let details: ModelRuntimeDetails?
     @State private var showsDetails = false
 
     private var summary: String {
@@ -935,6 +936,16 @@ private struct ComposerContextWindow: View {
                 Text("Context window:").fontWeight(.semibold)
                 Text(summary)
                 Text(tokens)
+                Text("最近一次请求的输入用量 / 应用输入预算")
+                if let policy = details?.contextBudget?.policy {
+                    Text("应用策略：\(policy == "long" ? "长上下文" : policy == "custom" ? "自定义" : "自动")")
+                }
+                if let maximum = details?.contextWindowTokens {
+                    Text("模型最大上下文：\(ModelDetailFormat.tokenCount(maximum))")
+                }
+                if let boundary = details?.contextBudget?.standardPriceInputTokens {
+                    Text("输入超过 \(boundary.formatted()) tokens 后，整次请求适用长上下文价格。")
+                }
             }
             .font(.callout)
             .padding()

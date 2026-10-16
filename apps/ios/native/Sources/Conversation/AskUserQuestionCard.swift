@@ -14,7 +14,7 @@ struct AskUserQuestionCard: View {
     let onCancel: () async -> Bool
 
     @State private var expandedQuestion: Int? = 0
-    /// Selected option labels per question index, in tap order.
+    /// Selected option indices per question index, in tap order.
     @State private var selected: [Int: [Int]] = [:]
     /// The free-text answer per question index.
     @State private var custom: [Int: String] = [:]
@@ -80,6 +80,20 @@ struct AskUserQuestionCard: View {
         custom: [Int: String]
     ) -> Bool {
         answers(questions: questions, selected: selected, custom: custom).pairs.count == questions.count
+    }
+
+    static func answerSummary(
+        question: ConversationAskQuestion,
+        selected: [Int],
+        custom: String
+    ) -> String? {
+        var labels = selected.compactMap { optionIndex -> String? in
+            guard question.options.indices.contains(optionIndex) else { return nil }
+            return question.options[optionIndex].label
+        }
+        let free = custom.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !free.isEmpty { labels.append(free) }
+        return labels.isEmpty ? nil : labels.joined(separator: ", ")
     }
 
     var body: some View {
@@ -308,11 +322,11 @@ struct AskUserQuestionCard: View {
     }
 
     private func answerSummary(at index: Int) -> String? {
-        var labels = selected[index] ?? []
-        let free = (custom[index] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !free.isEmpty { labels.append(free) }
-        guard !labels.isEmpty else { return nil }
-        return labels.joined(separator: ", ")
+        Self.answerSummary(
+            question: questions[index],
+            selected: selected[index] ?? [],
+            custom: custom[index] ?? ""
+        )
     }
 
     private func isAnswered(at index: Int) -> Bool {

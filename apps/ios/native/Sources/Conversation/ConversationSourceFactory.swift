@@ -56,6 +56,17 @@ enum ConversationSourceFactory {
     static func make(options: LaunchOptions = .init()) -> any ConversationSource {
         #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" {
+                #if canImport(harness_runtimeFFI)
+                if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SIDE_CHAT"] == "1" {
+                    // Exercise the real child-session bindings without credentials or user data.
+                    let root = FileManager.default.temporaryDirectory.appendingPathComponent("side-chat-ui-\(UUID().uuidString)")
+                    let source = EngineConversationSource(config: EngineConfig(
+                        apiBase: "https://invalid.example", apiKey: "", model: "", appSandboxRoot: root.path,
+                        projectCwd: nil, sessionMode: options.sessionMode, visionDelegationEnabled: false))
+                    source.model.providerConfigured = false
+                    return source
+                }
+                #endif
                 let source = MockConversationSource.uiTestFixture(
                     sessionMode: options.sessionMode,
                     cancelledRun: ProcessInfo.processInfo.environment["LINGXI_UI_TEST_CANCELLED_RUN"] == "1",

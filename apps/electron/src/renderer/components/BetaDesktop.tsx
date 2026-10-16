@@ -3533,7 +3533,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
           <ContextWindow key={activeSessionId ?? 'new-session'}
             usage={bridge.sessionLoading ? null : bridge.usage}
-            capacity={currentModelDetail?.context_window_tokens} />
+            capacity={currentModelDetail?.context_budget?.effective_input_budget ?? undefined}
+            maximum={currentModelDetail?.context_window_tokens}
+            priceBoundary={currentModelDetail?.context_budget?.standard_price_input_tokens}
+            policy={currentModelDetail?.context_budget?.policy} />
           <div ref={modelControl} className="composer-model-control" style={{ position: 'relative', minWidth: 0 }}>
             <button
               ref={modelTrigger}

@@ -3891,6 +3891,9 @@ impl BridgeConnection {
             }
             let mut payloads = self.queued_prompt_payloads.lock().await;
             let mut queue_command = prompt_command(text.clone());
+            // This entry already chose model input rather than RunSlashCommand.
+            // Preserve that choice when a path-like prompt waits in the queue.
+            queue_command.skip_slash_commands = true;
             let mut queued_images = Some(images);
             let mut queued_inputs = Some(queued_inputs);
             let scheduled_run_id = scheduled.as_ref().map(|(run_id, _, _)| run_id.clone());
@@ -4664,6 +4667,10 @@ mod turn_handoff_regression_test;
 #[cfg(test)]
 #[path = "server/permission_owner_regression_test.rs"]
 mod permission_owner_regression_test;
+
+#[cfg(test)]
+#[path = "server/prompt_ingress_regression_test.rs"]
+mod prompt_ingress_regression_test;
 
 #[cfg(test)]
 mod tests {

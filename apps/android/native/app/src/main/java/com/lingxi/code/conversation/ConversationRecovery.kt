@@ -8,8 +8,10 @@ import android.os.Build
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.PermissionResponseDto
+import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
@@ -20,6 +22,7 @@ import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.project.ProjectWorkspace
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -291,17 +294,17 @@ internal class DurableAttachCoordinator {
 }
 
 internal class RecoveringConversationSource(
-    private val pendingSource: kotlinx.coroutines.CompletableDeferred<EngineConversationSource?>,
+    private val pendingSource: Deferred<ConversationSource?>,
     private val strings: ConversationStrings,
     override val recoverySpec: ConversationRecoverySpec,
-) : ConversationSource, BackgroundRetainableConversationSource {
+) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
     private val delegateScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val models = MutableStateFlow(EngineModelState())
     private val sessions = MutableStateFlow(EngineSessionState.loading())
     private val activeSession = MutableStateFlow<ActivatedSession?>(null)
     private val permissions = MutableStateFlow<PermissionPromptState?>(null)
     private val mcp = MutableStateFlow(emptyList<MCPServer>())
-    @Volatile private var retainedSource: EngineConversationSource? = null
+    @Volatile private var retainedSource: ConversationSource? = null
     @Volatile private var closed = false
 
     init {
@@ -390,14 +393,40 @@ internal class RecoveringConversationSource(
         pendingSource.await()?.denyPermission(requestId)
     }
 
-    override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> = flow {
+    override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
+        submit(text, images, turnId, null, null)
+
+    override fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+    ): Flow<ReplyEvent> = submit(text, images, turnId, visualizationContext, null)
+
+    override fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+        promptMode: PromptModeDto?,
+    ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await()
         if (delegate == null) {
             emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(delegate.submit(text, images, turnId))
+        emitAll(delegate.submit(text, images, turnId, visualizationContext, promptMode))
+    }
+
+    override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> = flow {
+        val delegate = pendingSource.await() as? SlashCommandConversationSource
+        if (delegate == null) {
+            emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
+            emit(ReplyEvent.End)
+            return@flow
+        }
+        emitAll(delegate.submitSlashCommand(raw, turnId))
     }
 
     override suspend fun cancel(turnId: Long?) {
@@ -416,5 +445,6 @@ internal class RecoveringConversationSource(
         }
     }
 
-    override fun engineSourceForBackgroundRetention(): EngineConversationSource? = retainedSource
+    override fun engineSourceForBackgroundRetention(): EngineConversationSource? =
+        (retainedSource as? BackgroundRetainableConversationSource)?.engineSourceForBackgroundRetention()
 }

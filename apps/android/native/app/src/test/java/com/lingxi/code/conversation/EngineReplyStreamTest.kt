@@ -276,7 +276,7 @@ class EngineReplyStreamTest {
             events.onSubscription {
                 emit(ClientEvent.UsageUpdate(isSnapshot = null, inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u))
                 emit(ClientEvent.TextDelta("hi".toClientTextDto()))
-                emit(ClientEvent.ModelChanged(model = "opus"))
+                emit(ClientEvent.ModelChanged(modelSource = null, model = "opus"))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
             },
         )
@@ -334,7 +334,7 @@ class EngineReplyStreamTest {
                         eventJson = """{"type":"text_delta","text":"live"}""",
                     ),
                 )
-                emit(ClientEvent.ModelChanged(model = "ignored"))
+                emit(ClientEvent.ModelChanged(modelSource = null, model = "ignored"))
                 emit(
                     ClientEvent.TurnEventReplay(
                         sessionId = "session-a",

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import type { ModelContextBudgetDto } from '@lingxi/bridge-client';
 import type { UsageSnapshot } from '../bridge/conversation';
 import { formatTokens } from '../formatTokens';
 import { useT } from '../theme/ThemeContext';
@@ -15,10 +16,11 @@ export function contextWindowUsage(usage: UsageSnapshot | null, capacity?: numbe
 }
 
 /** Latest API context footprint; session-wide billing totals are deliberately separate. */
-export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null; capacity?: number }) {
+export function ContextWindow({ usage, capacity, maximum, priceBoundary, policy }: { usage: UsageSnapshot | null; capacity?: number; maximum?: number; priceBoundary?: number | null; policy?: ModelContextBudgetDto['policy'] }) {
   const t = useT();
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
+  const tooltip = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -33,7 +35,12 @@ export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null
     if (!open) return;
     const place = () => {
       const rect = trigger.current?.getBoundingClientRect();
-      if (rect) setPosition({ left: Math.max(12, Math.min(rect.left + rect.width / 2 - 126, window.innerWidth - 264)), bottom: window.innerHeight - rect.top + 8 });
+      if (!rect) return;
+      const height = tooltip.current?.getBoundingClientRect().height ?? 0;
+      setPosition({
+        left: Math.max(12, Math.min(rect.left + rect.width / 2 - 126, window.innerWidth - 264)),
+        bottom: Math.max(12, Math.min(window.innerHeight - rect.top + 8, window.innerHeight - height - 12)),
+      });
     };
     const dismiss = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') setDismissed(true); };
     place();
@@ -45,7 +52,7 @@ export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null
       window.removeEventListener('scroll', place, true);
       window.removeEventListener('keydown', dismiss);
     };
-  }, [open]);
+  }, [open, capacity, maximum, priceBoundary, policy, summary, tokens]);
 
   return <>
     <button ref={trigger} type="button" className="context-window-trigger"
@@ -61,10 +68,16 @@ export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null
           strokeLinecap="round" transform="rotate(-90 10 10)" />}
       </svg>
     </button>
-    {open && createPortal(<div id={id} role="tooltip" className="context-window-tooltip" style={position}>
+    {open && createPortal(<div ref={tooltip} id={id} role="tooltip" className="context-window-tooltip" style={position}>
       <div className="context-window-heading">Context window:</div>
       <div>{summary}</div>
       <div>{tokens}</div>
+      <div className="context-window-details">
+        <div>最近一次请求输入 / 应用预算</div>
+        {policy && <div>应用策略：{policy === 'long' ? '长上下文' : policy === 'custom' ? '自定义' : '自动'}</div>}
+        {maximum != null && <div>模型最大上下文：{formatTokens(maximum)}</div>}
+        {priceBoundary != null && <div>输入超过 {priceBoundary.toLocaleString()} tokens 后，整次请求适用长上下文价格。</div>}
+      </div>
     </div>, document.body)}
   </>;
 }

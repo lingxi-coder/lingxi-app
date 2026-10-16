@@ -21,23 +21,85 @@ use lingxi_core::host::{
     ContextPressureBanner, CostSnapshot, OutputStream, RefusalContinuationJoin,
     RefusalContinuationPhase, ServerFallbackTombstoneMessage, TurnOutcome,
 };
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
-fn display_source_value(source: &Utf16JsonProjection) -> serde_json::Value {
-    source
-        .to_json_string()
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_else(|| {
-            source
-                .string_at("")
-                .map_or(serde_json::Value::Null, |text| {
-                    serde_json::Value::String(text.to_owned())
-                })
-        })
+/// Convert exact source JSON to the display-only `Value` accepted by the TUI
+/// tool renderer. Strings and object keys use their source carrier's display
+/// form only at this rendering boundary; the original projection stays intact.
+pub fn projection_to_display_value(projection: &Utf16JsonProjection) -> serde_json::Value {
+    enum Frame<'a> {
+        Visit(JsonValueView<'a>),
+        Null,
+        Array(usize),
+        Object(Vec<String>),
+    }
+
+    let Some(root) = projection.at_pointer("") else {
+        return serde_json::Value::Null;
+    };
+    let mut frames = vec![Frame::Visit(root)];
+    let mut values = Vec::new();
+    while let Some(frame) = frames.pop() {
+        match frame {
+            Frame::Null => values.push(serde_json::Value::Null),
+            Frame::Visit(value) if value.is_null() => values.push(serde_json::Value::Null),
+            Frame::Visit(value) if value.as_str().is_some() => values.push(
+                serde_json::Value::String(value.as_str().unwrap_or_default().to_owned()),
+            ),
+            Frame::Visit(value) if value.as_bool().is_some() => {
+                values.push(serde_json::Value::Bool(value.as_bool().unwrap_or_default()))
+            }
+            Frame::Visit(value) if value.as_number().is_some() => {
+                let number = value.as_number().unwrap_or_default();
+                // Keep integer-valued fields usable by renderers calling
+                // as_u64/as_i64, as in the previous JSON serialization path.
+                // JSON stringification also normalizes negative zero to zero.
+                let number = if number == 0.0 { 0.0 } else { number };
+                values.push(
+                    serde_json::from_str(&number.to_string()).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Frame::Visit(value) if value.array_len().is_some() => {
+                let len = value.array_len().unwrap_or_default();
+                frames.push(Frame::Array(len));
+                for index in (0..len).rev() {
+                    frames.push(value.get_index(index).map_or(Frame::Null, Frame::Visit));
+                }
+            }
+            Frame::Visit(value) => {
+                let Some(entries) = value.object_entries() else {
+                    values.push(serde_json::Value::Null);
+                    continue;
+                };
+                let keys = entries
+                    .iter()
+                    .map(|entry| entry.display_key.to_owned())
+                    .collect();
+                frames.push(Frame::Object(keys));
+                for entry in entries.into_iter().rev() {
+                    frames.push(Frame::Visit(entry.value));
+                }
+            }
+            Frame::Array(len) => {
+                let start = values.len().saturating_sub(len);
+                let children = values.split_off(start);
+                values.push(serde_json::Value::Array(children));
+            }
+            Frame::Object(keys) => {
+                let start = values.len().saturating_sub(keys.len());
+                let children = values.split_off(start);
+                let mut object = serde_json::Map::new();
+                for (key, child) in keys.into_iter().zip(children) {
+                    object.insert(key, child);
+                }
+                values.push(serde_json::Value::Object(object));
+            }
+        }
+    }
+    values.pop().unwrap_or(serde_json::Value::Null)
 }
 
 /// One live heartbeat value retained by the bridge. Heartbeats are transient
@@ -732,7 +794,7 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::ToolUseStart {
             id: id.clone(),
             tool: tool.to_string(),
-            input: display_source_value(input),
+            input: projection_to_display_value(input),
         });
     }
 
@@ -799,7 +861,7 @@ impl OutputStream for BridgeOutputStream {
         // `model_content` so `body_text` can surface it; the structured fields
         // stay intact for tools that render off them (Bash stdout/stderr,
         // Edit/Write diffs).
-        let result = display_source_value(result);
+        let result = projection_to_display_value(result);
         let model_text = model_text.string_at("").unwrap_or_default();
         let result = match result.as_object() {
             Some(obj) if !model_text.is_empty() && !obj.contains_key("model_content") => {
@@ -1295,6 +1357,58 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tool_call_with_lone_surrogate_keeps_the_complete_display_object() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let id = lingxi_core::types::ToolUseId::new();
+        let source = Utf16JsonProjection::parse(
+            r#"{"command":"printf","args":["before\ud800after",{"key":"value"}],"count":2,"enabled":true,"empty":null}"#,
+        )
+        .unwrap();
+        let original = source.to_json_string().unwrap();
+
+        bridge.emit_tool_call(&id, "Bash", &source).await;
+
+        let TurnEvent::ToolUseStart { input, .. } = rx.recv().await.unwrap() else {
+            panic!("expected tool call");
+        };
+        assert_eq!(input["command"], "printf");
+        assert_eq!(input["args"][0], "before�after");
+        assert_eq!(input["args"][1]["key"], "value");
+        assert_eq!(input["count"].as_u64(), Some(2));
+        assert_eq!(input["enabled"], true);
+        assert!(input["empty"].is_null());
+        assert_eq!(source.to_json_string().unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn tool_result_with_lone_surrogates_keeps_output_status_and_model_text() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let id = lingxi_core::types::ToolUseId::new();
+        let result = Utf16JsonProjection::parse(
+            r#"{"stdout":"a\ud800b","exitCode":7,"nested":{"values":[1,"\udc00"]}}"#,
+        )
+        .unwrap();
+        let original = result.to_json_string().unwrap();
+        let model_text = Utf16JsonProjection::parse(r#""summary\ud800tail""#).unwrap();
+
+        bridge
+            .emit_tool_result(&id, "Bash", &model_text, &result, None)
+            .await;
+
+        let TurnEvent::ToolUseResult { result: shown, .. } = rx.recv().await.unwrap() else {
+            panic!("expected tool result");
+        };
+        assert_eq!(shown["stdout"], "a�b");
+        assert_eq!(shown["exitCode"].as_i64(), Some(7));
+        assert_eq!(shown["nested"]["values"][0].as_u64(), Some(1));
+        assert_eq!(shown["nested"]["values"][1], "�");
+        assert_eq!(shown["model_content"], "summary�tail");
+        assert_eq!(result.to_json_string().unwrap(), original);
     }
 
     #[tokio::test]

@@ -37,10 +37,11 @@
 //! [`RenderedMessage::CompactBoundary`]. The hidden summary is never rendered as
 //! an ordinary user row.
 
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use std::collections::HashMap;
 use tui_core::message::RenderedMessage;
+use tui_core::orchestrator_bridge::projection_to_display_value;
 
 /// Build the seeded scrollback for a resumed session from its persisted
 /// conversation history (in file/arrival order).
@@ -415,80 +416,6 @@ fn push_assistant_block(
         | ContentBlock::MediaAnalysis { .. }
         | ContentBlock::ProviderContent { .. } => {}
     }
-}
-
-/// Convert exact source JSON to the display-only `Value` accepted by the TUI
-/// tool renderer. Strings and object keys use their source carrier's display
-/// form here, after replay decoding has retained the original projection.
-fn projection_to_display_value(projection: &Utf16JsonProjection) -> serde_json::Value {
-    enum Frame<'a> {
-        Visit(JsonValueView<'a>),
-        Array(usize),
-        Object(Vec<String>),
-    }
-
-    let Some(root) = projection.at_pointer("") else {
-        return serde_json::Value::Null;
-    };
-    let mut frames = vec![Frame::Visit(root)];
-    let mut values = Vec::new();
-    while let Some(frame) = frames.pop() {
-        match frame {
-            Frame::Visit(value) if value.is_null() => values.push(serde_json::Value::Null),
-            Frame::Visit(value) if value.as_str().is_some() => values.push(
-                serde_json::Value::String(value.as_str().unwrap_or_default().to_owned()),
-            ),
-            Frame::Visit(value) if value.as_bool().is_some() => {
-                values.push(serde_json::Value::Bool(value.as_bool().unwrap_or_default()))
-            }
-            Frame::Visit(value) if value.as_number().is_some() => {
-                let number = value.as_number().unwrap_or_default();
-                values.push(
-                    serde_json::Number::from_f64(number)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::Null),
-                );
-            }
-            Frame::Visit(value) if value.array_len().is_some() => {
-                let len = value.array_len().unwrap_or_default();
-                frames.push(Frame::Array(len));
-                for index in (0..len).rev() {
-                    if let Some(child) = value.get_index(index) {
-                        frames.push(Frame::Visit(child));
-                    }
-                }
-            }
-            Frame::Visit(value) => {
-                let Some(entries) = value.object_entries() else {
-                    values.push(serde_json::Value::Null);
-                    continue;
-                };
-                let keys = entries
-                    .iter()
-                    .map(|entry| entry.display_key.to_owned())
-                    .collect();
-                frames.push(Frame::Object(keys));
-                for entry in entries.into_iter().rev() {
-                    frames.push(Frame::Visit(entry.value));
-                }
-            }
-            Frame::Array(len) => {
-                let start = values.len().saturating_sub(len);
-                let children = values.split_off(start);
-                values.push(serde_json::Value::Array(children));
-            }
-            Frame::Object(keys) => {
-                let start = values.len().saturating_sub(keys.len());
-                let children = values.split_off(start);
-                let mut object = serde_json::Map::new();
-                for (key, child) in keys.into_iter().zip(children) {
-                    object.insert(key, child);
-                }
-                values.push(serde_json::Value::Object(object));
-            }
-        }
-    }
-    values.pop().unwrap_or(serde_json::Value::Null)
 }
 
 #[cfg(test)]

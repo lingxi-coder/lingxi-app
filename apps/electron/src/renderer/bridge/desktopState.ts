@@ -183,7 +183,8 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
         },
       };
     case 'status_snapshot':
-      return { ...state, status: event.snapshot, currentModel: event.snapshot.model, currentModelSource: event.snapshot.model_source ?? null };
+      // Status carries an unqualified display model, not the selected route.
+      return { ...state, status: event.snapshot };
     case 'doctor_report':
       return { ...state, doctor: event.report };
     case 'auth_state':

@@ -25,8 +25,9 @@ import XCTest
                 apiKey: "",
                 model: "",
                 appSandboxRoot: NSTemporaryDirectory(),
-                                sessionMode: .code,
-visionDelegationEnabled: true)
+                sessionMode: .code,
+                visionDelegationEnabled: true
+            )
             return EngineConversationSource(config: config)
         }
 
@@ -181,12 +182,12 @@ visionDelegationEnabled: true)
         /// The wire answer map keys on the QUESTION TEXT; labels comma-join;
         /// free text rides as one more value; unanswered questions are
         /// omitted, and completeness requires every question answered.
-        func testAnswersMapKeysOnQuestionTextAndJoinsLabels() {
+        func testAnswersRetainQuestionIdentityAndJoinSelectedLabels() {
             let questions = [
                 askQuestion("记录什么？", multiSelect: true),
                 askQuestion("要提醒吗？"),
             ]
-            let selected = [0: [0, 1], 1: [Int]() ]
+            let selected = [0: [0, 1], 1: []]
             let custom = [1: " 每天晚上提醒 "]
 
             let answers = AskUserQuestionCard.answers(
@@ -197,11 +198,14 @@ visionDelegationEnabled: true)
             XCTAssertEqual(answers.pairs[0].answer.displayText, "笔记, 打卡")
             XCTAssertEqual(answers.pairs[1].question.displayText, "要提醒吗？")
             XCTAssertEqual(answers.pairs.last?.answer.displayText, "每天晚上提醒", "free text is trimmed and used as the answer")
+            XCTAssertEqual(answers.pairs.map(\.question.codeUnits), questions.map { Array($0.question.utf16) })
+            XCTAssertEqual(answers.pairs.map(\.answer.displayText), ["笔记, 打卡", "每天晚上提醒"])
             XCTAssertTrue(AskUserQuestionCard.isComplete(questions: questions, selected: selected, custom: custom))
 
             let incomplete = AskUserQuestionCard.answers(
                 questions: questions, selected: [0: [0]], custom: [:]
             )
+            XCTAssertEqual(incomplete.pairs.count, 1, "an unanswered question is omitted, not sent empty")
             XCTAssertFalse(incomplete.pairs.contains { $0.question.displayText == "要提醒吗？" }, "an unanswered question is omitted, not sent empty")
             XCTAssertFalse(AskUserQuestionCard.isComplete(questions: questions, selected: [0: [0]], custom: [:]))
         }
@@ -242,6 +246,32 @@ visionDelegationEnabled: true)
             )
             XCTAssertEqual(answers.pairs.first?.question.displayText, "要哪些功能？")
             XCTAssertEqual(answers.pairs.first?.answer.displayText, "笔记, 语音输入")
+        }
+
+        func testAnswerSummaryMapsIndicesToLabelsInSelectionOrder() {
+            let question = askQuestion("记录什么？", options: ["笔记", "打卡"], multiSelect: true)
+            XCTAssertEqual(
+                AskUserQuestionCard.answerSummary(question: question, selected: [1, 0], custom: "  语音  "),
+                "打卡, 笔记, 语音"
+            )
+            XCTAssertEqual(
+                AskUserQuestionCard.answerSummary(question: question, selected: [-1, 2], custom: "  自定义  "),
+                "自定义"
+            )
+            XCTAssertNil(AskUserQuestionCard.answerSummary(question: question, selected: [-1, 2], custom: " \n "))
+        }
+
+        func testSummaryUsesDisplayLabelsWhileAnswerPreservesSourceUnits() {
+            let question = ConversationAskQuestion(
+                question: "Q�", header: "", options: [
+                    ConversationAskOption(label: "�", description: "", preview: nil, sourceLabelCodeUnits: [0xD800]),
+                    ConversationAskOption(label: "�", description: "", preview: nil, sourceLabelCodeUnits: [0xFFFD]),
+                ], multiSelect: false, sourceQuestionCodeUnits: [0x51, 0xD801]
+            )
+            XCTAssertEqual(AskUserQuestionCard.answerSummary(question: question, selected: [0], custom: ""), "�")
+            let answers = AskUserQuestionCard.answers(questions: [question], selected: [0: [0]], custom: [:])
+            XCTAssertEqual(answers.pairs.first?.question.codeUnits, [0x51, 0xD801])
+            XCTAssertEqual(answers.pairs.first?.answer.codeUnits, [0xD800])
         }
     }
 

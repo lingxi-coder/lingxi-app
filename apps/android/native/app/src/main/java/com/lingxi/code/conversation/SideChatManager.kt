@@ -31,6 +31,7 @@ internal class SideChatManager(private val scope: CoroutineScope) {
     val failedDraft = MutableStateFlow<String?>(null)
     private var generation = 0
     private var creating = 0
+    val isCreating = MutableStateFlow(false)
     private val foreground = SideChatForegroundGate()
     val hasLiveChats: Boolean get() = creating > 0 || entries.value.isNotEmpty()
     var whenVacant: (() -> Unit)? = null
@@ -41,6 +42,7 @@ internal class SideChatManager(private val scope: CoroutineScope) {
         failedDraft.value = null
         error.value = null
         creating++
+        isCreating.value = true
         val originalGeneration = generation
         val foregroundToken = foreground.capture()
         scope.launch {
@@ -67,6 +69,7 @@ internal class SideChatManager(private val scope: CoroutineScope) {
                     restore()
                 } finally {
                     creating--
+                    isCreating.value = creating > 0
                     notifyVacant()
                 }
             }

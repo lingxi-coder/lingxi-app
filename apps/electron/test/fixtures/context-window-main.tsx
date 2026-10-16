@@ -17,7 +17,7 @@ declare global {
 function Harness() {
   const [state, setState] = useState<ReturnType<typeof emptyConversation>>(() => ({ ...emptyConversation(), usage: live }));
   useEffect(() => { window.sendUsageEvent = event => setState(previous => reduceEvent(previous, event)); }, []);
-  return <ContextWindow capacity={475000} usage={state.usage} />;
+  return <ContextWindow capacity={475000} maximum={1000000} priceBoundary={475000} policy="auto" usage={state.usage} />;
 }
 
 createRoot(document.getElementById('root')!).render(

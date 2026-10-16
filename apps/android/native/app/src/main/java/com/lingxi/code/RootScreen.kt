@@ -1881,7 +1881,7 @@ fun RootScreen(
                     sessionMode = activeSessionMode,
                     workspaceName = currentWorkspaceName,
                     onOpenSessionPanel = { sessionPanelOpen = true },
-                    onOpenSideChats = if (sideChats.isEmpty()) null else { { chatViewModel.sideChats.visible.value = true } },
+                    onOpenSideChats = if (chatViewModel.supportsSideChats) chatViewModel::openSideChats else null,
                     onSelectNewChatMode = { mode ->
                         if (mode != activeSessionMode) {
                             startNewSessionIn(newChatScope, mode, carryDraft = true)
@@ -2017,7 +2017,7 @@ fun RootScreen(
         // Immersive voice overlay (full-screen, above everything else).
         VoiceFlowOverlay(visible = voiceActive)
 
-        com.lingxi.code.conversation.SideChatSheet(chatViewModel.sideChats, isDark)
+        com.lingxi.code.conversation.SideChatSheet(chatViewModel.sideChats, isDark, onCreate = chatViewModel::createSideChat)
 
         // Permission prompt (above everything): renders the head parked request
         // and resolves it by submitting Approve/DenyPermission through the source,

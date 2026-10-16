@@ -1942,4 +1942,8 @@
     <string name="chat_summary_plan_empty">이 대화에는 계획이 없습니다</string>
     <string name="voice_rate_decrease">말하기 속도를 0.1 낮추기</string>
     <string name="voice_rate_increase">말하기 속도를 0.1 높이기</string>
+    <string name="side_chat_new">새 사이드 채팅</string>
+    <string name="side_chat_creating">사이드 채팅 생성 중…</string>
+    <string name="side_chats_title">사이드 채팅</string>
+    <string name="side_chat_hide">사이드 채팅 숨기기</string>
 </resources>

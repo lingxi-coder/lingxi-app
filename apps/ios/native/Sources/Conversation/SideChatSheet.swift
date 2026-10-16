@@ -92,6 +92,12 @@ final class SideChatCollection {
         if selectedID == sideID { selectedID = entries.last?.id }
     }
 
+    /// Opening an empty sheet must produce a real, editable child without sending a prompt.
+    func prepareForPresentation() {
+        guard entries.isEmpty, !creating else { return }
+        create(input: nil) { _ in }
+    }
+
     /// Manager owns the operation, so dismissing the sheet cannot cancel admission.
     func create(input: String?, completion: @escaping (Bool) -> Void) {
         guard !creating, let parent else { return }
@@ -158,6 +164,13 @@ struct SideChatSheet: View {
     @Environment(\.dismiss) private var dismiss
     private var selected: SideChatEntry? { collection.entries.first { $0.id == collection.selectedID } }
 
+    private var selectedTitle: String {
+        guard let index = collection.entries.firstIndex(where: { $0.id == collection.selectedID }) else {
+            return String(localized: "side_chats_title")
+        }
+        return "\(String(localized: "side_chat_title")) \(index + 1)"
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -166,9 +179,23 @@ struct SideChatSheet: View {
                         .id(selected.id)
                         .disabled(selected.closing)
                 } else {
-                    ContentUnavailableView(String(localized: "side_chats_title"), systemImage: "bubble.left.and.bubble.right", description: Text(String(localized: "side_chat_empty")))
+                    if collection.creating {
+                        ProgressView(String(localized: "side_chat_creating"))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ContentUnavailableView {
+                            Label(String(localized: "side_chats_title"), systemImage: "bubble.left.and.bubble.right")
+                        } description: {
+                            Text(String(localized: "side_chat_empty"))
+                        } actions: {
+                            Button(String(localized: "side_chat_new")) { collection.prepareForPresentation() }
+                                .accessibilityIdentifier("side-chat.create")
+                        }
+                    }
                 }
             }
+            .navigationTitle(selectedTitle)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
@@ -178,16 +205,52 @@ struct SideChatSheet: View {
                                 collection.selectedID = entry.id
                             }
                         }
-                    } label: { Label(String(localized: "side_chats_title"), systemImage: "bubble.left.and.bubble.right") }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(String(localized: "side_chat_hide")) { selected?.voice.handleContextChange(); dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if let selected {
-                        Button(selected.ending ? String(localized: "side_chat_closing") : selected.closing ? String(localized: "side_chat_retry_end") : String(localized: "side_chat_end"), role: .destructive) { collection.end(selected) }
-                            .disabled(selected.ending)
+                    } label: {
+                        Label {
+                            Text(String(localized: "side_chats_title"))
+                        } icon: {
+                            Image(systemName: "bubble.left.and.bubble.right")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 20, height: 20)
+                        }
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 17, weight: .medium))
+                            .frame(width: 44, height: 44)
                     }
+                    .disabled(collection.entries.isEmpty)
+                    .accessibilityIdentifier("side-chat.select")
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        selected?.voice.handleContextChange()
+                        collection.create(input: nil) { _ in }
+                    } label: {
+                        Label(String(localized: "side_chat_new"), systemImage: "plus")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 17, weight: .medium))
+                            .frame(width: 44, height: 44)
+                    }
+                    .disabled(collection.creating)
+                    .accessibilityIdentifier("side-chat.create")
+                    if let selected {
+                        Menu {
+                            Button(selected.ending ? String(localized: "side_chat_closing") : selected.closing ? String(localized: "side_chat_retry_end") : String(localized: "side_chat_end"), role: .destructive) { collection.end(selected) }
+                                .disabled(selected.ending)
+                        } label: {
+                            Label(String(localized: "side_chat_actions"), systemImage: "ellipsis")
+                                .labelStyle(.iconOnly)
+                                .font(.system(size: 17, weight: .medium))
+                                .frame(width: 44, height: 44)
+                        }
+                    }
+                    Button { selected?.voice.handleContextChange(); dismiss() } label: {
+                        Label(String(localized: "side_chat_hide"), systemImage: "xmark")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 17, weight: .medium))
+                            .frame(width: 44, height: 44)
+                    }
+                    .accessibilityIdentifier("side-chat.hide")
                 }
             }
             .safeAreaInset(edge: .top) {
@@ -196,6 +259,8 @@ struct SideChatSheet: View {
                 }
             }
         }
+        .task { collection.prepareForPresentation() }
+        .accessibilityIdentifier("side-chat.sheet")
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }

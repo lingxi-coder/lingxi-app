@@ -1942,4 +1942,8 @@
     <string name="chat_summary_plan_empty">No plan in this conversation.</string>
     <string name="voice_rate_decrease">Decrease speech rate by 0.1</string>
     <string name="voice_rate_increase">Increase speech rate by 0.1</string>
+    <string name="side_chat_new">New side chat</string>
+    <string name="side_chat_creating">Creating side chat…</string>
+    <string name="side_chats_title">Side chats</string>
+    <string name="side_chat_hide">Hide side chats</string>
 </resources>

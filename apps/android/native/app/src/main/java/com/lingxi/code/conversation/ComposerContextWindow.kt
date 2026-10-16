@@ -24,6 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.R
 import com.lingxi.code.theme.LingXiTheme
 
@@ -47,7 +48,7 @@ internal data class ComposerContextUsage(val used: Long, val capacity: ULong) {
 }
 
 @Composable
-internal fun ComposerContextWindow(usage: AgentRunUsage?, capacity: ULong?) {
+internal fun ComposerContextWindow(usage: AgentRunUsage?, capacity: ULong?, details: CatalogModelDetails? = null) {
     val t = LingXiTheme.palette
     val snapshot = ComposerContextUsage.from(usage, capacity) ?: return
     val summary = "${snapshot.percent}% used (${100 - snapshot.percent}% left)"
@@ -70,7 +71,20 @@ internal fun ComposerContextWindow(usage: AgentRunUsage?, capacity: ULong?) {
         AlertDialog(
             onDismissRequest = { showsDetails = false },
             title = { Text("Context window (estimated)") },
-            text = { Column { Text(summary); Text(tokens) } },
+            text = {
+                Column {
+                    Text(summary)
+                    Text(tokens)
+                    Text("最近一次请求的输入用量 / 应用输入预算")
+                    details?.contextBudget?.policy?.let { policy ->
+                        Text("应用策略：${when (policy) { "long" -> "长上下文"; "custom" -> "自定义"; else -> "自动" }}")
+                    }
+                    details?.contextWindowTokens?.let { Text("模型最大上下文：$it tokens") }
+                    details?.contextBudget?.standardPriceInputTokens?.let {
+                        Text("输入超过 $it tokens 后，整次请求适用长上下文价格。")
+                    }
+                }
+            },
             confirmButton = { TextButton(onClick = { showsDetails = false }) { Text(stringResource(R.string.common_ok)) } },
         )
     }

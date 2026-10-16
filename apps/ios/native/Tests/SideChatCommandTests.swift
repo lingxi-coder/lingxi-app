@@ -40,6 +40,30 @@ final class SideChatConversationSourceTests: XCTestCase {
             appSandboxRoot: root.path, projectCwd: nil, sessionMode: .code, visionDelegationEnabled: true), memoryOnly: true)
     }
 
+    func testOpeningEmptySheetCreatesOneEditableChildAndReopeningPreservesIt() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let parent = makeSource(root: root)
+        let child = makeSource(root: root)
+        var creations = 0
+        let created = expectation(description: "empty sheet creates a child")
+        let collection = SideChatCollection(parent: parent, createEntry: { _ in
+            creations += 1
+            created.fulfill()
+            return SideChatEntry(source: child, id: "empty-sheet-child")
+        })
+        collection.prepareForPresentation()
+        collection.prepareForPresentation()
+        await fulfillment(of: [created], timeout: 2)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(creations, 1)
+        XCTAssertEqual(collection.selectedID, "empty-sheet-child")
+        collection.entries.first?.draft = "keep the child draft"
+        collection.prepareForPresentation()
+        XCTAssertEqual(creations, 1)
+        XCTAssertEqual(collection.entries.first?.draft, "keep the child draft")
+        XCTAssertFalse(child.model.streaming)
+    }
+
     func testInitialPromptWaitsForForegroundCreationAdmission() async {
         await assertInitialPromptAdmission(background: false, resume: false)
     }
@@ -131,7 +155,7 @@ final class SideChatConversationSourceTests: XCTestCase {
         source.setCommandSubmitterForTesting { _ in }
         let entry = SideChatEntry(source: source, id: "hidden-side")
         XCTAssertNotNil(source.send("retry this prompt"))
-        source.applyForTesting(.error(kind: .rejected, message: "not admitted"))
+        source.applyForTesting(.error(kind: .rejected, message: "not admitted".clientTextDto))
         XCTAssertEqual(entry.draft, "retry this prompt")
         XCTAssertFalse(source.model.streaming)
     }
@@ -142,7 +166,7 @@ final class SideChatConversationSourceTests: XCTestCase {
         let entry = SideChatEntry(source: source, id: "ended-side")
         XCTAssertNotNil(source.send("do not restore after End"))
         source.clearEndedSideChat()
-        source.applyForTesting(.error(kind: .rejected, message: "late failure"))
+        source.applyForTesting(.error(kind: .rejected, message: "late failure".clientTextDto))
         XCTAssertTrue(entry.draft.isEmpty)
         XCTAssertTrue(source.model.messages.isEmpty)
         XCTAssertTrue(source.model.messageDetails.isEmpty)
@@ -174,7 +198,7 @@ final class SideChatConversationSourceTests: XCTestCase {
         let source = makeSource(root: root)
         source.setCommandSubmitterForTesting { _ in }
         source.applyForTesting(.turnStarted(turnId: 41))
-        source.applyForTesting(.textDelta(text: "side response"))
+        source.applyForTesting(.textDelta(text: "side response".clientTextDto))
         XCTAssertTrue(source.model.streaming)
         XCTAssertEqual(source.model.activeTurnToken?.clientTurnId, 41)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("durable-conversation-turn.json").path))

@@ -89,7 +89,12 @@ fun ModelDetailsDialog(
                     DetailRow("Input modalities", details.inputModalities.ifEmpty { null }?.joinToString(", "))
                     DetailRow("Output modalities", details.outputModalities.ifEmpty { null }?.joinToString(", "))
                     DetailRow("Capabilities", details.capabilities.ifEmpty { null }?.joinToString(" · "))
-                    DetailRow("Context window", details.contextWindowTokens?.let(::formatTokenCount))
+                    DetailRow("模型最大上下文", details.contextWindowTokens?.let(::formatTokenCount))
+                    DetailRow("应用输入预算", details.contextBudget?.effectiveInputBudget?.let(::formatTokenCount))
+                    DetailRow("上下文策略", details.contextBudget?.policy)
+                    DetailRow("标准价格输入上限", details.contextBudget?.standardPriceInputTokens?.toString())
+                    DetailRow("官方建议输入", details.contextBudget?.recommendationInputTokens?.let(::formatTokenCount))
+                    DetailRow("建议来源", details.contextBudget?.recommendationSource)
                     DetailRow("Max input", details.maxInputTokens?.let(::formatTokenCount))
                     DetailRow("Max output", details.maxOutputTokens?.let(::formatTokenCount))
                     DetailRow(
@@ -130,7 +135,7 @@ fun ModelDetailsDialog(
                             )
                             tiers.forEach { tier ->
                                 Text(
-                                    "≥ ${formatTokenCount(tier.contextThresholdTokens)}: " +
+                                    "输入 ${tier.contextThresholdTokens}–${tier.maxInputTokens?.toString() ?: "∞"}（整次请求）: " +
                                         listOfNotNull(
                                             tier.inputPerMillion?.let { "input \$${formatPrice(it)}" },
                                             tier.outputPerMillion?.let { "output \$${formatPrice(it)}" },

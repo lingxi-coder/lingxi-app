@@ -90,7 +90,7 @@ test('discoverLatestLockfile ignores .tmp shadows', () => {
 });
 
 test('client DTO protocol version tracks the source contract major', () => {
-  assert.equal(CLIENT_PROTOCOL_VERSION, '26.0.0');
+  assert.equal(CLIENT_PROTOCOL_VERSION, '27.0.0');
 });
 
 test('versionCompatible matches the Rust major-version rule (fail-closed)', () => {

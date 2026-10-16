@@ -181,3 +181,14 @@ test('advanced string fields reject shapes that the engine cannot parse', () => 
   }
   assert.equal(validateCustomProvider({...native,visionDelegate:'other/model',billingMode:'perToken',models:[{id:'m',metadata:{pricing:{billingMode:'unknown'}}}]}),null);
 });
+test('context policies preserve recommendation evidence and validate positive custom input', () => {
+  const draft = (context: unknown) => ({ ...native, models: [{ id: 'm', metadata: { contextWindowTokens: 8192, context } }] });
+  for (const application of [{ mode: 'auto' }, { mode: 'long' }, { mode: 'custom', input_tokens: 200000 }]) {
+    const context = { sharedWindow: true, recommendation: { inputTokens: 4000, source: 'https://example.com/model', verifiedAt: '2026-10-15' }, application };
+    assert.equal(validateCustomProvider(draft(context) as never), null);
+    const entry = parseProviderImport(JSON.stringify({ providers: { custom: draft(context) } })).entries[0];
+    assert.equal(validateImportEntry(entry), null);
+    assert.deepEqual(mergeProviderImport({}, [entry]).providers.custom, draft(context));
+  }
+  for (const context of [{ sharedWindow: 'true' }, { thinkingMaxInputTokens: 0 }, { recommendation: { inputTokens: 3000 } }, { application: { mode: 'custom', input_tokens: 0 } }, { application: { mode: 'custom', input_tokens: '8192' } }, { application: { mode: 'auto', input_tokens: 8192 } }, { application: { mode: 'unknown' } }]) assert.ok(validateCustomProvider(draft(context) as never));
+});

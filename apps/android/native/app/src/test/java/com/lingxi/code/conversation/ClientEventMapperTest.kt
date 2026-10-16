@@ -309,7 +309,7 @@ class ClientEventMapperTest {
 
     @Test
     fun modelChanged_isIgnored() {
-        assertNull(clientEventToReply(ClientEvent.ModelChanged(model = "opus")))
+        assertNull(clientEventToReply(ClientEvent.ModelChanged(modelSource = null, model = "opus")))
     }
 
     @Test

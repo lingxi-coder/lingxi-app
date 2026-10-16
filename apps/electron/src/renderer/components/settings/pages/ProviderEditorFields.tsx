@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useT } from '../../../theme/ThemeContext';
-import { SUPPORTED_PROVIDER_TYPES, type CustomProviderDraft } from './customProviderImport';
+import { SUPPORTED_PROVIDER_TYPES, type CustomProviderDraft, type CustomProviderModelDraft } from './customProviderImport';
 import { renameProviderModel, removeProviderModel, canRemoveProviderModel, addProviderConnection, removeProviderConnection, updateProviderConnection, providerConnections } from './customProviderDraft';
 import { ghostButtonStyle } from './ghostButton';
 
@@ -71,10 +71,25 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
       <strong style={{ fontSize: 13 }}>模型</strong>
       {draft.models.map((model, index) => <div key={index} style={{ display: 'flex', alignItems: 'end', gap: 8 }}>
         <label style={{ ...field, flex: 1 }}>模型 ID {index + 1}<input aria-label={`模型 ID ${index + 1}`} value={typeof model.id === 'string' ? model.id : ''} onChange={(event) => { const next = renameProviderModel(draft, index, event.target.value, pricingIds.current[index]); pricingIds.current[index] = next.pricingId; onDraft(next.draft); }} placeholder="例如 gpt-4.1" style={input} />{Array.isArray(model.aliases) && model.aliases.length ? <span style={{ fontSize: 11 }}>别名：{model.aliases.filter((alias) => typeof alias === 'string').join('、')}</span> : null}</label>
+        <ContextPolicyField model={model} onChange={next => onDraft({ ...draft, models: draft.models.map((m, i) => i === index ? next : m) })} />
         <button type="button" aria-label={`移除模型 ${index + 1}`} aria-describedby={canRemoveProviderModel(draft, index, pricingIds.current) ? undefined : 'provider-duplicate-model-hint'} disabled={!canRemoveProviderModel(draft, index, pricingIds.current)} style={ghostButtonStyle(t, false, true)} onClick={() => { const next = removeProviderModel(draft, index, pricingIds.current[index], pricingIds.current); pricingIds.current.splice(index, 1); onDraft(next); }}>移除</button>
       </div>)}
       {draft.models.some((_, index) => !canRemoveProviderModel(draft, index, pricingIds.current)) && <span id="provider-duplicate-model-hint" style={{ color: t.warn, fontSize: 12 }}>请先修正重复模型 ID，再移除被引用的模型；也可以直接移除正在编辑的重复项。</span>}
       <button type="button" style={{ ...ghostButtonStyle(t), justifySelf: 'start' }} onClick={() => { pricingIds.current.push(''); onDraft({ ...draft, models: [...draft.models, { id: '' }] }); }}>＋ 添加模型</button>
     </div>
   </div>;
+}
+
+function ContextPolicyField({ model, onChange }: { model: CustomProviderModelDraft; onChange(model: CustomProviderModelDraft): void }) {
+  const metadata = model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata) ? model.metadata as Record<string, unknown> : {};
+  const context = metadata.context && typeof metadata.context === 'object' && !Array.isArray(metadata.context) ? metadata.context as Record<string, unknown> : {};
+  const application = context.application && typeof context.application === 'object' ? context.application as Record<string, unknown> : {};
+  const mode = typeof application.mode === 'string' ? application.mode : 'auto';
+  const update = (application: Record<string, unknown>) => onChange({ ...model, metadata: { ...metadata, context: { ...context, application } } });
+  return <label style={{ display: 'grid', gap: 7, fontSize: 12.5 }}>上下文策略
+    <select aria-label={`上下文策略 ${String(model.id)}`} value={mode} onChange={e => update(e.target.value === 'custom' ? { mode: 'custom', input_tokens: '' } : { mode: e.target.value })}>
+      <option value="auto">自动（优先标准价格）</option><option value="long">长上下文</option><option value="custom">自定义输入预算</option>
+    </select>
+    {mode === 'custom' && <input aria-label={`输入 token 预算 ${String(model.id)}`} type="number" min="1" step="1" value={typeof application.input_tokens === 'number' ? application.input_tokens : ''} onChange={e => update({ mode: 'custom', input_tokens: e.target.value === '' ? '' : Number(e.target.value) })} />}
+  </label>;
 }

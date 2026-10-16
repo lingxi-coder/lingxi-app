@@ -143,6 +143,7 @@ class EngineRoundtripTest {
                     text = ClientTextDto(
                         codeUnits = "Reply with exactly: hello from lingxi".map { it.code.toUShort() },
                     ),
+                    visualizationContext = null,
                     promptMode = null,
                     images = emptyList(),
                     turnId = null,

@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '26.0.0';
+export const CLIENT_PROTOCOL_VERSION = '27.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -1062,6 +1062,10 @@ export interface ReasoningControlSpecDto {
 export type ModelBillingModeDto = 'per_token' | 'subscription' | 'free' | 'unknown';
 
 export interface ModelPricingTierDto {
+  max_input_tokens?: number;
+  service_tier?: string;
+  source?: string;
+  verified_at?: string;
   context_threshold_tokens: number;
   input_per_million?: number;
   output_per_million?: number;
@@ -1090,7 +1094,17 @@ export interface ModelCapabilitiesDto {
   structured_output: boolean;
 }
 
+export interface ModelContextBudgetDto {
+  policy: 'auto' | 'long' | 'custom';
+  effective_input_budget?: number | null;
+  hard_input_limit?: number | null;
+  standard_price_input_tokens?: number | null;
+  recommendation_input_tokens?: number | null;
+  recommendation_source?: string | null;
+}
+
 export interface ModelDetailsDto {
+  context_budget?: ModelContextBudgetDto;
   reference: string;
   provider_id: string;
   provider_label: string;

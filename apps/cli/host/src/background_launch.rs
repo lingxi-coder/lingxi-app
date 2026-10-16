@@ -1098,6 +1098,8 @@ mod tests {
             Some(vec![0x0073, 0x0079, 0x0073, 0xd800])
         );
         assert!(launch_source.at_pointer("/options/systemPrompt").is_none());
+        assert!(launch_json.contains(r#""initialPrompt": "go\ud800""#));
+        assert!(launch_json.contains(r#""system_prompt": "sys\ud800""#));
         assert!(!launch_spec_path(&home, "abcd1234")
             .with_extension(format!("tmp.{}", std::process::id()))
             .exists());

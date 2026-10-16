@@ -141,12 +141,13 @@ class CronNativeExecutionTest {
                     val humanTurn = async {
                         engine.submit(
                             ClientCommand.SendPrompt(
-                                ClientTextDto(
+                                text = ClientTextDto(
                                     codeUnits = "Human busy fixture".map { it.code.toUShort() },
                                 ),
-                                null,
-                                emptyList(),
-                                null,
+                                visualizationContext = null,
+                                promptMode = null,
+                                images = emptyList(),
+                                turnId = null,
                             ),
                         )
                     }

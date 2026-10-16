@@ -4816,8 +4816,12 @@ final class EngineConversationSource: ConversationSource {
     /// Canonical identity for one wire message. The protocol currently has
     /// no message id, so all fields that can distinguish a replayed message
     /// are length-prefixed into a collision-resistant key.
-    fileprivate static func messageSignature(_ dto: MessageDto) -> String {
+    static func messageSignature(_ dto: MessageDto) -> String {
         func field(_ value: String) -> String { "\(value.utf8.count):\(value)" }
+        func field(_ value: ClientTextDto) -> String {
+            let units = value.codeUnits.map { String($0, radix: 16) }.joined(separator: "-")
+            return "utf16|\(value.codeUnits.count):\(units)"
+        }
         let blocks = dto.blocks.map { block -> String in
             switch block {
             case let .text(text): return "text|\(field(text))"

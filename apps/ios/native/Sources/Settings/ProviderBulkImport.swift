@@ -334,7 +334,31 @@ enum ProviderBulkImport {
             if ["contextWindowTokens", "maxInputTokens", "maxOutputTokens"].contains(key), !nonnegativeInteger(value) { return false }
             if ["openWeights", "attachments", "temperatureControl"].contains(key), !isBoolean(value) { return false }
             if ["inputModalities", "outputModalities"].contains(key), !(value is [String]) { return false }
+            if key == "applicationOutputTokens" {
+                guard nonnegativeInteger(value), let number = value as? NSNumber,
+                      number.doubleValue > 0, number.doubleValue <= Double(UInt32.max) else { return false }
+            }
+            if key == "context", !validContextMetadata(value) { return false }
             if key == "pricing", !validModelPricing(value) { return false }
+        }
+        return true
+    }
+    private static func validContextMetadata(_ value: Any) -> Bool {
+        guard let object = value as? [String: Any], Set(object.keys).isSubset(of: ["sharedWindow", "thinkingMaxInputTokens", "recommendation", "application"]) else { return false }
+        func positive(_ value: Any?) -> Bool {
+            guard let value, nonnegativeInteger(value), let n = value as? NSNumber else { return false }
+            return n.doubleValue > 0 && n.doubleValue <= 9_007_199_254_740_991
+        }
+        if let value = object["sharedWindow"], !(value is NSNull), !isBoolean(value) { return false }
+        if let value = object["thinkingMaxInputTokens"], !(value is NSNull), !positive(value) { return false }
+        if let value = object["recommendation"], !(value is NSNull) {
+            guard let rec = value as? [String: Any], Set(rec.keys).isSubset(of: ["inputTokens", "source", "verifiedAt"]), positive(rec["inputTokens"]), nonempty(rec["source"]), nonempty(rec["verifiedAt"]) else { return false }
+        }
+        if let value = object["application"], !(value is NSNull) {
+            guard let policy = value as? [String: Any], let mode = policy["mode"] as? String, ["auto", "long", "custom"].contains(mode) else { return false }
+            if mode == "custom" {
+                guard Set(policy.keys).isSubset(of: ["mode", "input_tokens"]), positive(policy["input_tokens"]) else { return false }
+            } else if Set(policy.keys) != ["mode"] { return false }
         }
         return true
     }

@@ -245,6 +245,18 @@ internal fun validateProviderDefinitions(providers: JSONObject?) {
         if (provider.has("apiKeyEnv")) require(Regex("[A-Za-z_][A-Za-z0-9_]*").matches(provider.getString("apiKeyEnv"))) { "Use an environment variable name for apiKeyEnv" }
         val models = provider.optJSONArray("models") ?: JSONArray()
         require(models.length() > 0) { "$id requires at least one model" }
+        for (index in 0 until models.length()) {
+            val metadata = models.optJSONObject(index)?.optJSONObject("metadata") ?: continue
+            if (metadata.has("applicationOutputTokens") && !metadata.isNull("applicationOutputTokens")) {
+                val budget = metadata.opt("applicationOutputTokens")
+                require(budget is Number && budget.toDouble().let { it.isFinite() && it > 0 && it <= 4294967295.0 && it % 1.0 == 0.0 }) { "Application output budget must be a positive u32" }
+            }
+            if (metadata.has("context") && !metadata.isNull("context")) {
+                val context = metadata.optJSONObject("context")
+                require(context != null) { "Context metadata must be an object" }
+                validateContextMetadata(context)
+            }
+        }
         val ids = (0 until models.length()).map { index -> models.optJSONObject(index)?.optString("id") ?: models.optString(index) }
         require(ids.all(String::isNotBlank) && ids.distinct().size == ids.size) { "$id requires nonempty distinct model IDs" }
         if (provider.has("baseUrl") && provider.optString("baseUrl").isNotBlank()) {
@@ -307,5 +319,23 @@ private fun requireProviderSecretFree(value: Any?) {
             requireProviderSecretFree(value.opt(key))
         }
         is JSONArray -> (0 until value.length()).forEach { requireProviderSecretFree(value.opt(it)) }
+    }
+}
+
+internal fun validateContextMetadata(context: JSONObject) {
+    fun keys(value: JSONObject) = value.keys().asSequence().toSet()
+    fun positive(value: Any?): Boolean = value is Number && value.toDouble().let { it.isFinite() && it > 0 && it <= 9007199254740991.0 && it % 1.0 == 0.0 }
+    require(keys(context).all { it in setOf("sharedWindow", "thinkingMaxInputTokens", "recommendation", "application") }) { "Unknown context metadata field" }
+    if (context.has("sharedWindow") && !context.isNull("sharedWindow")) require(context.opt("sharedWindow") is Boolean) { "sharedWindow must be boolean" }
+    if (context.has("thinkingMaxInputTokens") && !context.isNull("thinkingMaxInputTokens")) require(positive(context.opt("thinkingMaxInputTokens"))) { "Thinking input limit must be positive" }
+    if (context.has("recommendation") && !context.isNull("recommendation")) {
+        val rec = context.optJSONObject("recommendation")
+        require(rec != null && keys(rec).all { it in setOf("inputTokens", "source", "verifiedAt") } && positive(rec.opt("inputTokens")) && rec.opt("source") is String && rec.getString("source").isNotBlank() && rec.opt("verifiedAt") is String && rec.getString("verifiedAt").isNotBlank()) { "Recommendation requires input tokens, source and verification date" }
+    }
+    if (context.has("application") && !context.isNull("application")) {
+        val policy = context.optJSONObject("application")
+        require(policy != null && policy.opt("mode") in setOf("auto", "long", "custom")) { "Unknown context policy" }
+        val custom = policy.getString("mode") == "custom"
+        require(keys(policy).all { it == "mode" || (custom && it == "input_tokens") } && (!custom || positive(policy.opt("input_tokens")))) { "Custom input budget must be positive" }
     }
 }

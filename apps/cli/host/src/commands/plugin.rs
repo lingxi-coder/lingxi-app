@@ -5569,8 +5569,10 @@ mod validate_tests {
             errors.iter().any(|error| error.contains("channels")),
             "{errors:?}"
         );
+        // Native's dependency projection ignores malformed rows such as the
+        // numeric entry above; they do not become validation errors.
         assert!(
-            errors.iter().any(|error| error.contains("dependencies")),
+            !errors.iter().any(|error| error.contains("dependencies")),
             "{errors:?}"
         );
         assert!(

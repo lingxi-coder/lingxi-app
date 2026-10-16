@@ -813,8 +813,11 @@ fn actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields() 
         assert_eq!(
             output.status.code(),
             Some(native.native_exit_code),
-            "case {}",
-            case.id
+            "case {}; status: {:?}; stdout: {}; stderr: {}",
+            case.id,
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(
             sha256_hex(&output.stderr),

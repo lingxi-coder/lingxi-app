@@ -196,7 +196,7 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     //     in the filename, the authToken in the body. The recovered token is what
     //     a client must present.
     assert!(lockfile_path.exists(), "lockfile must be written to disk");
-    let (body, lock_port) = IdeLockfile::read(&lockfile_path).expect("lockfile parses");
+    let (body, lock_port) = IdeLockfile::read_secure(&lockfile_path).expect("private lockfile parses securely");
     assert_eq!(lock_port, port, "lockfile filename encodes the bound port");
     assert_eq!(body.transport, "ws");
     assert!(

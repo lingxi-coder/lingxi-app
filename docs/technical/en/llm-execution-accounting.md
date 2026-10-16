@@ -98,22 +98,22 @@ execution_contracts, failover and pricing tests validate local behavior with moc
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/executor.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/resolve.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/prepared.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/client/route.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/route.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/options.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/frozen_pricing.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/usage_report.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/provider.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/llm.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/account/service.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/account/service.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/account/types.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/account/types.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/account/execution.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/account/execution.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/execution_contracts.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/tests/failover.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/failover.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/tests/server_fallback_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/server_fallback_pricing.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/executor.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/resolve.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/prepared.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/client/route.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/route.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/options.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/frozen_pricing.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/usage_report.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/provider.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/llm.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/account/service.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/account/service.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/account/types.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/account/types.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/account/execution.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/account/execution.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/execution_contracts.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/tests/failover.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/failover.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/tests/server_fallback_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/server_fallback_pricing.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
 
-- llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; Referenced input fingerprint sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; Product pin 7333dbc3795b6bad893cb7287088d80931538630
+- llm-client: HEAD 46240a65df198a654d7d6de1c0bd99c23fcbb979; Referenced input fingerprint sha256:548db437ccaaeec3ce6ad3beb931ef868b263f6ad9b3c47309a3e00c514326dd; Product pin 46240a65df198a654d7d6de1c0bd99c23fcbb979
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

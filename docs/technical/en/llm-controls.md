@@ -100,21 +100,21 @@ client.embeddings().embed uses an independent configured route with ServiceSetti
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/inference.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/request_controls.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/structured.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/codecs/inference.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/codecs/structured.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/codecs/cache.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/client/decisions.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/protocol/decision.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/embeddings/mod.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/token_count/request.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/src/providers/openrouter/response_cache.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/structured_output.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/decisions.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
-- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/7333dbc3795b6bad893cb7287088d80931538630/tests/embeddings.rs) — Committed source (7333dbc3795b6bad893cb7287088d80931538630)
+- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/inference.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/request_controls.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/structured.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/codecs/inference.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/codecs/structured.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/codecs/cache.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/decisions.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/decision.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/embeddings/mod.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/token_count/request.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/providers/openrouter/response_cache.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/structured_output.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/decisions.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/embeddings.rs) — Committed source (46240a65df198a654d7d6de1c0bd99c23fcbb979)
 
-- llm-client: HEAD 7333dbc3795b6bad893cb7287088d80931538630; Referenced input fingerprint sha256:51afdece5bf1e2d135f676f447d6ff43c84aaa464328f96ba19fa1e5010928af; Product pin 7333dbc3795b6bad893cb7287088d80931538630
+- llm-client: HEAD 46240a65df198a654d7d6de1c0bd99c23fcbb979; Referenced input fingerprint sha256:548db437ccaaeec3ce6ad3beb931ef868b263f6ad9b3c47309a3e00c514326dd; Product pin 46240a65df198a654d7d6de1c0bd99c23fcbb979
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

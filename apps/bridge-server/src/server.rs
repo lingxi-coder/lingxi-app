@@ -3537,6 +3537,25 @@ impl BridgeConnection {
                 };
 
                 let _handoff = self.turn_handoff.lock().await;
+                if self.turn_running.load(Ordering::SeqCst) {
+                    let requires_idle_turn = match self.router.as_ref() {
+                        Some(router) => router.requires_idle_turn_for_slash(&raw_source).await,
+                        None => false,
+                    };
+                    if requires_idle_turn {
+                        self.unscoped_event_sink()
+                            .emit(ClientEvent::SlashCommandResult {
+                                turn_id,
+                                display: ClientTextDto::from_projection(
+                                    &"this command requires an idle session".into(),
+                                )
+                                .expect("slash failure display is a root string"),
+                                is_error: true,
+                            })
+                            .await;
+                        return;
+                    }
+                }
                 if let Some(gate) = self.active_turn.gate() {
                     gate.set_session_id(driver.current_session_id().await);
                 }
@@ -4825,6 +4844,13 @@ mod tests {
         notify: Arc<Notify>,
     }
 
+    /// A queue-drain fixture that retains the complete source-preserving input
+    /// batch instead of relying on `TurnDriver`'s text-only fallback.
+    struct BatchRecordingDriver {
+        captured: Arc<Mutex<Option<Vec<orchestrator::QueuedPromptInput>>>>,
+        notify: Arc<Notify>,
+    }
+
     #[derive(Default)]
     struct RecordingSurfaceDriver {
         calls: StdMutex<Vec<String>>,
@@ -4916,6 +4942,22 @@ mod tests {
                 images,
                 orchestrator::native_user_message_source::current(),
             ));
+            self.notify.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl TurnDriver for BatchRecordingDriver {
+        async fn run_turn(&self, _: Utf16JsonProjection) {
+            panic!("queue drain must invoke the source-preserving batch path");
+        }
+
+        async fn run_queued_batch(
+            &self,
+            inputs: Vec<orchestrator::QueuedPromptInput>,
+            _: CancellationToken,
+        ) {
+            *self.captured.lock().await = Some(inputs);
             self.notify.notify_one();
         }
     }
@@ -5052,10 +5094,11 @@ mod tests {
     async fn queued_teammate_message_wakes_idle_driver_without_interrupting_busy_turn() {
         let captured = Arc::new(Mutex::new(None));
         let notify = Arc::new(Notify::new());
-        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+        let batch_driver = Arc::new(BatchRecordingDriver {
             captured: captured.clone(),
             notify: notify.clone(),
         });
+        let driver: Arc<dyn TurnDriver> = batch_driver;
         let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
         let connection = BridgeConnection::new()
             .bind(gate, driver)
@@ -5078,10 +5121,29 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
             .await
             .unwrap();
+        let captured = captured.lock().await;
+        let inputs = captured
+            .as_ref()
+            .expect("idle wakeup must deliver the complete queued batch");
+        assert_eq!(inputs.len(), 1);
         assert_eq!(
-            captured.lock().await.as_ref().unwrap().0,
+            inputs[0].text,
             "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>".into()
         );
+        assert!(inputs[0].is_meta);
+        assert!(!inputs[0].turn_companion);
+        assert!(inputs[0].trailing_history_rows.is_empty());
+        assert_eq!(
+            inputs[0].mod_origin,
+            Some(serde_json::json!({"kind":"peer"}))
+        );
+        assert!(inputs[0].prompt_ingress_kind.is_none());
+        assert!(inputs[0].message_origin.is_none());
+        assert!(inputs[0].prompt_source.is_none());
+        assert!(inputs[0].queue_priority.is_none());
+        assert!(inputs[0].scheduled_task_id.is_none());
+        assert!(inputs[0].scheduled_fire_id.is_none());
+        drop(captured);
         assert!(connection.queue.is_empty().await);
     }
 
@@ -7324,6 +7386,10 @@ mod tests {
 
     #[tokio::test]
     async fn fixed_cron_resolves_in_main_turn_without_dynamic_keepalive() {
+        let _serial = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_loop_runtime_state();
         let queue = Arc::new(super::MessageQueueManager::new());
         let mut command =
             drain_test_command("/scheduled raw instruction", super::QueueSource::Cron);
@@ -7333,10 +7399,11 @@ mod tests {
         command.is_meta = true;
         queue.enqueue(command).await;
         let captured = Arc::new(Mutex::new(None));
-        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+        let batch_driver = Arc::new(BatchRecordingDriver {
             captured: captured.clone(),
             notify: Arc::new(Notify::new()),
         });
+        let driver: Arc<dyn TurnDriver> = batch_driver;
         let runtime = Arc::new(tool_cron::LoopRuntime::default());
         super::drain_main_thread(
             &driver,
@@ -7350,10 +7417,23 @@ mod tests {
         )
         .await;
         assert_eq!(runtime.in_flight_prompt(), None);
+        let captured = captured.lock().await;
+        let inputs = captured
+            .as_ref()
+            .expect("scheduled input must reach the real queue batch consumer");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].text, "/scheduled raw instruction".into());
+        assert!(inputs[0].is_meta);
+        assert!(!inputs[0].turn_companion);
+        assert!(inputs[0].trailing_history_rows.is_empty());
         assert_eq!(
-            captured.lock().await.as_ref().unwrap().0,
-            "/scheduled raw instruction".into()
+            inputs[0].mod_origin,
+            Some(serde_json::json!({"kind":"scheduled-trigger"}))
         );
+        assert_eq!(inputs[0].queue_priority.as_deref(), Some("later"));
+        assert!(inputs[0].scheduled_task_id.is_none());
+        assert!(inputs[0].scheduled_fire_id.is_none());
+        tool_cron::reset_loop_runtime_state();
     }
 
     #[tokio::test]
@@ -7361,6 +7441,7 @@ mod tests {
         let _serial = crate::driver::LOOP_KA_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        tool_cron::reset_loop_runtime_state();
         let queue = Arc::new(super::MessageQueueManager::new());
         queue
             .enqueue(drain_test_command(
@@ -7369,10 +7450,11 @@ mod tests {
             ))
             .await;
         let captured = Arc::new(Mutex::new(None));
-        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+        let batch_driver = Arc::new(BatchRecordingDriver {
             captured: captured.clone(),
             notify: Arc::new(Notify::new()),
         });
+        let driver: Arc<dyn TurnDriver> = batch_driver;
         let runtime = Arc::new(tool_cron::LoopRuntime::default());
         super::drain_main_thread(
             &driver,
@@ -7394,9 +7476,22 @@ mod tests {
             Some("<<autonomous-loop-dynamic>>")
         );
         let result = captured.lock().await;
-        let text = result.as_ref().unwrap().0.string_at("").unwrap();
+        let inputs = result
+            .as_ref()
+            .expect("resolved loop tick must reach the source-preserving batch consumer");
+        assert_eq!(inputs.len(), 1);
+        let text = inputs[0].text.string_at("").unwrap();
         assert_ne!(text, "<<autonomous-loop-dynamic>>");
         assert!(text.contains("ScheduleWakeup"));
+        assert!(inputs[0].is_meta);
+        assert!(!inputs[0].turn_companion);
+        assert!(inputs[0].trailing_history_rows.is_empty());
+        assert_eq!(
+            inputs[0].mod_origin,
+            Some(serde_json::json!({"kind":"scheduled-trigger"}))
+        );
+        assert!(inputs[0].queue_priority.is_none());
+        tool_cron::reset_loop_runtime_state();
     }
 
     /// A normal user prompt (non-Cron) through the same batched drain branch must

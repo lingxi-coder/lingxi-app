@@ -258,6 +258,16 @@ pub trait CommandRouter: Send + Sync + 'static {
     ) -> Option<SlashDispatchOutcome> {
         None
     }
+
+    /// Whether `raw` resolves through this router's current slash registry to
+    /// a built-in command that requires an idle session (session replacement
+    /// or manual compaction). This is a
+    /// side-effect-free admission query: callers use it only to refuse such a
+    /// command while another turn owns the connection. Routers without a live
+    /// command catalog leave the result unknown and preserve normal routing.
+    async fn requires_idle_turn_for_slash(&self, _raw: &Utf16JsonProjection) -> bool {
+        false
+    }
 }
 
 pub(crate) fn slash_failure_display(diagnostic: &Utf16JsonProjection) -> Utf16JsonProjection {
@@ -292,6 +302,50 @@ mod slash_failure_display_tests {
                 0xd800,
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod session_transition_slash_tests {
+    use super::*;
+
+    #[test]
+    fn session_transition_slashes_resolve_by_canonical_builtin_identity() {
+        let mut registry = CommandRegistry::new();
+        let mut clear = command_api::model::SlashCommand::default();
+        clear.name = "clear".into();
+        clear.source = CommandSource::Builtin;
+        clear.aliases = vec!["reset".into(), "new".into()];
+        registry.register_command(clear);
+        let mut compact = command_api::model::SlashCommand::default();
+        compact.name = "compact".into();
+        compact.source = CommandSource::Builtin;
+        registry.register_command(compact);
+
+        for raw in ["/clear", "/new title", "/reset"] {
+            assert!(
+                requires_idle_turn_for_slash(&registry, &raw.into()),
+                "{raw} should resolve to the session-clearing builtin"
+            );
+        }
+        assert!(requires_idle_turn_for_slash(&registry, &"/compact".into()));
+
+        // The parser and registry preserve case. Unknown spellings and custom
+        // commands must not be reclassified as the builtin transition.
+        assert!(!requires_idle_turn_for_slash(
+            &registry,
+            &"/NEW title".into()
+        ));
+        assert!(!requires_idle_turn_for_slash(&registry, &"/clearer".into()));
+
+        let mut custom = command_api::model::SlashCommand::default();
+        custom.name = "custom-clear".into();
+        custom.source = CommandSource::Settings(lingxi_core::types::SettingsScope::Project);
+        registry.register_command(custom);
+        assert!(!requires_idle_turn_for_slash(
+            &registry,
+            &"/custom-clear".into()
+        ));
     }
 }
 
@@ -922,6 +976,13 @@ impl CommandRouter for EngineCommandRouter {
             result,
             authority_events: Self::slash_authority_change_events(&before, &after),
         })
+    }
+
+    async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
+        let Some(registry) = self.slash_registry.as_ref() else {
+            return false;
+        };
+        requires_idle_turn_for_slash(&registry.read().await, raw)
     }
 
     // The full command dispatch is one match over the command surface; splitting
@@ -2407,6 +2468,25 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+}
+
+pub(crate) fn requires_idle_turn_for_slash(
+    registry: &CommandRegistry,
+    raw: &Utf16JsonProjection,
+) -> bool {
+    let Some(parsed) = parse_slash_command(raw) else {
+        return false;
+    };
+    let Some(command) = registry.resolve(&parsed.name) else {
+        return false;
+    };
+    // The current registry resolves declared aliases (for example `new` and
+    // `reset`) to the canonical `/clear` builtin. Check the resolved source and
+    // name rather than comparing user text, so custom commands and unknown or
+    // case-mismatched spellings keep their ordinary dispatch behavior.
+    command.source == CommandSource::Builtin
+        && (source_text_eq_ascii(&command.name, "clear")
+            || source_text_eq_ascii(&command.name, "compact"))
 }
 
 /// Serve the access token of the Codex session the desktop sent. Returns the

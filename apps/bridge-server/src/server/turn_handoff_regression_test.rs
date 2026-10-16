@@ -334,9 +334,24 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
     }
 }
 
-#[derive(Default)]
 struct ReplacementRouter {
     calls: AtomicUsize,
+    slash_registry: command_api::registry::CommandRegistry,
+}
+
+impl Default for ReplacementRouter {
+    fn default() -> Self {
+        let mut slash_registry = command_api::registry::CommandRegistry::new();
+        let mut clear = command_api::model::SlashCommand::default();
+        clear.name = "clear".into();
+        clear.source = command_api::model::CommandSource::Builtin;
+        clear.aliases = vec!["reset".into(), "new".into()];
+        slash_registry.register_command(clear);
+        Self {
+            calls: AtomicUsize::new(0),
+            slash_registry,
+        }
+    }
 }
 
 #[async_trait]
@@ -353,6 +368,17 @@ impl CommandRouter for ReplacementRouter {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::future::pending().await
     }
+
+    async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
+        crate::router::requires_idle_turn_for_slash(&self.slash_registry, raw)
+    }
+}
+
+struct IdleTurnDriver;
+
+#[async_trait]
+impl TurnDriver for IdleTurnDriver {
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
 }
 
 struct WaitingQuestionDriver {
@@ -453,7 +479,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
             turn_id: Some(11),
         },
         ClientCommand::RunSlashCommand {
-            raw: "/NEW title".into(),
+            raw: "/new title".into(),
             turn_id: Some(12),
         },
         ClientCommand::RunSlashCommand {
@@ -515,7 +541,10 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
         },
     ] {
         let router = Arc::new(ReplacementRouter::default());
-        let connection = BridgeConnection::new().bind_router(router.clone());
+        let mut connection = BridgeConnection::new().bind_router(router.clone());
+        // A raw slash command is rejected before dispatch only on a connection
+        // with the session driver's command path bound.
+        connection.driver = Some(Arc::new(IdleTurnDriver));
         let handoff = connection.turn_handoff.lock().await;
         // Drain ownership is temporarily false while queued work is inspected.
         connection.turn_running.store(false, Ordering::SeqCst);

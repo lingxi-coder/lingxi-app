@@ -1302,10 +1302,19 @@ mod tests {
     #[test]
     fn exact_source_units_survive_completion_edit_submit_and_history_recall() {
         let mut c = Composer::default();
-        let units = vec![b'/' as u16, b'x' as u16, 0xd800, b' ' as u16, b'a' as u16];
-        c.replace_all_source_units(&units);
-        assert_eq!(c.text(), "/x� a");
-        assert_eq!(c.source_units(), units);
+        // Slash-command completion replaces the buffer with the selected
+        // source name plus one trailing ASCII space, and leaves the cursor
+        // after that separator so the next typed argument follows it.
+        let completion = vec![b'/' as u16, b'x' as u16, 0xd800, b' ' as u16];
+        c.replace_all_source_units(&completion);
+        assert_eq!(c.text(), "/x� ");
+        assert_eq!(c.source_units(), completion);
+
+        c.insert('a');
+        assert_eq!(
+            c.source_units(),
+            vec![b'/' as u16, b'x' as u16, 0xd800, b' ' as u16, b'a' as u16]
+        );
 
         assert_eq!(c.backspace().deleted, "a");
         assert_eq!(
@@ -1315,7 +1324,7 @@ mod tests {
         c.insert('b');
         assert_eq!(
             c.source_units(),
-            vec![b'/' as u16, b'x' as u16, 0xd800, b'b' as u16, b' ' as u16]
+            vec![b'/' as u16, b'x' as u16, 0xd800, b' ' as u16, b'b' as u16]
         );
 
         let submitted = c.take();

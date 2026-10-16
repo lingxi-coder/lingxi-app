@@ -1088,8 +1088,8 @@ mod tests {
             Some(vec![0x0067, 0x006f, 0xd800])
         );
         let launch_json = std::fs::read_to_string(launch_spec_path(&home, "abcd1234")).unwrap();
-        assert!(launch_json.contains(r#""initialPrompt":"go\ud800""#));
-        assert!(launch_json.contains(r#""systemPrompt":"sys\ud800""#));
+        assert!(launch_json.contains(r#""initialPrompt": "go\ud800""#));
+        assert!(launch_json.contains(r#""systemPrompt": "sys\ud800""#));
         assert!(!launch_spec_path(&home, "abcd1234")
             .with_extension(format!("tmp.{}", std::process::id()))
             .exists());
@@ -1117,13 +1117,14 @@ mod tests {
     #[test]
     fn launch_spec_distinguishes_missing_and_explicit_null_prompt_options() {
         let home = tmpdir();
-        let mut spec = sample("null0001", BackgroundLaunchKind::Fresh);
+        let short = "ca110001";
+        let mut spec = sample(short, BackgroundLaunchKind::Fresh);
         spec.options.system_prompt = None;
         spec.options.append_system_prompt = Some(Utf16JsonProjection::parse("null").unwrap());
 
-        write_launch_spec(&home, "null0001", &spec).unwrap();
+        write_launch_spec(&home, short, &spec).unwrap();
         let raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(launch_spec_path(&home, "null0001")).unwrap())
+            serde_json::from_slice(&std::fs::read(launch_spec_path(&home, short)).unwrap())
                 .unwrap();
         let options = raw["options"]
             .as_object()
@@ -1138,7 +1139,7 @@ mod tests {
                 .is_some_and(serde_json::Value::is_null),
             "an explicit raw JSON null must remain present"
         );
-        assert_eq!(read_launch_spec(&home, "null0001").unwrap(), spec);
+        assert_eq!(read_launch_spec(&home, short).unwrap(), spec);
     }
 
     #[test]

@@ -34,6 +34,11 @@ impl crate::router::CommandRouter for AdmissionRouter {
             authority_events: Vec::new(),
         })
     }
+
+    async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
+        command_api::parser::parse_slash_command(raw)
+            .is_some_and(|parsed| parsed.name.string_at("").as_deref() == Some("compact"))
+    }
 }
 
 struct AdmissionDriver(tokio::sync::Notify);
@@ -44,6 +49,13 @@ impl TurnDriver for AdmissionDriver {
         assert_eq!(prompt.string_at(""), Some("custom compact prompt"));
         self.0.notify_one();
     }
+}
+
+struct IdleTurnDriver;
+
+#[async_trait]
+impl TurnDriver for IdleTurnDriver {
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
 }
 
 #[tokio::test]
@@ -85,7 +97,11 @@ async fn custom_compact_turn_releases_admission_before_starting_turn() {
 async fn compact_cannot_enter_during_transient_idle_handoff() {
     for slash in [false, true] {
         let router = Arc::new(AdmissionRouter::default());
-        let connection = BridgeConnection::new().bind_router(router.clone());
+        let mut connection = BridgeConnection::new().bind_router(router.clone());
+        // Both slash admission and session transitions require a real bound
+        // turn driver. Without one, RunSlashCommand is rejected before it
+        // reaches the handoff gate this regression exercises.
+        connection.driver = Some(Arc::new(IdleTurnDriver));
         let command = || {
             if slash {
                 ClientCommand::RunSlashCommand {
@@ -127,6 +143,18 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
         )
         .await
         .expect("idle compact must still dispatch");
+        if slash {
+            let task = connection
+                .active_turn_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("idle slash compact owns its dispatched task");
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("idle slash compact dispatch must finish")
+                .unwrap();
+        }
         assert_eq!(router.calls.load(Ordering::SeqCst), 1);
     }
 }

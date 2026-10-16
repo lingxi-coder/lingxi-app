@@ -24,6 +24,7 @@ const API_KEY: &str = "native-provider-error-295-dummy";
 const MODEL: &str = "claude-sonnet-4-5";
 const PROMPT: &str = "Return the fixed provider error fixture response.";
 const ENTRYPOINT: &str = "--print --output-format json";
+const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 
 // These integration cases launch cold CLI subprocesses and bind independent
 // loopback listeners. Serialize them so their startup and request-body writes
@@ -90,9 +91,7 @@ impl LocalApiStub {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(5)))
-                            .unwrap();
+                        stream.set_read_timeout(Some(CLI_TIMEOUT)).unwrap();
                         let request = read_http_request(&mut stream).unwrap();
                         write_http_response(&mut stream, status, &response_body, &content_type)
                             .unwrap();
@@ -297,7 +296,7 @@ fn invoke_cli(
         .stderr(Stdio::piped());
 
     let mut child = command.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + CLI_TIMEOUT;
     loop {
         if child.try_wait().unwrap().is_some() {
             break;

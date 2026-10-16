@@ -1088,8 +1088,16 @@ mod tests {
             Some(vec![0x0067, 0x006f, 0xd800])
         );
         let launch_json = std::fs::read_to_string(launch_spec_path(&home, "abcd1234")).unwrap();
-        assert!(launch_json.contains(r#""initialPrompt": "go\ud800""#));
-        assert!(launch_json.contains(r#""systemPrompt": "sys\ud800""#));
+        let launch_source = Utf16JsonProjection::parse(&launch_json).unwrap();
+        assert_eq!(
+            launch_source.string_units("/initialPrompt"),
+            Some(vec![0x0067, 0x006f, 0xd800])
+        );
+        assert_eq!(
+            launch_source.string_units("/options/system_prompt"),
+            Some(vec![0x0073, 0x0079, 0x0073, 0xd800])
+        );
+        assert!(launch_source.at_pointer("/options/systemPrompt").is_none());
         assert!(!launch_spec_path(&home, "abcd1234")
             .with_extension(format!("tmp.{}", std::process::id()))
             .exists());

@@ -343,17 +343,57 @@ fn decode_utf16le_hex(raw: &str) -> Vec<u16> {
 }
 
 fn create_project_skills(cwd: &Path) {
+    // The 2.1.295 capture keeps Native's raw `.claude/skills` inputs. The
+    // actual LingXi CLI discovers project skills under its branded
+    // `<cwd>/<DOT_DIR>/skills` root; comparisons below translate only the
+    // resulting skill base-directory prefix back to Native's `.claude` root.
+    let skills_root = cwd.join(branding::DOT_DIR).join("skills");
     for (name, description) in [
         ("skill-🧪-probe", "Unicode-scalar Skill fixture"),
         ("skill.alpha+beta", "Punctuation Skill fixture"),
     ] {
-        let directory = cwd.join(".claude").join("skills").join(name);
+        let directory = skills_root.join(name);
         std::fs::create_dir_all(&directory).unwrap();
         let contents = format!(
             "---\nname: {name}\ndescription: {description}\n---\nReturn the fixed Skill body for {name}.\n"
         );
         std::fs::write(directory.join("SKILL.md"), contents).unwrap();
     }
+    assert!(
+        skills_root.is_dir(),
+        "project skill fixture must exist under the production brand root"
+    );
+}
+
+fn map_project_skill_base_path_to_native(text: &str) -> String {
+    let Some(body) = text.strip_prefix("Base directory for this skill: ") else {
+        return text.to_owned();
+    };
+    let project_skill_root = format!("<PROJECT_ROOT>/{}/skills/", branding::DOT_DIR);
+    let body = body
+        .strip_prefix(&project_skill_root)
+        .expect("the actual skill body must use the branded project skill root");
+    format!("Base directory for this skill: <PROJECT_ROOT>/.claude/skills/{body}")
+}
+
+fn map_project_skill_base_path_units_to_native(units: &[u16]) -> Vec<u16> {
+    let project_skill_root = format!(
+        "Base directory for this skill: <PROJECT_ROOT>/{}/skills/",
+        branding::DOT_DIR
+    );
+    let project_prefix: Vec<_> = project_skill_root.encode_utf16().collect();
+    assert!(
+        units.starts_with(&project_prefix),
+        "only the exact skill base-directory prefix is normalized"
+    );
+
+    let native_prefix: Vec<_> = "Base directory for this skill: <PROJECT_ROOT>/.claude/skills/"
+        .encode_utf16()
+        .collect();
+    native_prefix
+        .into_iter()
+        .chain(units[project_prefix.len()..].iter().copied())
+        .collect()
 }
 
 fn relevant_request_text_blocks(
@@ -391,7 +431,17 @@ fn relevant_request_text_blocks(
             "unpaired-surrogate-skill-name" => text.starts_with("/skill_"),
             _ => false,
         })
-        .map(|text| text.replace(cwd, "<PROJECT_ROOT>"))
+        .map(|text| {
+            let text = text.replace(cwd, "<PROJECT_ROOT>");
+            if matches!(
+                case.id.as_str(),
+                "unicode-skill-name" | "punctuation-skill-name"
+            ) {
+                map_project_skill_base_path_to_native(&text)
+            } else {
+                text
+            }
+        })
         .collect()
 }
 
@@ -806,7 +856,19 @@ fn actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields() 
         let cwd_text = cwd.as_str();
         let actual_request_blocks = relevant_request_text_blocks(case, &request, cwd_text);
         let session_text = std::str::from_utf8(&session_raw).unwrap();
-        let actual_session_units = session_user_content_units(session_text, cwd_text);
+        let mut actual_session_units = session_user_content_units(session_text, cwd_text);
+        if matches!(
+            case.id.as_str(),
+            "unicode-skill-name" | "punctuation-skill-name"
+        ) {
+            assert_eq!(
+                actual_session_units.len(),
+                2,
+                "registered project Skill persists its command row and body row"
+            );
+            actual_session_units[1] =
+                map_project_skill_base_path_units_to_native(&actual_session_units[1]);
+        }
         assert_eq!(
             actual_session_units, captured.session_user_content_units,
             "case {} session user fields differ from captured Native UTF-16 units",

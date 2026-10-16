@@ -58,7 +58,7 @@ export function Appearance({ bridge, onTheme }: PageContentProps) {
             thing left in there and it isn't this control. This inline
             three-way pill mirrors the same look `SettingsScreen.tsx`'s own
             `LayerSwitcher` already uses. */}
-        <div style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}>
+        <div className="settings-segmented" role="group" aria-label="主题" style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}>
           {appearanceOptions().map((option) => {
             const active = preference === option.id;
             return (

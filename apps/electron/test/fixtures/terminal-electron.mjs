@@ -51,6 +51,17 @@ async function main() {
     await run('document.querySelector(".terminal-resizer").dispatchEvent(new KeyboardEvent("keydown", { key:"ArrowUp", bubbles:true, cancelable:true }))');
     await delay(100); result.heightPersisted = await run('localStorage.getItem("lingxi.terminal.height.v1") === "264"');
     result.resizeWorks = (await state()).sizes.length > 0;
+    await delay(280);
+    const handle = await run(`(() => { const r = document.querySelector('.terminal-resizer').getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.floor(r.bottom - 1) }; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...handle });
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...handle, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: handle.x, y: handle.y - 40, modifiers: ['leftButtonDown'] });
+    await delay(30);
+    result.dragMetrics = await run(`(() => { const panel = document.querySelector('#desktop-terminal'); const r = document.querySelector('.terminal-resizer').getBoundingClientRect(); return { resizing: panel.dataset.resizing, transition: getComputedStyle(panel).transitionDuration, height: panel.getBoundingClientRect().height, expectedHeight: panel.style.height, handle: {top:r.top, bottom:r.bottom}, active: document.activeElement?.className }; })()`);
+    result.directResize = await run(`(() => { const panel = document.querySelector('#desktop-terminal'); return panel.dataset.resizing === 'true' && getComputedStyle(panel).transitionDuration === '0s' && Math.abs(panel.getBoundingClientRect().height - 304) < 1; })()`);
+    window.webContents.sendInputEvent({ type: 'mouseUp', x: handle.x, y: handle.y - 40, button: 'left', clickCount: 1 });
+    await delay(30);
+    result.resizeReleased = await run(`!document.querySelector('#desktop-terminal').hasAttribute('data-resizing')`);
     const screenshots = process.env.LINGXI_TERMINAL_SCREENSHOTS || '/tmp/lingxi-terminal-ui'; mkdirSync(screenshots, { recursive: true });
     await run(`window.terminalFixture.output('${second}', '\\r\\n\\x1b[32m✓ Terminal ready\\x1b[0m\\r\\n中文输入 · ANSI colors · session isolation\\r\\n(base) user@MacBook LingXi-Next % ')`); await delay(150);
     writeFileSync(`${screenshots}/light.png`, (await window.webContents.capturePage()).toPNG());

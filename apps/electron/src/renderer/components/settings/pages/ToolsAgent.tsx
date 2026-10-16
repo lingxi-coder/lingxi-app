@@ -22,7 +22,7 @@ function BoolRow({
 }: { title: string; desc: string; value: boolean; saving: boolean; onChange(next: boolean): void }) {
   return (
     <Row title={title} desc={desc} align="center">
-      <Toggle value={value} onChange={saving ? () => undefined : onChange} />
+      <Toggle value={value} onChange={onChange} label={title} disabled={saving} />
     </Row>
   );
 }
@@ -134,7 +134,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
 
       <Card title="输出风格 (outputStyle)">
         <Row title="outputStyle" desc="标量字段，后写入的层直接覆盖，不参与合并。" align="center">
-          <div style={{ display: 'flex', gap: 7 }}>
+          <div className="settings-inline-fields" style={{ display: 'flex', gap: 7 }}>
             <input value={outputStyleText} onChange={(e) => setOutputStyleText(e.target.value)} placeholder="Explanatory" aria-label="outputStyle" style={inputStyle(t)} />
             <button type="button" disabled={!snapshot || saving === 'outputStyle'} onClick={() => write({ outputStyle: outputStyleText.trim() || null }, 'outputStyle')} style={ghostButtonStyle(t, saving === 'outputStyle')}>保存</button>
           </div>
@@ -163,7 +163,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
           </Row>
         ))}
         <Row title="新增覆盖" align="center">
-          <div style={{ display: 'flex', gap: 7 }}>
+          <div className="settings-inline-fields" style={{ display: 'flex', gap: 7 }}>
             <input value={overrideFrom} onChange={(e) => setOverrideFrom(e.target.value)} placeholder="原模型 id" aria-label="原模型 id" style={inputStyle(t)} />
             <input value={overrideTo} onChange={(e) => setOverrideTo(e.target.value)} placeholder="替换为" aria-label="替换为" style={inputStyle(t)} />
             <button

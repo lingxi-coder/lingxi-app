@@ -83,6 +83,7 @@ export function extensionHubStyle(t: ReturnType<typeof useT>): CSSProperties {
   return {
     '--hub-active': t.surfaceActive,
     '--hub-accent': t.accent,
+    '--hub-accent-fill': `color-mix(in srgb, ${t.accent} 82%, #000)`,
     '--hub-border': t.border,
     '--hub-danger': t.danger,
     '--hub-hover': t.surfaceHover,

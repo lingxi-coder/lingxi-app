@@ -29,6 +29,11 @@ try {
   await prompt('/');
   await wait('Boolean(document.querySelector("#slash-command-results"))');
   const slash = await menuMetrics();
+  page.debugger.attach('1.3');
+  await page.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-transparency', value: 'reduce' }] });
+  assert.equal(await evaluate(`(() => { const style = getComputedStyle(document.querySelector('.slash-command-menu')); return style.backdropFilter === 'none' && !style.backgroundColor.startsWith('rgba'); })()`), true, 'command menus honor reduced transparency');
+  await page.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+  page.debugger.detach();
   await prompt('@');
   await wait('document.querySelectorAll("#mention-results [role=option]").length === 7');
   assert.deepEqual(await menuMetrics(), slash);

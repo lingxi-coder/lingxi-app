@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type ReactNode } from 'react';
 
 import { dialogFocusTarget } from '../../bridge/bridgeRuntimeState.js';
 import type { SettingsSnapshotEvent, UseBridge } from '../../bridge/bridgeTypes.js';
@@ -281,6 +281,9 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
       <div
         data-testid="layer-switcher"
+        role="group"
+        aria-label="设置存储范围"
+        className="settings-segmented"
         style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}
       >
         {EDITABLE_LAYERS.map((layer) => {
@@ -291,6 +294,7 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
               key={layer}
               type="button"
               data-layer={layer}
+              aria-pressed={active}
               disabled={disabled}
               aria-describedby={disabled ? LAYER_DISABLED_REASON_ID : undefined}
               onClick={() => onChange(layer)}
@@ -689,7 +693,7 @@ export function SettingsScreen({
     <div
       ref={panelRef}
       // Exclude the sidebar/titlebar drag regions still mounted behind settings.
-      className="no-drag"
+      className="settings-screen no-drag"
       role="dialog"
       aria-modal="true"
       aria-label="设置"
@@ -697,18 +701,14 @@ export function SettingsScreen({
       style={{
         position: 'absolute', inset: 0, zIndex: 60, display: 'flex', flexDirection: 'column',
         background: t.windowBg, color: t.text,
-      }}
+        colorScheme: t.dark ? 'dark' : 'light',
+        '--settings-accent': t.accent,
+        '--settings-text': t.text,
+      } as CSSProperties}
     >
       <div className="settings-window-drag-region drag-region" aria-hidden="true" />
-      {settingsReadError && (
-        <div data-testid="settings-snapshot-error" role="alert" style={{
-          padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
-        }}>
-          设置读取失败：{settingsReadError}
-        </div>
-      )}
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <nav style={{
+        <nav aria-label="设置分类" style={{
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflow: 'hidden',
         }}>
@@ -721,7 +721,7 @@ export function SettingsScreen({
               <Icon name="arrowLeft" size={17} stroke={1.8} />
               <span>Back to app</span>
             </button>
-            <div style={{
+            <div className="settings-search" style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8,
               background: t.surface, border: `0.5px solid ${t.border}`,
             }}>
@@ -782,7 +782,7 @@ export function SettingsScreen({
         <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
             <div className="settings-content-inner">
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
                 <div>
                   <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
                 </div>
@@ -792,6 +792,14 @@ export function SettingsScreen({
               </div>
               {showLayerSwitcher && (
                 <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
+              )}
+              {settingsReadError && (
+                <div data-testid="settings-snapshot-error" role="alert" style={{
+                  padding: '10px 14px', marginBottom: 18, background: t.surface, color: t.danger,
+                  border: `1px solid ${t.border}`, borderRadius: 8, fontSize: 12.5, overflowWrap: 'anywhere',
+                }}>
+                  设置读取失败：{settingsReadError}
+                </div>
               )}
               {body}
             </div>

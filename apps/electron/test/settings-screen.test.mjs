@@ -80,6 +80,37 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
   }
 }
 
+test('all settings pages fit macOS windows and name their switches', async () => {
+  for (const theme of ['light', 'dark']) {
+    const states = await runScenario('macos-audit', theme);
+    assert.equal(states.length, 36);
+    assert.deepEqual(states.filter(state => state.overflow || state.bottomOverflow || state.unnamedSwitches || state.placeholder), [], `${theme}: layout or accessible names`);
+  }
+});
+
+test('settings controls expose focus, scope, saving and accessibility preferences', async () => {
+  for (const theme of ['light', 'dark']) {
+    const state = await runScenario('macos-controls', theme);
+    assert.equal(state.searchFocus, true);
+    assert.equal(state.savingDisabled, true);
+    assert.equal(state.selectedScope, true);
+    assert.equal(state.scheme, theme);
+    assert.ok(state.primaryContrast >= 4.5, `${theme}: primary label contrast ${state.primaryContrast}`);
+    assert.deepEqual(state.accessibility.motion, ['0s', '0s']);
+    assert.equal(state.accessibility.border, state.accessibility.text);
+    assert.equal(state.accessibility.selectedNavOutline, 'solid');
+  }
+});
+
+test('expanded settings editors fit a narrow macOS window', async () => {
+  for (const theme of ['light', 'dark']) {
+    const states = await runScenario('macos-editors', theme);
+    assert.equal(states.length, 6);
+    assert.deepEqual(states.filter(state => state.overflow || !state.dialogFits || !state.editor), []);
+    assert.ok(states.every(state => state.fieldHeights.every(height => height <= 44)), 'single-line fields retain macOS control height');
+  }
+});
+
 test('the layer switcher appears only on layered pages', async () => {
   const { permissions, diagnostics, mcp, customProviders } = await runScenario('layer-switcher');
   assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project/local');
@@ -241,8 +272,9 @@ test('the settings-focus behavior starts at Back, traverses search, and restores
 // see `all six Task 18 pages...` below (extended to eight).
 
 test('a malformed settings snapshot surfaces as an error banner instead of throwing through the render', async () => {
-  const { state } = await runScenario('malformed-snapshot');
+  const { state, errorTop } = await runScenario('malformed-snapshot');
   assert.equal(state.hasSnapshotError, true);
+  assert.ok(errorTop >= 44, 'the error stays inside content below macOS window controls');
 });
 
 test('settings pages and the Hooks configuration-file shortcut render real content', async () => {

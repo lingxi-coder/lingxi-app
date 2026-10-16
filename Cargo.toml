@@ -76,6 +76,7 @@ tool-git-mobile = { git = "https://github.com/lingxi-coder/harness-runtime.git",
 tool-shell = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "68eb7675f2b3ffb3df13364fbe2812b5eaadfab5" }
 tool-web = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "68eb7675f2b3ffb3df13364fbe2812b5eaadfab5" }
 tool-workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "68eb7675f2b3ffb3df13364fbe2812b5eaadfab5" }
+workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "68eb7675f2b3ffb3df13364fbe2812b5eaadfab5" }
 
 # Shared registry dependencies for the retained product packages.
 serde = { version = "1", features = ["derive"] }

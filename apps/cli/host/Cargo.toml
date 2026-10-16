@@ -88,6 +88,8 @@ mcp = { workspace = true }
 # `Arc<SessionCwd>` trusted set so file tools accept a mid-session dir at once.
 tool-api = { workspace = true }
 plugin = { workspace = true }
+# CLI workflow validation uses the shared runtime metadata parser directly.
+workflow = { workspace = true }
 # Phase 8 (tui command registry): the `/skills` + `/memory` startup
 # snapshots — the same on-disk walks the iocraft screens used, captured once
 # into `tui_rata::session::SessionInfo` before the TUI loop starts.

@@ -2752,7 +2752,7 @@ fn validate_workflow_file(
         );
         return;
     }
-    if plugin::extract_meta_name(raw).is_none() {
+    if workflow::meta_string_value(raw, "name").is_none() {
         push_issue(
             errors,
             prefix,

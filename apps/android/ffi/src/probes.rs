@@ -10,8 +10,8 @@ use super::callbacks::AndroidGitCredentialProviderBridge;
 /// the one thing the host `file://` tests (P4b/c) cannot exercise.
 ///
 /// It is NOT a bypass: it builds a [`tool_api::BuiltinToolContext`] with
-/// `android_git = Some(AndroidGitToolCtx { enabled: true, has_token: false,
-/// workspace_root })` + `android_git_secret = Some(AndroidGitSecret {
+/// `mobile_git = Some(MobileGitToolCtx { enabled: true, has_token: false,
+/// workspace_root })` + `mobile_git_secret = Some(MobileGitSecret {
 /// credential_provider: None, ca_dir: Some(ca_cert_dir), .. })`, constructs the
 /// `GitTool`, parses
 /// `operation_json` into the tool input `Value`, and runs `GitTool::call(..)` on
@@ -43,7 +43,7 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
         use mobile_linux_api::ProcessOutput;
         use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
-        use tool_api::{AndroidGitSecret, AndroidGitToolCtx};
+        use tool_api::{MobileGitSecret, MobileGitToolCtx};
 
         // Parse the structured operation input. A malformed payload is a probe
         // error, not a tool failure.
@@ -59,7 +59,7 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
 
         // Build the REAL BuiltinToolContext. The git ops drive libgit2 + the
         // filesystem directly, so the test-support stub fs/process/sandbox
-        // handles are inert here; only `android_git` + `android_git_secret`
+        // handles are inert here; only `mobile_git` + `mobile_git_secret`
         // matter. No token (public repo); the CA dir points at the system store.
         let mut ctx = shell_test_ctx(ProcessOutput {
             stdout: String::new(),
@@ -67,12 +67,12 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
             exit_code: 0,
             timed_out: false,
         });
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: false,
             workspace_root: workspace,
         });
-        ctx.android_git_secret = Some(AndroidGitSecret {
+        ctx.mobile_git_secret = Some(MobileGitSecret {
             credential_provider: None,
             ca_dir: if ca_cert_dir.is_empty() {
                 None
@@ -152,7 +152,7 @@ pub fn android_git_probe_authed(
         use mobile_linux_api::ProcessOutput;
         use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
-        use tool_api::{AndroidGitSecret, AndroidGitToolCtx};
+        use tool_api::{MobileGitSecret, MobileGitToolCtx};
 
         let input: serde_json::Value = match serde_json::from_str(&operation_json) {
             Ok(v) => v,
@@ -177,12 +177,12 @@ pub fn android_git_probe_authed(
             exit_code: 0,
             timed_out: false,
         });
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: provider.is_some(),
             workspace_root: workspace,
         });
-        ctx.android_git_secret = Some(AndroidGitSecret {
+        ctx.mobile_git_secret = Some(MobileGitSecret {
             credential_provider: provider,
             ca_dir: if ca_cert_dir.is_empty() {
                 None

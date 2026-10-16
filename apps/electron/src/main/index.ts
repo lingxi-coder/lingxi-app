@@ -9,7 +9,6 @@ import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { stopLegacyOrphanBridges } from './bridgeDiscovery.js';
 import type { SessionRef } from './bridgeTypes.js';
 import { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import {
@@ -215,14 +214,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
   const bridgeRoot = join(userData, 'bridge-runtime');
-  // Pre-broker bridges that launchd inherited must be gone before any runtime
-  // launches, but the process scan behind the sweep need not hold startup: it
-  // runs beside the rest of it and is awaited, failure included, before the
-  // window can open one.
-  const legacyOrphanSweep: Promise<number[]> = process.platform === 'darwin' && app.isPackaged
-    ? stopLegacyOrphanBridges(bridgeRoot)
-    : Promise.resolve([]);
-  legacyOrphanSweep.catch(() => undefined);
   const credentialBroker = createMacCredentialBrokerClient({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -459,10 +450,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
   } catch (error) {
     diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
-  }
-  const stoppedLegacyPids = await legacyOrphanSweep;
-  if (stoppedLegacyPids.length > 0) {
-    diagnostics.add('warn', 'host', `stopped legacy orphan bridge processes: ${stoppedLegacyPids.join(', ')}`);
   }
   createWindow();
 

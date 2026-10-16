@@ -2719,7 +2719,10 @@ mod tests {
             }),
         )]);
         let filtered = without_settings_credentials(Some(profiles)).unwrap();
-        let (parsed, warnings) = provider_config::parse_user_providers(&filtered);
+        let (parsed, warnings) = llm_runtime::parse_provider_profiles_lenient(
+            &filtered,
+            llm_runtime::ProviderParseOptions::lenient_deferred_static(),
+        );
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].profile.profile_name, "custom");

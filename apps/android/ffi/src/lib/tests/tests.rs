@@ -368,7 +368,7 @@ fn android_project_cwd_accepts_managed_project_workspaces() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
-/// P4-T10: the FFI → `AndroidGitToolCtx` mapping yields `enabled = false`
+/// P4-T10: the FFI → `MobileGitToolCtx` mapping yields `enabled = false`
 /// when `enable_git` is false even if the other gate inputs (workspace +
 /// CA store) are satisfied, and regardless of a present credential provider.
 /// Pure-fn level (mirrors the body of [`build_android_engine`]'s git mapping).
@@ -402,7 +402,7 @@ fn ffi_mapping_disabled_when_enable_git_false() {
         }),
     );
 
-    let ctx = tool_api::AndroidGitToolCtx {
+    let ctx = tool_api::MobileGitToolCtx {
         enabled: android_git_gate(cfg.enable_git, workspace_ready, ca_store_reachable),
         has_token: credential_provider.is_some(),
         workspace_root: cfg.workspace_root.clone(),

@@ -410,7 +410,7 @@ pub fn build_android_engine(
             } else {
                 std::path::Path::new(&c.ca_cert_dir).exists()
             };
-            cfg.android_git = Some(tool_api::AndroidGitToolCtx {
+            cfg.android_git = Some(tool_api::MobileGitToolCtx {
                 enabled: android_git_gate(c.enable_git, workspace_ready, ca_store_reachable),
                 has_token: credential_provider.is_some(),
                 workspace_root: c.workspace_root.clone(),
@@ -452,7 +452,7 @@ pub fn build_android_engine(
                 } else {
                     (None, None, Vec::new())
                 };
-            cfg.android_git_secret = Some(tool_api::AndroidGitSecret {
+            cfg.android_git_secret = Some(tool_api::MobileGitSecret {
                 credential_provider,
                 ca_dir: if c.ca_cert_dir.is_empty() {
                     None

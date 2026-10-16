@@ -120,19 +120,19 @@ targets:
       configs:
         StoreDebug:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
-          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-ocjengstsi572dn9uvmrsdulrn1t1fvg
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
         StoreRelease:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
-          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-ocjengstsi572dn9uvmrsdulrn1t1fvg
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
         FullDebug:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
-          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-l23qteth7diqh6djlpu7vigk9l4srlin
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
         FullRelease:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
-          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-l23qteth7diqh6djlpu7vigk9l4srlin
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
     preBuildScripts:
       - name: Select Firebase application

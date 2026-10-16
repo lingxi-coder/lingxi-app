@@ -1,6 +1,6 @@
 # LingXi accounts / Firebase Authentication
 
-Project: `lingxi-d6627` (display name `lingxi`, number `535003056752`).
+Project: `lingxi-5e4b2` (display name `lingxi`, number `55470483519`).
 LingXi accounts are independent of model-provider credentials and engine `auth_state`.
 Account controls live in each platform's Account settings page. Existing local work
 does not require signing in.
@@ -9,7 +9,7 @@ does not require signing in.
 
 | Client | Firebase application |
 | --- | --- |
-| Desktop | Web app `1:535003056752:web:8e620fcba1416aff75c2b5` |
+| Desktop | Web app `1:55470483519:web:ec5536aff825451a57708a` |
 | iOS Store | `com.lingxi.code` |
 | iOS Full | `com.lingxi.code.full` |
 | Android Play release / debug | `com.lingxi.code` / `com.lingxi.code.debug` |
@@ -66,14 +66,38 @@ Email/password and Google have been enabled in this project. `firebase.json`
 declares their configuration; deploy just these settings with:
 
 ```sh
-firebase deploy --only auth --project lingxi-d6627
+firebase deploy --only auth --project lingxi-5e4b2
 ```
 
-The local Android debug keystore's SHA-1 and SHA-256 were registered for both
-debug package names. Production Google login requires each distribution's actual
-release signing certificate, including the Google Play App Signing certificate
-when applicable. Add those public fingerprints in Firebase and download updated
-Android config file. Do not reuse debug fingerprints as release credentials.
+Android debug builds use a project-specific local signing key at
+`apps/android/native/.signing/lingxi-5e4b2-debug.keystore` (alias `androiddebugkey`,
+standard debug passwords `android`). This private key is ignored by Git; retain it
+locally and transfer it only through approved private storage when reusing this
+exact OAuth registration on another checkout or machine. Do not commit the key.
+Both Play Debug and Direct Debug, including their instrumentation APKs, use it.
+
+Registered SHA-1: `46:89:F9:DB:6A:B5:C0:AD:77:BC:04:F0:4B:87:93:E2:D9:0E:0C:32`.
+Registered SHA-256: `5C:F2:7E:B0:FD:1A:36:CC:47:02:7F:B0:B8:1C:ED:5B:23:40:36:10:4D:6F:B0:E2:C3:E0:A7:40:E8:C2:CC:42`.
+The downloaded `google-services.json` contains an Android OAuth client for each
+debug package and the new project's Web OAuth client used as the server client ID.
+
+The previous global debug key remains intact. Its SHA-1 is still occupied by OAuth
+clients in another project; the current account receives HTTP 403 for the previous
+Firebase project. The new local key avoids that conflict without changing the old
+project. A new-signed APK cannot update an installed old-signed APK in place.
+Preserve/export local data before removing an old installation. The device
+validation below backed up the previous apps before installing fresh builds.
+
+On a new machine, restore this key through private storage, or generate a new
+project-local debug key and register its SHA-1/SHA-256 for both debug apps before
+using Google login. A newly generated key has different fingerprints. Standard
+Android debug keystore generation uses `keytool -genkeypair` with RSA 2048, alias
+`androiddebugkey`, and debug passwords `android`.
+
+Production Google login requires each distribution's actual release signing
+certificate, including the Google Play App Signing certificate when applicable.
+Add those public fingerprints in Firebase and download updated Android config.
+Do not reuse debug fingerprints as release credentials.
 
 Apple **is not enabled on the server yet**, at the user's direction. The code is
 present, but live Apple sign-in needs the following configuration:
@@ -82,8 +106,8 @@ present, but live Apple sign-in needs the following configuration:
    their provisioning profiles. `Account.entitlements` declares this capability
    for the containing app, separately from the widget.
 2. Create an Apple Services ID for web/Android sign-in, associate it with the
-   primary Apple App ID, and register `lingxi-d6627.firebaseapp.com` and the return
-   URL `https://lingxi-d6627.firebaseapp.com/__/auth/handler`.
+   primary Apple App ID, and register `lingxi-5e4b2.firebaseapp.com` and the return
+   URL `https://lingxi-5e4b2.firebaseapp.com/__/auth/handler`.
 3. Create a Sign in with Apple key. In Firebase Authentication's Apple provider,
    configure Services ID, Team ID, Key ID, and private key, then enable it. Store
    the key only in the provider configuration / approved secret storage.
@@ -160,6 +184,59 @@ Native live tests are opt-in:
 These checks cover debug/emulator builds, not signed device distribution. Apple
 provider configuration and production signing fingerprints remain required before
 the corresponding production social-login flows can work.
+
+## Current project configuration verification (2026-10-16)
+
+Firebase MCP is bound to `lingxi-5e4b2` with seven client apps (Desktop Web,
+two iOS bundles, and four Android variants), plus the default Web app created
+by Firebase Auth provisioning. Email/password and Google providers
+are enabled; Desktop authorized domains include `localhost` and `127.0.0.1`.
+All client SDK configurations and iOS callback schemes target this project.
+Android signingReport, both Google Services processing tasks, and both debug
+signing validation tasks pass with the project-specific certificate.
+Both debug APKs subsequently passed full assembly and the final native/rootfs
+payload verification. Missing local generated runtime assets were restaged from
+the exact Cargo-locked SDK release evidence; no packaging checks were bypassed.
+Those device APKs included in-progress Mobile Linux changes in the development
+checkout. Their acceptance establishes authentication and session persistence;
+it does not establish a full-product build from this Firebase-only commit.
+Both new-signed APKs were installed on the connected Samsung SM_S9310 after a
+verified file-level backup of the previous apps and their original APKs. Backup:
+`backups/android-google-20261016T101119Z/manifest.json` (local, Git-ignored).
+The backup does not export hardware-backed Android Keystore keys; encrypted
+credentials may need reauthentication if restored. No legacy data migration was
+added, and the new apps were installed fresh.
+
+The Play build's production Account page completed Google sign-in on the Samsung
+SM_S9310 after device network connectivity was restored and the owner authorized
+sharing the basic Google profile. Firebase MCP confirmed the account exists in
+`lingxi-5e4b2`, has provider `google.com`, and has a verified email address.
+The first attempt had timed out in Google Play services with `NETWORK_ERROR`;
+the later successful result supersedes that network blocker.
+
+Process-restored login passed: force-stopped the app (previous PID 12578),
+confirmed that process exited, and launched a new process (PID 16486). Without
+signing in again, the sidebar and Account page showed the same owner profile,
+verified email, and Sign Out control. Account refresh completed and retained the
+signed-in profile without a visible error. The app is left signed in.
+Evidence is saved locally beside the backup as `play-google-restored.png` and
+`verification.json`.
+
+Direct (`com.lingxi.code.direct.debug`) was verified independently through its
+production Account page: Google login completed for the same owner account.
+Firebase MCP showed the same Firebase UID/provider with a newer last-login time.
+Force-stopped Direct (PID 16917), confirmed process exit, and launched a new
+process (PID 17783). The sidebar and Account page restored the same profile and
+verified email without another sign-in. Account refresh retained the signed-in
+state without a visible error. Direct is left signed in; evidence is saved as
+`direct-google-restored.png` beside the backup. Both distribution checks validate
+application process restarts, not a phone reboot or signed production distribution.
+
+The integration checks recorded above were performed against the previous project;
+they do not establish live login acceptance for this project. Android debug Google
+OAuth clients are registered with the project-specific key described above; release
+signing fingerprints and Apple provider credentials are still required. Switching projects does not
+migrate existing Firebase users or their sessions.
 
 ## Build outputs
 

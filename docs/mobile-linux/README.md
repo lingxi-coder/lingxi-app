@@ -1,5 +1,7 @@
 # MobileLinux release contract
 
+Current SDK/rootfs release and clean-machine build steps: [build from RC3](build-from-release.md).
+
 LingXi's Android or iOS combined distribution is GPLv3 when it includes the
 OpenMinis-derived shell, PRoot, PTY bridge, or Alpine rootfs integration.
 Original MIT and Apache-2.0 components retain their notices.
@@ -11,7 +13,7 @@ artifact ownership and validation. The inherited component baseline includes:
 - OpenMinis `9cf3a855fecd27bb5735b84cacbd56852a3ab8dd`
 - OpenMinis PRoot fork `8cf13e997cdc9472997aae19df8050c073c9a86c`
 - talloc 2.4.2
-- Base MobileLinux rootfs: Alpine 3.21.3 for `arm64-v8a` and `x86_64`
+- Active SDK rootfs: Alpine `3.24.2-user1`; Android arm64-v8a/x86_64 toolchain images and the iOS arm64 base fakefs image
 
 Android keeps one distribution dimension:
 
@@ -59,40 +61,27 @@ A release evidence directory contains, per ABI:
 <abi>/executable-allowlist.json
 ```
 
-The official minirootfs digest in `rootfs.archives` remains the immutable
-source pin. The shipped archive is the deterministic, package-augmented
-rootfs, so it needs a committed digest of its own in
-`rootfs.release_archives.<abi>.sha256`; staging refuses any ABI that has no
-such pin rather than trust the hash the evidence directory issues for itself.
+The Cargo-locked SDK is the source of rootfs archive identities. Its
+`docs/toolchains/runtime-pins.json` selects `3.24.2-user1`, and the per-ABI
+`docs/mobile-linux/releases/3.24.2-user1/<abi>/rootfs-manifest.json` records the
+archive's exact size, SHA-256 and immutable file inventory. The source minirootfs
+hash is a separate input identity.
 
-### KNOWN UNANCHORED STEP: no release archive digest is committed
+RC3 publishes both Android archives and complete evidence. Product
+`scripts/lib/mobile-linux-rootfs-release.json` selects the release tag;
+`fetch-sdk-rootfs.py` checks downloaded archive bytes against the locked SDK,
+and staging compares all supplied evidence to those committed records.
+The SDK validates lock, archive policy, inventory and original APK/source closure.
 
-`mobile-linux-pins.json` carries **no `rootfs.release_archives` key**, for
-either ABI. Minting one requires a reproducible package-augmented rootfs: the
-generic MobileLinux release archive still needs its reproducible packaging run
-and reviewed repository digest. These pins must not be invented from a
-single local build or revised merely to route around the remaining gate.
-
-So the shipped rootfs bytes have **no repository-committed anchor at all**. The
-only guarantee today is a refusal: `stage-mobile-linux-assets.sh` aborts on its
-first ABI with `no committed release rootfs digest for arm64-v8a`. That is a
-documented gap, not coverage. Two things must not be misread as closing it:
-
-- `verify-mobile-linux-pins.sh` succeeding. It validates the source pins and
-  never opens a rootfs archive.
-- Synthetic `verify-release-archive` fixtures. They prove the comparator
-  works, not that a real digest exists.
-
-Whoever unblocks the APK closure must, in the same change: build the archive
-with `package-rootfs-release.sh`; confirm the two-pass determinism check in
-`test-rootfs-tooling.sh` reproduces the digest byte-for-byte; cross-check it
-against `rootfs-manifest.json`'s `archive.sha256`; commit it under
-`rootfs.release_archives.<abi>.sha256`.
-
-Once a pin exists, staging verifies the archive bytes against it, against its
-own manifest and lock, and against the archive policy before copying assets
-under `app/build/generated/mobileLinux/<play|direct>/assets`. Gradle stores
-`.gz` and `.zst` assets without recompression, preserving the release hash.
+The [release preparation script](../../scripts/mobile-linux/prepare-sdk-release.py)
+also installs the checksum-pinned native-only Maven and XCFramework bundles and
+stages resources for both Android distributions. Android archives are stored as
+`rootfs.tar.gz.bin` to retain exact gzip bytes through asset merging. The final
+APK verifier checks the packaged assets and native-support closure.
+For iOS the script installs the tested default-user fakefs ZIP, RootfsPatch and
+vDSO from the published staging bundle. SDK source identity and archive hashes
+are checked before use. [Clean-machine commands](build-from-release.md) describe
+all preparation and product FFI build steps.
 
 Release deliverables must also include:
 

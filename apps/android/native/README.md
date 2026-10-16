@@ -1,5 +1,7 @@
 # 灵犀 (LingXi) — Android client
 
+Current SDK/rootfs release and clean-machine build steps: [build from RC3](../../../docs/mobile-linux/build-from-release.md).
+
 A Jetpack Compose port of the LingXi mobile experience (`lingxi-iphone.html` /
 the iOS client), built as a Material 3 single-Activity app. This is the **UI
 shell** milestone (M10 A3): every surface is rendered against verbatim mock

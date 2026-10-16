@@ -100,21 +100,21 @@ client.embeddings().embed 使用独立配置路由，并遵守 ServiceSetting �
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/inference.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/request_controls.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/structured.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/codecs/inference.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/codecs/structured.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/codecs/cache.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/client/decisions.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/protocol/decision.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/embeddings/mod.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/token_count/request.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/src/providers/openrouter/response_cache.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/structured_output.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/decisions.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
-- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/46240a65df198a654d7d6de1c0bd99c23fcbb979/tests/embeddings.rs) — 已提交源码 (46240a65df198a654d7d6de1c0bd99c23fcbb979)
+- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/inference.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/request_controls.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/structured.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/inference.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/structured.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/cache.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/decisions.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/decision.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/embeddings/mod.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/token_count/request.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openrouter/response_cache.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/structured_output.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/decisions.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/embeddings.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
 
-- llm-client: HEAD 46240a65df198a654d7d6de1c0bd99c23fcbb979; 所据文件指纹 sha256:548db437ccaaeec3ce6ad3beb931ef868b263f6ad9b3c47309a3e00c514326dd; 产品固定版本 46240a65df198a654d7d6de1c0bd99c23fcbb979
+- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

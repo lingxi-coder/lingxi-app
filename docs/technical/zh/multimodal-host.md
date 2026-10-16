@@ -73,18 +73,18 @@ cargo test --locked -p harness-runtime --features mobile --test realtime_owner
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/src/api.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/client/src/protocol/commands.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/orchestrator/src/image_input.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/orchestrator/src/image_input.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/audio-runtime/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/audio-runtime/src/lib.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/audio-runtime/src/cloud.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/audio-runtime/src/cloud.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/runtime/src/desktop/configuration.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/src/desktop/configuration.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/runtime/src/mobile/audio_service.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/src/mobile/audio_service.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/runtime/src/mobile/host/audio_context.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/src/mobile/host/audio_context.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/runtime/src/mobile/host/audio_realtime_owner.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/src/mobile/host/audio_realtime_owner.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/runtime/tests/mobile/realtime_owner.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/tests/mobile/realtime_owner.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
-- [harness-runtime/crates/runtime/tests/desktop/audio_injection.rs](https://github.com/lingxi-coder/harness-runtime/blob/98fc362da3fabfe36aa5610b9e93818923c1ab31/crates/runtime/tests/desktop/audio_injection.rs) — 已提交源码 (98fc362da3fabfe36aa5610b9e93818923c1ab31)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/src/api.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/client/src/protocol/commands.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/orchestrator/src/image_input.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/orchestrator/src/image_input.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/audio-runtime/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/audio-runtime/src/lib.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/audio-runtime/src/cloud.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/audio-runtime/src/cloud.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/runtime/src/desktop/configuration.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/src/desktop/configuration.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/runtime/src/mobile/audio_service.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/src/mobile/audio_service.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/runtime/src/mobile/host/audio_context.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/src/mobile/host/audio_context.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/runtime/src/mobile/host/audio_realtime_owner.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/src/mobile/host/audio_realtime_owner.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/runtime/tests/mobile/realtime_owner.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/tests/mobile/realtime_owner.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
+- [harness-runtime/crates/runtime/tests/desktop/audio_injection.rs](https://github.com/lingxi-coder/harness-runtime/blob/e3e34efba151a8219e2b05406c3d229b5cc6314f/crates/runtime/tests/desktop/audio_injection.rs) — 已提交源码 (e3e34efba151a8219e2b05406c3d229b5cc6314f)
 
-- harness-runtime: HEAD 98fc362da3fabfe36aa5610b9e93818923c1ab31; 所据文件指纹 sha256:8ac34e7055ee1007cfccf0eafbeaa5e2437c2f20dc623f1069d255177d27dd90; 产品固定版本 98fc362da3fabfe36aa5610b9e93818923c1ab31
+- harness-runtime: HEAD e3e34efba151a8219e2b05406c3d229b5cc6314f; 所据文件指纹 sha256:2d439c83e9c12bcb5aacfcf0a5da70a9d8beba68e9eba861d817bcf67c9bb51b; 产品固定版本 e3e34efba151a8219e2b05406c3d229b5cc6314f
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

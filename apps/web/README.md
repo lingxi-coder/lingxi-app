@@ -12,19 +12,22 @@ npm run build
 
 入口为 `/`、`/docs` 和 `/docs/api-reference`。每个 SDK 文档页有独立 `/docs/<page-id>` 路由；部署 `dist/` 时须将页面请求回退到 `index.html`，同时正常提供静态资源与 `api-index.json`。
 
-## 发布到 Cloudflare
+## 发布到 Firebase Hosting
 
-`wrangler.jsonc` 将 `dist/` 作为静态资源发布到现有的 `lingxios-site` Worker，使用 `lingxios.net/*` 路由，并为文档路由启用单页应用回退。Cloudflare 管理该域名的 HTTPS 证书。
+官网使用当前项目 `lingxi-5e4b2` 的 Firebase Hosting，配置位于仓库根目录 `firebase.json`。
+静态资源来自 `apps/web/dist`；`/v1/**` 同域转发到 `catalogApi`，其余路由使用 SPA 回退。
 
 ```sh
-npm run docs:check
-npm run typecheck
-npm test
+npm ci
 npm run build
-npx wrangler@latest deploy
+cd ../..
+firebase deploy --only hosting --project lingxi-5e4b2
 ```
 
-首次发布前需要运行 `npx wrangler@latest login` 登录有权管理该 Worker 的 Cloudflare 账户。若 `docs:check` 提示索引过期，先运行 `npm run docs:sync` 并检查生成的源码提交链接，再重新构建发布。
+默认站点 https://lingxi-5e4b2.web.app，模型后台 `/admin/models`。
+官网自定义域名 `lingxios.net` 的 DNS/证书切换和后台部署记录见
+[资源清单](../../docs/firebase-backend-resources.md)。Cloudflare 原静态 Worker 配置已移除。
+
 
 ## 唯一正文与双语手册
 

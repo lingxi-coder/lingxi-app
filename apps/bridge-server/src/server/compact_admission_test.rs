@@ -149,8 +149,8 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
                     turn_id: Some(17),
                     is_error: true,
                     display,
-                }) if display.string_at("").as_deref()
-                    == Some("this command requires an idle session")
+                }) if display.code_units
+                    == "this command requires an idle session".encode_utf16().collect::<Vec<_>>()
             ));
         }
 
@@ -181,7 +181,7 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
         assert_eq!(router.calls.load(Ordering::SeqCst), 1);
         if let Some((endpoint, mut socket, _)) = captured {
             assert!(matches!(
-                super::connection_regression_test::next_frame(socket).await,
+                super::connection_regression_test::next_frame(&mut socket).await,
                 Frame::Event(ClientEvent::SlashCommandResult {
                     turn_id: Some(17),
                     is_error: false,

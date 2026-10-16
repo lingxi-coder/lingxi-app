@@ -580,8 +580,10 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
                     is_error: true,
                     display,
                 }) => assert_eq!(
-                    display.string_at("").as_deref(),
-                    Some("this command requires an idle session")
+                    display.code_units,
+                    "this command requires an idle session"
+                        .encode_utf16()
+                        .collect::<Vec<_>>()
                 ),
                 frame => {
                     panic!("busy slash transition must report an idle-session error, got {frame:?}")

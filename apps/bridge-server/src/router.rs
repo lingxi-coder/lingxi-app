@@ -982,7 +982,8 @@ impl CommandRouter for EngineCommandRouter {
         let Some(registry) = self.slash_registry.as_ref() else {
             return false;
         };
-        requires_idle_turn_for_slash(&registry.read().await, raw)
+        let registry = registry.read().await;
+        requires_idle_turn_for_slash(&registry, raw)
     }
 
     // The full command dispatch is one match over the command surface; splitting

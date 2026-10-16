@@ -1842,6 +1842,7 @@ async fn slash_command_routes_to_registry() {
         &mut ws,
         &ClientCommand::RunSlashCommand {
             raw: "/clear".into(),
+            images: Vec::new(),
             turn_id: Some(7),
         },
     )
@@ -2178,6 +2179,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
         &mut ws,
         &ClientCommand::RunSlashCommand {
             raw: "/install".into(),
+            images: Vec::new(),
             turn_id: Some(9),
         },
     )

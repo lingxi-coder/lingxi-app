@@ -527,7 +527,7 @@ test('the runSlashCommand dispatch-failure catch resets cancellation runtime; th
   assert.doesNotMatch(sideQuestionBranch, /clearCancellationRuntime|beginSlashCommand/);
   const firstCatchStart = runSlashCommandBody.indexOf('catch (cause) {', claimStart);
   assert.ok(firstCatchStart >= 0, 'could not locate the dispatch-failure catch inside runSlashCommand');
-  const firstCatchEnd = runSlashCommandBody.indexOf('return;', firstCatchStart);
+  const firstCatchEnd = runSlashCommandBody.indexOf('return false;', firstCatchStart);
   assert.ok(firstCatchEnd > firstCatchStart, 'the dispatch-failure catch no longer ends with a return -- update this test\'s markers');
   const dispatchFailureCatch = runSlashCommandBody.slice(firstCatchStart, firstCatchEnd);
 

@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import '../../src/renderer/global.css';
 
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
-import type { SettingsSnapshotEvent } from '../../src/renderer/bridge/bridgeTypes.js';
+import type { ConfigurationOperationEvent, SettingsSnapshotEvent } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 
@@ -42,9 +42,36 @@ function Fixture() {
   // join the reporter effect's dep list just to be observable.
   const navCalls = useRef<string[]>([]);
   const extensionCalls = useRef<Array<{ domain: string; command: Record<string, unknown> }>>([]);
+  const [hookOperation, setHookOperation] = useState<ConfigurationOperationEvent>();
   const [extensionCatalogs, setExtensionCatalogs] = useState<{ plugins?: object; skills?: object; document?: object }>({});
   const pluginAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'plugin', command }); }, []);
   const skillAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'skill', command }); }, []);
+  const hookAdmin = useCallback(async (command: { action: string; scope?: string }) => {
+    if (command.action !== 'get_document') throw new Error(`Unsupported hook admin fixture action: ${command.action}`);
+    // The host returns get_document through a configuration_operation event,
+    // not as a command return value. Mirror its current details_json envelope.
+    const parseRecord = (raw: string | undefined): Record<string, unknown> => {
+      try {
+        const value: unknown = JSON.parse(raw ?? '{}');
+        return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+      } catch { return {}; }
+    };
+    const layers = parseRecord(settingsSnapshotEvent?.layers_json);
+    const own = parseRecord(typeof layers[command.scope ?? 'local'] === 'string'
+      ? layers[command.scope ?? 'local'] as string
+      : JSON.stringify(layers[command.scope ?? 'local']));
+    const effective = parseRecord(settingsSnapshotEvent?.effective_json);
+    const ownHooks = own.hooks && typeof own.hooks === 'object' && !Array.isArray(own.hooks) ? own.hooks : {};
+    const effectiveHooks = effective.hooks && typeof effective.hooks === 'object' && !Array.isArray(effective.hooks) ? effective.hooks : {};
+    setHookOperation({
+      type: 'configuration_operation', domain: 'hook', operation_id: 0,
+      status: 'succeeded', effect: 'not_applicable', message: 'Hook document loaded.',
+      details_json: JSON.stringify({
+        scope: command.scope ?? 'local', revision_sha256: 'a'.repeat(64),
+        own_json: JSON.stringify(ownHooks, null, 2), effective_json: JSON.stringify(effectiveHooks, null, 2),
+      }),
+    });
+  }, [settingsSnapshotEvent]);
   const failNextCredential = useRef(false);
   const holdSettingsWrite = useRef(false);
   const releaseSettingsWrite = useRef<(() => void) | null>(null);
@@ -198,7 +225,7 @@ function Fixture() {
         revisions: { user: 'a'.repeat(64), project: 'b'.repeat(64), local: 'c'.repeat(64) },
       }),
     },
-    configurationOperations: {},
+    configurationOperations: hookOperation ? { hook: hookOperation } : {},
     refreshMcpServers: noopAsyncVoid,
     refreshSkills: noopAsyncVoid,
     refreshAuth: noopAsyncVoid,
@@ -266,6 +293,7 @@ function Fixture() {
     removeMcpServer: noopAsyncVoid,
     skillAdmin,
     mcpAdmin: noopAsyncVoid,
+    hookAdmin,
     fusionAdmin: noopAsyncVoid,
     fusionCatalogEvent: { type: 'fusion_catalog' as const, catalog_json: JSON.stringify({
       scopes: ['user', 'project', 'local'].map(scope => ({ scope, path: `/test/${scope}/settings.json`, revision: 'a'.repeat(64), globals: {}, strategies: [] })),
@@ -274,7 +302,7 @@ function Fixture() {
     pluginAdmin,
     setPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: true, masked: '••••••••', restartRequired: false }),
     clearPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: false, restartRequired: false }),
-    runSlashCommand: async (command: string) => { navCalls.current.push(`slash:${command}`); },
+    runSlashCommand: async (command: string) => { navCalls.current.push(`slash:${command}`); return true; },
   };
 
   if (extensionCatalogs.plugins) bridge.pluginCatalogEvent.catalog_json = JSON.stringify(extensionCatalogs.plugins);

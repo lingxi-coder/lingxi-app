@@ -21,6 +21,8 @@ import type {
   WritableScopeDto,
 } from '@lingxi/bridge-client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { SlashCommandTerminalRegistry } from './slashCommandTerminals.js';
+import type { SlashCommandTerminalResult } from './slashCommandTerminals.js';
 import { watchCredentialRecovery } from './credentialRecovery.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import { hostMicrophonePermissionReader } from '../../shared/microphoneAccess.js';
@@ -233,6 +235,7 @@ export function useBridge(): UseBridge {
   const pendingFusionDispatches = useRef(new Map<string, { raw: string }>());
   const sideQuestionTurns = useRef(new Map<string, Set<number>>());
   const nextSideQuestionTurn = useRef(Date.now());
+  const slashCommandTerminals = useRef(new SlashCommandTerminalRegistry());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
   const removedRuntimeIds = useRef(new Set<string>());
@@ -603,6 +606,8 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      slashCommandTerminals.current.observe(sessionId, event);
+      if (event.type === 'session_ended') slashCommandTerminals.current.clearSession(sessionId);
       // Side envelopes belong solely to the RAM-only side controller.
       if (event.type.startsWith('side_chat_')) return;
       const eventProjectPath = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId)?.projectPath
@@ -869,6 +874,7 @@ export function useBridge(): UseBridge {
       }
       if (isRuntimeRemovedState(state)) {
         removedRuntimeIds.current.add(sessionId);
+        slashCommandTerminals.current.clearSession(sessionId);
         setBootstrap((previous) => {
           if (!previous) return previous;
           const previousActiveSession = previous.activeSession ?? previous.settings.activeSession;
@@ -1016,6 +1022,7 @@ export function useBridge(): UseBridge {
 
     return () => {
       offEvent();
+      slashCommandTerminals.current.clear();
       offState();
       offPermission();
       offComputerAccess();
@@ -1187,12 +1194,13 @@ export function useBridge(): UseBridge {
     }
   }, [host, updateRuntime]);
 
-  const runSlashCommand = useCallback(async (raw: string) => {
+  const runSlashCommand = useCallback(async (raw: string, images: ImageRefDto[], onTerminal?: (result: SlashCommandTerminalResult) => void): Promise<boolean> => {
     const command = raw.trim();
     const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId || !command.startsWith('/')) return;
+    if (sessionLoadingRef.current || !host || !sessionId || !command.startsWith('/')) return false;
     if (isSideQuestionCommand(command, runtimeStatesRef.current.get(sessionId)?.desktop.slashCommands ?? [])) {
       const turnId = ++nextSideQuestionTurn.current;
+      if (onTerminal) slashCommandTerminals.current.register(sessionId, turnId, onTerminal);
       const turns = sideQuestionTurns.current.get(sessionId) ?? new Set<number>();
       turns.add(turnId);
       sideQuestionTurns.current.set(sessionId, turns);
@@ -1200,14 +1208,19 @@ export function useBridge(): UseBridge {
         ...state, runtimeCenter: beginSideQuestion(state.runtimeCenter, sessionId, turnId, command),
       }));
       try {
-        await host.command(sessionId, { type: 'run_slash_command', raw: command, turn_id: turnId });
+        await host.command(sessionId, { type: 'run_slash_command', raw: command, images, turn_id: turnId });
       } catch (cause) {
+        const display = messageFrom(cause);
+        slashCommandTerminals.current.observe(sessionId, { type: 'slash_command_result', turn_id: turnId, display, is_error: true });
         updateRuntime(sessionId, (state) => ({
-          ...state, runtimeCenter: finishSideQuestion(state.runtimeCenter, sessionId, turnId, messageFrom(cause), true),
+          ...state, runtimeCenter: finishSideQuestion(state.runtimeCenter, sessionId, turnId, display, true),
         }));
+        return false;
       }
-      return;
+      return true;
     }
+    const turnId = ++nextSideQuestionTurn.current;
+    if (onTerminal) slashCommandTerminals.current.register(sessionId, turnId, onTerminal);
     const pendingFusion = /^\/fusion(?:\s|$)/i.test(command) ? { raw: command } : undefined;
     if (pendingFusion) pendingFusionDispatches.current.set(sessionId, pendingFusion);
     turnActiveRefs.current.set(sessionId, true);
@@ -1221,8 +1234,11 @@ export function useBridge(): UseBridge {
       conversation: beginSlashCommand(state.conversation, command),
     }));
     try {
-      await host.command(sessionId, { type: 'run_slash_command', raw: command });
+      await host.command(sessionId, { type: 'run_slash_command', raw: command, images, turn_id: turnId });
     } catch (cause) {
+      slashCommandTerminals.current.observe(sessionId, {
+        type: 'slash_command_result', turn_id: turnId, display: messageFrom(cause), is_error: true,
+      });
       // A genuine dispatch failure: the command never ran, so release both
       // claims and surface the error exactly as before. This is also
       // terminal for the session's cancellation bookkeeping -- see the
@@ -1242,7 +1258,7 @@ export function useBridge(): UseBridge {
         isCancelling: false,
       }));
       capture(cause);
-      return;
+      return false;
     } finally {
       if (pendingFusionDispatches.current.get(sessionId) === pendingFusion) pendingFusionDispatches.current.delete(sessionId);
     }
@@ -1256,6 +1272,7 @@ export function useBridge(): UseBridge {
     } catch (cause) {
       capture(cause);
     }
+    return true;
   }, [capture, host, submittedSessionFor, updateRuntime]);
 
   const beginLocalCommand = useCallback(async (raw: string) => {
@@ -1904,7 +1921,7 @@ export function useBridge(): UseBridge {
     }));
     try {
       await host.command(sessionId, instructions?.trim()
-        ? { type: 'run_slash_command', raw: `/compact ${instructions.trim()}` }
+        ? { type: 'run_slash_command', raw: `/compact ${instructions.trim()}`, images: [] }
         : { type: 'force_compact' });
     } catch (cause) {
       updateRuntime(sessionId, (state) => ({

@@ -419,14 +419,18 @@ internal class RecoveringConversationSource(
         emitAll(delegate.submit(text, images, turnId, visualizationContext, promptMode))
     }
 
-    override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> = flow {
+    override fun submitSlashCommand(
+        raw: ClientTextDto,
+        images: List<ImageRefDto>,
+        turnId: Long,
+    ): Flow<ReplyEvent> = flow {
         val delegate = pendingSource.await() as? SlashCommandConversationSource
         if (delegate == null) {
             emit(ReplyEvent.Error(strings.resolve(R.string.chat_engine_build_failed, "引擎创建失败")))
             emit(ReplyEvent.End)
             return@flow
         }
-        emitAll(delegate.submitSlashCommand(raw, turnId))
+        emitAll(delegate.submitSlashCommand(raw, images, turnId))
     }
 
     override suspend fun cancel(turnId: Long?) {

@@ -378,6 +378,30 @@ fn slash_model_prompt(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalSlashImageResolution {
+    Consume,
+    Restore,
+}
+
+fn local_slash_image_resolution(
+    result: &lingxi_core::host::SlashDispatchResult,
+) -> Option<LocalSlashImageResolution> {
+    match result {
+        lingxi_core::host::SlashDispatchResult::Handled { .. } => {
+            Some(LocalSlashImageResolution::Consume)
+        }
+        lingxi_core::host::SlashDispatchResult::Failed { .. }
+        | lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
+            Some(LocalSlashImageResolution::Restore)
+        }
+        lingxi_core::host::SlashDispatchResult::RunAsTurn { .. }
+        | lingxi_core::host::SlashDispatchResult::RunSkillAsTurn { .. }
+        | lingxi_core::host::SlashDispatchResult::Unknown { .. }
+        | lingxi_core::host::SlashDispatchResult::ParseFailure { .. } => None,
+    }
+}
+
 enum SlashModelTurn {
     Prompt(lingxi_core::types::utf16_json::Utf16JsonProjection),
     Batch(Vec<orchestrator::QueuedPromptInput>),
@@ -413,6 +437,7 @@ trait SourceBatchRunner: Send + Sync {
         &self,
         inputs: Vec<orchestrator::QueuedPromptInput>,
         cancel: CancellationToken,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>;
 }
 
@@ -422,9 +447,145 @@ impl SourceBatchRunner for orchestrator::ConversationOrchestrator {
         &self,
         inputs: Vec<orchestrator::QueuedPromptInput>,
         cancel: CancellationToken,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
     ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
-        self.run_queued_prompt_batch(inputs, cancel).await
+        self.run_queued_prompt_batch_with_admission(inputs, cancel, on_admitted)
+            .await
     }
+}
+
+/// Attach the TUI's queued image paths to the real user row of a registry
+/// slash batch. Skill body companions and hook rows remain metadata only.
+fn attach_slash_images_to_primary_batch_input(
+    inputs: &mut [orchestrator::QueuedPromptInput],
+    image_paths: &[std::path::PathBuf],
+) -> Result<(), orchestrator::OrchestratorError> {
+    if image_paths.is_empty() {
+        return Ok(());
+    }
+    let images = image_paths
+        .iter()
+        .map(|path| orchestrator::image_input::load_image_source(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(primary) = inputs.iter_mut().find(|input| !input.is_meta) else {
+        return Err(orchestrator::OrchestratorError::Internal(
+            "registry slash batch has no primary user input for image attachments".into(),
+        ));
+    };
+    primary.images.extend(images);
+    Ok(())
+}
+
+fn resolve_slash_images(
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    dispatch_id: uuid::Uuid,
+    image_paths: Option<Vec<std::path::PathBuf>>,
+) {
+    let _ = tx.send(tui::TurnEvent::SlashImagesResolved {
+        dispatch_id,
+        image_paths,
+    });
+}
+
+async fn run_slash_prompt_with_images(
+    orchestrator: &orchestrator::ConversationOrchestrator,
+    prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    image_paths: Vec<std::path::PathBuf>,
+    cancel: CancellationToken,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    dispatch_id: uuid::Uuid,
+) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+    if cancel.is_cancelled() {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+        let _ = tx.send(tui::TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::Cancelled,
+        ));
+        return Ok(orchestrator::conversation::TurnOutcome::Cancelled);
+    }
+    let images = match image_paths
+        .iter()
+        .map(|path| orchestrator::image_input::load_image_source(path))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(images) => images,
+        Err(error) => {
+            resolve_slash_images(tx, dispatch_id, Some(image_paths));
+            return Err(error);
+        }
+    };
+    if cancel.is_cancelled() {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+        let _ = tx.send(tui::TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::Cancelled,
+        ));
+        return Ok(orchestrator::conversation::TurnOutcome::Cancelled);
+    }
+
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission_flag = admitted.clone();
+    let admission_tx = tx.clone();
+    let result = orchestrator
+        .run_turn_streaming_with_cancel_image_sources_and_admission(
+            prompt.clone(),
+            images,
+            cancel,
+            Box::new(move || {
+                admission_flag.store(true, std::sync::atomic::Ordering::Release);
+                // The orchestrator has acquired its own turn gate. The Host
+                // admission alone is earlier and cannot consume the batch.
+                resolve_slash_images(&admission_tx, dispatch_id, None);
+            }),
+        )
+        .await;
+    if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+    }
+    result
+}
+
+async fn run_slash_prompt_batch_with_images(
+    runner: &dyn SourceBatchRunner,
+    mut inputs: Vec<orchestrator::QueuedPromptInput>,
+    image_paths: Vec<std::path::PathBuf>,
+    cancel: CancellationToken,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+    dispatch_id: uuid::Uuid,
+) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError> {
+    if cancel.is_cancelled() {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+        let _ = tx.send(tui::TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::Cancelled,
+        ));
+        return Ok(orchestrator::conversation::TurnOutcome::Cancelled);
+    }
+    if let Err(error) = attach_slash_images_to_primary_batch_input(&mut inputs, &image_paths) {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+        return Err(error);
+    }
+    if cancel.is_cancelled() {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+        let _ = tx.send(tui::TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::Cancelled,
+        ));
+        return Ok(orchestrator::conversation::TurnOutcome::Cancelled);
+    }
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission_flag = admitted.clone();
+    let admission_tx = tx.clone();
+    let result = runner
+        .run_prompt_batch(
+            inputs,
+            cancel,
+            Box::new(move || {
+                admission_flag.store(true, std::sync::atomic::Ordering::Release);
+                resolve_slash_images(&admission_tx, dispatch_id, None);
+            }),
+        )
+        .await;
+    if !admitted.load(std::sync::atomic::Ordering::Acquire) {
+        resolve_slash_images(tx, dispatch_id, Some(image_paths));
+    }
+    result
 }
 
 async fn unless_cancelled<T>(
@@ -1024,7 +1185,7 @@ async fn drain_teammate_prompts(
                     orchestrator::native_user_message_source::human(),
                     orchestrator::mod_prompt_origin::with_origin(
                         origin,
-                        runner.run_prompt_batch(inputs, cancel),
+                        runner.run_prompt_batch(inputs, cancel, Box::new(|| {})),
                     ),
                 )
                 .await
@@ -2844,14 +3005,18 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let dispatch_turn_gate = teammate_turn_gate.clone();
     let dispatch_cancel_reason = queue_cancel_reason.clone();
     let dispatch_source_batch_runner = source_batch_runner.clone();
+    let dispatch_concrete_orchestrator = concrete_orchestrator.clone();
     let on_dispatch_slash =
         move |input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+              images: Vec<std::path::PathBuf>,
               control: tui::chat_widget::PendingSlashDispatch| {
             let token = control.cancellation.clone();
+            let image_restore_id = control.image_restore_id;
             let pending_slashes = dispatch_pending_slashes.clone();
             let reservation = PendingSlashReservation::new(&pending_slashes);
             let dispatcher = dispatch_dispatcher.clone();
             let orch = dispatch_orch.clone();
+            let concrete_orch = dispatch_concrete_orchestrator.clone();
             let tx = dispatch_turn_tx.clone();
             let source_batch_runner = dispatch_source_batch_runner.clone();
             let queue = dispatch_queue.clone();
@@ -2880,14 +3045,26 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 )
                 .await
                 else {
+                    resolve_slash_images(&tx, image_restore_id, Some(images));
                     discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                     return;
                 };
                 if let Some(host) = pending_slashes.loop_host.get() {
                     host.refresh_session().await;
                 }
+                let local_image_resolution = local_slash_image_resolution(&result);
                 let prompt = slash_model_prompt(result, fallback_input, &tx);
                 if prompt.is_none() {
+                    // Successful local commands are consumed like a normal
+                    // submit. A failed or unrecognized dispatch did not become
+                    // a model prompt, so return its own attachment batch.
+                    let image_paths = match local_image_resolution
+                        .expect("a local slash result has an image disposition")
+                    {
+                        LocalSlashImageResolution::Consume => None,
+                        LocalSlashImageResolution::Restore => Some(images),
+                    };
+                    resolve_slash_images(&tx, image_restore_id, image_paths);
                     drop(completion);
                     drop(reservation);
                     // Local results are responsive and own no model lifecycle.
@@ -2917,6 +3094,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 )
                 .await
                 else {
+                    resolve_slash_images(&tx, image_restore_id, Some(images));
                     discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                     return;
                 };
@@ -2933,19 +3111,36 @@ pub(crate) async fn run_ratatui_with_initial_state(
                             orchestrator::native_user_message_source::human(),
                             orchestrator::mod_prompt_origin::with_origin(
                                 serde_json::json!({"kind":"composer"}),
-                                orch.run_turn_streaming_with_images(&prompt, &[], token),
+                                run_slash_prompt_with_images(
+                                    concrete_orch.as_ref(),
+                                    &prompt,
+                                    images,
+                                    token,
+                                    &tx,
+                                    image_restore_id,
+                                ),
                             ),
                         )
                         .await
                         .map(|_| ())
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| {
+                            lingxi_core::host::HandleError::ActionFailed(error.to_string())
+                                .to_string()
+                        })
                     }
                     SlashModelTurn::Batch(inputs) => {
                         orchestrator::native_user_message_source::with_source(
                             orchestrator::native_user_message_source::human(),
                             orchestrator::mod_prompt_origin::with_origin(
                                 serde_json::json!({"kind":"composer"}),
-                                source_batch_runner.run_prompt_batch(inputs, token),
+                                run_slash_prompt_batch_with_images(
+                                    source_batch_runner.as_ref(),
+                                    inputs,
+                                    images,
+                                    token,
+                                    &tx,
+                                    image_restore_id,
+                                ),
                             ),
                         )
                         .await
@@ -6986,9 +7181,417 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    fn slash_image_test_orchestrator(
+        cwd: &std::path::Path,
+        streaming: Arc<orchestrator::test_support_stream::MockStreamingApiClient>,
+    ) -> Arc<orchestrator::ConversationOrchestrator> {
+        orchestrator::ConversationOrchestrator::into_shared(
+            orchestrator::ConversationOrchestrator::new_with_streaming(
+                orchestrator::OrchestratorConfig::default(),
+                Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
+                streaming,
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(orchestrator::test_support::NoOpPermissionGate),
+                Arc::new(orchestrator::test_support::MockOutputStream::new()),
+                Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
+                cwd.to_path_buf(),
+            ),
+        )
+    }
+
+    fn slash_image_stream() -> Arc<orchestrator::test_support_stream::MockStreamingApiClient> {
+        use orchestrator::test_support_stream::{
+            content_block_start_text, content_block_stop, message_delta_stop, message_start,
+            message_stop, text_delta, MockStreamingApiClient,
+        };
+        Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("slash_image", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "received"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]))
+    }
+
+    fn assert_provider_received_slash_image(
+        calls: &[orchestrator::test_support_stream::CapturedStreamCall],
+    ) {
+        use lingxi_core::types::{ContentBlock, ConversationMessage, ImageSource};
+        assert_eq!(calls.len(), 1, "slash dispatch makes one provider call");
+        let mut primary_has_image = false;
+        let mut meta_has_image = false;
+        for message in &calls[0].messages {
+            let ConversationMessage::User {
+                content, is_meta, ..
+            } = message
+            else {
+                continue;
+            };
+            for block in content {
+                if let ContentBlock::Image { source } = block {
+                    if *is_meta {
+                        meta_has_image = true;
+                    } else {
+                        primary_has_image = matches!(
+                            source,
+                            ImageSource::Base64 { media_type, data }
+                                if media_type == "image/png" && data == "iVBORw0KGgo="
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            primary_has_image,
+            "decoded attachment reaches the primary user message"
+        );
+        assert!(
+            !meta_has_image,
+            "the generated Skill companion remains image-free"
+        );
+    }
+
+    fn assert_slash_image_resolution(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<tui::TurnEvent>,
+        dispatch_id: uuid::Uuid,
+        expected_paths: Option<Vec<std::path::PathBuf>>,
+    ) {
+        match rx.try_recv().expect("slash image resolution event") {
+            tui::TurnEvent::SlashImagesResolved {
+                dispatch_id: actual_id,
+                image_paths,
+            } => {
+                assert_eq!(actual_id, dispatch_id);
+                assert_eq!(image_paths, expected_paths);
+            }
+            other => panic!("expected image resolution, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_slash_direct_prompt_sends_its_image_to_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("direct.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+        let streaming = slash_image_stream();
+        let orch = slash_image_test_orchestrator(dir.path(), streaming.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let dispatch_id = uuid::Uuid::new_v4();
+        let Some(SlashModelTurn::Prompt(prompt)) = slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::RunAsTurn {
+                prompt: "/loop inspect".into(),
+            },
+            "/loop inspect".into(),
+            &tx,
+        ) else {
+            panic!("direct registry command must remain a model prompt");
+        };
+
+        run_slash_prompt_with_images(
+            orch.as_ref(),
+            &prompt,
+            vec![image_path],
+            CancellationToken::new(),
+            &tx,
+            dispatch_id,
+        )
+        .await
+        .unwrap();
+        assert_provider_received_slash_image(&streaming.captured_calls().await);
+        assert_slash_image_resolution(&mut rx, dispatch_id, None);
+    }
+
+    #[tokio::test]
+    async fn registry_slash_skill_batch_sends_its_image_on_the_primary_queued_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("skill.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+        let streaming = slash_image_stream();
+        let orch = slash_image_test_orchestrator(dir.path(), streaming.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let dispatch_id = uuid::Uuid::new_v4();
+        let Some(SlashModelTurn::Batch(inputs)) = slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::RunSkillAsTurn {
+                command: "<command-name>/demo</command-name>".into(),
+                body: "Expanded Skill body".into(),
+                hook_messages: Vec::new(),
+            },
+            "/demo".into(),
+            &tx,
+        ) else {
+            panic!("Skill slash must remain a queued prompt batch");
+        };
+
+        let outcome = orchestrator::native_user_message_source::with_source(
+            orchestrator::native_user_message_source::human(),
+            orchestrator::mod_prompt_origin::with_origin(
+                serde_json::json!({"kind":"composer"}),
+                run_slash_prompt_batch_with_images(
+                    orch.as_ref(),
+                    inputs,
+                    vec![image_path],
+                    CancellationToken::new(),
+                    &tx,
+                    dispatch_id,
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            orchestrator::conversation::TurnOutcome::EndTurn
+        ));
+        assert_provider_received_slash_image(&streaming.captured_calls().await);
+        assert_slash_image_resolution(&mut rx, dispatch_id, None);
+    }
+
+    #[tokio::test]
+    async fn slash_batch_image_read_failure_aborts_before_provider_and_cancel_skips_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.png");
+        let streaming = slash_image_stream();
+        let orch = slash_image_test_orchestrator(dir.path(), streaming.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let failed_dispatch_id = uuid::Uuid::new_v4();
+        let inputs = orchestrator::skill_prompt_inputs(
+            "<command-name>/demo</command-name>".into(),
+            "Expanded Skill body".into(),
+            Vec::new(),
+        );
+        let error = run_slash_prompt_batch_with_images(
+            orch.as_ref(),
+            inputs.clone(),
+            vec![missing.clone()],
+            CancellationToken::new(),
+            &tx,
+            failed_dispatch_id,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("could not read image"));
+        assert!(streaming.captured_calls().await.is_empty());
+        assert!(orch.snapshot_history().await.is_empty());
+        assert_slash_image_resolution(&mut rx, failed_dispatch_id, Some(vec![missing.clone()]));
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let cancelled_dispatch_id = uuid::Uuid::new_v4();
+        assert!(matches!(
+            run_slash_prompt_batch_with_images(
+                orch.as_ref(),
+                inputs,
+                vec![missing.clone()],
+                cancelled,
+                &tx,
+                cancelled_dispatch_id,
+            )
+            .await
+            .unwrap(),
+            orchestrator::conversation::TurnOutcome::Cancelled
+        ));
+        assert_slash_image_resolution(&mut rx, cancelled_dispatch_id, Some(vec![missing.clone()]));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            tui::TurnEvent::TurnEnded(lingxi_core::host::TurnOutcome::Cancelled)
+        ));
+        assert!(streaming.captured_calls().await.is_empty());
+        assert!(orch.snapshot_history().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_image_read_failure_restores_before_provider_and_provider_error_consumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.png");
+        let streaming = slash_image_stream();
+        let orch = slash_image_test_orchestrator(dir.path(), streaming.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let dispatch_id = uuid::Uuid::new_v4();
+        let error = run_slash_prompt_with_images(
+            orch.as_ref(),
+            &"/loop inspect".into(),
+            vec![missing.clone()],
+            CancellationToken::new(),
+            &tx,
+            dispatch_id,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("could not read image"));
+        assert_slash_image_resolution(&mut rx, dispatch_id, Some(vec![missing.clone()]));
+        assert!(streaming.captured_calls().await.is_empty());
+        assert!(orch.snapshot_history().await.is_empty());
+
+        let direct_cancel = CancellationToken::new();
+        direct_cancel.cancel();
+        let direct_cancel_id = uuid::Uuid::new_v4();
+        assert!(matches!(
+            run_slash_prompt_with_images(
+                orch.as_ref(),
+                &"/loop inspect".into(),
+                vec![missing.clone()],
+                direct_cancel,
+                &tx,
+                direct_cancel_id,
+            )
+            .await
+            .unwrap(),
+            orchestrator::conversation::TurnOutcome::Cancelled
+        ));
+        assert_slash_image_resolution(&mut rx, direct_cancel_id, Some(vec![missing.clone()]));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            tui::TurnEvent::TurnEnded(lingxi_core::host::TurnOutcome::Cancelled)
+        ));
+        assert!(streaming.captured_calls().await.is_empty());
+
+        let provider_error = llm_runtime::LlmError::Transport {
+            message: "provider connection failed".into(),
+        };
+        let errored_stream = Arc::new(
+            orchestrator::test_support_stream::MockStreamingApiClient::with_open_error(
+                provider_error,
+                Vec::new(),
+            ),
+        );
+        let errored_orch = slash_image_test_orchestrator(dir.path(), errored_stream.clone());
+        let image_path = dir.path().join("provider-error.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+        let provider_dispatch_id = uuid::Uuid::new_v4();
+        let error = run_slash_prompt_with_images(
+            errored_orch.as_ref(),
+            &"/loop inspect".into(),
+            vec![image_path],
+            CancellationToken::new(),
+            &tx,
+            provider_dispatch_id,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("provider connection failed"));
+        assert_slash_image_resolution(&mut rx, provider_dispatch_id, None);
+        assert_provider_received_slash_image(&errored_stream.captured_calls().await);
+    }
+
+    struct AdmissionCallbackBatchRunner {
+        admit: bool,
+        fail_after_admission: bool,
+        observed_images: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SourceBatchRunner for AdmissionCallbackBatchRunner {
+        async fn run_prompt_batch(
+            &self,
+            inputs: Vec<orchestrator::QueuedPromptInput>,
+            _cancel: CancellationToken,
+            on_admitted: Box<dyn FnOnce() + Send + 'static>,
+        ) -> Result<orchestrator::conversation::TurnOutcome, orchestrator::OrchestratorError>
+        {
+            let image_count = inputs.iter().map(|input| input.images.len()).sum();
+            self.observed_images
+                .store(image_count, std::sync::atomic::Ordering::SeqCst);
+            if self.admit {
+                on_admitted();
+            }
+            if self.fail_after_admission {
+                Err(orchestrator::OrchestratorError::Internal(
+                    "scripted failure after admission".into(),
+                ))
+            } else {
+                Ok(orchestrator::conversation::TurnOutcome::Cancelled)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_slash_restores_only_when_runner_does_not_admit_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("admission.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+        let inputs = orchestrator::skill_prompt_inputs(
+            "<command-name>/demo</command-name>".into(),
+            "Expanded Skill body".into(),
+            Vec::new(),
+        );
+        let observed_images = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let before_admission = uuid::Uuid::new_v4();
+        let result = run_slash_prompt_batch_with_images(
+            &AdmissionCallbackBatchRunner {
+                admit: false,
+                fail_after_admission: false,
+                observed_images: observed_images.clone(),
+            },
+            inputs.clone(),
+            vec![image_path.clone()],
+            CancellationToken::new(),
+            &tx,
+            before_admission,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            orchestrator::conversation::TurnOutcome::Cancelled
+        ));
+        assert_eq!(
+            observed_images.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the image is attached to the pending Skill batch before admission"
+        );
+        assert_slash_image_resolution(&mut rx, before_admission, Some(vec![image_path.clone()]));
+
+        let after_admission = uuid::Uuid::new_v4();
+        let error = run_slash_prompt_batch_with_images(
+            &AdmissionCallbackBatchRunner {
+                admit: true,
+                fail_after_admission: true,
+                observed_images,
+            },
+            inputs,
+            vec![image_path],
+            CancellationToken::new(),
+            &tx,
+            after_admission,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("scripted failure after admission"));
+        assert_slash_image_resolution(&mut rx, after_admission, None);
+        assert!(
+            rx.try_recv().is_err(),
+            "one dispatch resolves its images once"
+        );
+    }
+
     #[test]
     fn local_slash_result_does_not_end_the_active_model_turn() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert_eq!(
+            local_slash_image_resolution(&lingxi_core::host::SlashDispatchResult::Handled {
+                display: "already executed".into(),
+            }),
+            Some(LocalSlashImageResolution::Consume)
+        );
+        assert_eq!(
+            local_slash_image_resolution(&lingxi_core::host::SlashDispatchResult::NotASlashCommand),
+            Some(LocalSlashImageResolution::Restore)
+        );
+        assert_eq!(
+            local_slash_image_resolution(&lingxi_core::host::SlashDispatchResult::Failed {
+                diagnostic: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"message":"dispatch failed"}"#
+                )
+                .unwrap(),
+            }),
+            Some(LocalSlashImageResolution::Restore)
+        );
         assert!(slash_model_prompt(
             lingxi_core::host::SlashDispatchResult::Handled {
                 display: "Stopped".into()
@@ -7023,6 +7626,7 @@ mod tests {
             lingxi_core::host::SlashDispatchResult::Unknown {
                 name: "unknown".into(),
                 display: "unknown slash".into(),
+                suggestion: None,
             },
             "/unknown fixed".into(),
             &tx,

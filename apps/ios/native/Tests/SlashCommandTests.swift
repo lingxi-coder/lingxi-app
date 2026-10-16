@@ -276,7 +276,7 @@ import XCTest
 
             XCTAssertNotNil(source.send("/help topic"))
             await flushTasks()
-            guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(raw, _, _, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected runSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, Array("/help topic".utf16))
@@ -286,7 +286,7 @@ import XCTest
             source.applyForTesting(.slashCommandResult(turnId: turnId, display: "help output".clientTextDto, isError: false))
             XCTAssertNotNil(source.send("  /help spaced topic  "))
             await flushTasks()
-            guard case let .runSlashCommand(spacedRaw, spacedTurnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(spacedRaw, _, _, spacedTurnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected normalized runSlashCommand")
             }
             XCTAssertEqual(spacedRaw.codeUnits, Array("/help spaced topic".utf16))
@@ -326,7 +326,7 @@ import XCTest
             XCTAssertNotNil(source.send("/� topic"))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(raw, _, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected selected command to use RunSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" topic".utf16))
@@ -352,7 +352,7 @@ import XCTest
             XCTAssertNotNil(source.send("/� target"))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(raw, _, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected selected alias to use RunSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" target".utf16))
@@ -389,7 +389,7 @@ import XCTest
             XCTAssertNotNil(source.send("/� item", images: [], selectedSlashCommand: selected))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, _) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(raw, _, _, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected selected command to use RunSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, [0x002f, 0xd800] + Array(" item".utf16))
@@ -543,7 +543,7 @@ import XCTest
 
             let token = try XCTUnwrap(source.send("/rv staged"))
             await flushTasks()
-            guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(raw, _, _, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected runSlashCommand")
             }
             XCTAssertEqual(raw.codeUnits, Array("/rv staged".utf16))
@@ -591,13 +591,17 @@ import XCTest
             var submitted: [ClientCommand] = []
             source.setCommandSubmitterForTesting { submitted.append($0) }
 
-            let token = try XCTUnwrap(source.send("/� argument", images: [], selectedSlashCommand: selected))
+            let attachedImage = ImageRefDto(mediaType: "image/png", base64: "AQID")
+            let token = try XCTUnwrap(source.send("/� argument", images: [attachedImage], selectedSlashCommand: selected))
             await flushTasks()
 
-            guard case let .runSlashCommand(raw, turnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .runSlashCommand(raw, images, turnId) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected exact selected slash command")
             }
             XCTAssertEqual(raw.codeUnits, [0x002F, 0xD800] + Array(" argument".utf16))
+            XCTAssertEqual(images.count, 1)
+            XCTAssertEqual(images.first?.mediaType, attachedImage.mediaType)
+            XCTAssertEqual(images.first?.base64, attachedImage.base64)
             XCTAssertEqual(turnId, token.clientTurnId)
         }
     }

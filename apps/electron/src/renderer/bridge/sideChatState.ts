@@ -11,6 +11,7 @@ export interface SideChatState {
   desktop: DesktopState;
   draft: string;
   images: ImageAttachment[];
+  draftRevision: number;
   permissions: PermissionRequest[];
   questions: AskUserQuestionRequestDto[];
   closing: boolean;
@@ -18,7 +19,7 @@ export interface SideChatState {
   error?: string;
 }
 export function newSideChat(id: string, hostId: string): SideChatState {
-  return { id, hostId, conversation: { ...emptyConversation(), sessionKey: `side:${id}` }, desktop: emptyDesktopState(), draft: '', images: [], permissions: [], questions: [], closing: false, ending: false };
+  return { id, hostId, conversation: { ...emptyConversation(), sessionKey: `side:${id}` }, desktop: emptyDesktopState(), draft: '', images: [], draftRevision: 0, permissions: [], questions: [], closing: false, ending: false };
 }
 export function reduceSideChat(side: SideChatState, event: ClientEvent): SideChatState {
   // Parent history must never become visible in the side transcript.
@@ -49,8 +50,10 @@ export function acknowledgeSidePrompt(side: SideChatState, text: string, images:
   return { ...side, draft: side.draft === text ? '' : side.draft, error: undefined,
     conversation: /^\s*\//.test(text) ? side.conversation : appendUserPrompt(side.conversation, text, images) };
 }
-export function sideCommandInput(text: string) {
-  return /^\s*\//.test(text) ? { type: 'run_slash_command', raw: text.trim() } : { type: 'send_prompt', text, images: [] };
+export function sideCommandInput(text: string, images: readonly ImageRefDto[] = []) {
+  return /^\s*\//.test(text)
+    ? { type: 'run_slash_command', raw: text.trim(), images: [...images] }
+    : { type: 'send_prompt', text, images: [...images] };
 }
 export function sideCreationInput(text: string, files: string[] = []): string | undefined | null {
   const match = /^\s*\/side(?:\s+([\s\S]*))?\s*$/.exec(text);

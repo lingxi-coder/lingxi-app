@@ -7,6 +7,7 @@ import { runInNewContext } from 'node:vm';
 import React, { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
+import { SlashCommandTerminalRegistry } from '../src/renderer/bridge/slashCommandTerminals';
 import { SettingsScreen } from '../src/renderer/components/settings/SettingsScreen';
 import * as layerFields from '../src/renderer/components/settings/layerFields';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -135,13 +136,18 @@ function imageHarness() {
   const pendingFile = { name: 'private-A.png', size: 8, arrayBuffer: () => bytes } as File;
   let current: any[] = [];
   const revoked: string[] = [], notices: unknown[] = [];
-  const context: any = {
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
     ready: true, activeSessionId: 'A', imageAttachments: [], MAX_IMAGE_ATTACHMENTS: 4,
     draftSessionId: { current: 'A' }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageFileToAttachment,
     URL: { revokeObjectURL: (url: string) => revoked.push(url) },
     setImageNotice: (notice: unknown) => notices.push(notice),
     setImageAttachments: (update: (images: any[]) => any[]) => { current = update(current); },
   };
+  context.sessionDraftGenerations = { current: new Map() };
+  for (const name of ['draftGenerationFor', 'bumpDraftGeneration', 'markDraftEdited']) {
+    const helper = findNode(file, (node) => ts.isVariableDeclaration(node) && node.name.getText(file) === name) as ts.VariableDeclaration;
+    evaluate(`globalThis.${name} = ${helper.initializer!.getText(file)};`, context);
+  }
   evaluate(`globalThis.addImageFiles = ${declaration.initializer!.getText(file)};`, context);
   return { context, revoked, notices, pendingFile, setCurrent: (images: any[]) => { current = images; }, images: () => current,
     release: () => release(Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]).buffer) };
@@ -185,7 +191,7 @@ test('the real useBridge event handler settles A after the UI navigates to B', a
   const wait = requestConfigurationOperation(pending, 'A', 'hook', 7, async () => {}, 1_000);
   const file = source('src/renderer/bridge/useBridge.ts');
   const call = findNode(file, (node) => ts.isCallExpression(node) && node.expression.getText(file) === 'host.onEvent') as ts.CallExpression;
-  const context: any = {
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
     removedRuntimeIds: { current: new Set() }, bootstrapRef: { current: { runtimes: [] } }, pendingSessionRef: { current: null },
     sideQuestionTurns: { current: new Map() }, pendingFusionDispatches: { current: new Map() }, isPendingFusionSessionRestore: () => false,
     updateRuntime: () => {}, activeSessionIdRef: { current: 'B' }, pendingConfigurationOperations: { current: pending }, settleConfigurationOperation,
@@ -233,7 +239,7 @@ test('the real connection-disposal handler rejects its pending configuration ope
   const file = source('src/renderer/bridge/useBridge.ts');
   const call = findNode(file, (node) => ts.isCallExpression(node)
     && node.expression.getText(file) === 'host.onConnectionStateChanged') as ts.CallExpression;
-  const context: any = {
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
     pendingConfigurationOperations: { current: pending }, interruptConfigurationOperations,
     removedRuntimeIds: { current: new Set() }, isRuntimeRemovedState: () => true,
     setBootstrap: () => {}, setRuntimeStates: () => {}, removeRuntimeFromMaps: () => {}, completeTrackedSpeech: () => {},
@@ -259,7 +265,7 @@ test('a failed configuration dispatch retains A ownership without surfacing its 
   const initializer = dispatch.initializer as ts.CallExpression;
   const operationId = findNode(file, (node) => ts.isFunctionDeclaration(node)
     && node.name?.getText(file) === 'configurationOperationId');
-  const context: any = {
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
     pendingConfigurationOperations: { current: pending }, requestConfigurationOperation,
     sessionLoadingRef: { current: false }, activeSessionIdRef: { current: 'A' },
     CONFIGURATION_OPERATION_TIMEOUT_MS: 1_000,

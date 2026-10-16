@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { SlashCommandTerminalRegistry } from '../src/renderer/bridge/slashCommandTerminals';
 import * as runtime from '../src/renderer/bridge/bridgeRuntimeState';
 import * as conversation from '../src/renderer/bridge/conversation';
 import * as desktop from '../src/renderer/bridge/desktopState';
@@ -48,7 +49,7 @@ function harness() {
   const states = new Map([['A', runtime.emptyRuntimeState({ status: 'connected' })],
     ['B', runtime.emptyRuntimeState({ status: 'connected' })]]);
   const calls: Array<{ action: string; sessionId: string; requestId?: number }> = [], visibleErrors: string[] = [];
-  const context: any = { ...runtime, ...conversation, ...desktop, ...center, ...tracked,
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() }, ...runtime, ...conversation, ...desktop, ...center, ...tracked,
     useCallback: (callback: any) => callback, isPermissionRequestGone, messageFrom,
     runtimeStatesRef: { current: states }, activeSessionIdRef: { current: 'A' }, sessionLoadingRef: { current: false },
     removedRuntimeIds: { current: new Set() }, bootstrapRef: { current: null }, pendingSessionRef: { current: null },

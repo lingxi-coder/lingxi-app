@@ -244,6 +244,15 @@ pub enum TurnEvent {
     },
     /// Backend reset failed; preserve the previous conversation on screen.
     SessionClearFailed(String),
+    /// Resolve image paths moved into a registry-slash dispatch. `Some(paths)`
+    /// restores that exact batch at the head of the pending attachments; `None`
+    /// consumes it after the invocation is admitted or handled locally.
+    SlashImagesResolved {
+        /// Unique identity from the originating `PendingSlashDispatch`.
+        dispatch_id: uuid::Uuid,
+        /// Paths to restore, or `None` once this dispatch owns/consumes them.
+        image_paths: Option<Vec<std::path::PathBuf>>,
+    },
     /// Streaming text chunk from the assistant.
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The

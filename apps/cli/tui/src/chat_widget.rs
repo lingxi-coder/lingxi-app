@@ -70,6 +70,8 @@ const AGENTS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 pub struct PendingSlashDispatch {
     pub cancellation: CancellationToken,
     pub completed: CancellationToken,
+    /// Correlates the image batch moved with this slash invocation.
+    pub image_restore_id: uuid::Uuid,
 }
 
 impl PendingSlashDispatch {
@@ -77,6 +79,7 @@ impl PendingSlashDispatch {
         Self {
             cancellation: CancellationToken::new(),
             completed: CancellationToken::new(),
+            image_restore_id: uuid::Uuid::new_v4(),
         }
     }
     pub fn cancel(&self) {
@@ -275,10 +278,13 @@ pub enum ChatOutcome {
     /// path's `run_slash_command`, so a typed `/loop …` actually schedules.
     ///
     /// The caller installs the token with `TurnStartedWithCancel` once a
-    /// dispatched model prompt owns the turn. Local results only emit a notice
-    /// and leave any active model turn untouched.
+    /// dispatched model prompt owns the turn. Pending images are drained here
+    /// so this invocation carries them through the registry dispatcher instead
+    /// of leaking them onto a later, unrelated prompt. Local results only emit
+    /// a notice and leave any active model turn untouched.
     DispatchSlash(
         lingxi_core::types::utf16_json::Utf16JsonProjection,
+        Vec<std::path::PathBuf>,
         PendingSlashDispatch,
     ),
     /// A held cross-session message was delivered. The caller should drive
@@ -410,6 +416,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::CompactEnded
         | TurnEvent::RawUtilization { .. }
         | TurnEvent::CommandCatalogRefreshed { .. }
+        | TurnEvent::SlashImagesResolved { .. }
         | TurnEvent::MultiAgent(_)
         | TurnEvent::HookProgressStarted { .. }
         | TurnEvent::HookProgressFinished { .. }
@@ -534,8 +541,9 @@ pub struct ChatWidget {
     pending_prompts: VecDeque<PendingPrompt>,
     /// Image files queued for the NEXT submitted turn: pasted image paths,
     /// clipboard-image pastes (Ctrl+V) and `/image` attachments. Drained by
-    /// [`Self::take_pending_images`] when the prompt is submitted so the
-    /// orchestrator sends them as `ContentBlock::Image` on the user message.
+    /// [`Self::take_pending_images`] when a prompt or registry slash is
+    /// dispatched so the orchestrator sends them as `ContentBlock::Image` on
+    /// that user message.
     pending_images: Vec<std::path::PathBuf>,
     /// Widget-lifetime clock driving the spinner's animation frame (and the
     /// `/stats` session-duration row).
@@ -733,6 +741,8 @@ impl ChatWidget {
             theme_name: ThemeName::Dark,
             current_turn: None,
             pending_slash_dispatches: Vec::new(),
+            slash_image_restore_scope: uuid::Uuid::new_v4(),
+            pending_slash_image_restores: std::collections::HashMap::new(),
             queued_prompt_owners: Vec::new(),
             accepts_turn_events: false,
             session_clear_pending: false,
@@ -1530,6 +1540,8 @@ impl ChatWidget {
                 self.active_tool_id = None;
                 self.active_tool_kinds.clear();
                 self.background_boundary_id = uuid::Uuid::new_v4();
+                self.slash_image_restore_scope = uuid::Uuid::new_v4();
+                self.pending_slash_image_restores.clear();
                 let transcript_path = session::jsonl::path::session_path(
                     &home,
                     &cwd.display().to_string(),
@@ -1561,6 +1573,17 @@ impl ChatWidget {
                 self.session_clear_pending = false;
                 let _ =
                     self.show_system_text(&format!("Could not clear conversation: {error}"), true);
+            }
+            TurnEvent::SlashImagesResolved {
+                dispatch_id,
+                image_paths,
+            } => {
+                let scope = self.pending_slash_image_restores.remove(&dispatch_id);
+                if scope == Some(self.slash_image_restore_scope) {
+                    if let Some(image_paths) = image_paths {
+                        self.restore_pending_images(image_paths);
+                    }
+                }
             }
             TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
                 self.accepts_turn_events = true;
@@ -2872,8 +2895,8 @@ impl ChatWidget {
         None
     }
 
-    /// Echo the source invocation for display and hand the exact projection to
-    /// the off-loop registry dispatcher.
+    /// Echo the source invocation for display and hand the exact projection and
+    /// pending image paths to the off-loop registry dispatcher.
     fn dispatch_registry_slash(
         &mut self,
         input: lingxi_core::types::utf16_json::Utf16JsonProjection,
@@ -2886,7 +2909,12 @@ impl ChatWidget {
             .retain(PendingSlashDispatch::is_pending);
         let token = PendingSlashDispatch::new();
         self.pending_slash_dispatches.push(token.clone());
-        ChatOutcome::DispatchSlash(input, token)
+        let images = self.take_pending_images();
+        if !images.is_empty() {
+            self.pending_slash_image_restores
+                .insert(token.image_restore_id, self.slash_image_restore_scope);
+        }
+        ChatOutcome::DispatchSlash(input, images, token)
     }
 
     /// Desired widget height at `width` columns: the streaming live tail (the
@@ -6279,6 +6307,25 @@ impl ChatWidget {
         images
     }
 
+    fn restore_pending_images(&mut self, image_paths: Vec<std::path::PathBuf>) {
+        if image_paths.is_empty() {
+            return;
+        }
+        let mut restored = image_paths;
+        restored.append(&mut self.pending_images);
+        self.pending_images = restored;
+        let labels = self
+            .pending_images
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(String::from)
+            })
+            .collect();
+        self.bottom_pane.set_attached_image_labels(labels);
+    }
+
     /// Surface the oldest queued interactive prompt once no prompt is open
     /// (called after every key/paste, i.e. after a resolution could have
     /// happened).
@@ -9669,7 +9716,7 @@ mod tests {
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(reg));
         widget.set_command_registry(registry);
 
-        let Some(ChatOutcome::DispatchSlash(input, _token)) =
+        let Some(ChatOutcome::DispatchSlash(input, _, _token)) =
             widget.handle_slash("/loop 5m go".into())
         else {
             panic!("a registry-backed command must route to DispatchSlash");
@@ -9686,6 +9733,118 @@ mod tests {
 
         // An unregistered slash command still falls through as a normal prompt.
         assert!(widget.handle_slash("/totally-unknown".into()).is_none());
+    }
+
+    #[test]
+    fn registry_slash_dispatch_drains_its_images_instead_of_leaking_to_next_prompt() {
+        let path = std::env::temp_dir().join(format!(
+            "tui-chatwidget-slash-image-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
+
+        let mut widget = widget();
+        assert!(matches!(
+            widget.push_image(&path.display().to_string()),
+            ChatOutcome::Continue
+        ));
+        let mut registry = command_api::CommandRegistry::new();
+        registry.register_command(command_api::SlashCommand {
+            name: "loop".into(),
+            description: "run a task on a loop".into(),
+            source: command_api::CommandSource::Bundled,
+            kind: command_api::SlashCommandKind::Bundled {
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_fn: None,
+            },
+            loaded_from: Some("bundled".to_string()),
+            ..command_api::SlashCommand::default()
+        });
+        widget.set_command_registry(std::sync::Arc::new(tokio::sync::RwLock::new(registry)));
+
+        typ(&mut widget, "/loop 5m inspect this image");
+        let ChatOutcome::DispatchSlash(input, images, _token) =
+            widget.handle_key(press(KeyCode::Enter))
+        else {
+            panic!("a registry-backed command must route to DispatchSlash");
+        };
+        assert_eq!(input.string_at(""), Some("/loop 5m inspect this image"));
+        assert_eq!(images, vec![path.clone()]);
+        assert!(widget.pending_images.is_empty());
+
+        typ(&mut widget, "next prompt");
+        let ChatOutcome::Submit(_, _, later_images, _) = widget.handle_key(press(KeyCode::Enter))
+        else {
+            panic!("the next ordinary prompt should submit normally");
+        };
+        assert!(
+            later_images.is_empty(),
+            "slash image must not leak to next turn"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn cancelled_slash_restore_prepends_its_batch_without_overwriting_new_images() {
+        let first = std::env::temp_dir().join(format!(
+            "tui-chatwidget-slash-image-first-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let second = std::env::temp_dir().join(format!(
+            "tui-chatwidget-slash-image-second-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&first, b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(&second, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let mut widget = widget();
+        widget.push_image(&first.display().to_string());
+        let mut registry = command_api::CommandRegistry::new();
+        registry.register_command(command_api::SlashCommand {
+            name: "loop".into(),
+            description: "run a task on a loop".into(),
+            source: command_api::CommandSource::Bundled,
+            kind: command_api::SlashCommandKind::Bundled {
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_fn: None,
+            },
+            loaded_from: Some("bundled".to_string()),
+            ..command_api::SlashCommand::default()
+        });
+        widget.set_command_registry(std::sync::Arc::new(tokio::sync::RwLock::new(registry)));
+        typ(&mut widget, "/loop 5m inspect this image");
+        let ChatOutcome::DispatchSlash(_, images, dispatch) =
+            widget.handle_key(press(KeyCode::Enter))
+        else {
+            panic!("a registry-backed command must dispatch");
+        };
+        assert_eq!(images, vec![first.clone()]);
+
+        widget.push_image(&second.display().to_string());
+        widget.apply_turn_event(TurnEvent::SlashImagesResolved {
+            dispatch_id: dispatch.image_restore_id,
+            image_paths: Some(images),
+        });
+        assert_eq!(widget.pending_images, vec![first.clone(), second.clone()]);
+
+        // A duplicate completion for the same dispatch is ignored, and neither
+        // image is replaced or duplicated in the next submitted prompt.
+        widget.apply_turn_event(TurnEvent::SlashImagesResolved {
+            dispatch_id: dispatch.image_restore_id,
+            image_paths: Some(vec![first.clone()]),
+        });
+        assert_eq!(widget.pending_images, vec![first.clone(), second.clone()]);
+        typ(&mut widget, "next prompt");
+        let ChatOutcome::Submit(_, _, later_images, _) = widget.handle_key(press(KeyCode::Enter))
+        else {
+            panic!("the next ordinary prompt should submit normally");
+        };
+        assert_eq!(later_images, vec![first, second]);
+        std::fs::remove_file(later_images[0].clone()).ok();
+        std::fs::remove_file(later_images[1].clone()).ok();
     }
 
     #[test]
@@ -9725,7 +9884,7 @@ mod tests {
 
         let input = Utf16JsonProjection::parse(r#""/plug\ud800 arg\udfff""#).unwrap();
         let expected_units = input.string_units("").unwrap();
-        let Some(ChatOutcome::DispatchSlash(dispatched, _)) = widget.handle_slash(input) else {
+        let Some(ChatOutcome::DispatchSlash(dispatched, _, _)) = widget.handle_slash(input) else {
             panic!("source registry command should dispatch");
         };
         assert_eq!(dispatched.string_units(""), Some(expected_units));
@@ -9749,7 +9908,8 @@ mod tests {
         let mut widget = widget();
         let active = CancellationToken::new();
         widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
-        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/stop".into())
+        let ChatOutcome::DispatchSlash(_, _, pending) =
+            widget.dispatch_registry_slash("/stop".into())
         else {
             panic!("local command must be dispatched");
         };
@@ -9767,7 +9927,7 @@ mod tests {
     #[test]
     fn pending_slash_queues_followup_and_session_switch_cancels_dispatch() {
         let mut widget = widget();
-        let ChatOutcome::DispatchSlash(_, pending) =
+        let ChatOutcome::DispatchSlash(_, _, pending) =
             widget.dispatch_registry_slash("/slow-skill".into())
         else {
             panic!("dispatch")
@@ -9787,7 +9947,7 @@ mod tests {
         let mut widget = widget();
         let active = CancellationToken::new();
         widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
-        let ChatOutcome::DispatchSlash(_, pending) =
+        let ChatOutcome::DispatchSlash(_, _, pending) =
             widget.dispatch_registry_slash("/slow-skill".into())
         else {
             panic!("dispatch")
@@ -9804,7 +9964,8 @@ mod tests {
     #[test]
     fn cancelling_pending_slash_does_not_cancel_later_new_input() {
         let mut widget = widget();
-        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow".into())
+        let ChatOutcome::DispatchSlash(_, _, pending) =
+            widget.dispatch_registry_slash("/slow".into())
         else {
             panic!("dispatch")
         };
@@ -9824,7 +9985,7 @@ mod tests {
     #[test]
     fn completed_local_dispatch_does_not_leave_followup_queued() {
         let mut widget = widget();
-        let ChatOutcome::DispatchSlash(_, completed) =
+        let ChatOutcome::DispatchSlash(_, _, completed) =
             widget.dispatch_registry_slash("/local".into())
         else {
             panic!("dispatch")
@@ -9842,7 +10003,7 @@ mod tests {
     #[test]
     fn handle_slash_routes_worktree_builtin_to_registry_dispatch() {
         let mut widget = widget();
-        let Some(ChatOutcome::DispatchSlash(input, _token)) =
+        let Some(ChatOutcome::DispatchSlash(input, _, _token)) =
             widget.handle_slash("/worktree remove --discard".into())
         else {
             panic!("/worktree must route to DispatchSlash");
@@ -9859,7 +10020,7 @@ mod tests {
     #[test]
     fn handle_slash_routes_fusion_builtin_to_registry_dispatch() {
         let mut widget = widget();
-        let Some(ChatOutcome::DispatchSlash(input, _token)) =
+        let Some(ChatOutcome::DispatchSlash(input, _, _token)) =
             widget.handle_slash("/fusion --fast review locking".into())
         else {
             panic!("/fusion must route to DispatchSlash");
@@ -9943,7 +10104,7 @@ mod tests {
         let expected = "/fusion --fast --strategy project:review review locking"
             .encode_utf16()
             .collect::<Vec<_>>();
-        let Some(ChatOutcome::DispatchSlash(input, _)) =
+        let Some(ChatOutcome::DispatchSlash(input, _, _)) =
             widget.handle_slash("/fusion --fast --strategy project:review review locking".into())
         else {
             panic!("explicit strategy must reach the runtime resolver");
@@ -9962,7 +10123,8 @@ mod tests {
             let mut widget = widget();
             widget.set_fusion_settings(fusion_settings(false));
             let expected = input.encode_utf16().collect::<Vec<_>>();
-            let Some(ChatOutcome::DispatchSlash(dispatched, _)) = widget.handle_slash(input.into())
+            let Some(ChatOutcome::DispatchSlash(dispatched, _, _)) =
+                widget.handle_slash(input.into())
             else {
                 panic!("maintenance must reach the runtime without opening setup: {input}");
             };
@@ -9978,7 +10140,7 @@ mod tests {
         let expected = "/fusion review the locking"
             .encode_utf16()
             .collect::<Vec<_>>();
-        let Some(ChatOutcome::DispatchSlash(input, _)) =
+        let Some(ChatOutcome::DispatchSlash(input, _, _)) =
             widget.handle_slash("/fusion review the locking".into())
         else {
             panic!("a configured session must dispatch, not open the wizard");

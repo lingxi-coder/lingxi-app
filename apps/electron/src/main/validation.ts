@@ -417,12 +417,14 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       if (typeof input['enabled'] !== 'boolean') throw new Error('invalid fast mode enabled flag');
       return { type, enabled: input['enabled'] };
     case 'run_slash_command': {
-      exactKeys(input, ['type', 'raw', 'turn_id']);
+      exactKeys(input, ['type', 'raw', 'images', 'turn_id']);
       const raw = string(input['raw'], 'slash command raw', 4096);
       if (!/^\/[^\s/]+(?:\s|$)/.test(raw)) throw new Error('invalid slash command raw');
+      if (!Array.isArray(input['images'])) throw new Error('invalid slash command image attachments');
+      const images = validateImageRefs(input['images']);
       return input['turn_id'] === undefined
-        ? { type, raw }
-        : { type, raw, turn_id: integer(input['turn_id'], 'slash command turn id', 1) };
+        ? { type, raw, images }
+        : { type, raw, images, turn_id: integer(input['turn_id'], 'slash command turn id', 1) };
     }
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);

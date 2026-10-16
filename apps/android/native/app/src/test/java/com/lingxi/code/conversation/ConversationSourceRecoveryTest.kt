@@ -70,13 +70,14 @@ class ConversationSourceRecoveryTest {
             ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
         )
         val raw = "/skill\uD800 argument".toClientTextDto()
+        val images = listOf(ImageRefDto(mediaType = "image/png", base64 = "cG5nLWltYWdl"))
         try {
             val commandSource: SlashCommandConversationSource = source
             assertEquals(
                 listOf(ReplyEvent.CommandOutput("done", false, 44uL)),
-                commandSource.submitSlashCommand(raw, 44L).toList(),
+                commandSource.submitSlashCommand(raw, images, 44L).toList(),
             )
-            assertEquals(listOf(raw to 44L), delegate.slashCommands)
+            assertEquals(listOf(Triple(raw, images, 44L)), delegate.slashCommands)
             assertTrue(delegate.prompts.isEmpty())
         } finally {
             source.close()
@@ -92,7 +93,7 @@ class ConversationSourceRecoveryTest {
         )
         try {
             val prompt = source.submit("echo hi", emptyList(), 45L, null, PromptModeDto.BASH).toList()
-            val slash = source.submitSlashCommand("/help".toClientTextDto(), 46L).toList()
+            val slash = source.submitSlashCommand("/help".toClientTextDto(), emptyList(), 46L).toList()
             for (replies in listOf(prompt, slash)) {
                 assertEquals(2, replies.size)
                 assertTrue(replies.first() is ReplyEvent.Error)
@@ -426,7 +427,7 @@ private data class RecoveredPrompt(
 
 private class RecordingRecoveredSource : ConversationSource, SlashCommandConversationSource {
     val prompts = mutableListOf<RecoveredPrompt>()
-    val slashCommands = mutableListOf<Pair<ClientTextDto, Long>>()
+    val slashCommands = mutableListOf<Triple<ClientTextDto, List<ImageRefDto>, Long>>()
 
     override fun submit(
         text: String,
@@ -439,8 +440,8 @@ private class RecordingRecoveredSource : ConversationSource, SlashCommandConvers
         return flowOf(ReplyEvent.End)
     }
 
-    override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> {
-        slashCommands += raw to turnId
+    override fun submitSlashCommand(raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> {
+        slashCommands += Triple(raw, images, turnId)
         return flowOf(ReplyEvent.CommandOutput("done", false, turnId.toULong()))
     }
 }

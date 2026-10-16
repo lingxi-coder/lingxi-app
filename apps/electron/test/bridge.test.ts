@@ -2657,12 +2657,12 @@ test('a chat cannot sign in to Codex by itself while the app refreshes the Codex
     (runtime as any).activeWorkspace = '/workspace';
     (runtime as any).requireClient = () => ({ sendCommand: (command: any) => { sent.push(command.raw); } });
     for (const raw of ['/connect chatgpt', '/connect  openai-chatgpt ']) {
-      const dispatched = runtime.dispatchCommand({ type: 'run_slash_command', raw });
+      const dispatched = runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] });
       if (managed) await assert.rejects(dispatched, /^Error: Sign in to Codex from Settings\. Every chat uses that sign-in\.$/);
       else await dispatched;
     }
     // Other providers still connect from the chat.
-    await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/connect openrouter' });
+    await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/connect openrouter', images: [] });
     assert.deepEqual(sent, managed
       ? ['/connect openrouter']
       : ['/connect chatgpt', '/connect  openai-chatgpt ', '/connect openrouter']);
@@ -2884,7 +2884,7 @@ test('Fusion waits for all configured credentials and reuses cached keys', async
       configured_provider_ids: [command.provider_id], storage_encrypted: false, credential_previews: {},
     }));
   };
-  const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches' });
+  const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches', images: [] });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(calls.includes('run_slash_command'), false);
   assert.equal(runtime.turnActive, true);
@@ -2892,7 +2892,7 @@ test('Fusion waits for all configured credentials and reuses cached keys', async
   await pending;
   assert.deepEqual(calls.filter((call) => call.startsWith('load:')).sort(), ['load:deepseek', 'load:kimi', 'load:zai']);
   assert.equal(calls.at(-1), 'run_slash_command');
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion second task' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion second task', images: [] });
   assert.equal(calls.filter((call) => call.startsWith('load:')).length, 3);
 });
 
@@ -2914,7 +2914,7 @@ test('cancel during Fusion credential hydration prevents delayed dispatch', asyn
     panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
   } }) });
   (runtime as any).resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'default' }, name: 'Default', revision: 'aabb', config: { panelModels: [{ profile: 'kimi', model: 'kimi-k3' }] } });
-  const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches' });
+  const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches', images: [] });
   await new Promise(resolve => setImmediate(resolve));
   runtime.cancelTurn(undefined);
   key.resolve('test-key');
@@ -2939,8 +2939,8 @@ test('Fusion setup and publication retry preserve the conversation without loadi
   (runtime as any).wireClient(client, 0);
   client.emit('event', { type: 'slash_command_result', is_error: false, display: 'Fusion started: unrelated output' });
   assert.equal(commits, 0, 'display text alone must not claim a new conversation');
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup' });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --retry-publication fu_saved' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup', images: [] });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --retry-publication fu_saved', images: [] });
   assert.equal(loads, 0);
   assert.equal(commands.length, 2);
   client.emit('event', { type: 'slash_command_result', is_error: true, display: 'Fusion started: invalid' });

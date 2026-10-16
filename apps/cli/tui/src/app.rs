@@ -202,17 +202,23 @@ pub struct AppCallbacks<'cb> {
     /// `on_permission_action`).
     pub on_task_action: Box<dyn FnMut(TaskAction) + 'cb>,
     /// Executed on [`ChatOutcome::DispatchSlash`]: the caller dispatches the
-    /// carried raw input through the live `RegistrySlashDispatcher` off-loop
-    /// (expanding a `type:"prompt"` command like `/loop` or a user command/skill
-    /// and running it as a turn, or surfacing a local command's output / the
-    /// unknown-command literal via a [`TurnEvent::SystemNotice`]). The widget has
+    /// carried raw input and any queued image paths through the live
+    /// `RegistrySlashDispatcher` off-loop (expanding a `type:"prompt"` command
+    /// like `/loop` or a user command/skill and running it as a turn, or
+    /// surfacing a local command's output / unknown-command literal via a
+    /// [`TurnEvent::SystemNotice`]). The widget has
     /// already echoed the invocation and registered the paired
     /// [`CancellationToken`] as its active turn, so the caller passes that token
     /// to `run_turn` (Ctrl-C then cancels the dispatched turn) and emits a
     /// `TurnEnded` for a non-turn result to clear the widget's running state.
     /// `None` (tests / no registry) is a no-op.
-    pub on_dispatch_slash:
-        Box<dyn FnMut(Utf16JsonProjection, crate::chat_widget::PendingSlashDispatch) + 'cb>,
+    pub on_dispatch_slash: Box<
+        dyn FnMut(
+                Utf16JsonProjection,
+                Vec<std::path::PathBuf>,
+                crate::chat_widget::PendingSlashDispatch,
+            ) + 'cb,
+    >,
     /// Executed on [`ChatOutcome::RewakePeer`]: the caller drives
     /// `OrchestratorHandle::run_async_hook_rewake` off the render thread so
     /// a just-delivered held peer message is injected without a synthetic
@@ -810,8 +816,8 @@ impl<'cb> RataApp<'cb> {
                     // through the live `RegistrySlashDispatcher` off-loop; the
                     // expanded prompt runs as a turn (or the local output / the
                     // unknown-command literal returns via `TurnEvent::SystemNotice`).
-                    ChatOutcome::DispatchSlash(input, token) => {
-                        (self.callbacks.on_dispatch_slash)(input, token);
+                    ChatOutcome::DispatchSlash(input, images, token) => {
+                        (self.callbacks.on_dispatch_slash)(input, images, token);
                     }
                     ChatOutcome::RewakePeer => {
                         (self.callbacks.on_rewake_peer)();
@@ -931,7 +937,11 @@ pub fn run_app(
     on_clear_session: impl FnMut(Option<String>),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
-    on_dispatch_slash: impl FnMut(Utf16JsonProjection, crate::chat_widget::PendingSlashDispatch),
+    on_dispatch_slash: impl FnMut(
+        Utf16JsonProjection,
+        Vec<std::path::PathBuf>,
+        crate::chat_widget::PendingSlashDispatch,
+    ),
     on_rewake_peer: impl FnMut(),
     exit_request_probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> io::Result<AppExit> {

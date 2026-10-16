@@ -222,7 +222,7 @@ function bridgeFixture(sessionId: string | null, running: boolean, backgroundSta
     setPermissionMode: async (mode: string) => { permissionChanges.push(mode); },
     emitCommandOutput: () => undefined,
     beginLocalCommand: async () => undefined,
-    runSlashCommand: async (command: string) => { slashCommands.push(command); },
+    runSlashCommand: async (command: string) => { slashCommands.push(command); return true; },
     sendPrompt: (text: string) => new Promise<void>((resolve) => {
       lastSentPrompt = text;
       sendPending = true;

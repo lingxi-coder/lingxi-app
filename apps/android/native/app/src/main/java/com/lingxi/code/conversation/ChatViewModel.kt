@@ -2188,10 +2188,9 @@ class ChatViewModel(
         val slashCommandSource = turnSource as? SlashCommandConversationSource
         turnJob = viewModelScope.launch {
             val replyStream = if (
-                !isBashInput && images.isEmpty() && isSlashCommandLine(text) &&
-                slashCommandSource != null
+                !isBashInput && isSlashCommandLine(text) && slashCommandSource != null
             ) {
-                slashCommandSource.submitSlashCommand(text.toClientTextDto(), submittedTurnId)
+                slashCommandSource.submitSlashCommand(text.toClientTextDto(), images, submittedTurnId)
             } else {
                 turnSource.submit(submittedText, images, submittedTurnId, visualizationChip?.reference, promptMode)
             }

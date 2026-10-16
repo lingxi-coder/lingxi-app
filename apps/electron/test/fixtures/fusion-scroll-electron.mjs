@@ -146,7 +146,11 @@ async function main() {
     result.scopeLabelsVisible = await run(`[...document.querySelectorAll('.extension-hub-row-scope')].every(element => getComputedStyle(element).display !== 'none')`);
     await run('window.fusionFixture.invalidateNamedStrategy()'); await delay(60);
     await openNamed('Review renamed');
-    result.namedRepairNoReplacement = await run(`document.body.innerText.includes('其他策略和此作用域的设置会保留') && !document.body.innerText.includes('我确认用此新策略替换')`);
+    result.namedRepairNoReplacement = await run(`(() => {
+      const diagnostic = document.querySelector('[role="alert"]')?.textContent ?? '';
+      return diagnostic.includes('fusion.maxPanel must be 2..=8')
+        && !document.body.innerText.includes('我确认用此新策略替换');
+    })()`);
     await run(`[...document.querySelectorAll('summary')].find(summary => summary.textContent.includes('高级执行参数')).click()`);
     await input('[aria-label="模型数量上限"]', '4');
     await clickText('保存');

@@ -588,14 +588,18 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         let fallback_queue = loop_queue.clone();
         let fallback_catalog = unknown_fallback_catalog.clone();
         let unknown_fallback_turn_fn: UnknownSlashFallbackTurnFn =
-            Arc::new(move |prompt, command_name, token| {
+            Arc::new(move |prompt, command_name, suggestion, token| {
                 let o = fallback_orch.clone();
                 let host = fallback_host.clone();
                 let queue = fallback_queue.clone();
                 let catalog = fallback_catalog.clone();
                 Box::pin(async move {
                     let (request_context, transcript_attachment) =
-                        crate::repl_loop::unknown_command_fallback_context(&command_name, &catalog);
+                        crate::repl_loop::unknown_command_fallback_context(
+                            &command_name,
+                            suggestion.as_ref(),
+                            &catalog,
+                        );
                     host.refresh_session().await;
                     let _ = host.begin(None, true);
                     queue.register_active_turn(token.clone()).await;

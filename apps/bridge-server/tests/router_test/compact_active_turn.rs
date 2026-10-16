@@ -120,6 +120,7 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
             &mut ws,
             &ClientCommand::RunSlashCommand {
                 raw: raw.into(),
+                images: Vec::new(),
                 turn_id: Some(turn_id),
             },
         )
@@ -214,6 +215,7 @@ async fn active_force_compact_refuses_while_slash_text_queues_and_ws_liveness_su
         &mut ws,
         &ClientCommand::RunSlashCommand {
             raw: idle_raw.into(),
+            images: Vec::new(),
             turn_id: Some(94),
         },
     )

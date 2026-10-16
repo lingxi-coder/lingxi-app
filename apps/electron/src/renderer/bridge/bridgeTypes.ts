@@ -64,6 +64,7 @@ import type {
   RuntimeCenterSection,
   RuntimeCenterState,
 } from './runtimeCenterState.js';
+import type { SlashCommandTerminalResult } from './slashCommandTerminals.js';
 
 /**
  * The wire shape of `ClientEvent::SettingsSnapshot`, unparsed. The settings
@@ -166,7 +167,7 @@ export interface UseBridge {
   clearVisualizationFollowup(): void;
   subscribeTrackedSpeech(token: DesktopTurnToken, listener: (event: TrackedSpeechEvent) => void): () => void;
   sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
-  runSlashCommand(raw: string): Promise<void>;
+  runSlashCommand(raw: string, images: ImageRefDto[], onTerminal?: (result: SlashCommandTerminalResult) => void): Promise<boolean>;
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
   beginLocalCommand(raw: string): Promise<void>;
   /** Push a locally-produced command's own output into the transcript. */

@@ -128,6 +128,7 @@ async fn queued_path_prompt_keeps_its_ingress_and_optional_attachments() {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: ClientTextDto::from_projection(&text).unwrap(),
+                images: Vec::new(),
                 turn_id: Some(43),
             })
             .await;

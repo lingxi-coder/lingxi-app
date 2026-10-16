@@ -476,14 +476,17 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         },
         ClientCommand::RunSlashCommand {
             raw: "/clear".into(),
+            images: Vec::new(),
             turn_id: Some(11),
         },
         ClientCommand::RunSlashCommand {
             raw: "/new title".into(),
+            images: Vec::new(),
             turn_id: Some(12),
         },
         ClientCommand::RunSlashCommand {
             raw: "/reset".into(),
+            images: Vec::new(),
             turn_id: Some(13),
         },
     ];
@@ -537,6 +540,7 @@ async fn session_replacement_waits_for_settled_turn_handoff() {
         },
         ClientCommand::RunSlashCommand {
             raw: "/reset".into(),
+            images: Vec::new(),
             turn_id: None,
         },
     ] {

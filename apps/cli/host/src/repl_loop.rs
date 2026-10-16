@@ -33,6 +33,7 @@ pub type UnknownSlashFallbackTurnFn = Arc<
     dyn Fn(
             Utf16JsonProjection,
             Utf16JsonProjection,
+            Option<Utf16JsonProjection>,
             CancellationToken,
         ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>
         + Send
@@ -249,23 +250,37 @@ pub trait TaskNotificationWake: Send + Sync {
 /// sidecar for an unknown REPL slash command.
 pub(crate) fn unknown_command_fallback_context(
     command_name: &Utf16JsonProjection,
+    suggestion: Option<&Utf16JsonProjection>,
     catalog: &command_api::HeadlessCommandCatalog,
 ) -> (
     Vec<Utf16JsonProjection>,
     orchestrator::RequestContextTranscriptAttachment,
 ) {
-    let reminder = command_api::render_unknown_command_reminder(command_name, catalog);
-    let available_names = Utf16JsonProjection::array(catalog.prompt_command_names.clone())
-        .expect("command catalog names form a JSON array");
+    let safe_suggestion = command_api::native_unknown_command_fallback_suggestion(suggestion);
+    let reminder = command_api::render_unknown_command_reminder(
+        command_name,
+        safe_suggestion.as_ref(),
+        catalog,
+    );
+    let available_names = Utf16JsonProjection::array(
+        command_api::native_unknown_command_fallback_available_names(catalog),
+    )
+    .expect("command catalog names form a JSON array");
     let available_count = Utf16JsonProjection::parse(&catalog.available_command_count.to_string())
         .expect("command count is a JSON number");
-    let payload = Utf16JsonProjection::object(vec![
+    let mut fields = vec![
         ("type".to_owned(), "unknown_command_fallback".into()),
         ("commandName".to_owned(), command_name.clone()),
+    ];
+    if let Some(suggestion) = safe_suggestion {
+        fields.push(("suggestion".to_owned(), suggestion));
+    }
+    fields.extend([
         ("availableCommandNames".to_owned(), available_names),
         ("availableCommandCount".to_owned(), available_count),
-    ])
-    .expect("unknown command fallback is a JSON object");
+    ]);
+    let payload =
+        Utf16JsonProjection::object(fields).expect("unknown command fallback is a JSON object");
     let rendered = Utf16JsonProjection::object(vec![("content".to_owned(), reminder.clone())])
         .and_then(|line| Utf16JsonProjection::array(vec![line]))
         .expect("unknown command rendered view is a content array");
@@ -621,6 +636,7 @@ where
             UnknownSlash {
                 prompt: Utf16JsonProjection,
                 command_name: Utf16JsonProjection,
+                suggestion: Option<Utf16JsonProjection>,
             },
             Skill(Vec<orchestrator::QueuedPromptInput>),
         }
@@ -658,9 +674,12 @@ where
             // For an unknown command, the runner separately stages Native's
             // reminder and transcript attachment around that same prompt.
             SlashDispatchResult::ParseFailure { .. } => Some(ModelTurn::Prompt(source_input)),
-            SlashDispatchResult::Unknown { name, .. } => Some(ModelTurn::UnknownSlash {
+            SlashDispatchResult::Unknown {
+                name, suggestion, ..
+            } => Some(ModelTurn::UnknownSlash {
                 prompt: source_input,
                 command_name: name,
+                suggestion,
             }),
             SlashDispatchResult::NotASlashCommand => {
                 // Dispatcher contract: won't happen for "/" prefixed input.
@@ -692,9 +711,11 @@ where
                     ModelTurn::UnknownSlash {
                         prompt,
                         command_name,
+                        suggestion,
                     } => unknown_fallback_turn_fn.expect("unknown fallback runner was checked")(
                         prompt,
                         command_name,
+                        suggestion,
                         token.clone(),
                     ),
                     ModelTurn::Skill(inputs) => skill_batch_fn
@@ -812,7 +833,7 @@ mod tests {
             available_command_count: 2,
         };
 
-        let (context, attachment) = unknown_command_fallback_context(&command_name, &catalog);
+        let (context, attachment) = unknown_command_fallback_context(&command_name, None, &catalog);
 
         assert_eq!(context.len(), 1);
         assert!(context[0]
@@ -834,6 +855,60 @@ mod tests {
             context[0].string_units("")
         );
         assert_eq!(attachment.rendered_role, "user");
+    }
+
+    #[test]
+    fn unknown_command_context_projects_safe_suggestion_and_first_forty_names() {
+        let command_name = Utf16JsonProjection::from("missing");
+        let mut prompt_names = vec!["unsafe+name".into()];
+        prompt_names.extend((0..41).map(|index| format!("prompt-{index}").into()));
+        let catalog = command_api::HeadlessCommandCatalog {
+            prompt_command_names: prompt_names,
+            available_command_count: 43,
+        };
+
+        let (context, attachment) = unknown_command_fallback_context(
+            &command_name,
+            Some(&Utf16JsonProjection::from("clear")),
+            &catalog,
+        );
+
+        assert!(context[0]
+            .string_at("")
+            .unwrap()
+            .contains("The closest available command is /clear."));
+        assert_eq!(attachment.payload.string_at("/suggestion"), Some("clear"));
+        let names = attachment
+            .payload
+            .at_pointer("/availableCommandNames")
+            .unwrap();
+        assert_eq!(names.array_len(), Some(40));
+        assert_eq!(
+            names.get_index(0).and_then(|value| value.as_str()),
+            Some("prompt-0")
+        );
+        assert_eq!(
+            names.get_index(39).and_then(|value| value.as_str()),
+            Some("prompt-39")
+        );
+        assert!(attachment
+            .payload
+            .at_pointer("/availableCommandNames/40")
+            .is_none());
+        assert_eq!(
+            attachment.payload.number_at("/availableCommandCount"),
+            Some(43.0)
+        );
+
+        let unsafe_suggestion =
+            Utf16JsonProjection::root_string("c�".into(), vec![b'c' as u16, 0xd800]).unwrap();
+        let (context, attachment) =
+            unknown_command_fallback_context(&command_name, Some(&unsafe_suggestion), &catalog);
+        assert!(!context[0]
+            .string_at("")
+            .unwrap()
+            .contains("The closest available command is"));
+        assert!(attachment.payload.at_pointer("/suggestion").is_none());
     }
 
     #[tokio::test]
@@ -1459,7 +1534,7 @@ mod tests {
         };
         let fallback_prompts = prompts.clone();
         let unknown_fallback_turn_fn: UnknownSlashFallbackTurnFn =
-            Arc::new(move |prompt, _command_name, _token| {
+            Arc::new(move |prompt, _command_name, _suggestion, _token| {
                 let p = fallback_prompts.clone();
                 Box::pin(async move {
                     p.lock().await.push(prompt);
@@ -1554,14 +1629,16 @@ mod tests {
         let dispatcher = FixedDispatcher(SlashDispatchResult::Unknown {
             name: "missing".into(),
             display: "Unknown command: /missing".into(),
+            suggestion: Some("clear".into()),
         });
         let captured = Arc::new(Mutex::new(None));
         let captured_for_fallback = captured.clone();
         let unknown_fallback_turn_fn: UnknownSlashFallbackTurnFn =
-            Arc::new(move |prompt, command_name, token| {
+            Arc::new(move |prompt, command_name, suggestion, token| {
                 let captured = captured_for_fallback.clone();
                 Box::pin(async move {
-                    *captured.lock().await = Some((prompt, command_name, token.is_cancelled()));
+                    *captured.lock().await =
+                        Some((prompt, command_name, suggestion, token.is_cancelled()));
                     Ok(TurnOutcome::EndTurn)
                 })
             });
@@ -1590,7 +1667,7 @@ mod tests {
         .await;
 
         assert_eq!(outcome, StepOutcome::Continue);
-        let (prompt, name, cancelled) = captured
+        let (prompt, name, suggestion, cancelled) = captured
             .lock()
             .await
             .clone()
@@ -1601,6 +1678,10 @@ mod tests {
             Some("/missing café".encode_utf16().collect())
         );
         assert_eq!(name.string_at(""), Some("missing"));
+        assert_eq!(
+            suggestion.as_ref().and_then(|name| name.string_at("")),
+            Some("clear")
+        );
         assert!(
             !cancelled,
             "the same live turn token reaches the fallback runner"
@@ -1620,6 +1701,7 @@ mod tests {
                 SlashDispatchResult::Unknown {
                     name: "native-unknown".into(),
                     display: "Unknown command".into(),
+                    suggestion: None,
                 },
                 "/native-unknown fixed-argument",
             ),

@@ -72,6 +72,7 @@ async fn custom_compact_turn_releases_admission_before_starting_turn() {
         std::time::Duration::from_secs(1),
         connection.dispatch(ClientCommand::RunSlashCommand {
             raw: "/compact custom prompt".into(),
+            images: Vec::new(),
             turn_id: Some(18),
         }),
     )
@@ -114,6 +115,7 @@ async fn compact_cannot_enter_during_transient_idle_handoff() {
             if slash {
                 ClientCommand::RunSlashCommand {
                     raw: "/compact preserve decisions".into(),
+                    images: Vec::new(),
                     turn_id: Some(17),
                 }
             } else {

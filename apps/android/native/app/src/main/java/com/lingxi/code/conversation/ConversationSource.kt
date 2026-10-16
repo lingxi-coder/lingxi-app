@@ -262,8 +262,12 @@ interface ConversationSource {
  * slash text on the existing SendPrompt path.
  */
 interface SlashCommandConversationSource {
-    /** Submit the exact UTF-16 command line as a correlated conversation turn. */
-    fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent>
+    /** Submit the exact UTF-16 command line and ordered image attachments as one correlated turn. */
+    fun submitSlashCommand(
+        raw: ClientTextDto,
+        images: List<ImageRefDto>,
+        turnId: Long,
+    ): Flow<ReplyEvent>
 }
 
 /** Match the host parser's ECMAScript trim-before-slash rule without decoding UTF-16. */

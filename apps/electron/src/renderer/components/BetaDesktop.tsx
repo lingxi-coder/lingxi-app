@@ -39,6 +39,8 @@ import { sideCreationInput } from '../bridge/sideChatState';
 import { isSideQuestionCommand } from '../bridge/sideQuestion';
 import type { ContextSummarySnapshot } from '../bridge/conversation';
 import { matchesComposerSubmission, type ComposerSubmissionSnapshot } from '../bridge/composerSubmission';
+import { restoreSlashDraftAfterTerminalError, type SlashDraftRecoverySnapshot } from '../bridge/slashDraftRecovery.js';
+import type { SlashCommandTerminalResult } from '../bridge/slashCommandTerminals.js';
 import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { runningSubagentIds } from '../bridge/runtimeCenterState';
@@ -1732,6 +1734,16 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const draftSessionId = useRef<string | null>(null);
   const imageDraftGeneration = useRef(0);
   const composerDraftRevision = useRef(0);
+  const sessionDraftGenerations = useRef(new Map<string, number>());
+  const draftGenerationFor = (sessionId: string | null) => sessionId ? sessionDraftGenerations.current.get(sessionId) ?? 0 : 0;
+  const bumpDraftGeneration = (sessionId: string | null) => {
+    if (!sessionId) return;
+    sessionDraftGenerations.current.set(sessionId, draftGenerationFor(sessionId) + 1);
+  };
+  const markDraftEdited = () => {
+    composerDraftRevision.current += 1;
+    bumpDraftGeneration(draftSessionId.current);
+  };
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
   const selectedFusion = fusionChoice?.sessionId === activeSessionId ? fusionChoice.reference : null;
@@ -2110,7 +2122,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const syncPromptState = () => {
     const editor = input.current;
     if (!editor) return { text: '', files: [] };
-    composerDraftRevision.current += 1;
+    markDraftEdited();
     const snapshot = richPromptSnapshot(editor);
     setText(snapshot.text);
     setSelectedFiles((current) => (
@@ -2150,6 +2162,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       draftsBySession.current.set(activeSessionId, {
         ...snapshot, html: editor.innerHTML, images: [...imageAttachmentsRef.current],
       });
+      if (previousSessionId) sessionDraftGenerations.current.set(activeSessionId, draftGenerationFor(previousSessionId));
     }
     if (previousSessionId) {
       const snapshot = richPromptSnapshot(editor);
@@ -2551,7 +2564,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     const candidates = files.slice(0, remaining);
-    if (candidates.length) composerDraftRevision.current += 1;
+    if (candidates.length) markDraftEdited();
     const results = await Promise.all(candidates.map(async (file) => {
       try {
         return { attachment: await imageFileToAttachment(file) };
@@ -2610,7 +2623,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   };
 
   const removeImage = (id: string) => {
-    composerDraftRevision.current += 1;
+    markDraftEdited();
     setImageAttachments((current) => {
       const removed = current.find((attachment) => attachment.id === id);
       if (removed) URL.revokeObjectURL(removed.previewUrl);
@@ -2677,12 +2690,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       setImageNotice('当前任务完成后才能运行 / 命令。');
       return;
     }
-    if (bridge.running && imageAttachments.length) {
+    if (bridge.running && imageAttachments.length && !isSlashCommand) {
       setImageNotice('Pending message 暂不支持图片，请等待当前任务完成后发送。');
-      return;
-    }
-    if (isSlashCommand && imageAttachments.length) {
-      setImageNotice('图片附件不能和 / 命令一起发送，请先输入普通问题。');
       return;
     }
     if (isSlashCommand) {
@@ -2701,18 +2710,104 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       }
     }
     if (voiceState === 'listening') stopVoice();
+    const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
     if (isSlashCommand) {
-      clearComposer();
       const resolved = resolveDesktopCommand(slashCommand, ALL_DESKTOP_COMMANDS);
       if (resolved && !desktopCommandIsShadowed(slashCommand, bridge.desktop.slashCommands)) {
+        if (images.length) {
+          setImageNotice('桌面本地命令不支持图片附件，请移除图片后重试。');
+          return;
+        }
+        clearComposer();
         await bridge.beginLocalCommand(slashCommand);
         void Promise.resolve(resolved.command.run(resolved.args, commandContext)).catch(() => undefined);
         return;
       }
-      invoke(() => bridge.runSlashCommand(slashCommand));
+      const submittingSessionId = draftSessionId.current;
+      const submittedRevision = composerDraftRevision.current;
+      const submitted: ComposerSubmissionSnapshot = {
+        sessionId: submittingSessionId,
+        generation: imageDraftGeneration.current,
+        html: input.current?.innerHTML,
+        text: snapshot.text,
+        files: [...snapshot.files],
+        imageIds: imageAttachments.map((attachment) => attachment.id),
+      };
+      const recoverySnapshot: SlashDraftRecoverySnapshot = { ...submitted, images: [...imageAttachmentsRef.current] };
+      let clearOwner: { sessionId: string; draftGeneration: number } | null = null;
+      let terminalErrorSeen = false;
+      const restoreOnTerminalError = (terminal: SlashCommandTerminalResult) => {
+        if (!terminal.isError) return;
+        terminalErrorSeen = true;
+        if (!clearOwner) return;
+        const latest = draftSessionId.current === submitted.sessionId && input.current
+          ? richPromptSnapshot(input.current)
+          : { text: '', files: [] };
+        const restored = restoreSlashDraftAfterTerminalError(recoverySnapshot, clearOwner, terminal, {
+          activeSessionId: draftSessionId.current,
+          draftGeneration: draftGenerationFor(submitted.sessionId),
+          savedDraftExists: submitted.sessionId ? draftsBySession.current.has(submitted.sessionId) : false,
+          text: latest.text,
+          files: latest.files,
+          images: imageAttachmentsRef.current,
+        });
+        if (!restored || !submitted.sessionId) return;
+        if (restored.kind === 'saved') {
+          draftsBySession.current.set(submitted.sessionId, {
+            text: restored.text, files: restored.files, html: restored.html ?? '', images: restored.images,
+          });
+          bumpDraftGeneration(submitted.sessionId);
+          return;
+        }
+        if (input.current) input.current.innerHTML = restored.html ?? restored.text;
+        setText(restored.text);
+        setSelectedFiles(restored.files);
+        imageAttachmentsRef.current = restored.images;
+        setImageAttachments(restored.images);
+        composerDraftRevision.current += 1;
+        bumpDraftGeneration(submitted.sessionId);
+        imageDraftGeneration.current += 1;
+        setImageNotice('命令执行失败，草稿和图片附件已恢复，可以修改后重试。');
+      };
+      const ownsVisibleDraft = () => draftSessionId.current === submitted.sessionId
+        && imageDraftGeneration.current === submitted.generation
+        && composerDraftRevision.current === submittedRevision;
+      try {
+        const accepted = await bridge.runSlashCommand(slashCommand, images, restoreOnTerminalError);
+        if (!accepted) {
+          if (ownsVisibleDraft()) {
+            setImageNotice(images.length ? '发送失败，图片附件已保留，可以重试。' : '命令发送失败，草稿已保留，可以重试。');
+          }
+          return;
+        }
+        if (terminalErrorSeen) {
+          if (ownsVisibleDraft()) setImageNotice('命令执行失败，草稿和图片附件已保留，可以重试。');
+          return;
+        }
+        if (ownsVisibleDraft()) {
+          const latest = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
+          if (matchesComposerSubmission(submitted, {
+            ...latest,
+            html: input.current?.innerHTML,
+            images: imageAttachmentsRef.current,
+          })) {
+            clearComposer(submittingSessionId, submitted.imageIds);
+            if (submittingSessionId) clearOwner = { sessionId: submittingSessionId, draftGeneration: draftGenerationFor(submittingSessionId) };
+          }
+        } else if (submittingSessionId !== draftSessionId.current && submittingSessionId) {
+          const saved = draftsBySession.current.get(submittingSessionId);
+          if (saved && matchesComposerSubmission(submitted, saved)) {
+            clearComposer(submittingSessionId, submitted.imageIds);
+            clearOwner = { sessionId: submittingSessionId, draftGeneration: draftGenerationFor(submittingSessionId) };
+          }
+        }
+      } catch {
+        if (ownsVisibleDraft()) {
+          setImageNotice(images.length ? '发送失败，图片附件已保留，可以重试。' : '命令发送失败，草稿已保留，可以重试。');
+        }
+      }
       return;
     }
-    const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
     const submittingSessionId = draftSessionId.current;
     const submittedRevision = composerDraftRevision.current;
     const submitted: ComposerSubmissionSnapshot = {
@@ -3219,7 +3314,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           onClose={() => { void stopFlowMode(); }}
         />
       )}
-      {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={() => bridge.runSlashCommand('/goal clear')} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
+      {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={async () => { await bridge.runSlashCommand('/goal clear', []); }} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
       <div
         className="beta-composer"
         onDragOver={(event) => {

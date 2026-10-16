@@ -52,7 +52,8 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.deepEqual(validateClientCommand({ type: 'get_conversation_controls' }), { type: 'get_conversation_controls' });
   assert.deepEqual(validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } }), { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } });
   assert.deepEqual(validateClientCommand({ type: 'set_fast_mode', enabled: true }), { type: 'set_fast_mode', enabled: true });
-  assert.deepEqual(validateClientCommand({ type: 'run_slash_command', raw: '/model opus' }), { type: 'run_slash_command', raw: '/model opus' });
+  assert.deepEqual(validateClientCommand({ type: 'run_slash_command', raw: '/model opus', images: [] }), { type: 'run_slash_command', raw: '/model opus', images: [] });
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/model opus' }), /invalid slash command image attachments/);
   assert.deepEqual(
     validateClientCommand({ type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] }),
     { type: 'refresh_listings', which: [{ type: 'status' }, { type: 'doctor' }, { type: 'slash_commands' }] },
@@ -72,8 +73,8 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.throws(() => validateClientCommand({ type: 'set_fast_mode', enabled: 'true' }), /invalid fast mode enabled flag/);
   assert.throws(() => validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'level', id: '' } }), /invalid reasoning level/);
   assert.throws(() => validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'token_budget', tokens: -1 } }), /invalid reasoning token budget/);
-  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: 'model opus' }), /invalid slash command/);
-  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/' }), /invalid slash command/);
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: 'model opus', images: [] }), /invalid slash command/);
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/', images: [] }), /invalid slash command/);
   assert.throws(() => validateClientCommand({ type: 'task_list', status_filter: { type: ['paused'] } }), /invalid task status/);
   assert.throws(() => validateClientCommand({ type: 'list_session_agents', extra: true }), /unsupported fields/);
   assert.throws(() => validateClientCommand({ type: 'load_session_agent_transcript', agent_id: '../outside' }), /invalid agent id/);
@@ -311,7 +312,7 @@ test('active turns allow live model and permission controls but reject session l
     { type: 'login' },
     { type: 'logout' },
     { type: 'force_compact' },
-    { type: 'run_slash_command', raw: '/clear' },
+    { type: 'run_slash_command', raw: '/clear', images: [] },
   ] as const) {
     assert.throws(
       () => assertCommandAllowedDuringTurn(validateClientCommand(command, '/workspace'), true),
@@ -327,25 +328,25 @@ test('active turns allow live model and permission controls but reject session l
 test('side questions are allowed during a turn without allowing other slash commands', () => {
   for (const raw of ['/btw', '/btw progress?', '/btw\nprogress?', '/btw\tprogress?']) {
     assert.doesNotThrow(() => assertCommandAllowedDuringTurn(
-      validateClientCommand({ type: 'run_slash_command', raw, turn_id: 42 }), true,
+      validateClientCommand({ type: 'run_slash_command', raw, images: [], turn_id: 42 }), true,
     ));
   }
   for (const raw of ['/btwhatever question', '/btw-extra question', '/BTW question', '/clear']) {
     assert.throws(() => assertCommandAllowedDuringTurn(
-      validateClientCommand({ type: 'run_slash_command', raw }), true,
+      validateClientCommand({ type: 'run_slash_command', raw, images: [] }), true,
     ), /cancel the active turn/);
   }
-  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/btw/clear' }), /invalid slash command/);
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/btw/clear', images: [] }), /invalid slash command/);
 });
 
 test('slash commands preserve optional correlation ids and reject invalid ids', () => {
   for (const turn_id of [1, 42, Number.MAX_SAFE_INTEGER]) {
-    const command = { type: 'run_slash_command', raw: '/btw progress?', turn_id };
+    const command = { type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id };
     assert.deepEqual(validateClientCommand(command), command);
   }
   for (const turn_id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '42', null, Infinity, NaN]) {
     assert.throws(() => validateClientCommand({
-      type: 'run_slash_command', raw: '/btw progress?', turn_id,
+      type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id,
     }), /invalid slash command turn id/);
   }
 });
@@ -363,6 +364,11 @@ test('image prompt payloads require canonical, bounded image data', () => {
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
   const image = { media_type: 'image/png', base64: png.toString('base64') };
   assert.deepEqual(validateImageRefs([image]), [image]);
+  assert.deepEqual(
+    validateClientCommand({ type: 'run_slash_command', raw: '/inspect', images: [image] }),
+    { type: 'run_slash_command', raw: '/inspect', images: [image] },
+    'slash commands retain the same validated ordered image DTOs as SendPrompt',
+  );
   assert.deepEqual(validateImageRefs(undefined), []);
   assert.throws(() => validateImageRefs([{ ...image, media_type: 'image/svg+xml' }]), /invalid image media type/);
   assert.throws(() => validateImageRefs([{ ...image, base64: `data:image/png;base64,${image.base64}` }]), /invalid image base64/);

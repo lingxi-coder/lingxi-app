@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { SlashCommandTerminalRegistry } from '../src/renderer/bridge/slashCommandTerminals';
 import * as tracked from '../src/renderer/bridge/trackedTurns';
 import { matchesComposerSubmission } from '../src/renderer/bridge/composerSubmission';
 import { VoiceFlowController } from '../src/renderer/audio/flow/controller';
@@ -37,7 +38,7 @@ function deferred<T>() {
 }
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 function eventHarness(purpose: 'flow' | 'composer' = 'flow') {
-  const context: any = { ...tracked, useCallback: (fn: any) => fn,
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() }, ...tracked, useCallback: (fn: any) => fn,
     activeTrackedTurns: { current: new Map() }, pendingTrackedTurns: { current: new Map() }, trackedSpeechListeners: { current: new Map() },
     removedRuntimeIds: { current: new Set() }, bootstrapRef: { current: null }, pendingSessionRef: { current: null }, sharedDesktopCacheRef: { current: new Map() },
     turnActiveRefs: { current: new Map() }, engineTurnActiveRefs: { current: new Map() }, slashPendingRefs: { current: new Map() }, pendingFusionDispatches: { current: new Map() }, sideQuestionTurns: { current: new Map() },
@@ -140,7 +141,7 @@ function composerHarness() {
   const queued = deferred<void>(), notices: unknown[] = [], revoked: string[] = [];
   let images: any[] = [];
   const editor = { innerHTML: 'First prompt', replaceChildren() { this.innerHTML = ''; } };
-  const context: any = { ready: true, flowModeRef: { current: false }, voiceState: 'idle', text: 'First prompt', selectedFiles: [], imageAttachments: images,
+  const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() }, ready: true, flowModeRef: { current: false }, voiceState: 'idle', text: 'First prompt', selectedFiles: [], imageAttachments: images,
     draftSessionId: { current: 'A' }, draftsBySession: { current: new Map() }, imageDraftGeneration: { current: 1 }, composerDraftRevision: { current: 0 }, imageAttachmentsRef: { current: images },
     input: { current: editor }, richPromptSnapshot: () => ({ text: editor.innerHTML, files: [] }), promptWithFileMentions: (text: string) => text,
     sideCreationInput, onCreateSide: undefined,
@@ -152,6 +153,10 @@ function composerHarness() {
     visualizationChip: null, setVisualizationChip: () => {},
   };
   for (const name of ['savedEditorSelection', 'activeMentionRange', 'activeSlashRange', 'activeSlashQuery']) context[name] = { current: null };
+  context.sessionDraftGenerations = { current: new Map() };
+  for (const name of ['draftGenerationFor', 'bumpDraftGeneration', 'markDraftEdited']) {
+    evaluate(`globalThis.${name} = ${declaration(composerSource, name)};`, context);
+  }
   evaluate('globalThis.clearComposer = ' + declaration(composerSource, 'clearComposer'), context);
   evaluate('globalThis.submit = ' + declaration(composerSource, 'submit'), context);
   return { queued, context, editor, notices, revoked, images: () => images,

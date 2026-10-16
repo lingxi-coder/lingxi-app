@@ -137,7 +137,7 @@ function composerBridgeFixture() {
     setPermissionMode: async () => undefined,
     emitCommandOutput: () => undefined,
     beginLocalCommand: async () => undefined,
-    runSlashCommand: async () => undefined,
+    runSlashCommand: async () => false,
     sendPrompt: async () => undefined,
     cancel: async () => undefined,
   };

@@ -319,8 +319,9 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const handleReload = () => {
     setReloading(true);
     setPageError(null);
-    void bridge.runSlashCommand('/reload-skills')
-      .then(async () => {
+    void bridge.runSlashCommand('/reload-skills', [])
+      .then(async (accepted) => {
+        if (!accepted) return;
         await bridge.refreshSkills();
         if (adminAvailable) await callSkillAdmin(bridge, { action: 'get_catalog' });
       })
@@ -639,7 +640,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);
-              void bridge.runSlashCommand(`/${selectedSkill.name}`).then(onClose).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to start this skill.')).finally(() => setTryingSkill(false));
+              void bridge.runSlashCommand(`/${selectedSkill.name}`, []).then((accepted) => { if (accepted) onClose(); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to start this skill.')).finally(() => setTryingSkill(false));
             }}><ExtensionGlyph name="chat" size={16} />Try now</button>
           </footer>}
         </section>

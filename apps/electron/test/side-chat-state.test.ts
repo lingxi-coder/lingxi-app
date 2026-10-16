@@ -30,9 +30,12 @@ test('side events route only to the targeted RAM conversation', () => {
   assert.equal(child.conversation.sessionKey, 'side:child');
 });
 test('child slash input is sent to runtime admission rather than local parent commands', () => {
-  assert.deepEqual(sideCommandInput('/side should fail'), { type: 'run_slash_command', raw: '/side should fail' });
-  assert.deepEqual(sideCommandInput('/model ready-model'), { type: 'run_slash_command', raw: '/model ready-model' });
+  assert.deepEqual(sideCommandInput('/side should fail'), { type: 'run_slash_command', raw: '/side should fail', images: [] });
+  assert.deepEqual(sideCommandInput('/model ready-model'), { type: 'run_slash_command', raw: '/model ready-model', images: [] });
   assert.deepEqual(sideCommandInput('normal question'), { type: 'send_prompt', text: 'normal question', images: [] });
+  const images = [{ media_type: 'image/png', base64: 'AQID' }];
+  assert.deepEqual(sideCommandInput('/review image', images), { type: 'run_slash_command', raw: '/review image', images });
+  assert.deepEqual(sideCommandInput('describe this', images), { type: 'send_prompt', text: 'describe this', images });
   const side = { ...newSideChat('child', 'parent'), draft: '/side should fail' };
   assert.equal(side.draft, '/side should fail');
 });

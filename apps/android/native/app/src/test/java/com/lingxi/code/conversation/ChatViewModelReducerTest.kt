@@ -93,6 +93,7 @@ class ChatViewModelReducerTest {
         val pending = mutableListOf<List<UShort>>()
         val commands = mutableListOf<ClientCommand>()
         val slashRequests = mutableListOf<Pair<List<UShort>, Long>>()
+        val slashImageRequests = mutableListOf<List<ImageRefDto>>()
         val cancelledTurnIds = mutableListOf<Long?>()
         var submittedTurnId: Long? = null
         val submittedPromptModes = mutableListOf<PromptModeDto?>()
@@ -110,8 +111,9 @@ class ChatViewModelReducerTest {
             commands += command
             if (command is ClientCommand.SendPrompt) pending += command.text.codeUnits.toList()
         }
-        override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> {
+        override fun submitSlashCommand(raw: ClientTextDto, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> {
             slashRequests += raw.codeUnits.toList() to turnId
+            slashImageRequests += images
             return never.asSharedFlow()
         }
         override fun submit(
@@ -472,6 +474,21 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun slashCommandWithImageKeepsTheCommandAndAttachmentOnTheSlashPath() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        val image = ImageRefDto(mediaType = "image/png", base64 = "cG5nLWltYWdl")
+
+        vm.send("/inspect", listOf(image))
+        runCurrent()
+
+        assertEquals(1, source.slashRequests.size)
+        assertEquals(listOf(image), source.slashImageRequests.single())
+        assertTrue(source.submitted.isEmpty())
+        assertTrue(source.commands.none { it is ClientCommand.SendPrompt })
+    }
+
+    @Test
     fun slashCommandFailure_displaysItsResultAndErrorState() = runTest(dispatcher) {
         val source = RecordingSource()
         val vm = ChatViewModel(source)
@@ -498,9 +515,11 @@ class ChatViewModelReducerTest {
     @Test
     fun runSlashCommandClientCommand_preservesUtf16AndTurnIdentity() {
         val raw = "/custom arg \uD800".toClientTextDto()
-        val command = runSlashCommandClientCommand(raw, 73L)
+        val images = listOf(ImageRefDto(mediaType = "image/png", base64 = "cG5nLWltYWdl"))
+        val command = runSlashCommandClientCommand(raw, images, 73L)
 
         assertEquals(raw.codeUnits, command.raw.codeUnits)
+        assertEquals(images, command.images)
         assertEquals(73uL, command.turnId)
     }
 

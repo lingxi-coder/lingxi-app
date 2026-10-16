@@ -96,7 +96,7 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
             on_clear_session: Box::new(|_| {}),
             on_sandbox_action: Box::new(|_| {}),
             on_task_action: Box::new(|_| {}),
-            on_dispatch_slash: Box::new(|_, _| {}),
+            on_dispatch_slash: Box::new(|_, _, _| {}),
             on_rewake_peer: Box::new(|| {}),
         },
     );

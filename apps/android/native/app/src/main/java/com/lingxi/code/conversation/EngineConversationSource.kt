@@ -412,7 +412,11 @@ class EngineConversationSource private constructor(
             strings,
         )
 
-    override fun submitSlashCommand(raw: ClientTextDto, turnId: Long): Flow<ReplyEvent> =
+    override fun submitSlashCommand(
+        raw: ClientTextDto,
+        images: List<ImageRefDto>,
+        turnId: Long,
+    ): Flow<ReplyEvent> =
         mapReplyStream(
             events.onSubscription {
                 try {
@@ -420,7 +424,7 @@ class EngineConversationSource private constructor(
                     activeSession.value?.sessionId?.let { sessionId ->
                         durableTurns.begin(sessionId, turnId)
                     }
-                    handle.submit(runSlashCommandClientCommand(raw, turnId))
+                    handle.submit(runSlashCommandClientCommand(raw, images, turnId))
                 } catch (t: Throwable) {
                     permissionIngress.endTurn()
                     durableTurns.clear(turnId)
@@ -718,8 +722,12 @@ class EngineConversationSource private constructor(
 }
 
 /** Keep the protocol command construction independently testable on the JVM. */
-internal fun runSlashCommandClientCommand(raw: ClientTextDto, turnId: Long): ClientCommand.RunSlashCommand =
-    ClientCommand.RunSlashCommand(raw = raw, turnId = turnId.toULong())
+internal fun runSlashCommandClientCommand(
+    raw: ClientTextDto,
+    images: List<ImageRefDto>,
+    turnId: Long,
+): ClientCommand.RunSlashCommand =
+    ClientCommand.RunSlashCommand(raw = raw, images = images, turnId = turnId.toULong())
 
 internal fun slashCommandEventBelongsToTurn(event: ClientEvent, turnId: Long): Boolean =
     event !is ClientEvent.SlashCommandResult || event.turnId == turnId.toULong()

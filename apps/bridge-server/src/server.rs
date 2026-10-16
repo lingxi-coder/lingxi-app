@@ -1458,12 +1458,56 @@ struct QueuedModTurn {
     owns_generation: bool,
 }
 
+async fn emit_slash_terminal_failure(
+    sink: &dyn ClientEventSink,
+    turn_id: Option<u64>,
+    display: ClientTextDto,
+) {
+    let Some(turn_id) = turn_id else {
+        return;
+    };
+    sink.emit(ClientEvent::SlashCommandResult {
+        turn_id: Some(turn_id),
+        display,
+        is_error: true,
+    })
+    .await;
+}
+
+fn slash_dispatch_abort_display(
+    cancellation: &CancellationToken,
+    refusal_probe: Option<&harness_runtime::desktop::PolicyHelperRefusalProbe>,
+) -> Option<ClientTextDto> {
+    if let Some(error) =
+        refusal_probe.and_then(harness_runtime::desktop::PolicyHelperRefusalProbe::current)
+    {
+        let projection = BridgeConnection::policy_refusal_projection(&error);
+        return Some(
+            ClientTextDto::from_projection(&projection)
+                .expect("policy refusal display is a root string"),
+        );
+    }
+    cancellation
+        .is_cancelled()
+        .then(|| "Slash command was cancelled before entering the model.".into())
+}
+
 fn skill_prompt_inputs(
     command: Utf16JsonProjection,
     body: Utf16JsonProjection,
     hook_messages: Vec<Utf16JsonProjection>,
 ) -> Vec<orchestrator::QueuedPromptInput> {
     orchestrator::skill_prompt_inputs(command, body, hook_messages)
+}
+
+fn slash_image_sources(images: Vec<ImageRefDto>) -> Vec<lingxi_core::types::ImageSource> {
+    images
+        .into_iter()
+        .map(|image| lingxi_core::types::ImageSource::Base64 {
+            media_type: image.media_type,
+            data: image.base64,
+        })
+        .collect()
 }
 
 struct TransitionScope(Arc<AtomicBool>);
@@ -1562,17 +1606,16 @@ async fn stop_loop_for_session_transition_parts(
 
 async fn dispatch_queued_bridge_slash(
     raw: Utf16JsonProjection,
+    images: Vec<ImageRefDto>,
     turn_id: Option<u64>,
     generation: u64,
     cancellation: CancellationToken,
     mod_drain: &ModQueueDrain,
 ) -> Option<QueuedModTurn> {
-    if mod_drain
-        .policy_helper_refusal
-        .as_ref()
-        .is_some_and(|probe| probe.current().is_some())
-        || cancellation.is_cancelled()
+    if let Some(display) =
+        slash_dispatch_abort_display(&cancellation, mod_drain.policy_helper_refusal.as_ref())
     {
+        emit_slash_terminal_failure(mod_drain.events.as_ref(), turn_id, display).await;
         return None;
     }
     let parsed = command_api::parser::parse_slash_command(&raw);
@@ -1595,25 +1638,25 @@ async fn dispatch_queued_bridge_slash(
         )
         .await;
     }
-    if cancellation.is_cancelled()
-        || mod_drain
-            .policy_helper_refusal
-            .as_ref()
-            .is_some_and(|probe| probe.current().is_some())
+    if let Some(display) =
+        slash_dispatch_abort_display(&cancellation, mod_drain.policy_helper_refusal.as_ref())
     {
+        emit_slash_terminal_failure(mod_drain.events.as_ref(), turn_id, display).await;
         return None;
     }
     if is_compact {
         mod_drain.loop_runtime.reset_autonomous_loop_delivered();
     }
     let Some(router) = mod_drain.router.as_ref() else {
+        let message = "no slash-command dispatcher wired";
         mod_drain
             .events
             .emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
-                message: "no slash-command dispatcher wired".into(),
+                message: message.into(),
             })
             .await;
+        emit_slash_terminal_failure(mod_drain.events.as_ref(), turn_id, message.into()).await;
         return None;
     };
     let context = command_api::ModCommandRunContext {
@@ -1626,12 +1669,10 @@ async fn dispatch_queued_bridge_slash(
         router.dispatch_slash(raw.clone(), cancellation.clone()),
     )
     .await;
-    if cancellation.is_cancelled()
-        || mod_drain
-            .policy_helper_refusal
-            .as_ref()
-            .is_some_and(|probe| probe.current().is_some())
+    if let Some(display) =
+        slash_dispatch_abort_display(&cancellation, mod_drain.policy_helper_refusal.as_ref())
     {
+        emit_slash_terminal_failure(mod_drain.events.as_ref(), turn_id, display).await;
         return None;
     }
     drop(_transition);
@@ -1645,6 +1686,7 @@ async fn dispatch_queued_bridge_slash(
             prompt: Utf16JsonProjection::from(""),
             prompt_inputs: Some(vec![orchestrator::QueuedPromptInput {
                 text: prompt,
+                images: slash_image_sources(images),
                 ..Default::default()
             }]),
             as_user: false,
@@ -1657,15 +1699,21 @@ async fn dispatch_queued_bridge_slash(
             command,
             body,
             hook_messages,
-        }) => Some(QueuedModTurn {
-            prompt: Utf16JsonProjection::from(""),
-            prompt_inputs: Some(skill_prompt_inputs(command, body, hook_messages)),
-            as_user: false,
-            origin: serde_json::json!({"kind":"bridge"}),
-            generation,
-            cancel: cancellation.clone(),
-            owns_generation: true,
-        }),
+        }) => {
+            let mut prompt_inputs = skill_prompt_inputs(command, body, hook_messages);
+            if let Some(first) = prompt_inputs.first_mut() {
+                first.images.extend(slash_image_sources(images));
+            }
+            Some(QueuedModTurn {
+                prompt: Utf16JsonProjection::from(""),
+                prompt_inputs: Some(prompt_inputs),
+                as_user: false,
+                origin: serde_json::json!({"kind":"bridge"}),
+                generation,
+                cancel: cancellation.clone(),
+                owns_generation: true,
+            })
+        }
         Some(lingxi_core::host::SlashDispatchResult::Handled { display }) => {
             mod_drain
                 .events
@@ -1737,6 +1785,7 @@ async fn dispatch_queued_bridge_slash(
 
 async fn run_owned_bridge_slash(
     raw: Utf16JsonProjection,
+    images: Vec<ImageRefDto>,
     turn_id: Option<u64>,
     generation: u64,
     cancellation: CancellationToken,
@@ -1764,9 +1813,15 @@ async fn run_owned_bridge_slash(
             router.stop_realtime_audio().await;
         }
     }
-    let result =
-        dispatch_queued_bridge_slash(raw, turn_id, generation, cancellation, &owner.mod_drain)
-            .await;
+    let result = dispatch_queued_bridge_slash(
+        raw,
+        images,
+        turn_id,
+        generation,
+        cancellation,
+        &owner.mod_drain,
+    )
+    .await;
     if let Some(gate) = owner.active_turn.gate() {
         gate.set_session_id(owner.driver.current_session_id().await);
     }
@@ -2211,10 +2266,14 @@ async fn drain_main_thread(
                             .cloned()
                             .expect("raw queued slash retains exact UTF-16 source");
                         let turn_id = payload.as_ref().and_then(|payload| payload.turn_id);
+                        let images = payload
+                            .as_ref()
+                            .map(|payload| payload.images.clone())
+                            .unwrap_or_default();
                         let turn = match mod_drain {
                             Some(mod_drain) => {
                                 dispatch_queued_bridge_slash(
-                                    raw, turn_id, generation, cancel, mod_drain,
+                                    raw, images, turn_id, generation, cancel, mod_drain,
                                 )
                                 .await
                             }
@@ -3261,7 +3320,7 @@ impl BridgeConnection {
         }
     }
 
-    async fn reject_if_policy_refused(&self) -> bool {
+    async fn reject_if_policy_refused(&self, slash_turn_id: Option<u64>) -> bool {
         let Some(error) = self
             .policy_helper_refusal
             .as_ref()
@@ -3269,14 +3328,25 @@ impl BridgeConnection {
         else {
             return false;
         };
-        self.unscoped_event_sink()
-            .emit(Self::refusal_error_event(&error))
-            .await;
+        let display = Self::policy_refusal_projection(&error);
+        let sink = self.unscoped_event_sink();
+        sink.emit(Self::refusal_error_event(&error)).await;
+        emit_slash_terminal_failure(
+            sink.as_ref(),
+            slash_turn_id,
+            ClientTextDto::from_projection(&display)
+                .expect("policy refusal display is a root string"),
+        )
+        .await;
         true
     }
 
     async fn dispatch(&self, command: ClientCommand) {
-        if self.reject_if_policy_refused().await {
+        let slash_turn_id = match &command {
+            ClientCommand::RunSlashCommand { turn_id, .. } => *turn_id,
+            _ => None,
+        };
+        if self.reject_if_policy_refused(slash_turn_id).await {
             return;
         }
         if matches!(
@@ -3524,15 +3594,21 @@ impl BridgeConnection {
             // A raw slash command is admitted before expansion. Busy requests
             // are queued as singleton raw inputs and are not dispatched until
             // the between-turn drain claims them.
-            ClientCommand::RunSlashCommand { raw, turn_id } => {
+            ClientCommand::RunSlashCommand {
+                raw,
+                images,
+                turn_id,
+            } => {
                 let raw_source = raw.clone().into_projection();
                 let Some(driver) = self.driver.clone() else {
-                    self.unscoped_event_sink()
-                        .emit(ClientEvent::Error {
-                            kind: ErrorKindDto::Rejected,
-                            message: "slash command requires a session driver".into(),
-                        })
-                        .await;
+                    let message = "slash command requires a session driver";
+                    let sink = self.unscoped_event_sink();
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: message.into(),
+                    })
+                    .await;
+                    emit_slash_terminal_failure(sink.as_ref(), turn_id, message.into()).await;
                     return;
                 };
 
@@ -3572,7 +3648,7 @@ impl BridgeConnection {
                         queued_payloads.insert(
                             queued_command.uuid.clone(),
                             QueuedPromptPayload {
-                                images: Vec::new(),
+                                images: images.clone(),
                                 turn_id,
                                 prompt_inputs: None,
                             },
@@ -3587,7 +3663,14 @@ impl BridgeConnection {
                 drop(queued_payloads);
                 let Some(admission) = admission else {
                     drop(_handoff);
-                    self.reject_if_policy_refused().await;
+                    if !self.reject_if_policy_refused(turn_id).await {
+                        emit_slash_terminal_failure(
+                            self.unscoped_event_sink().as_ref(),
+                            turn_id,
+                            "Slash command was rejected by policy helper".into(),
+                        )
+                        .await;
+                    }
                     return;
                 };
                 let (generation, cancellation) = match admission {
@@ -3607,7 +3690,14 @@ impl BridgeConnection {
                                 .remove(std::slice::from_ref(&queued_uuid), "policy helper refusal")
                                 .await;
                             drop(_handoff);
-                            self.reject_if_policy_refused().await;
+                            if !self.reject_if_policy_refused(turn_id).await {
+                                emit_slash_terminal_failure(
+                                    self.unscoped_event_sink().as_ref(),
+                                    turn_id,
+                                    "Slash command was rejected by policy helper".into(),
+                                )
+                                .await;
+                            }
                             return;
                         }
                         drop(_handoff);
@@ -3640,6 +3730,7 @@ impl BridgeConnection {
                 };
                 let task = tokio::spawn(run_owned_bridge_slash(
                     raw_source,
+                    images,
                     turn_id,
                     generation,
                     cancellation,
@@ -3953,7 +4044,7 @@ impl BridgeConnection {
                             .remove(std::slice::from_ref(&queued_uuid), "policy helper refusal")
                             .await;
                         drop(_handoff);
-                        self.reject_if_policy_refused().await;
+                        self.reject_if_policy_refused(None).await;
                         return;
                     }
                     self.loop_runtime.invalidate_noop_streak();
@@ -3984,7 +4075,7 @@ impl BridgeConnection {
                 }
                 PromptSeedAdmission::Refused => {
                     drop(_handoff);
-                    self.reject_if_policy_refused().await;
+                    self.reject_if_policy_refused(None).await;
                     return;
                 }
             }
@@ -4742,8 +4833,10 @@ mod tests {
             ]
         );
 
-        let slash =
-            Utf16JsonProjection::parse(r#"{"type":"run_slash_command","raw":"/x\udfff"}"#).unwrap();
+        let slash = Utf16JsonProjection::parse(
+            r#"{"type":"run_slash_command","raw":"/x\udfff","images":[]}"#,
+        )
+        .unwrap();
         let ClientCommand::RunSlashCommand { raw, .. } = deserialize_source(&slash).unwrap() else {
             panic!("run_slash_command source must decode as a slash command");
         };
@@ -5495,6 +5588,7 @@ mod tests {
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: ClientTextDto::from_projection(&raw)
                     .expect("test slash raw text is a root string"),
+                images: Vec::new(),
                 turn_id: Some(77),
             })
             .await;
@@ -5607,6 +5701,7 @@ mod tests {
             dispatch_connection
                 .dispatch(ClientCommand::RunSlashCommand {
                     raw: "/local".into(),
+                    images: Vec::new(),
                     turn_id: Some(81),
                 })
                 .await;
@@ -5668,7 +5763,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_slash_cancel_reaches_the_dispatcher_owned_token() {
+    async fn idle_slash_cancel_reaches_dispatcher_and_emits_correlated_terminal_result() {
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
         let router = Arc::new(CancellationObservingSlashRouter {
             started: tokio::sync::Notify::new(),
             received: StdMutex::new(None),
@@ -5681,12 +5777,14 @@ mod tests {
                 )
                 .bind_router(router.clone()),
         );
+        assert!(connection.claim_outbound(&sink).await);
         let started = router.started.notified();
         let dispatch_connection = connection.clone();
         let slash = tokio::spawn(async move {
             dispatch_connection
                 .dispatch(ClientCommand::RunSlashCommand {
                     raw: "/cancel-me".into(),
+                    images: Vec::new(),
                     turn_id: Some(83),
                 })
                 .await;
@@ -5701,6 +5799,14 @@ mod tests {
             .await
             .expect("cancelled dispatcher returns and is joined")
             .unwrap();
+        let Frame::Event(ClientEvent::SlashCommandResult {
+            turn_id, is_error, ..
+        }) = super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("pre-model cancellation must emit a correlated terminal result");
+        };
+        assert_eq!(turn_id, Some(83));
+        assert!(is_error);
         let task = connection
             .active_turn_task
             .lock()
@@ -5712,6 +5818,8 @@ mod tests {
             .expect("drainer joins after cancellation")
             .unwrap();
         assert!(!connection.turn_running.load(Ordering::SeqCst));
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
     }
 
     #[tokio::test]
@@ -5729,6 +5837,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/inspect".into(),
+                images: Vec::new(),
                 turn_id: Some(78),
             })
             .await;
@@ -5771,6 +5880,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/must-not-expand".into(),
+                images: Vec::new(),
                 turn_id: Some(702),
             })
             .await;
@@ -5779,16 +5889,64 @@ mod tests {
             let Frame::Event(ClientEvent::Error { kind, message }) =
                 super::connection_regression_test::next_frame(&mut socket).await
             else {
-                panic!("retained refusal must be reported as an Error event");
+                panic!("retained refusal must preserve its generic Error event");
             };
             assert!(matches!(kind, ErrorKindDto::Rejected));
             assert_eq!(message.display(), "policyHelpers.linux");
         }
+        let Frame::Event(ClientEvent::SlashCommandResult {
+            turn_id,
+            display,
+            is_error,
+        }) = super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("retained slash refusal must also close its correlated request");
+        };
+        assert_eq!(turn_id, Some(702));
+        assert_eq!(display.display(), "policyHelpers.linux");
+        assert!(is_error);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(connection.queue.is_empty().await);
         assert!(connection.queued_prompt_payloads.lock().await.is_empty());
         assert!(!connection.turn_running.load(Ordering::SeqCst));
         assert!(!connection.active_turn.is_active());
+
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slash_without_driver_preserves_error_and_emits_correlated_terminal_result() {
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
+        let connection = BridgeConnection::new();
+        assert!(connection.claim_outbound(&sink).await);
+
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: "/model".into(),
+                images: Vec::new(),
+                turn_id: Some(704),
+            })
+            .await;
+
+        let Frame::Event(ClientEvent::Error { kind, message }) =
+            super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("missing-driver rejection must preserve the generic Error event");
+        };
+        assert!(matches!(kind, ErrorKindDto::Rejected));
+        assert_eq!(message.display(), "slash command requires a session driver");
+        let Frame::Event(ClientEvent::SlashCommandResult {
+            turn_id,
+            display,
+            is_error,
+        }) = super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("missing-driver slash must emit a correlated terminal result");
+        };
+        assert_eq!(turn_id, Some(704));
+        assert_eq!(display.display(), "slash command requires a session driver");
+        assert!(is_error);
 
         connection.close_connection(None).await;
         endpoint.shutdown().await;
@@ -5818,6 +5976,7 @@ mod tests {
             dispatch_connection
                 .dispatch(ClientCommand::RunSlashCommand {
                     raw: "/cancel-on-policy-refusal".into(),
+                    images: Vec::new(),
                     turn_id: Some(703),
                 })
                 .await;
@@ -5832,13 +5991,33 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), cancellation.cancelled())
             .await
             .expect("the refusal watcher cancels the active owner");
-        let Frame::Event(ClientEvent::Error { kind, message }) =
-            super::connection_regression_test::next_frame(&mut socket).await
-        else {
-            panic!("the terminal refusal must reach the Bridge client");
-        };
-        assert!(matches!(kind, ErrorKindDto::Rejected));
-        assert_eq!(message.display(), "policyHelpers.linux");
+        let mut saw_refusal = false;
+        let mut saw_slash_terminal = false;
+        for _ in 0..2 {
+            match super::connection_regression_test::next_frame(&mut socket).await {
+                Frame::Event(ClientEvent::Error { kind, message }) => {
+                    assert!(matches!(kind, ErrorKindDto::Rejected));
+                    assert_eq!(message.display(), "policyHelpers.linux");
+                    saw_refusal = true;
+                }
+                Frame::Event(ClientEvent::SlashCommandResult {
+                    turn_id,
+                    display,
+                    is_error,
+                }) => {
+                    assert_eq!(turn_id, Some(703));
+                    assert_eq!(display.display(), "policyHelpers.linux");
+                    assert!(is_error);
+                    saw_slash_terminal = true;
+                }
+                frame => panic!("unexpected frame for canceled slash: {frame:?}"),
+            }
+        }
+        assert!(saw_refusal, "the existing generic refusal remains visible");
+        assert!(
+            saw_slash_terminal,
+            "the slash request receives a correlated terminal result"
+        );
 
         let task = connection
             .active_turn_task
@@ -6405,6 +6584,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/origin".into(),
+                images: Vec::new(),
                 turn_id: None,
             })
             .await;
@@ -6459,6 +6639,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/clear".into(),
+                images: Vec::new(),
                 turn_id: None,
             })
             .await;
@@ -6625,6 +6806,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/loop 5m /babysit-prs".into(),
+                images: Vec::new(),
                 turn_id: Some(41),
             })
             .await;
@@ -6637,6 +6819,59 @@ mod tests {
         assert!(
             !routed.load(Ordering::SeqCst),
             "a RunAsTurn result must NOT take the display-only route fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_slash_command_run_as_turn_preserves_inline_images() {
+        let captured = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(BatchRecordingDriver {
+            captured: captured.clone(),
+            notify: notify.clone(),
+        });
+        let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
+            result: lingxi_core::host::SlashDispatchResult::RunAsTurn {
+                prompt: "EXPANDED /inspect prompt".into(),
+            },
+            routed: Arc::new(AtomicBool::new(false)),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new()
+            .bind(gate, driver)
+            .bind_router(router);
+        let wire_images = vec![ImageRefDto {
+            media_type: "image/png".into(),
+            base64: "cG5nLWltYWdl".into(),
+        }];
+
+        connection
+            .dispatch(ClientCommand::RunSlashCommand {
+                raw: "/inspect".into(),
+                images: wire_images,
+                turn_id: Some(42),
+            })
+            .await;
+        notify.notified().await;
+        join_active_slash_task(&connection).await;
+
+        let inputs = captured
+            .lock()
+            .await
+            .clone()
+            .expect("turn driver must capture the input batch");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(
+            inputs[0].text.string_at(""),
+            Some("EXPANDED /inspect prompt")
+        );
+        assert_eq!(
+            inputs[0].images,
+            vec![lingxi_core::types::ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: "cG5nLWltYWdl".into(),
+            }],
+            "RunSlashCommand's ordered wire image is carried into the model batch"
         );
     }
 
@@ -6669,6 +6904,7 @@ mod tests {
         connection
             .dispatch(ClientCommand::RunSlashCommand {
                 raw: "/help".into(),
+                images: Vec::new(),
                 turn_id: Some(42),
             })
             .await;

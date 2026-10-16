@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { SessionRuntime } from '../src/main/bridge.js';
 
 const session = { access_token: 'test-private-token', expires_at: 123, fedramp: false };
-const command = { type: 'run_slash_command', raw: '/fusion compare approaches' };
+const command = { type: 'run_slash_command', raw: '/fusion compare approaches', images: [] };
 function fixture(resolveOpenAiOAuth = async () => session as typeof session | undefined) {
   const calls: string[] = [];
   const failures: Array<{ raw: string; error: string }> = [];
@@ -84,8 +84,8 @@ test('Fusion records missing OAuth without starting a run', async () => {
 
 test('Fusion setup and publication retry bypass OAuth activation and commit their persisted messages', async () => {
   const { runtime, calls } = fixture(async () => { throw new Error('must not load'); });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup' });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --retry-publication saved' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup', images: [] });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --retry-publication saved', images: [] });
   assert.deepEqual(calls, ['old:run_slash_command', 'commit', 'old:run_slash_command']);
 });
 
@@ -112,7 +112,7 @@ test('Fusion resolves the chosen scoped strategy before credentials and fences d
       }));
     }
   };
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --strategy project:review inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --strategy project:review inspect', images: [] });
   assert.deepEqual(calls, ['key:deepseek', 'commit']);
   assert.equal(sent.at(-1).raw, '/fusion --strategy-revision abcd --strategy project:review inspect');
   assert.equal(client.listenerCount('event'), 0);
@@ -153,7 +153,7 @@ test('Fusion fast preset never activates OAuth for a configured tail model that 
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {
     panelModels: [{ profile: 'deepseek', model: 'a' }, { profile: 'kimi', model: 'b' }, { profile: 'openai-chatgpt', model: 'c' }], analystModel: { profile: 'deepseek', model: 'judge' },
   } });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --fast inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --fast inspect', images: [] });
   assert.deepEqual(calls, ['key:deepseek', 'key:kimi', 'old:run_slash_command', 'commit']);
 });
 
@@ -162,7 +162,7 @@ test('Fusion explicit models hydrate their own profiles plus the analyst, exclud
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {
     panelModels: [{ profile: 'openai-chatgpt', model: 'stored' }], analystModel: { profile: 'deepseek', model: 'judge' },
   } });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models deepseek:a,kimi:b inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models deepseek:a,kimi:b inspect', images: [] });
   assert.deepEqual(calls, ['key:deepseek', 'key:kimi', 'old:run_slash_command', 'commit']);
 });
 
@@ -171,7 +171,7 @@ test('Fusion explicit OAuth model activates authentication even when it is outsi
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {
     panelModels: [{ profile: 'kimi', model: 'stored' }], analystModel: { profile: 'deepseek', model: 'judge' },
   } });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models openai-chatgpt:chosen,deepseek:a inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models openai-chatgpt:chosen,deepseek:a inspect', images: [] });
   assert.deepEqual(calls, ['oauth', 'key:deepseek', 'old:run_slash_command', 'commit']);
 });
 
@@ -193,7 +193,7 @@ test('bare Fusion model ids hydrate the captured conversation profile and ignore
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {
     panelModels: [{ profile: 'openai-chatgpt', model: 'stored' }], analystModel: { profile: 'deepseek', model: 'judge' },
   } });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models a,b inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models a,b inspect', images: [] });
   assert.deepEqual(calls, ['key:kimi', 'key:deepseek', 'old:run_slash_command', 'commit']);
   assert.equal(catalogRequests, 2, 'current profile is confirmed before and after credential preparation');
 });
@@ -205,7 +205,7 @@ test('a changed conversation profile cannot dispatch a bare Fusion model roster 
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {
     analystModel: { profile: 'deepseek', model: 'judge' },
   } });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models a,b inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models a,b inspect', images: [] });
   assert.deepEqual(calls, ['key:kimi', 'key:deepseek', 'record', 'commit']);
   assert.match(failures[0]!.error, /conversation model changed/);
   assert.equal(state.pendingPromptHydrations.size, 0);
@@ -217,7 +217,7 @@ test('bare Fusion model profile remains valid while shared OAuth is served', asy
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {
     analystModel: { profile: 'deepseek', model: 'judge' },
   } });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models openai-chatgpt:chosen,a inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models openai-chatgpt:chosen,a inspect', images: [] });
   assert.deepEqual(calls, ['oauth', 'key:deepseek', 'old:run_slash_command', 'commit']);
 });
 
@@ -227,7 +227,7 @@ test('Fusion malformed flags and credential failures use record-only dispatch wi
     state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa',
       config: { panelModels: [{ profile: 'deepseek', model: 'a' }] } });
     state.opts.resolveProviderCredential = async () => { throw new Error('Selected credential is unavailable'); };
-    await runtime.dispatchCommand({ type: 'run_slash_command', raw });
+    await runtime.dispatchCommand({ type: 'run_slash_command', raw, images: [] });
     assert.deepEqual(calls, ['record', 'commit']);
     assert.equal(failures.length, 1);
     assert.equal(failures[0]!.raw, raw);
@@ -248,7 +248,7 @@ test('bare Fusion models retain a custom parent profile named claude', async () 
   state.credentialRoutingSettings = { providers: { claude: { models: ['current', 'a', 'b'] } } };
   runtime.scheduledModelCatalog = async () => ({ type: 'model_list', models: [], current: 'claude/current' });
   state.resolveFusionStrategy = async () => ({ reference: { scope: 'user', id: 'review' }, name: 'Review', revision: 'aa', config: {} });
-  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models a,b inspect' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --models a,b inspect', images: [] });
   assert.deepEqual(calls, ['key:claude', 'old:run_slash_command', 'commit']);
 });
 

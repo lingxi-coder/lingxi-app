@@ -471,6 +471,12 @@ function validateDisabledReason(v: unknown): void {
   if ('message' in o) assert.ok(isString(o['message']));
 }
 
+function validateImageRef(value: unknown): void {
+  const image = rec(value);
+  assert.ok(isString(image['media_type']));
+  assert.ok(isString(image['base64']));
+}
+
 function validateReasoningSelection(v: unknown): void {
   const o = rec(v);
   switch (o['type']) {
@@ -897,6 +903,8 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'run_slash_command':
       assert.ok(isString(o['raw']));
+      assert.ok(Array.isArray(o['images']));
+      for (const image of o['images'] as unknown[]) validateImageRef(image);
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
       break;
     case 'refresh_listings':

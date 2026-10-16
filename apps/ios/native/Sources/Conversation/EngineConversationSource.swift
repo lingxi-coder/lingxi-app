@@ -1191,6 +1191,7 @@ final class EngineConversationSource: ConversationSource {
     private func startSlashCommand(
         raw: ClientTextDto,
         displayRaw: String,
+        images: [ImageRefDto],
         turnId: UInt64
     ) -> ConversationTurnToken {
         model.notice = nil
@@ -1216,7 +1217,7 @@ final class EngineConversationSource: ConversationSource {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.submitCommand(.runSlashCommand(raw: raw.clientTextDto, turnId: turnId))
+                try await self.submitCommand(.runSlashCommand(raw: raw.clientTextDto, images: images, turnId: turnId))
             } catch {
                 guard self.activeConversationTurnToken == token else { return }
                 self.fail(.host, "\(error)")
@@ -1338,6 +1339,7 @@ final class EngineConversationSource: ConversationSource {
             return startSlashCommand(
                 raw: ClientTextDto(codeUnits: rawUnits),
                 displayRaw: trimmed,
+                images: images,
                 turnId: turnId
             )
         }

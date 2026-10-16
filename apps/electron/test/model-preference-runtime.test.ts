@@ -131,19 +131,19 @@ test('explicit /model persists only on confirmation, including reselecting the c
     const events: any[] = [];
     (instance as any).broadcastClientEvent = (event: unknown) => events.push(event);
     client.emit('event', { type: 'model_changed', model: 'current-model' });
-    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model current-model ' });
+    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model current-model ', images: [] });
     await tick();
-    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'run_slash_command', raw: '/model current-model ' }]);
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'run_slash_command', raw: '/model current-model ', images: [] }]);
     assert.equal(store.getPublic().model, 'old-model');
     assert.ok(!events.some(event => event.type === 'slash_command_result'));
-    await assert.rejects(instance.dispatchCommand({ type: 'run_slash_command', raw: '/model' }), /already in progress/);
+    await assert.rejects(instance.dispatchCommand({ type: 'run_slash_command', raw: '/model', images: [] }), /already in progress/);
     client.emit('event', { type: 'slash_command_result', display: 'Switched', is_error: false });
     client.emit('event', { type: 'model_list', current: 'provider/current-model', models: ['provider/current-model'] });
     await selecting;
     assert.equal(new SettingsStore(dir).getPublic().model, 'provider/current-model');
     assert.ok(events.some(event => event.type === 'slash_command_result' && !event.is_error));
-    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/model' });
-    assert.deepEqual(commands.at(-1), { type: 'run_slash_command', raw: '/model' });
+    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/model', images: [] });
+    assert.deepEqual(commands.at(-1), { type: 'run_slash_command', raw: '/model', images: [] });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('a late side-question reply cannot complete or reject a pending slash model switch', async () => {
@@ -151,8 +151,8 @@ test('a late side-question reply cannot complete or reject a pending slash model
   try {
     const store = new SettingsStore(dir); store.setLastModel('old-model');
     const { instance, client, commands } = runtime(store);
-    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/btw progress?', turn_id: 41 });
-    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model next-model', turn_id: 42 });
+    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id: 41 });
+    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model next-model', images: [], turn_id: 42 });
     await tick();
     for (const is_error of [true, false]) {
       client.emit('event', { type: 'slash_command_result', turn_id: 41, display: 'Side answer', is_error });
@@ -173,8 +173,8 @@ test('side-question dispatch and replies preserve main turn ownership', async ()
   try {
     const { instance, client, commands } = runtime(new SettingsStore(dir));
     client.emit('event', { type: 'turn_started', turn_id: 7 });
-    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/btw progress?', turn_id: 42 });
-    assert.deepEqual(commands, [{ type: 'run_slash_command', raw: '/btw progress?', turn_id: 42 }]);
+    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id: 42 });
+    assert.deepEqual(commands, [{ type: 'run_slash_command', raw: '/btw progress?', images: [], turn_id: 42 }]);
     for (const is_error of [true, false]) {
       client.emit('event', { type: 'slash_command_result', turn_id: 42, display: 'Side answer', is_error });
       assert.equal(instance.turnActive, true);
@@ -192,7 +192,7 @@ test('rejected explicit /model never saves or reports success', async () => {
     const { instance, client } = runtime(store);
     const events: any[] = [];
     (instance as any).broadcastClientEvent = (event: unknown) => events.push(event);
-    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model forbidden-model' });
+    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model forbidden-model', images: [] });
     await tick();
     client.emit('event', { type: 'slash_command_result', display: 'Could not switch model: blocked by hook', is_error: false });
     client.emit('event', { type: 'model_list', current: 'old-model', models: ['old-model'] });

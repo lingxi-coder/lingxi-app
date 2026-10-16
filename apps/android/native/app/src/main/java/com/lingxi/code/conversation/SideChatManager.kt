@@ -38,7 +38,12 @@ internal class SideChatManager(private val scope: CoroutineScope) {
     private fun notifyVacant() {
         if (!hasLiveChats) whenVacant?.also { whenVacant = null }?.invoke()
     }
-    fun create(parent: EngineConversationSource, input: String, restore: () -> Unit) {
+    fun create(
+        input: String,
+        draftOnFailure: String?,
+        newSource: () -> SideChatSource,
+        restore: () -> Unit,
+    ) {
         failedDraft.value = null
         error.value = null
         creating++
@@ -47,8 +52,9 @@ internal class SideChatManager(private val scope: CoroutineScope) {
         val foregroundToken = foreground.capture()
         scope.launch {
             withContext(NonCancellable) {
-                val source = parent.newSideChatSource()
+                var pendingSource: SideChatSource? = null
                 try {
+                    val source = newSource().also { pendingSource = it }
                     source.create(UUID.randomUUID().toString())
                     if (generation != originalGeneration) { source.end(); return@withContext }
                     val entry = SideChatEntry(source, ChatViewModel(source))
@@ -63,9 +69,9 @@ internal class SideChatManager(private val scope: CoroutineScope) {
                         else entry.draft.value = input
                     }
                 } catch (failure: Throwable) {
-                    source.close()
+                    pendingSource?.close()
                     error.value = failure.message ?: "Unable to create side chat"
-                    failedDraft.value = if (input.isEmpty()) "/side" else "/side $input"
+                    failedDraft.value = draftOnFailure
                     restore()
                 } finally {
                     creating--

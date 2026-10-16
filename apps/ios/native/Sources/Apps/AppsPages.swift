@@ -617,7 +617,7 @@ struct AppRuntimeView: View {
     private var chatID: String? { AppsModel.chatAppID(of: appId) }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
             t.windowBg.ignoresSafeArea()
             if let webView {
                 HostedWebView(webView: webView)
@@ -633,7 +633,15 @@ struct AppRuntimeView: View {
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            capsule.padding(.top, 6).padding(.trailing, 10)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack {
+                Spacer()
+                capsule
+            }
+            .padding(.vertical, 6)
+            .padding(.trailing, 10)
+            .background(t.windowBg)
         }
         .task(id: appId) {
             let link = $externalURL
@@ -680,6 +688,7 @@ struct AppRuntimeView: View {
         } message: { url in
             Text(String(localized: "apps_external_link_body \(url.absoluteString)"))
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("app-runtime")
     }
 
@@ -692,7 +701,7 @@ struct AppRuntimeView: View {
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.subheadline.weight(.bold))
-                        .frame(width: 46, height: 32)
+                        .frame(width: 46, height: 44)
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel(String(localized: "composer_more"))
@@ -702,12 +711,13 @@ struct AppRuntimeView: View {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.subheadline.weight(.semibold))
-                    .frame(width: 46, height: 32)
+                    .frame(width: 46, height: 44)
                     .contentShape(Rectangle())
             }
             .accessibilityLabel(String(localized: "common_close"))
             .accessibilityIdentifier("app-runtime.close")
         }
+        .buttonStyle(.plain)
         .foregroundStyle(t.text)
         .background(t.surface.opacity(0.92), in: Capsule())
         .overlay(Capsule().stroke(t.border, lineWidth: 0.5))

@@ -13,7 +13,6 @@ import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.ProviderConnection
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
-import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
@@ -242,10 +241,9 @@ class ProviderSettingsRepository(
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val secureKeyStore = SecureKeyStore.create(appContext)
 
     fun loadProviderState(): Triple<List<GenericProvider>, List<GenericProvider>, List<GenericProvider>> {
-        val llm = decodeProviders(PREF_LLM).ifEmpty { seedLegacyAnthropicIfPresent() }
+        val llm = decodeProviders(PREF_LLM)
         val search = decodeProviders(PREF_SEARCH)
         val fetch = decodeProviders(PREF_FETCH)
         return Triple(llm, search, fetch)
@@ -305,12 +303,7 @@ class ProviderSettingsRepository(
                 storageEncrypted = false,
                 error = "provider ${provider.preset} is not supported by the built-in mobile catalog",
             )
-        val snapshot = credentialClient.set(credentialId, secret)
-        if (snapshot.error == null && provider.preset == "anthropic") {
-            secureKeyStore?.setApiKey(secret)
-            secureKeyStore?.setApiBase(provider.url)
-        }
-        return snapshot
+        return credentialClient.set(credentialId, secret)
     }
 
     suspend fun deleteCredential(provider: GenericProvider): ProviderCredentialSnapshot {
@@ -321,12 +314,7 @@ class ProviderSettingsRepository(
                 storageEncrypted = false,
                 error = "provider ${provider.preset} is not supported by the built-in mobile catalog",
             )
-        val snapshot = credentialClient.delete(credentialId)
-        if (snapshot.error == null && provider.preset == "anthropic") {
-            secureKeyStore?.setApiKey("")
-            secureKeyStore?.setApiBase(provider.url)
-        }
-        return snapshot
+        return credentialClient.delete(credentialId)
     }
 
     suspend fun testConnection(
@@ -732,34 +720,6 @@ class ProviderSettingsRepository(
         ProviderKind.Llm -> PREF_LLM
         ProviderKind.Search -> PREF_SEARCH
         ProviderKind.Fetch -> PREF_FETCH
-    }
-
-    private fun seedLegacyAnthropicIfPresent(): List<GenericProvider> {
-        val storedKey = secureKeyStore?.apiKey().orEmpty()
-        if (storedKey.isBlank()) return emptyList()
-        return listOf(
-            GenericProvider(
-                id = "l_anthropic",
-                preset = "anthropic",
-                name = "Anthropic",
-                url = secureKeyStore?.apiBase().orEmpty().ifBlank { "https://api.anthropic.com" },
-                key = "",
-                // Derived from the preset, never hardcoded: this value becomes
-                // the engine's `default_model`, and a non-curated id
-                // (`traits::is_curated_model`) is registered only because it is
-                // the configured default, so the picker renders it as a stray
-                // row above the real Anthropic shortlist.
-                model = ProviderKind.Llm.presets
-                    .firstOrNull { it.id == "anthropic" }
-                    ?.models
-                    ?.firstOrNull()
-                    .orEmpty(),
-                status = ConnStatus.Configured,
-                isDefault = true,
-                enabled = true,
-                credentialConfigured = true,
-            ),
-        )
     }
 
     private fun decodeProviders(key: String): List<GenericProvider> {

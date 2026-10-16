@@ -24,11 +24,10 @@ import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.project.ProjectWorkspace
-import com.lingxi.code.secure.SecureKeyStore
-import com.lingxi.code.secure.resolveEngineCredentials
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -564,27 +563,19 @@ class EngineConversationSource private constructor(
             // folds every inbound `McpServers` into this StateFlow; empty until a
             // `RefreshListings(Mcp)` reply lands (settings shows the mock list).
             val mcp = MutableStateFlow(emptyList<MCPServer>())
-            // Credentials: the encrypted-at-rest SecureKeyStore FIRST (the shipped
-            // app's source of truth — SHIP-BLOCKER #1), falling back to the process
-            // environment as a dev override. A shipped mobile app has no process
-            // env, so the key normally comes from the secure store the Settings
-            // screen writes; ANTHROPIC_API_KEY only ever overrides on a dev host.
-            val store = SecureKeyStore.create(context)
-            val creds = resolveEngineCredentials(
-                storedKey = store?.apiKey() ?: "",
-                storedBase = store?.apiBase() ?: "",
-                env = System.getenv(),
-            )
+            // Persisted secrets are resolved from the Rust shared secure store;
+            // these scalar values remain only as explicit development overrides.
+            val environment = resolveEngineEnvironmentOverrides(System.getenv())
             val providerLaunch = ProviderSettingsRepository(context).engineLaunchConfig()
             val handle = buildVoiceEngine(
                 context = context,
-                apiBase = creds.apiBase,
-                apiKey = creds.apiKey,
-                // Empty `creds.model` → the engine starts on MobileConfig.default_model
-                // (a real Anthropic wire id), never a branded `lx-*` mock id. A
+                apiBase = environment.apiBase,
+                apiKey = environment.apiKey,
+                // Empty environment model → use the current provider setting,
+                // which is a real wire id rather than a branded `lx-*` mock id.
                 // The shared engine restores the last confirmed model for an
                 // interactive launch; this is the provider fallback for new installs.
-                model = creds.model.ifBlank { providerLaunch.defaultModel },
+                model = environment.model.ifBlank { providerLaunch.defaultModel },
                 providerProfilesJson = providerLaunch.providerProfilesJson,
                 routingJson = providerLaunch.routingJson,
                 visionDelegationEnabled = providerLaunch.visionDelegationEnabled,

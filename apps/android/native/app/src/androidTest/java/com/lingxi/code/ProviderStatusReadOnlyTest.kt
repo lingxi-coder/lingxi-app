@@ -6,7 +6,6 @@ import android.content.SharedPreferences
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
-import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.settings.ProviderConnectionTestResult
 import com.lingxi.code.settings.ProviderCredentialClient
 import com.lingxi.code.settings.ProviderCredentialSnapshot
@@ -14,22 +13,18 @@ import com.lingxi.code.settings.ProviderSettingsRepository
 import java.lang.reflect.Proxy
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class ProviderStatusReadOnlyTest {
     @Test
-    fun repeatedRefreshOnlyListsCredentialsEvenWhenLegacyKeyExists() = runBlocking {
-        // The old-key fixture lives in memory, without changing user preferences.
+    fun repeatedRefreshOnlyReadsTheCurrentCredentialStore() = runBlocking {
+        // Keep provider settings isolated from the installed app's preferences.
         val context = object : ContextWrapper(InstrumentationRegistry.getInstrumentation().targetContext) {
             private val preferences = mutableMapOf<String, SharedPreferences>()
             override fun getApplicationContext(): Context = this
             override fun getSharedPreferences(name: String, mode: Int): SharedPreferences =
                 preferences.getOrPut(name) { memoryPreferences() }
         }
-        val legacy = SecureKeyStore.create(context)
-        assertNotNull("Encrypted preference fixture must be available", legacy)
-        legacy!!.setApiKey("status-refresh-legacy-fixture")
         val queries = mutableListOf<List<String>>()
         val client = object : ProviderCredentialClient {
             override suspend fun list(providerIds: List<String>): ProviderCredentialSnapshot {
@@ -56,7 +51,6 @@ class ProviderStatusReadOnlyTest {
             }
         }
         assertEquals(List(3) { listOf("anthropic") }, queries)
-        assertEquals("status-refresh-legacy-fixture", legacy.apiKey())
     }
 
     private fun memoryPreferences(): SharedPreferences {

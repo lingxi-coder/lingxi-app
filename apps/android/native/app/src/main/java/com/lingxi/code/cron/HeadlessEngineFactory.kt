@@ -5,15 +5,14 @@ import android.util.Log
 import com.lingxi.code.bindings.android.AndroidLaunchModeFfi
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.project.ProjectWorkspace
-import com.lingxi.code.secure.SecureKeyStore
-import com.lingxi.code.secure.resolveEngineCredentials
 import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.voice.resolveEngineEnvironmentOverrides
 
 /**
  * Builds a NO-UI [MobileEngineHandle] for the cron background path — the same
- * engine the foreground app builds (shared `SecureKeyStore` credentials and
- * a validated per-project or managed no-project execution workspace), but
+ * engine the foreground app builds (current provider settings plus the Rust
+ * shared credential store, and a validated execution workspace), but
  * with discarding event / permission sinks because a fired cron job runs
  * headless: its result comes back from the single-task cron FFI, not from
  * streamed events. Rust immediately denies any permission that was not already
@@ -36,18 +35,13 @@ object HeadlessEngineFactory {
     /** Build a transient headless engine, or `null` if unavailable. */
     fun build(context: Context, scope: CronScope = CronScope.global(context)): MobileEngineHandle? {
         val appContext = context.applicationContext
-        val store = SecureKeyStore.create(appContext)
-        val creds = resolveEngineCredentials(
-            storedKey = store?.apiKey() ?: "",
-            storedBase = store?.apiBase() ?: "",
-            env = System.getenv(),
-        )
+        val environment = resolveEngineEnvironmentOverrides(System.getenv())
         val providerLaunch = ProviderSettingsRepository(appContext).engineLaunchConfig()
         return buildVoiceEngine(
             context = appContext,
-            apiBase = creds.apiBase,
-            apiKey = creds.apiKey,
-            model = creds.model.ifBlank { providerLaunch.defaultModel },
+            apiBase = environment.apiBase,
+            apiKey = environment.apiKey,
+            model = environment.model.ifBlank { providerLaunch.defaultModel },
             providerProfilesJson = providerLaunch.providerProfilesJson,
             routingJson = providerLaunch.routingJson,
             visionDelegationEnabled = providerLaunch.visionDelegationEnabled,

@@ -14,9 +14,8 @@
 - Android rootfs：`3.24.2-user1`，arm64 与 x86_64 均完成归档、清单、APK closure 校验。
 - ARM 归档 SHA-256：`043363aa7a21ff3b3095652de2849d9d6a3a2546fc8012c082383dfed32a37a8`。
 - x86_64 归档 SHA-256：`d1aeaf2611692032f688c6eee5484234adca332033b0466b4771e7273fc93685`。
-- rootfs 与 Maven 产物只在本地构建、暂存，尚未发布远端 Release。
-  固定依赖提交随本次三个仓库的 main 一同交付；新 rootfs 归档仍需本地构建或另行发布。
-  现有远端 rootfs 下载配置仍指向此前 Release，不能据此下载新候选归档。
+- SDK 与默认用户 rootfs 通过 `v0.1.0-rc.3` 发布；固定依赖提交已交付 main。
+  产品下载入口与清机构建说明见 [从发布构建](build-from-release.md)。
 
 ## 已通过的验证
 
@@ -61,7 +60,7 @@
 iOS XCUITest 启动器在用例执行前与 Xcode 握手失败（DTX / runner code 74），两版本 Xcode 交叉检查仍复现；该自动 UI 用例没有通过。实际产品冷启动与终端界面改由公开深链接加 iPhone Mirroring 检查完成，身份与跨进程持久化输出均已目视确认。镜像鼠标注入也报 noWindowsAvailable，因此不声称通过侧栏逐步点击或键盘输入验收。
 
 真实引擎回调测试使用空凭据，验证本地命令、目录、配置与终止事件；本记录不声称在线 LLM 生成或所有产品功能已全面回归。
-本地产物用于开发与真机验收，未发布远端 Release；源代码通过三个仓库的 main 交付。iOS 本地 FFI framework 包含 device arm64 与 simulator arm64，NativeSupport 保留完整平台切片；未生成新的 Intel simulator FFI 发行切片。
+此前本地产物用于开发与真机验收；随后以同一 SDK 源码构建 Release SDK，连同默认用户 rootfs 发布为 RC3。源代码通过 main 交付。iOS 本地 FFI framework 包含 device arm64 与 simulator arm64，NativeSupport 保留完整平台切片；未生成新的 Intel simulator FFI 发行切片。
 
 ## 本地证据
 

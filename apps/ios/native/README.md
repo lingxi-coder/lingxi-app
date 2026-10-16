@@ -1,5 +1,7 @@
 # 灵犀 Code · iPhone (SwiftUI)
 
+Current SDK/rootfs release and clean-machine build steps: [build from RC3](../../../docs/mobile-linux/build-from-release.md).
+
 A native SwiftUI recreation of the LingXi Code iPhone design prototype
 (`apps/.design-reference/project/lingxi-iphone.html`). The conversation
 surface drives the real in-process engine over UniFFI (M10-P3a) through a

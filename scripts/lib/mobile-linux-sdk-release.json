@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "tag": "v0.1.0-rc.3",
+  "sdk_source_revision": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+  "assets": {
+    "android_native": {
+      "name": "mobile-linux-android-native-support-0.1.0-rc.3.zip",
+      "sha256": "01b7bcf4bde183f4c6347707e6ba90101c6389fc68e9ca517849cf049f518cc5"
+    },
+    "android_maven": {
+      "name": "mobile-linux-native-maven-0.1.0-rc.3.zip",
+      "sha256": "977b84dfd6381cbfe0789fb44c11cf115bd47d4e1e096c50151b6c4e588794c3"
+    },
+    "ios_native": {
+      "name": "MobileLinuxNativeSupport-0.1.0-rc.3.xcframework.zip",
+      "sha256": "ad75d649565de57209827c9e8bf4f8bc7b8cc9371030f0b8b42d2ce634203264"
+    },
+    "ios_rootfs": {
+      "name": "mobile-linux-rootfs-ios-arm64-v3.24.2-user1.zip",
+      "sha256": "99e5efffebc4d0ffa1dc64d2448a02327945d4f53cf6b975f98f634c700be891"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "source": "llm-client/data/providers",
+  "revision": "24f49956b8130ee187c2d0b6ce011015bdbb7c29",
+  "workingTreeChanges": false,
+  "sourceSha256": "e7abd842ee1cf6ea61d29cd0ef61f0fd1ec31a3652a6ec9cd6a1ef3fbf2ad84a",
+  "seedSha256": "b6aec2f771b4e8db0f6a49de27dd97831f0ccbc156f087ae31df657c85d4fd5a",
+  "providers": 46,
+  "models": 1327
+}

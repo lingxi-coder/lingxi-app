@@ -158,6 +158,7 @@ export function PublicLayout({
           <RouteLink href="/download">Download</RouteLink>
           <RouteLink href="/pricing">Pricing</RouteLink>
           <RouteLink href="/docs">Docs</RouteLink>
+          <RouteLink href="/admin/models">{locale === 'zh' ? '模型管理' : 'Model administration'}</RouteLink>
           <RouteLink href="/login">Console</RouteLink>
         </div>
       </footer>

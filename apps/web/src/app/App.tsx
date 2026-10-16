@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { ConsoleLayout } from '../layouts/ConsoleLayout';
 import { DocsPage } from '../pages/DocsPage';
 import { PrivacyPage, DataDeletionPage } from '../pages/PrivacyPage';
@@ -15,6 +15,8 @@ import { detectInitialRegion, Locale, Region } from '../utils/locale';
 import { usePersistentState } from './usePersistentState';
 import { useRouter } from './router';
 import { useTheme } from './useTheme';
+
+const AdminModelsPage = lazy(() => import('../pages/AdminModelsPage'));
 
 export function App() {
   const route = useRouter();
@@ -52,6 +54,8 @@ export function App() {
     onLocaleChange: setLocale,
     onRegionChange: setRegion,
   };
+
+  if (route === '/admin/models') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载管理后台…' : 'Loading administration…'}</main>}><AdminModelsPage locale={locale} /></Suspense>;
 
   if (route === '/docs' || route.startsWith('/docs/')) {
     return (

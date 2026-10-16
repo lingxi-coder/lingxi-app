@@ -6,12 +6,13 @@ import Security
 final class FakeKeychain: @unchecked Sendable {
     private let lock = NSLock()
     private var payload: Data? = Data("old-fake-secret".utf8)
+    private var mutations = 0
     private var blockNextRead = true
     let readStarted = DispatchSemaphore(value: 0)
     let releaseRead = DispatchSemaphore(value: 0)
     let deleteStarted = DispatchSemaphore(value: 0)
 
-    func read(_ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+    func read(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
         lock.lock()
         let value = payload
         let shouldBlock = blockNextRead
@@ -22,14 +23,25 @@ final class FakeKeychain: @unchecked Sendable {
             precondition(releaseRead.wait(timeout: .now() + 5) == .success, "test read was never released")
         }
         guard let value else { return errSecItemNotFound }
-        result?.pointee = value as CFData
+        let attributes = query as NSDictionary
+        if attributes[kSecReturnAttributes] as? Bool == true {
+            result?.pointee = [[kSecAttrAccount as String: "anthropic"]] as CFArray
+        } else {
+            result?.pointee = value as CFData
+        }
         return errSecSuccess
+    }
+
+    func snapshot() -> (Data?, Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (payload, mutations)
     }
 
     func delete() -> OSStatus {
         deleteStarted.signal()
         lock.lock()
         defer { lock.unlock() }
+        mutations += 1
         payload = nil
         return errSecSuccess
     }
@@ -37,6 +49,7 @@ final class FakeKeychain: @unchecked Sendable {
     func update(_ attributes: CFDictionary, insert: Bool) -> OSStatus {
         lock.lock()
         defer { lock.unlock() }
+        mutations += 1
         if !insert && payload == nil { return errSecItemNotFound }
         payload = (attributes as NSDictionary)[kSecValueData] as? Data
         return errSecSuccess
@@ -46,7 +59,7 @@ final class FakeKeychain: @unchecked Sendable {
 let fakeKeychain = FakeKeychain()
 
 func SecItemCopyMatching(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
-    fakeKeychain.read(result)
+    fakeKeychain.read(query, result)
 }
 func SecItemDelete(_ query: CFDictionary) -> OSStatus { fakeKeychain.delete() }
 func SecItemUpdate(_ query: CFDictionary, _ attributes: CFDictionary) -> OSStatus {
@@ -70,7 +83,7 @@ struct CredentialStoreRegression {
         let store = CredentialStore(manifest: BrokerManifest(version: "test", protocolVersion: 1, channel: "development"))
         let service = "com.lingxi.provider-credentials.v1.development"
         func request(_ op: String, payload: String? = nil) -> BrokerRequest {
-            BrokerRequest(op: op, service: service, account: "openai", payload: payload)
+            BrokerRequest(op: op, service: service, account: "anthropic", payload: payload)
         }
         let retrieval = Task.detached { await store.handle(request("retrieve")) }
         let readStarted = await waitForSignal(fakeKeychain.readStarted, seconds: 5)
@@ -96,6 +109,19 @@ struct CredentialStoreRegression {
         let stored = await store.handle(request("store", payload: "new-fake-secret"))
         let replacement = await store.handle(request("retrieve"))
         precondition(stored.ok && replacement.payload == "new-fake-secret")
+        let beforeRefresh = fakeKeychain.snapshot()
+        for _ in 0..<3 {
+            let listed = await store.handle(BrokerRequest(op: "list", service: service, account: nil, payload: nil))
+            let anthropicPreview = await store.handle(BrokerRequest(op: "preview", service: service, account: "anthropic", payload: nil))
+            let contains = await store.handle(BrokerRequest(op: "contains", service: service, account: "anthropic", payload: nil))
+            precondition(listed.ok && listed.accounts == ["anthropic"])
+            precondition(anthropicPreview.ok && anthropicPreview.present == true)
+            precondition(contains.ok && contains.present == true)
+        }
+        let afterRefresh = fakeKeychain.snapshot()
+        precondition(beforeRefresh.0 == afterRefresh.0 && beforeRefresh.1 == afterRefresh.1,
+                     "Anthropic status refresh must not modify or rewrite Keychain records")
+        print("Anthropic status/list/preview checks remained read-only")
         let deletedAgain = await store.handle(request("delete"))
         let preview = await store.handle(request("preview"))
         precondition(deletedAgain.ok && preview.present == false && preview.payload == nil)

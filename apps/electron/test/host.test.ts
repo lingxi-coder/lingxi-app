@@ -1029,6 +1029,11 @@ test('provider credential IPC uses the broker path, hot-syncs cached sessions, a
   });
   assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
 
+  for (let refresh = 0; refresh < 3; refresh += 1) {
+    await credentials!({ sender, senderFrame: frame }, 'anthropic');
+  }
+  assert.deepEqual(operations, [], 'repeated status/preview requests must not write broker or runtime credentials');
+
   const setCredential = handlers.get(CH_PROVIDER_CREDENTIAL_SET);
   const clearCredential = handlers.get(CH_PROVIDER_CREDENTIAL_CLEAR);
   assert.ok(setCredential);

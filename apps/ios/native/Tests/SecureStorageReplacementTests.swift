@@ -5,6 +5,19 @@ import XCTest
 @testable import LingxiCode
 
 final class SecureStorageReplacementTests: XCTestCase {
+    func testRepeatedAnthropicReadsNeverRewriteExistingKeychainRecord() async throws {
+        let original = Data("existing-anthropic-credential-record".utf8)
+        let backend = FakeSecureStorageKeychainBackend(payload: original)
+        let store = SecureStorageImpl(backend: backend)
+
+        for _ in 0..<3 {
+            let retrieved = try await store.retrieve(service: "lingxi", account: "anthropic-api-key")
+            XCTAssertEqual(retrieved, original)
+        }
+
+        XCTAssertEqual(backend.calls, ["retrieve", "retrieve", "retrieve"])
+    }
+
     func testReplacementFailurePreservesExistingRecord() async throws {
         let original = Data("original-record".utf8)
         let backend = FakeSecureStorageKeychainBackend(

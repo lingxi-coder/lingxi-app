@@ -114,7 +114,7 @@ class ChatViewModel(
     internal fun createSideChat() {
         if (sideChats.isCreating.value) return
         val parent = source as? EngineConversationSource ?: return
-        sideChats.create(parent, "") {
+        sideChats.create(input = "", draftOnFailure = null, newSource = parent::newSideChatSource) {
             reportHostError(sideChats.error.value ?: "Unable to create side chat")
         }
     }
@@ -2060,7 +2060,7 @@ class ChatViewModel(
                 reportHostError(strings.resolve(R.string.side_chat_nested_unavailable, "旁聊中无法创建新的旁聊"))
                 return
             }
-            sideChats.create(parent, input) {
+            sideChats.create(input = input, draftOnFailure = text, newSource = parent::newSideChatSource) {
                 onDraftChanged(text)
                 reportHostError(sideChats.error.value ?: "Unable to create side chat")
             }

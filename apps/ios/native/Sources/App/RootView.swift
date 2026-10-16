@@ -351,12 +351,9 @@ struct RootView: View {
         @Bindable var navigation = navigation
         return GeometryReader { geometry in
           ZStack {
-            // Sidebar + chat. In compact width this collapses to a stack whose
-            // root is the sidebar: the system back button/back-swipe opens it,
-            // while Drawer closes it through the preferred-column binding.
-            NavigationSplitView(
-                columnVisibility: $navigation.columnVisibility,
-                preferredCompactColumn: $navigation.compactColumn
+            AdaptiveConversationSidebar(
+                navigation: navigation,
+                gesturesEnabled: app.setupDone && navigation.path.isEmpty
             ) {
                 sidebar
                     .id(localization.language)
@@ -397,12 +394,23 @@ struct RootView: View {
                             .background(theme.windowBg)
                         }
                     }
+                        .toolbar {
+                            if (UIDevice.current.userInterfaceIdiom == .phone || geometry.size.width < 840) && navigation.path.isEmpty {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button(action: navigation.showSidebar) {
+                                        Label("drawer_open_sidebar_a11y", systemImage: "sidebar.left")
+                                            .labelStyle(.iconOnly)
+                                    }
+                                    .accessibilityIdentifier("drawer.open")
+                                }
+                            }
+                        }
                         .navigationDestination(for: AppRoute.self, destination: destination)
                         .id(localization.language)
                 }
             }
 
-            .environment(\.horizontalSizeClass, geometry.size.width >= 840 ? .regular : .compact)
+            .environment(\.horizontalSizeClass, UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 840 ? .regular : .compact)
 
             // Onboarding owns the whole window, sidebar and navigation bars
             // included, so it sits outside the split view rather than in a column.

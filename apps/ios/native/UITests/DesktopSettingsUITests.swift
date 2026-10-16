@@ -2,29 +2,30 @@ import XCTest
 import UIKit
 
 final class DesktopSettingsUITests: XCTestCase {
-    private func launch(theme: String = "dark") -> XCUIApplication {
+    private func launch(theme: String = "dark", largeText: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["LINGXI_UI_TESTING"] = "1"
         app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-theme", theme]
+        if largeText { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
         if UIDevice.current.userInterfaceIdiom == .pad {
             XCUIDevice.shared.orientation = .landscapeLeft
         }
         app.launch()
         let settings = app.buttons["drawer.settings"]
         if !settings.isHittable {
-            let drawer = app.navigationBars.firstMatch.buttons.element(boundBy: 0)
+            let drawer = app.buttons["drawer.open"]
             XCTAssertTrue(drawer.waitForExistence(timeout: 12), app.debugDescription)
             drawer.tap()
         }
         XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
         settings.tap()
-        XCTAssertTrue(app.textFields["settings.search"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
         return app
     }
 
     func testSearchKeepsDisconnectedEngineSettingsAccessible() {
         let app = launch()
-        let search = app.textFields["settings.search"]
+        let search = app.searchFields.firstMatch
         search.tap()
         search.typeText("routing")
         let providers = app.buttons["settings.page.custom-providers"]
@@ -46,6 +47,39 @@ final class DesktopSettingsUITests: XCTestCase {
                 XCTAssertTrue(app.buttons["settings.group.\(group)"].exists, "\(group): \(app.debugDescription)")
             }
             attach("Settings-\(theme)")
+            app.terminate()
+        }
+    }
+
+    func testNativeAccountFormInLightDarkAndLargeText() {
+        for (theme, largeText) in [("light", false), ("dark", false), ("light", true)] {
+            let app = launch(theme: theme, largeText: largeText)
+            let account = app.buttons["settings.page.account"]
+            if !account.isHittable { app.collectionViews.firstMatch.swipeUp() }
+            account.tap()
+            XCTAssertTrue(app.staticTexts["LingXi 账户"].waitForExistence(timeout: 8), app.debugDescription)
+            XCTAssertFalse(app.buttons["settings.apply-saved"].exists)
+            XCTAssertFalse(app.descendants(matching: .any)["settings.engine-disconnected"].exists)
+            if app.buttons["account.signout"].exists { app.buttons["account.signout"].tap() }
+            let google = app.buttons["account.google"]
+            XCTAssertTrue(google.waitForExistence(timeout: 8), app.debugDescription)
+            XCTAssertGreaterThanOrEqual(google.frame.height, 44)
+            XCTAssertFalse(app.buttons["account.apple"].exists, "Disabled provider must not appear as a working login option")
+            attach("Account-\(theme)-\(largeText ? "large" : "standard")")
+            let email = app.textFields["account.email"]
+            if !email.isHittable { app.collectionViews.firstMatch.swipeUp() }
+            XCTAssertTrue(email.exists, app.debugDescription)
+            email.tap()
+            email.typeText("native-ui@example.com")
+            let password = app.secureTextFields["account.password"]
+            XCTAssertTrue(password.exists)
+            password.tap()
+            password.typeText("synthetic-password")
+            let submit = app.buttons["account.submit"]
+            XCTAssertTrue(submit.isEnabled)
+            attach("Account-keyboard-\(theme)-\(largeText ? "large" : "standard")")
+            app.buttons["settings.done"].tap()
+            XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 8))
             app.terminate()
         }
     }

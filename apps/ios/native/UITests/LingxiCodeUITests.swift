@@ -667,13 +667,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
-    /// The hand-written drawer had no drag affordance at all — `DragGesture` did
-    /// not appear anywhere in Sources. Collapsing the split view onto a
-    /// navigation stack hands the interactive back-swipe over for free, so pin
-    /// it: an edge drag on the chat must land on the sidebar.
-    ///
-    /// Only the opening direction is a gesture. iOS has no forward swipe, so
-    /// returning to the chat is a tap on the sidebar's close control.
+    /// The drawer supports edge opening while leaving the chat visible.
     func testEdgeSwipeOpensTheSidebar() {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
 
@@ -690,6 +684,77 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
     }
 
+    func testCompactSidebarLeavesContentVisibleAndDismissesBySwipeAndBackdrop() {
+        openDrawer()
+        let search = app.textFields["drawer.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThan(search.frame.maxX, app.frame.maxX - 44)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "iPhone-SwiftUI-drawer-open"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+
+        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.5))
+        origin.press(forDuration: 0.05, thenDragTo: target)
+        XCTAssertTrue(waitUntilGone(app.buttons["drawer.close"], timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.open"].isHittable)
+
+        openDrawer()
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5)).tap()
+        XCTAssertTrue(waitUntilGone(app.buttons["drawer.close"], timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.open"].isHittable)
+    }
+
+    func testCompactSidebarVerticalScrollDoesNotDismiss() {
+        openDrawer()
+        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        origin.press(forDuration: 0.05, thenDragTo: target)
+        XCTAssertTrue(app.buttons["drawer.close"].isHittable, app.debugDescription)
+    }
+
+    func testCompactSidebarIgnoresSwipesStartingInsideTheConversation() {
+        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+        origin.press(forDuration: 0.05, thenDragTo: target)
+        XCTAssertFalse(app.buttons["drawer.close"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.open"].isHittable)
+    }
+
+    func testCompactSidebarShortDragSettlesBackOpen() {
+        openDrawer()
+        let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+        let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5))
+        origin.press(forDuration: 0.05, thenDragTo: target, withVelocity: .slow, thenHoldForDuration: 0.4)
+        XCTAssertTrue(app.buttons["drawer.close"].isHittable, app.debugDescription)
+        app.buttons["drawer.close"].tap()
+        XCTAssertTrue(waitUntilGone(app.buttons["drawer.close"], timeout: 5))
+    }
+
+    func testCompactSidebarClosingDismissesSearchKeyboard() {
+        openDrawer()
+        let search = app.textFields["drawer.search"]
+        search.tap()
+        search.typeText("drawer search")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.buttons["drawer.close"].tap()
+        XCTAssertTrue(waitUntilGone(app.keyboards.firstMatch, timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["drawer.open"].isHittable)
+    }
+
+    func testCompactSidebarAdaptsToRotationWhileOpen() {
+        openDrawer()
+        defer { XCUIDevice.shared.orientation = .portrait }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let search = app.textFields["drawer.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertLessThan(search.frame.maxX, app.frame.maxX - 44)
+        XCTAssertTrue(app.buttons["drawer.close"].isHittable)
+        app.buttons["drawer.close"].tap()
+        XCTAssertTrue(waitUntilGone(app.buttons["drawer.close"], timeout: 5))
+    }
+
     func testCompactSidebarHasAnExplicitCloseControl() {
         openDrawer()
 
@@ -702,13 +767,8 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(waitUntilGone(close, timeout: 5), app.debugDescription)
     }
 
-    /// Every sidebar route used to be routed through a deferred close
-    /// (`closeDrawerThen` + `Task.yield()`) because dismissing the hand-written
-    /// drawer and changing presentation state in one animated transaction made
-    /// SwiftUI drop the presentation. `NavigationSplitView` removed that
-    /// coupling and the deferral went with it, so every presentation shape the
-    /// sidebar can still reach under this fixture is pinned here: a sheet and a
-    /// push. Each must arrive AND leave the sidebar behind.
+    /// Closing the container and navigating in the same update must retain
+    /// both sheet and pushed-page presentations.
     func testEverySidebarRoutePresentsAndLeavesTheSidebar() {
         // Settings — a sheet.
         openDrawer()
@@ -1155,15 +1215,13 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["composer.model.provider.row.\(reference)"]
     }
 
-    /// The chat is the detail column of a `NavigationSplitView`. In compact width
-    /// that collapses to a stack rooted at the sidebar, so "open the drawer" is
-    /// the system back button — the leading navigation-bar item — not an
-    /// app-drawn control any more.
+    /// Compact layout has an explicit trigger; iPad keeps its system control.
     private func openDrawer() {
         let chatsTab = app.buttons["drawer.filter.chat"]
-        if chatsTab.exists { return }
+        if chatsTab.exists && chatsTab.isHittable { return }
 
-        let trigger = app.navigationBars.firstMatch.buttons.element(boundBy: 0)
+        let compactTrigger = app.buttons["drawer.open"]
+        let trigger = compactTrigger.exists ? compactTrigger : app.navigationBars.firstMatch.buttons.element(boundBy: 0)
         XCTAssertTrue(trigger.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(trigger, timeout: 5), app.debugDescription)
         trigger.tap()
@@ -1177,6 +1235,7 @@ final class LingxiCodeUITests: XCTestCase {
             trigger.tap()
         }
         XCTAssertTrue(chatsTab.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(chatsTab, timeout: 5), app.debugDescription)
     }
 
     /// The transcript identifies the chat column without depending on chrome.

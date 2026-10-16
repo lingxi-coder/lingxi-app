@@ -14,14 +14,14 @@ struct SettingsSection<Content: View>: View {
             if let label {
                 Text(label)
                     .font(.footnote)
-                    .foregroundColor(t.text4)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.bottom, 8)
             }
             VStack(spacing: 0) { content }
-                .background(t.surface)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
                 .clipShape(.rect(cornerRadius: 16))
             if let footer {
-                Text(footer).font(.footnote).foregroundColor(t.text4)
+                Text(footer).font(.footnote).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16).padding(.top, 8)
             }
         }
@@ -75,10 +75,11 @@ struct SettingsRow<Trailing: View>: View {
             HStack(spacing: 12) {
                 if let icon {
                     let c = iconColor ?? t.accent
-                    LXIcon(name: icon, size: 14, color: c, stroke: 1.8)
-                        .frame(width: 32, height: 32)
-                        .background(c.mix(with: t.surface, amount: 0.16))
-                        .clipShape(.rect(cornerRadius: 9))
+                    Image(systemName: icon.settingsSystemImage)
+                        .font(.body.weight(.medium)).foregroundStyle(.white)
+                        .frame(width: 29, height: 29)
+                        .background(c, in: RoundedRectangle(cornerRadius: 7))
+                        .accessibilityHidden(true)
                 }
                 let layout = typeSize.isAccessibilitySize
                     ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
@@ -88,19 +89,19 @@ struct SettingsRow<Trailing: View>: View {
                         if let labelView { labelView }
                         else {
                             Text(label).font(.body)
-                                .foregroundStyle(danger ? t.danger : t.text)
+                                .foregroundStyle(danger ? Color.red : Color.primary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         if let subView { subView }
                         else if let sub {
-                            Text(sub).font(.footnote).foregroundStyle(t.text2)
+                            Text(sub).font(.footnote).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     HStack(spacing: 8) {
                         if let value {
-                            Text(value).font(.body).foregroundStyle(valueColor ?? t.text2)
+                            Text(value).font(.body).foregroundStyle(valueColor ?? Color.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         trailing
@@ -108,12 +109,12 @@ struct SettingsRow<Trailing: View>: View {
                     }
                 }
                 if chevron && onTap != nil {
-                    LXIcon(name: .chevronR, size: 13, color: t.text4)
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary).accessibilityHidden(true)
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
             .frame(minHeight: 48)
-            if !isLast { Divider().padding(.leading, icon == nil ? 16 : 60) }
+            if !isLast { Divider().padding(.leading, icon == nil ? 16 : 57) }
         }
         .contentShape(Rectangle())
     }
@@ -157,11 +158,11 @@ struct RadioList: View {
                     VStack(spacing: 0) {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(o.label).font(.body).foregroundColor(t.text)
-                                if let sub = o.sub { Text(sub).font(.footnote).foregroundColor(t.text4) }
+                                Text(o.label).font(.body).foregroundStyle(.primary)
+                                if let sub = o.sub { Text(sub).font(.footnote).foregroundStyle(.secondary) }
                             }
                             Spacer()
-                            if value == o.value { LXIcon(name: .check, size: 16, color: t.accent, stroke: 2.5) }
+                            if value == o.value { Image(systemName: "checkmark").font(.body.weight(.semibold)).foregroundStyle(t.accent) }
                         }
                         .padding(.horizontal, 14).padding(.vertical, 12)
                         if i < options.count - 1 { Divider().padding(.leading, 16) }
@@ -171,7 +172,7 @@ struct RadioList: View {
                 .accessibilityAddTraits(value == o.value ? [.isSelected] : [])
             }
         }
-        .background(t.surface)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12))
 
     }
@@ -220,7 +221,7 @@ struct SettingsField: View {
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .padding(.vertical, 11).padding(.leading, 12).padding(.trailing, trailingPadding)
-        .background(t.surface)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
     }
@@ -230,7 +231,7 @@ struct FieldLabel: View {
     @Environment(\.theme) private var t
     let text: String
     var body: some View {
-        Text(text).font(.subheadline).foregroundColor(t.text3)
+        Text(text).font(.subheadline).foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 6)
     }
@@ -241,8 +242,36 @@ struct FieldHint: View {
     let text: AttributedString
     init(_ s: String) { self.text = (try? AttributedString(markdown: s)) ?? AttributedString(s) }
     var body: some View {
-        Text(text).font(.footnote).foregroundColor(t.text4)
+        Text(text).font(.footnote).foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 4).padding(.bottom, 14)
+    }
+}
+
+private extension LXIconName {
+    var settingsSystemImage: String {
+        switch self {
+        case .pin: "person.crop.circle.fill"
+        case .sun: "sun.max.fill"
+        case .mic: "mic.fill"
+        case .globe: "globe"
+        case .search: "magnifyingglass"
+        case .wrench: "wrench.and.screwdriver.fill"
+        case .link: "link"
+        case .dream: "moon.stars.fill"
+        case .message: "bubble.left.fill"
+        case .pencil: "pencil"
+        case .check: "checkmark.shield.fill"
+        case .clock: "clock.fill"
+        case .folder: "folder.fill"
+        case .plug: "puzzlepiece.extension.fill"
+        case .sparkle: "sparkles"
+        case .cog: "gearshape.fill"
+        case .skill: "square.stack.3d.up.fill"
+        case .workflow: "arrow.triangle.branch"
+        case .listChecks: "checklist"
+        case .book: "book.fill"
+        default: "slider.horizontal.3"
+        }
     }
 }

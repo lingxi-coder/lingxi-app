@@ -8,7 +8,7 @@ final class FirebaseAccountUITests: XCTestCase {
     private func openAccount(_ app: XCUIApplication) {
         let settings = app.buttons["drawer.settings"]
         if !settings.isHittable {
-            let drawer = app.navigationBars.firstMatch.buttons.element(boundBy: 0)
+            let drawer = app.buttons["drawer.open"]
             XCTAssertTrue(drawer.waitForExistence(timeout: 20))
             drawer.tap()
         }

@@ -4,6 +4,8 @@ import { Card } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { ghostButtonStyle } from './ghostButton';
 
+const googleIcon = new URL('../../../assets/google-g.png', import.meta.url).href;
+
 export function LingxiAccount() {
   const t = useT();
   const [state, setState] = useState<AccountState | null>(null);
@@ -66,7 +68,7 @@ export function LingxiAccount() {
           </div>
         </form>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" disabled={busy} style={button} onClick={() => void run({ type: 'oauth', provider: 'google.com' })}>通过 Google 登录</button>
+          <button type="button" disabled={busy} style={{ ...button, display: 'inline-flex', alignItems: 'center', gap: 10, minHeight: 40, padding: '10px 12px', background: '#fff', color: '#1f1f1f', border: '1px solid #747775' }} onClick={() => void run({ type: 'oauth', provider: 'google.com' })}><img src={googleIcon} alt="" width={20} height={20} />通过 Google 登录</button>
           <button type="button" disabled={busy} style={button} onClick={() => void run({ type: 'oauth', provider: 'apple.com' })}>通过 Apple 登录</button>
         </div>
         <span style={{ color: t.text3, fontSize: 12 }}>Google 和 Apple 登录将在系统浏览器中完成。</span>

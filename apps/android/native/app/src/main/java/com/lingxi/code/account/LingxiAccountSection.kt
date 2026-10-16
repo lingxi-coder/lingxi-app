@@ -4,10 +4,14 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -46,7 +50,17 @@ fun LingxiAccountSection(model: AccountViewModel = viewModel()) {
             Button(onClick = { model.emailSignIn(email, password, register) }, enabled = !state.busy && email.isNotBlank() && password.isNotEmpty(), modifier = Modifier.testTag("account.submit")) { Text(if (register) "创建账户" else "登录") }
             TextButton(onClick = { register = !register; password = "" }, enabled = !state.busy, modifier = Modifier.testTag("account.mode")) { Text(if (register) "已有账户，登录" else "注册新账户") }
             TextButton(onClick = { model.resetPassword(email) }, enabled = !state.busy && email.isNotBlank()) { Text("忘记密码") }
-            OutlinedButton(onClick = { activity?.let { model.google(it, context.getString(R.string.default_web_client_id)) } }, enabled = !state.busy && activity != null, modifier = Modifier.fillMaxWidth().testTag("account.google")) { Text("通过 Google 登录") }
+            OutlinedButton(
+                onClick = { activity?.let { model.google(it, context.getString(R.string.default_web_client_id)) } },
+                enabled = !state.busy && activity != null,
+                colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White, contentColor = Color(0xFF1F1F1F)),
+                border = BorderStroke(1.dp, Color(0xFF747775)),
+                modifier = Modifier.fillMaxWidth().testTag("account.google"),
+            ) {
+                Image(painterResource(R.drawable.google_g), contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Text("通过 Google 登录")
+            }
             OutlinedButton(onClick = { activity?.let(model::apple) }, enabled = !state.busy && activity != null, modifier = Modifier.fillMaxWidth()) { Text("通过 Apple 登录") }
         }
         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())

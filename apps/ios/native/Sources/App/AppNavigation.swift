@@ -83,17 +83,15 @@ final class AppNavigationModel {
     /// Sidebar visibility in a regular-width (iPad) split layout. Ignored while
     /// the split view is collapsed.
     var columnVisibility: NavigationSplitViewVisibility = .all
-    /// Which column the collapsed (iPhone) split view shows. This is the only
-    /// sidebar control that applies in compact width — `columnVisibility` is
-    /// ignored there — so navigation resets it, never `columnVisibility`.
-    /// Leaving the regular-width sidebar alone is deliberate: an iPad user who
-    /// picks a session keeps the two columns they asked for.
+    /// Compact sidebar state shared with the iPhone SwiftUI drawer. Keep it
+    /// independent from iPad column visibility so choosing a session on iPad
+    /// preserves the user's split layout.
     var compactColumn: NavigationSplitViewColumn = .detail
     var settingsOpen = false
     var settingsPath: [SettingsPage] = []
 
-    /// Reveals the sidebar from code (deep links, app actions). The system's own
-    /// back button and back-swipe drive the same state without going through here.
+    /// Reveals the sidebar from the toolbar, deep links or app actions.
+    /// The SwiftUI drawer writes interactive gesture results to this same state.
     func showSidebar() {
         columnVisibility = .all
         compactColumn = .sidebar

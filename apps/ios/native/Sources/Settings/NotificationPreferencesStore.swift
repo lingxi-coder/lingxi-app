@@ -53,5 +53,8 @@ enum NotificationPreferencesStore {
             NotificationPolicy.clampIdleThreshold(config.messageIdleNotifThresholdMs),
             forKey: Keys.idleThresholdMs
         )
+        if defaults === UserDefaults.standard {
+            Task { @MainActor in PushRegistration.shared.refresh() }
+        }
     }
 }

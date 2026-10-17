@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
 
 val voiceManifest = rootProject.file("../../../resources/voice/models.json")
 val voiceRuntime = JsonSlurper().parse(voiceManifest) as Map<*, *>
@@ -9,6 +10,7 @@ val mobileLinuxSdkVersion = mobileLinuxContract["sdk_version"] as String
 plugins {
     id("com.google.gms.google-services")
     id("com.android.application")
+    id("com.google.firebase.crashlytics")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
@@ -54,6 +56,9 @@ android {
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"store\"")
             buildConfigField("boolean", "MOBILE_LINUX_FULL", "false")
             buildConfigField("boolean", "HIGH_RISK_NATIVE_OFFLOADS", "false")
+            configure<CrashlyticsExtension> {
+                unstrippedNativeLibsDir = file("build/nativeSymbols/play")
+            }
         }
         create("direct") {
             dimension = "distribution"
@@ -63,6 +68,9 @@ android {
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"full\"")
             buildConfigField("boolean", "MOBILE_LINUX_FULL", "true")
             buildConfigField("boolean", "HIGH_RISK_NATIVE_OFFLOADS", "true")
+            configure<CrashlyticsExtension> {
+                unstrippedNativeLibsDir = file("build/nativeSymbols/direct")
+            }
         }
     }
 
@@ -79,8 +87,13 @@ android {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
+            manifestPlaceholders["crashlyticsCollectionEnabled"] = false
         }
         release {
+            manifestPlaceholders["crashlyticsCollectionEnabled"] = true
+            configure<CrashlyticsExtension> {
+                nativeSymbolUploadEnabled = true
+            }
             // Enable only after the minified release variant passes the
             // UniFFI/JNI device smoke documented in the optimizer checklist.
             isMinifyEnabled = false
@@ -181,6 +194,10 @@ listOf("play", "direct").forEach { distribution ->
 dependencies {
     implementation(platform("com.google.firebase:firebase-bom:35.0.0"))
     implementation("com.google.firebase:firebase-auth")
+    implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.firebase:firebase-installations")
+    // Includes JVM/ANR reporting and the native signal handler for Rust/JNI.
+    implementation("com.google.firebase:firebase-crashlytics-ndk")
     implementation("androidx.credentials:credentials:1.5.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
     implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")

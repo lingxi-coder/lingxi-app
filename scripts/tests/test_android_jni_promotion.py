@@ -113,7 +113,9 @@ class AndroidJniPromotionTests(unittest.TestCase):
         for tag in ("darwin-x86_64", "linux-x86_64"):
             strip = self.ndk / f"toolchains/llvm/prebuilt/{tag}/bin/llvm-strip"
             strip.parent.mkdir(parents=True)
-            strip.write_text("#!/bin/sh\nexit 0\n")
+            strip.write_text("#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n"
+                             "if os.environ.get('JNI_FIXTURE_MARK_STRIPPED') == '1':\n"
+                             "    Path(sys.argv[1]).write_bytes(b'stripped runtime')\n")
             strip.chmod(0o755)
         self.bin = self.root / "mock tools"
         self.bin.mkdir()
@@ -123,6 +125,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
             mock.chmod(0o755)
         self.jni = self.native / "app/src/play/jniLibs"
         self.kotlin = self.native / "app/src/main/java"
+        self.symbols = self.native / "app/build/nativeSymbols/play"
         self.failure_marker = self.root / "promotion-failed"
         self.aar = archive
         self.download_count = self.root / "download-count"
@@ -134,6 +137,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
                     "JNI_FIXTURE_REAL_CP": shutil.which("cp"), "JNI_FIXTURE_REAL_MV": shutil.which("mv")}
         # Exercise defaults even if the developer's environment has output overrides.
         self.env.pop("LINGXI_ANDROID_JNILIBS_DIR", None)
+        self.env.pop("LINGXI_ANDROID_NATIVE_SYMBOLS_DIR", None)
         self.env.pop("LINGXI_KOTLIN_OUT", None)
         self.handwritten = self.kotlin / "com/lingxi/code/Handwritten.kt"
         self.handwritten.parent.mkdir(parents=True)
@@ -147,6 +151,9 @@ class AndroidJniPromotionTests(unittest.TestCase):
     def seed_previous_pair(self):
         for abi in ABIS:
             (self.jni / abi / LIBRARY).write_bytes(f"old-library-{abi}".encode())
+            symbol = self.symbols / abi / LIBRARY
+            symbol.parent.mkdir(parents=True)
+            symbol.write_bytes(f"old-symbols-{abi}".encode())
         old = self.kotlin / PACKAGE / "old-component/stale.kt"
         old.parent.mkdir(parents=True)
         old.write_text("old bindings")
@@ -157,14 +164,16 @@ class AndroidJniPromotionTests(unittest.TestCase):
         return result
 
     def assert_preserved(self, before):
-        self.assertEqual((files(self.jni), files(self.kotlin)), before)
+        self.assertEqual((files(self.jni), files(self.kotlin), files(self.symbols)), before)
         self.assertFalse((self.kotlin / ".jni-promotion.lock").exists())
         self.assertFalse(any(self.kotlin.rglob(".jni-stage.*")))
         self.assertFalse(any(self.jni.rglob(".jni-stage.*")))
+        self.assertFalse(any(self.symbols.rglob(".jni-stage.*")))
+        self.assertFalse((self.symbols / ".jni-promotion.lock").exists())
 
     def test_failed_bindgen_preserves_previous_pair(self):
         self.seed_previous_pair()
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         result = self.run_script(JNI_FIXTURE_FAIL_BINDGEN="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("bindgen failed", result.stderr)
@@ -172,7 +181,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
 
     def test_second_abi_promotion_failure_rolls_back_previous_pair(self):
         self.seed_previous_pair()
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         result = self.run_script(JNI_FIXTURE_FAIL_PROMOTION="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.failure_marker.exists(), result.stdout + result.stderr)
@@ -180,7 +189,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
 
     def test_backup_command_failure_after_rename_restores_the_moved_original(self):
         self.seed_previous_pair()
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         result = self.run_script(JNI_FIXTURE_FAIL_AFTER_BACKUP="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("after backup rename", result.stderr)
@@ -200,14 +209,22 @@ class AndroidJniPromotionTests(unittest.TestCase):
         self.assertEqual(len(generated), 3)
         self.assertTrue(all(value.startswith(b"new bindings") for value in generated.values()))
 
+    def test_symbols_preserve_exact_unstripped_bytes_before_runtime_stripping(self):
+        self.seed_previous_pair()
+        result = self.run_script(JNI_FIXTURE_MARK_STRIPPED="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for abi in ABIS:
+            self.assertEqual((self.symbols / abi / LIBRARY).read_bytes(), f"new-library-{abi}".encode())
+            self.assertEqual((self.jni / abi / LIBRARY).read_bytes(), b"stripped runtime")
+
     def test_generation_failure_with_no_previous_artifacts_leaves_no_partial_pair(self):
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         result = self.run_script(JNI_FIXTURE_FAIL_BINDGEN="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_preserved(before)
 
     def test_promotion_failure_with_no_previous_artifacts_removes_new_pair(self):
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         result = self.run_script(JNI_FIXTURE_FAIL_PROMOTION="1")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.failure_marker.exists(), result.stdout + result.stderr)
@@ -224,7 +241,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
 
     def test_another_publisher_lock_rejects_without_replacing_artifacts_or_releasing_its_lock(self):
         self.seed_previous_pair()
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         lock = self.jni / ".jni-promotion.lock"
         lock.mkdir()
         result = self.run_script()
@@ -238,7 +255,7 @@ class AndroidJniPromotionTests(unittest.TestCase):
 
     def test_interrupted_download_does_not_poison_a_healthy_retry(self):
         self.seed_previous_pair()
-        before = (files(self.jni), files(self.kotlin))
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
         self.aar.unlink()
         first = self.run_script(JNI_FIXTURE_FAIL_DOWNLOAD="1")
         self.assertNotEqual(first.returncode, 0, first.stdout + first.stderr)

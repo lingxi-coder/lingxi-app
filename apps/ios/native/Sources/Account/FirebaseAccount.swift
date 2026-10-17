@@ -34,6 +34,7 @@ final class FirebaseAccount {
     static func configure() {
         guard FirebaseApp.app() == nil else { return }
         FirebaseApp.configure()
+        CrashReporting.configure()
     }
     private init() {
         Self.configure()
@@ -120,6 +121,7 @@ final class FirebaseAccount {
     func signOut() {
         perform {
             try Auth.auth().signOut()
+            PushRegistration.shared.signedOut()
             GIDSignIn.sharedInstance.signOut()
         }
     }

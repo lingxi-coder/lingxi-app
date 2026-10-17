@@ -60,6 +60,7 @@ VOICE_MANIFEST="${REPO_ROOT}/resources/voice/models.json"
 # Optional output roots keep a complete JNI/bindings refresh isolated from
 # concurrent Gradle builds until the caller promotes the verified pair.
 FINAL_JNILIBS_DIR="${LINGXI_ANDROID_JNILIBS_DIR:-${ANDROID_DIR}/app/src/${VARIANT}/jniLibs}"
+FINAL_NATIVE_SYMBOLS_DIR="${LINGXI_ANDROID_NATIVE_SYMBOLS_DIR:-${ANDROID_DIR}/app/build/nativeSymbols/${VARIANT}}"
 STAGING_PARENT="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}"
 KOTLIN_OUT="${LINGXI_KOTLIN_OUT:-${ANDROID_DIR}/app/src/main/java}"   # bindgen writes <pkg-path>/*.kt under here
 
@@ -289,11 +290,11 @@ done
 # honors `--manifest-path`, so run it from the workspace root or it fails with
 # "could not find Cargo.toml" when invoked from elsewhere (e.g. the repo root).
 if [[ "${VARIANT}" == "direct" ]]; then
-  ( cd "${CARGO_DIR}" && cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
+  ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
       build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
       --features android-computer-use --"${PROFILE}" )
 else
-  ( cd "${CARGO_DIR}" && cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
+  ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
       build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
       --"${PROFILE}" )
 fi
@@ -343,6 +344,17 @@ cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --
 KT_COUNT="$(find "${BINDINGS_STAGE}/${PKG_REL_PATH}" -type f -name '*.kt' 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${KT_COUNT}" -gt 0 ]] || { echo "ERROR: no Kotlin bindings generated under ${GEN_PKG_DIR}" >&2; exit 1; }
 
+# Preserve the exact unstripped binaries before packaging strips them. Publish
+# symbols in the same rollback transaction as JNI/bindings so a later build of
+# the other flavor cannot replace the symbol file for an already-built APK.
+lock_promotion_root "${KOTLIN_OUT}"
+lock_promotion_root "${FINAL_JNILIBS_DIR}"
+lock_promotion_root "${FINAL_NATIVE_SYMBOLS_DIR}"
+for t in "${TARGETS[@]}"; do
+  abi="$(abi_of "${t}")"
+  prepare_artifact "${JNILIBS_DIR}/${abi}/${SONAME}" "${FINAL_NATIVE_SYMBOLS_DIR}/${abi}/${SONAME}"
+done
+
 # UniFFI metadata lives in linker sections that llvm-strip removes. Keep the
 # staging libraries intact until bindgen has inspected one of them, then strip
 # only the runtime payloads immediately before copying them into the APK tree.
@@ -368,8 +380,6 @@ fi
 # another invocation's successfully published pair. Gradle readers should use
 # isolated output roots when they need to avoid the brief promotion window.
 # ---------------------------------------------------------------------------
-lock_promotion_root "${KOTLIN_OUT}"
-lock_promotion_root "${FINAL_JNILIBS_DIR}"
 prepare_artifact "${BINDINGS_STAGE}/${PKG_REL_PATH}" "${GEN_PKG_DIR}"
 for t in "${TARGETS[@]}"; do
   abi="$(abi_of "${t}")"
@@ -394,4 +404,5 @@ PROMOTION_COMMITTED=true
 log "OK"
 echo "variant        : ${VARIANT}"
 echo "jniLibs        : ${FINAL_JNILIBS_DIR}"
+echo "native symbols : ${FINAL_NATIVE_SYMBOLS_DIR}"
 echo "Kotlin bindings: ${GEN_PKG_DIR} (${KT_COUNT} .kt file(s))"

@@ -1,0 +1,10 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    { "collectionGroup": "pushInstallations", "fieldPath": "expiresAt", "ttl": true, "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }] },
+    { "collectionGroup": "pushRegistrationClaims", "fieldPath": "expiresAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "pushInstallations", "fieldPath": "fcmInstallationId", "indexes": [] },
+    { "collectionGroup": "pushInstallations", "fieldPath": "secretHash", "indexes": [] },
+    { "collectionGroup": "pushInstallations", "fieldPath": "registrationHash", "indexes": [] }
+  ]
+}

@@ -236,14 +236,13 @@ fn validate_terminal_text(tree: &Utf16JsonProjection, pointer: &str) -> Option<(
         return None;
     }
     let props = format!("{pointer}/props");
-    if tree.at_pointer(&props).is_some() {
-        if !object_has_only_fields(tree, &props, &["bold"])
+    if tree.at_pointer(&props).is_some()
+        && (!object_has_only_fields(tree, &props, &["bold"])
             || tree
                 .at_pointer(&format!("{props}/bold"))
-                .is_some_and(|value| value.as_bool().is_none())
-        {
-            return None;
-        }
+                .is_some_and(|value| value.as_bool().is_none()))
+    {
+        return None;
     }
     let children = format!("{pointer}/children");
     for index in 0..tree.array_len(&children)? {

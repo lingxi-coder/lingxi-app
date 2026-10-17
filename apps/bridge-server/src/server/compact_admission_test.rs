@@ -37,7 +37,7 @@ impl crate::router::CommandRouter for AdmissionRouter {
 
     async fn requires_idle_turn_for_slash(&self, raw: &Utf16JsonProjection) -> bool {
         command_api::parser::parse_slash_command(raw)
-            .is_some_and(|parsed| parsed.name.string_at("").as_deref() == Some("compact"))
+            .is_some_and(|parsed| parsed.name.string_at("") == Some("compact"))
     }
 }
 

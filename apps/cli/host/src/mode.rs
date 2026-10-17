@@ -3159,7 +3159,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     }
                 };
                 if let Err(e) = turn_result {
-                    let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
+                    let _ = tx.send(tui::TurnEvent::TextDelta(e.to_string()));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
                         lingxi_core::host::TurnOutcome::EndTurn,
                     ));
@@ -6842,8 +6842,7 @@ mod tests {
                 .take_mid_turn_input()
                 .await
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("unowned teammate")
         );
     }
@@ -6912,8 +6911,7 @@ mod tests {
                 .take_mid_turn_input()
                 .await
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("A\nA2")
         );
         assert!(state.order.lock().unwrap().queued.is_empty());
@@ -6962,8 +6960,7 @@ mod tests {
                 .take_mid_turn_input()
                 .await
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("A\nB")
         );
     }
@@ -6990,8 +6987,7 @@ mod tests {
                 .take_mid_turn_input()
                 .await
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("new")
         );
         assert!(state.order.lock().unwrap().queued.is_empty());

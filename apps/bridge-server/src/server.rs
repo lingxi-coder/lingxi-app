@@ -7506,8 +7506,7 @@ mod tests {
                 .loop_runtime
                 .in_flight_prompt()
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("first connection tick")
         );
         assert_eq!(second.loop_runtime.in_flight_prompt(), None);
@@ -7552,8 +7551,7 @@ mod tests {
             loop_runtime
                 .in_flight_prompt()
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("# Autonomous loop tick"),
             "the batched drain branch must tag a Cron tick as in-flight"
         );
@@ -7714,8 +7712,7 @@ mod tests {
             runtime
                 .in_flight_prompt()
                 .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+                .and_then(|text| text.string_at("")),
             Some("<<autonomous-loop-dynamic>>")
         );
         let result = captured.lock().await;

@@ -503,8 +503,7 @@ mod tests {
         assert_eq!(
             a.system_prompt
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("You are helpful.")
         );
     }
@@ -522,8 +521,7 @@ mod tests {
         assert_eq!(
             a.append_system_prompt
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("Also be concise.")
         );
     }
@@ -1231,8 +1229,7 @@ mod tests {
         assert_eq!(
             a.resolve_system_prompt()
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("Be helpful.")
         );
     }
@@ -1250,8 +1247,7 @@ mod tests {
         assert_eq!(
             a.resolve_append_system_prompt()
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("Be concise.")
         );
     }

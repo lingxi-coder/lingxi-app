@@ -1742,10 +1742,7 @@ mod tests {
         // Only the `Next` prompt is drained mid-turn; the `Now` command is left.
         let joined = adapter.take_mid_turn_input().await;
         assert_eq!(
-            joined
-                .as_ref()
-                .and_then(|text| text.string_at(""))
-                .as_deref(),
+            joined.as_ref().and_then(|text| text.string_at("")),
             Some("first")
         );
 

@@ -466,8 +466,7 @@ async fn uncorrelated_text_keeps_legacy_mid_turn_delivery() {
             .take_mid_turn_prompt()
             .await
             .as_ref()
-            .and_then(|text| text.string_at(""))
-            .as_deref(),
+            .and_then(|text| text.string_at("")),
         Some("folded text")
     );
     assert!(connection.queued_prompt_payloads.lock().await.is_empty());

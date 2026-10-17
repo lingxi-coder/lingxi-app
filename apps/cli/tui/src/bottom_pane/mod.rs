@@ -1817,32 +1817,35 @@ impl BottomPane {
                     self.composer.complete_at(at, &insert);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
-                } else if {
-                    let current = self.composer.source_units();
-                    let current_resolved = completion_view::resolve_catalog_name_units(
-                        &current,
-                        &self.registry_commands,
-                    );
-                    current == source_insert
-                        || current_resolved.is_some()
-                            && current_resolved
-                                == completion_view::resolve_catalog_name_units(
-                                    &source_insert,
-                                    &self.registry_commands,
-                                )
-                } {
-                    // Buffer already IS the highlighted command — by name or in
-                    // full as one of its aliases (`/quit` highlights `/exit
-                    // (quit)`) → let Enter run it (claude-code runs the typed
-                    // alias rather than rewriting the buffer).
-                    None
                 } else {
-                    // Partial/different `/command` → commit it + close the popup.
-                    let mut completed = source_insert;
-                    completed.push(b' ' as u16);
-                    self.composer.replace_all_source_units(&completed);
-                    self.completion = None;
-                    Some(BottomPaneOutcome::Consumed)
+                    let is_current_command = {
+                        let current = self.composer.source_units();
+                        let current_resolved = completion_view::resolve_catalog_name_units(
+                            &current,
+                            &self.registry_commands,
+                        );
+                        current == source_insert
+                            || current_resolved.is_some()
+                                && current_resolved
+                                    == completion_view::resolve_catalog_name_units(
+                                        &source_insert,
+                                        &self.registry_commands,
+                                    )
+                    };
+                    if is_current_command {
+                        // Buffer already IS the highlighted command — by name or in
+                        // full as one of its aliases (`/quit` highlights `/exit
+                        // (quit)`) → let Enter run it (claude-code runs the typed
+                        // alias rather than rewriting the buffer).
+                        None
+                    } else {
+                        // Partial/different `/command` → commit it + close the popup.
+                        let mut completed = source_insert;
+                        completed.push(b' ' as u16);
+                        self.composer.replace_all_source_units(&completed);
+                        self.completion = None;
+                        Some(BottomPaneOutcome::Consumed)
+                    }
                 }
             }
             KeyCode::Esc => {

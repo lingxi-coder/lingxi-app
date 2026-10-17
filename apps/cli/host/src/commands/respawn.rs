@@ -784,8 +784,7 @@ mod tests {
         assert_eq!(
             spec.initial_prompt
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("do the thing")
         );
     }
@@ -812,8 +811,7 @@ mod tests {
             second
                 .initial_prompt
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("second prompt")
         );
     }

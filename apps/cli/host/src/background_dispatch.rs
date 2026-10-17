@@ -129,7 +129,7 @@ fn intent_from_source_prompt(
     prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> Option<String> {
     let text = prompt.string_at("")?;
-    intent_from_prompt(Some(text.as_ref()))
+    intent_from_prompt(Some(text))
 }
 
 fn captured_terminal_size() -> TerminalSize {
@@ -1161,8 +1161,7 @@ mod tests {
         assert_eq!(
             spec.initial_prompt
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             argv.prompt.as_deref()
         );
         assert_eq!(
@@ -1346,8 +1345,7 @@ mod tests {
             spec.options
                 .system_prompt
                 .as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+                .and_then(|prompt| prompt.string_at("")),
             Some("captured system")
         );
         let handoff = spec

@@ -127,6 +127,10 @@ pub struct Runtime {
     /// `/rewind` picker rows from it, and the restore path calls its
     /// `rewind_files` on a code rewind.
     pub file_history: std::sync::Arc<session::FileHistory>,
+    /// Per-host owner for V2 installed-plugin archive materializations. Keep
+    /// the exact session returned by DesktopRuntime so discovery, PluginManager,
+    /// and settings inventory share the same cache lifetime.
+    pub plugin_archive_session: std::sync::Arc<plugin::PluginArchiveSession>,
     /// (`/reload-plugins`) Retained plugin subsystem, projected from
     /// [`harness_runtime::desktop::DesktopRuntime::plugin_runtime`]. The TUI mount threads
     /// it into the `on_reload_plugins` effect so the interactive command applies
@@ -1661,6 +1665,7 @@ pub async fn build_runtime_from_config(
         sandbox_desc_fallback: rt.sandbox_desc_fallback,
         sandbox_desc_deps_ok: rt.sandbox_desc_deps_ok,
         file_history: rt.file_history,
+        plugin_archive_session: rt.plugin_archive_session,
         plugin_runtime: rt.plugin_runtime,
         provider_availability: rt.provider_availability,
         provider_auth_methods: rt.provider_auth_methods,

@@ -997,9 +997,7 @@ mod tests {
         assert_eq!(code, exit_codes::SUCCESS);
         // The executor received the persisted prompt.
         assert_eq!(
-            seen.as_ref()
-                .and_then(|prompt| prompt.string_at(""))
-                .as_deref(),
+            seen.as_ref().and_then(|prompt| prompt.string_at("")),
             Some("port the daemon")
         );
         // The job transitioned working → done (terminal).

@@ -364,7 +364,7 @@ impl NativeRealtimeSession {
     }
     /// PCM16 little-endian, mono chunks in the rate declared by session_ready.
     pub fn send_audio(&self, pcm: Vec<u8>) -> Result<(), Value> {
-        if pcm.is_empty() || pcm.len() % 2 != 0 || pcm.len() > self.max_chunk_bytes {
+        if pcm.is_empty() || !pcm.len().is_multiple_of(2) || pcm.len() > self.max_chunk_bytes {
             return Err(failure(
                 "invalid_request",
                 "native realtime audio requires a bounded nonempty PCM16 chunk",

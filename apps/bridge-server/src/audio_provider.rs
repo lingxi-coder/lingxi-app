@@ -71,7 +71,7 @@ async fn execute(envelope: Envelope) -> String {
         ) {
             Ok(llm_runtime::Region::ChinaMainland) => "china".into(),
             Ok(llm_runtime::Region::International) => "international".into(),
-            Err(error) => return settings_failure_json(&error),
+            Err(error) => settings_failure_json(&error),
         }
     });
     let host = match audio_provider::AudioProviderHost::new(

@@ -232,20 +232,20 @@ mod lifecycle_example {
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/api.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/desktop/sdk.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/desktop/session_state.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/desktop/session_state.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/mobile/host.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/mobile/host/assembly.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/mobile/host/assembly.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/headless/mod.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/headless/config.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/headless/config.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/headless/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/headless/host.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/headless/io.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/headless/io.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/runtime/src/headless/session.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/headless/session.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/permission/src/gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/permission/src/gate.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/session/src/storage.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/session/src/storage.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
-- [harness-runtime/crates/session/src/resumer.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/session/src/resumer.rs) — 已提交源码 (dc6ce1217143b693d97ab6278ff66568beea20d3)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/api.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/desktop/sdk.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/desktop/session_state.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/desktop/session_state.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/mobile/host.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/mobile/host/assembly.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/mobile/host/assembly.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/headless/mod.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/headless/config.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/headless/config.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/headless/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/headless/host.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/headless/io.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/headless/io.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/runtime/src/headless/session.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/runtime/src/headless/session.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/permission/src/gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/permission/src/gate.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/session/src/storage.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/session/src/storage.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [harness-runtime/crates/session/src/resumer.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/session/src/resumer.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
 
-- harness-runtime: HEAD dc6ce1217143b693d97ab6278ff66568beea20d3; 所据文件指纹 sha256:a83d44fb79099d3a923f8fd33bfd18789edd02c2b1d5c683a16c589fffaf2578; 产品固定版本 dc6ce1217143b693d97ab6278ff66568beea20d3
+- harness-runtime: HEAD d3165b04f670c898b75c90732af8907e28b05bd5; 所据文件指纹 sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; 产品固定版本 d3165b04f670c898b75c90732af8907e28b05bd5
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

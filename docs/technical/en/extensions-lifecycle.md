@@ -62,18 +62,18 @@ These commands identify existing contracts; they do not certify remote server be
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/tool-api/src/registry.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/skill/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/skill/src/lib.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/runtime/src/desktop/skill_loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/runtime/src/desktop/skill_loader.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/hooks/src/events.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/hooks/src/executor.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/hooks/src/executor.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/hooks/src/ssrf_guard.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/hooks/src/ssrf_guard.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/plugin/src/manager.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/plugin/src/manager.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/mcp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/mcp/src/registry.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/mcp/src/registry/catalog_refresh.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/mcp/src/registry/catalog_refresh.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/lsp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/lsp/src/registry.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
-- [harness-runtime/crates/runtime/src/mobile/mobile_lsp.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/runtime/src/mobile/mobile_lsp.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tool-api/src/registry.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/skill/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/skill/src/lib.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/runtime/src/desktop/skill_loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/skill_loader.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/hooks/src/events.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/hooks/src/executor.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/hooks/src/executor.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/hooks/src/ssrf_guard.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/hooks/src/ssrf_guard.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/plugin/src/manager.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/plugin/src/manager.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/mcp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/mcp/src/registry.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/mcp/src/registry/catalog_refresh.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/mcp/src/registry/catalog_refresh.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/lsp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/lsp/src/registry.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
+- [harness-runtime/crates/runtime/src/mobile/mobile_lsp.rs](https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/mobile_lsp.rs) — Committed source (1129e10ad0c8bc3c27e577245165e8290c7e2fec)
 
-- harness-runtime: HEAD e03def6e13ff326fe0d507372ea8c50f58b44100; Referenced input fingerprint sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; Product pin e03def6e13ff326fe0d507372ea8c50f58b44100
+- harness-runtime: HEAD 1129e10ad0c8bc3c27e577245165e8290c7e2fec; Referenced input fingerprint sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; Product pin 1129e10ad0c8bc3c27e577245165e8290c7e2fec
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

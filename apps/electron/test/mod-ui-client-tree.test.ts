@@ -47,7 +47,7 @@ test('renders the eight Native Client surface node kinds as inert JSON-backed Re
       { type: 'Select', props: { key: 'period', label: 'Period', options: [{ value: 'day', label: 'Today' }, { value: 'week' }], value: 'day' }, press: { plugin: 'status-plugin', handle: 3 } },
       { type: 'Link', props: { href: 'https://example.com', label: 'Details' } },
       { type: 'Code', props: { source: 'const ready = true;', language: 'typescript', path: 'status.ts' } },
-      { type: 'Markdown', props: { key: 'status-markdown', text: '**All good**', dimColor: true, pressableLinks: [] }, press: { plugin: 'status-plugin', handle: 4 } },
+      { type: 'Markdown', props: { key: 'status-markdown', text: '**All good**', dimColor: true } },
     ],
   };
 
@@ -86,10 +86,19 @@ test('keeps links inert unless they use a supported external URL scheme', () => 
   assert.doesNotMatch(html, /href="https:\/\/example.com\/@team/);
 });
 
-test('keeps ordinary Markdown links on the normal navigation path without a press handler', () => {
+test('keeps ordinary Client Markdown links on the normal navigation path', () => {
   const html = render({ type: 'Markdown', props: { text: '[Docs](https://example.test/docs)' } });
   assert.match(html, /<a[^>]*href="https:\/\/example\.test\/docs"[^>]*target="_blank"/);
   assert.doesNotMatch(html, /data-pressable-links/);
+});
+
+test('rejects a Client Markdown press handler but retains pressableLinks as plain metadata', () => {
+  assert.throws(() => parseModUiClientTree({
+    type: 'Markdown', props: { text: '[Docs](https://example.test/docs)' }, press: { plugin: 'status-plugin', handle: 4 },
+  }), /unsupported properties/);
+  assert.doesNotThrow(() => parseModUiClientTree({
+    type: 'Markdown', props: { text: '[Docs](https://example.test/docs)', pressableLinks: ['https://example.test/docs'] },
+  }));
 });
 
 test('rejects unknown element names and nested Client instances before React can create tags', () => {
@@ -127,26 +136,22 @@ test('rejects repeated Select values and malformed held handles', () => {
   assert.throws(() => parseModUiClientTree({ type: 'Button', props: { key: 'ok', label: 'Okay' }, press: { plugin: 'other', handle: 1 } }, 'status-plugin'), /owning Client plugin/);
 });
 
-test('builds source-shaped press/input/select and Markdown-link control bodies with the parent render identity', () => {
+test('builds source-shaped press/input/select control bodies with the parent render identity', () => {
   const events: ModUiClientSurfaceEvent[] = [
     { type: 'press' },
     { type: 'input', kind: 'change', value: 'hello' },
     { type: 'input', kind: 'submit', value: 'hello' },
     { type: 'select', value: 'week' },
-    { type: 'markdown-link', href: 'https://example.test/docs' },
   ];
   assert.deepEqual(events.map((event) => buildNativeUiClientPressRequest(site, client, 'control', event)), [
     { subtype: 'ui_client_press', plugin: 'status-plugin', component: 'AbovePrompt', instance_id: 'parent-render-1', client: 'status', module: 'surface/status.tsx', element: 'control', event: events[0] },
     { subtype: 'ui_client_press', plugin: 'status-plugin', component: 'AbovePrompt', instance_id: 'parent-render-1', client: 'status', module: 'surface/status.tsx', element: 'control', event: events[1] },
     { subtype: 'ui_client_press', plugin: 'status-plugin', component: 'AbovePrompt', instance_id: 'parent-render-1', client: 'status', module: 'surface/status.tsx', element: 'control', event: events[2] },
     { subtype: 'ui_client_press', plugin: 'status-plugin', component: 'AbovePrompt', instance_id: 'parent-render-1', client: 'status', module: 'surface/status.tsx', element: 'control', event: events[3] },
-    { subtype: 'ui_client_press', plugin: 'status-plugin', component: 'AbovePrompt', instance_id: 'parent-render-1', client: 'status', module: 'surface/status.tsx', element: 'control', event: { type: 'press' } },
   ]);
   assert.throws(() => buildNativeUiClientPressRequest(site, client, 'control', { type: 'input', kind: 'change', value: 'x'.repeat(16_385) }), /input event value is invalid/);
   assert.throws(() => buildNativeUiClientPressRequest(site, { ...client, module: 'm'.repeat(257) }, 'control', { type: 'press' }), /client.module is invalid/);
-  assert.throws(() => buildNativeUiClientPressRequest(site, client, 'docs', { type: 'markdown-link', href: '' }), /Markdown link href is invalid/);
-  assert.throws(() => parseModUiClientTree({ type: 'Markdown', props: { text: 'docs', pressableLinks: [] } }), /require a press handler/);
-  assert.throws(() => parseModUiClientTree({ type: 'Markdown', props: { text: 'docs' }, press: { plugin: 'status-plugin', handle: 4 } }), /requires a key/);
+  assert.throws(() => parseModUiClientTree({ type: 'Markdown', props: { text: 'docs' }, press: { plugin: 'status-plugin', handle: 4 } }), /unsupported properties/);
 });
 
 test('extracts only unique, leaf Client identities from a parent ui.render tree', () => {

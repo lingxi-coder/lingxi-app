@@ -28,7 +28,7 @@ import type {
   UiInvalidateEventDto,
   UiJsonValue,
 } from '@lingxi/bridge-client';
-import { ModUiClientTree, parseModUiClientTree, type ModUiClientHeldEvent, type ModUiClientIdentity } from './modUiClientTree';
+import { ModUiClientTree, parseModUiClientTree, type ModUiClientIdentity } from './modUiClientTree';
 import {
   ModUiParentTree,
   collectModUiClientElements,
@@ -222,7 +222,7 @@ function collectInteractiveNodes(tree: UiJsonValue): Array<{ element: string; ha
     const type = value.type;
     const props = value.props;
     const press = value.press;
-    if ((type === 'Button' || type === 'Input' || type === 'Select' || type === 'Markdown')
+    if ((type === 'Button' || type === 'Input' || type === 'Select')
       && isRecord(props) && isRecord(press) && typeof props.key === 'string'
       && typeof press.handle === 'number' && Number.isSafeInteger(press.handle) && press.handle > 0) {
       result.push({ element: props.key, handle: press.handle });
@@ -976,7 +976,7 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     unmountOperationRef.current(currentRuntimeId, revision);
   }, [descriptor.key, descriptor.module, descriptor.plugin, site?.instanceId, site?.sessionId]);
 
-  const onPress = useCallback(async (request: Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>, _handle: number, heldEvent?: ModUiClientHeldEvent) => {
+  const onPress = useCallback(async (request: Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>, _handle: number) => {
     if (!controlAddressable || !context || !runtimeEpochAvailable
       || failedRuntimeEpochRef.current === runtimeEpochRef.current
       || (fault?.source === 'adapter' && fault.phase === 'run')
@@ -1008,8 +1008,6 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       // Native Select callbacks receive the selected value as their first
       // argument and `{ value }` as the event, matching the author API.
       event = { value: reachedValue };
-    } else if (heldEvent !== undefined) {
-      event = { link: { href: heldEvent.link.href } };
     }
     const operation = {
       type: 'runHeld',

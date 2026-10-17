@@ -23,10 +23,7 @@ export interface ModUiClientIdentity {
   module: string;
 }
 
-export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto | { type: 'markdown-link'; href: string };
-export interface ModUiClientHeldEvent {
-  link: { href: string };
-}
+export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto;
 /** Exact bridge-client request consumed by Native's `ui_client_press` control. */
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
 
@@ -112,7 +109,6 @@ export type ModUiSurfaceNode =
   | {
       type: 'Markdown';
       props: { key?: string; text: string; dimColor?: boolean; pressableLinks?: readonly string[] };
-      press?: ModUiClientPressRef;
       hover?: ModUiJsonValue;
       children?: readonly [];
     };
@@ -122,7 +118,7 @@ export interface ModUiClientTreeProps {
   site: ModUiRenderSite;
   client: ModUiClientIdentity;
   /** Native ui_client_press request dispatcher. Runtime policy/VM handoff stays outside React. */
-  onPress(request: NativeUiClientPressRequest, handle: number, heldEvent?: ModUiClientHeldEvent): void | Promise<unknown>;
+  onPress(request: NativeUiClientPressRequest, handle: number): void | Promise<unknown>;
   /** A rejected local VM callback run is reported by the owning host adapter. */
   onRunFault?(request: NativeUiClientPressRequest, reason: string): void;
   /** A render-tree validation failure is reported through the owning host adapter. */
@@ -357,8 +353,6 @@ function validateProps(node: Record<string, unknown>, type: ModUiSurfaceNodeType
       if (typeof props.text !== 'string' || props.text.length > MAX_TREE_CHARS) fail('Markdown.props.text is invalid');
       if (props.dimColor !== undefined && typeof props.dimColor !== 'boolean') fail('Markdown.props.dimColor must be boolean');
       if (props.pressableLinks !== undefined && (!Array.isArray(props.pressableLinks) || props.pressableLinks.length > 256 || props.pressableLinks.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 2_048))) fail('Markdown.props.pressableLinks is invalid');
-      if (props.pressableLinks !== undefined && node.press === undefined) fail('Markdown.props.pressableLinks require a press handler');
-      if (node.press !== undefined && props.key === undefined) fail('pressable Markdown requires a key');
       break;
   }
 }
@@ -372,16 +366,15 @@ function validateNode(value: unknown, depth: number, state: { nodes: number }, e
   if (typeof type !== 'string' || !['Box', 'Text', 'Button', 'Input', 'Select', 'Link', 'Code', 'Markdown'].includes(type)) {
     fail('node type is unsupported');
   }
-  const allowed = type === 'Box' || type === 'Text' || type === 'Link'
+  const allowed = type === 'Box' || type === 'Text' || type === 'Link' || type === 'Markdown'
     ? ['type', 'props', 'hover', 'children']
-    : type === 'Markdown' ? ['type', 'props', 'hover', 'children', 'press']
-      : type === 'Button' || type === 'Input' || type === 'Select'
-        ? ['type', 'props', 'hover', 'children', 'press'] : ['type', 'props', 'hover', 'children'];
+    : type === 'Button' || type === 'Input' || type === 'Select'
+      ? ['type', 'props', 'hover', 'children', 'press'] : ['type', 'props', 'hover', 'children'];
   exactKeys(value, allowed, ['type'], type);
   if (value.props !== undefined) validateJson(value.props);
   if (value.hover !== undefined) validateJson(value.hover);
   validateProps(value, type as ModUiSurfaceNodeType);
-  if (type === 'Button' || type === 'Input' || type === 'Select' || type === 'Markdown' && value.press !== undefined) {
+  if (type === 'Button' || type === 'Input' || type === 'Select') {
     validatePress(value.press);
     if (expectedPlugin !== undefined && (value.press as ModUiClientPressRef).plugin !== expectedPlugin) {
       fail('press.plugin must match the owning Client plugin');
@@ -427,10 +420,7 @@ export function buildNativeUiClientPressRequest(
   validateString(pressPlugin, 'press.plugin');
   if (pressPlugin !== client.plugin) fail('press.plugin must match the owning Client plugin');
   let requestEvent: NativeUiClientPressEventDto;
-  if (event.type === 'markdown-link') {
-    if (typeof event.href !== 'string' || event.href.length === 0 || event.href.length > 2_048) fail('Markdown link href is invalid');
-    requestEvent = { type: 'press' };
-  } else if (event.type === 'input') {
+  if (event.type === 'input') {
     if (event.kind !== 'change' && event.kind !== 'submit') fail('input event kind is invalid');
     if (typeof event.value !== 'string' || event.value.length > MAX_INPUT_VALUE) fail('input event value is invalid');
     requestEvent = event;
@@ -504,12 +494,9 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
   const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent) => {
     if (!interactionsEnabled) return;
     const request = buildNativeUiClientPressRequest(site, client, element, event, press.plugin);
-    const heldEvent: ModUiClientHeldEvent | undefined = event.type === 'markdown-link'
-      ? { link: { href: event.href } }
-      : undefined;
     const activeGeneration = lifecycle.current;
     try {
-      void Promise.resolve(onPressRef.current(request, press.handle, heldEvent)).catch((error: unknown) => {
+      void Promise.resolve(onPressRef.current(request, press.handle)).catch((error: unknown) => {
         if (lifecycle.current !== activeGeneration) return;
         const reason = error instanceof Error ? error.message : String(error);
         onRunFaultRef.current?.(request, reason);
@@ -573,19 +560,7 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
         <CodeBlock code={node.props.source} language={node.props.language} variant="tool" />
       </figure>;
     case 'Markdown': {
-      const press = node.press;
-      const onClickCapture = press === undefined ? undefined : (event: React.MouseEvent<HTMLDivElement>) => {
-        const target = event.target;
-        if (!(target instanceof Element)) return;
-        const anchor = target.closest('a[href]');
-        const href = anchor?.getAttribute('href');
-        if (!href) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (href.length > 2_048 || node.props.pressableLinks !== undefined && !node.props.pressableLinks.includes(href)) return;
-        dispatch(press, node.props.key ?? '', { type: 'markdown-link', href });
-      };
-      return <div className="mod-ui-client-markdown" data-pressable-links={node.props.pressableLinks?.join(' ')} style={node.props.dimColor ? { color: t.text3 } : undefined} onClickCapture={onClickCapture}>
+      return <div className="mod-ui-client-markdown" style={node.props.dimColor ? { color: t.text3 } : undefined}>
         <MarkdownContent text={node.props.text} />
       </div>;
     }

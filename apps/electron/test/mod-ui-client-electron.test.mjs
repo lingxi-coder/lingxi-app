@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'mod-ui-client-electron.mjs');
 
-test('Electron renders Native Client input, Select, and Markdown held events from current values', { timeout: 45_000 }, async () => {
+test('Electron renders Native Client input and Select held events while keeping Markdown links ordinary', { timeout: 45_000 }, async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-mod-ui-client-vite-'));
   const fixtureBuildDir = mkdtempSync(join(tmpdir(), 'lingxi-mod-ui-client-build-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-mod-ui-client-electron-'));
@@ -81,22 +81,16 @@ test('Electron renders Native Client input, Select, and Markdown held events fro
     ]);
     assert.equal(result.selectUsesHookReachedValue, true);
     assert.deepEqual(result.selectRunHeldEvents, [{ value: 'week' }]);
-    assert.equal(result.allowedMarkdownClickPreventedNavigation, true);
-    assert.equal(result.markdownLinkPressRequests.length, 2, JSON.stringify({ requests: result.markdownLinkPressRequests, events: result.markdownLinkRunHeldEvents, contextHref: result.contextMentionHref, openEvents: result.contextMentionOpenEvents }));
-    assert.deepEqual(result.markdownLinkPressRequests.map((request) => request.event), [{ type: 'press' }, { type: 'press' }]);
-    assert.equal(result.markdownLinkPressRequests.some((request) => Object.hasOwn(request, 'href')), false);
+    assert.equal(result.markdownExternalLinkUsesNormalNavigation, true);
+    assert.equal(result.markdownOpenLinkUsesNormalNavigation, true);
+    assert.equal(result.markdownLinksDoNotDispatchClientCallbacks, true);
     assert.equal(result.contextMentionClickPreventedNavigation, true);
-    assert.deepEqual(result.contextMentionOpenEvents, []);
-    assert.deepEqual(result.markdownLinkRunHeldEvents, [
-      { link: { href: 'https://example.test/docs' } },
-      { link: { href: result.contextMentionHref } },
-    ]);
+    assert.deepEqual(result.contextMentionOpenEvents, [{ kind: 'plugin', name: 'Fixture', target: 'plugin:fixture' }]);
     assert.equal(result.ordinaryMentionClickPreventedNavigation, true);
-    assert.deepEqual(result.ordinaryMentionOpenEvents, [{ kind: 'plugin', name: 'Fixture', target: 'plugin:fixture' }]);
-    assert.equal(result.unlistedMarkdownClickPreventedNavigation, true);
-    assert.equal(result.unlistedMarkdownLinkNotDispatched, true);
-    assert.equal(result.markdownWithoutAllowlistPreventsNavigation, true);
-    assert.deepEqual(result.markdownWithoutAllowlistRunHeldEvents, [{ link: { href: 'https://example.test/open' } }]);
+    assert.deepEqual(result.ordinaryMentionOpenEvents, [
+      { kind: 'plugin', name: 'Fixture', target: 'plugin:fixture' },
+      { kind: 'plugin', name: 'Fixture', target: 'plugin:fixture' },
+    ]);
     assert.equal(result.preRegistrationFrameReplayed, true);
     assert.equal(result.staleOperationIgnoredWithoutFault, true);
     assert.equal(result.parentPropsUpdateRendered, true);

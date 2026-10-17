@@ -152,8 +152,8 @@ const surfaceTree = (displayTitle = title): UiClientFrameDto['tree'] => ({
     { type: 'Button', props: { key: 'run', label: 'Run' }, press: { plugin: 'fixture-plugin', handle: 17 } },
     { type: 'Input', props: { key: 'filter', label: 'Filter', value: '' }, press: { plugin: 'fixture-plugin', handle: 18 } },
     { type: 'Select', props: { key: 'period', label: 'Period', options: [{ value: 'day' }, { value: 'week' }] }, press: { plugin: 'fixture-plugin', handle: 19 } },
-    { type: 'Markdown', props: { key: 'docs', text: `[Allowed docs](https://example.test/docs) [Plugin mention](${fixtureContextMentionHref}) [Unlisted](https://example.test/private)`, pressableLinks: ['https://example.test/docs', fixtureContextMentionHref] }, press: { plugin: 'fixture-plugin', handle: 20 } },
-    { type: 'Markdown', props: { key: 'open-links', text: '[Open link](https://example.test/open)' }, press: { plugin: 'fixture-plugin', handle: 21 } },
+    { type: 'Markdown', props: { key: 'docs', text: `[Docs](https://example.test/docs) [Plugin mention](${fixtureContextMentionHref}) [Other link](https://example.test/private)`, pressableLinks: ['https://example.test/docs', fixtureContextMentionHref] } },
+    { type: 'Markdown', props: { key: 'open-links', text: '[Open link](https://example.test/open)' } },
     { type: 'Markdown', props: { key: 'ordinary-mention', text: `[Ordinary mention](${fixtureContextMentionHref})` } },
   ],
 });

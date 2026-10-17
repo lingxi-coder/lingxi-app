@@ -64,6 +64,8 @@ mod process_io {
                 .env("ANTHROPIC_API_KEY", "sk-test-fake")
                 .args([
                     "--print",
+                    "--model",
+                    "claude-sonnet-4-5",
                     "--verbose",
                     "--input-format",
                     "stream-json",
@@ -240,7 +242,7 @@ mod process_io {
             .current_dir(home.path())
             .env("LINGXI_CONFIG_DIR", home.path())
             .env("ANTHROPIC_API_KEY", "sk-test-fake")
-            .arg("/version")
+            .args(["--model", "claude-sonnet-4-5", "/version"])
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))

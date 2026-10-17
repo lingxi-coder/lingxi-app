@@ -24,7 +24,7 @@ fn slash_version_dispatch_works_without_api() {
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .env("LINGXI_CONFIG_DIR", home.path())
-        .arg("/version")
+        .args(["--model", "claude-sonnet-4-5", "/version"])
         .assert()
         .success()
         .stdout(predicate::str::starts_with("lingxi-cli "));
@@ -37,7 +37,7 @@ fn slash_help_dispatch_works_without_api() {
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .env("LINGXI_CONFIG_DIR", home.path())
-        .arg("/help")
+        .args(["--model", "claude-sonnet-4-5", "/help"])
         .assert()
         .success();
 }
@@ -101,7 +101,7 @@ fn json_mode_emits_command_output_event() {
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .env("LINGXI_CONFIG_DIR", home.path())
-        .args(["--json", "/version"])
+        .args(["--model", "claude-sonnet-4-5", "--json", "/version"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"event\":\"command_output\""))

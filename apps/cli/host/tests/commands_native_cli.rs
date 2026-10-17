@@ -34,7 +34,6 @@ struct CommandInputCase {
     kind: String,
     prompt: Option<String>,
     prompt_utf16le_hex: Option<String>,
-    input_file: Option<String>,
     session_id: String,
     skill_name: Option<String>,
 }
@@ -59,6 +58,7 @@ struct NativeReceiptCase {
     id: String,
     kind: String,
     session_id: String,
+    input_file: Option<String>,
     argv: Vec<String>,
     native_exit_code: i32,
     stdout_file: String,
@@ -614,7 +614,7 @@ fn run_cli_case(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let input = case
+    let input = receipt
         .input_file
         .as_deref()
         .map(|path| fixture_file(fixture_root, path))
@@ -774,10 +774,10 @@ fn actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields() 
                 native.argv.last().map(String::as_str),
                 case.prompt.as_deref()
             );
-            assert!(case.input_file.is_none());
+            assert!(native.input_file.is_none());
         } else {
             assert!(case.prompt.is_none());
-            let input_file = case.input_file.as_deref().unwrap();
+            let input_file = native.input_file.as_deref().unwrap();
             let input_bytes = fixture_file(&fixture_root, input_file);
             let input_line = std::str::from_utf8(&input_bytes).unwrap().trim_end();
             let input = Utf16JsonProjection::parse(input_line).unwrap();

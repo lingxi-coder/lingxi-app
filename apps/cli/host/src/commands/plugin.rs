@@ -4949,7 +4949,7 @@ mod telemetry_tests {
                         "version": version,
                         "installedAt": "2026-09-01T00:00:00.000Z",
                         "lastUpdated": "2026-09-01T00:00:00.000Z",
-                        "autoInstalled": auto_installed
+                        "auto": auto_installed
                     }]
                 }
             }),

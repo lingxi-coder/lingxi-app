@@ -9768,7 +9768,7 @@ mod tests {
         widget.set_command_registry(std::sync::Arc::new(tokio::sync::RwLock::new(registry)));
 
         typ(&mut widget, "/loop 5m inspect this image");
-        let ChatOutcome::DispatchSlash(input, images, _token) =
+        let ChatOutcome::DispatchSlash(input, images, dispatch) =
             widget.handle_key(press(KeyCode::Enter))
         else {
             panic!("a registry-backed command must route to DispatchSlash");
@@ -9777,6 +9777,9 @@ mod tests {
         assert_eq!(images, vec![path.clone()]);
         assert!(widget.pending_images.is_empty());
 
+        // The fixture has delivered this batch to the slash handler; model its
+        // completion before asserting that the next ordinary turn can start.
+        dispatch.completed.cancel();
         typ(&mut widget, "next prompt");
         let ChatOutcome::Submit(_, _, later_images, _) = widget.handle_key(press(KeyCode::Enter))
         else {
@@ -9828,6 +9831,10 @@ mod tests {
         assert_eq!(images, vec![first.clone()]);
 
         widget.push_image(&second.display().to_string());
+        // The off-loop slash was cancelled before model admission. Its image
+        // resolution returns the submitted batch while the second image stays
+        // queued, then its completion releases the pending-dispatch admission.
+        dispatch.cancel();
         widget.apply_turn_event(TurnEvent::SlashImagesResolved {
             dispatch_id: dispatch.image_restore_id,
             image_paths: Some(images),
@@ -9841,6 +9848,7 @@ mod tests {
             image_paths: Some(vec![first.clone()]),
         });
         assert_eq!(widget.pending_images, vec![first.clone(), second.clone()]);
+        dispatch.completed.cancel();
         typ(&mut widget, "next prompt");
         let ChatOutcome::Submit(_, _, later_images, _) = widget.handle_key(press(KeyCode::Enter))
         else {

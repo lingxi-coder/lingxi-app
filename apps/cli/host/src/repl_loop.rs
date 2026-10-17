@@ -836,10 +836,21 @@ mod tests {
         let (context, attachment) = unknown_command_fallback_context(&command_name, None, &catalog);
 
         assert_eq!(context.len(), 1);
-        assert!(context[0]
+        let reminder_units = context[0]
             .string_units("")
-            .expect("reminder is a root string")
-            .contains(&0xd800));
+            .expect("reminder is a root string");
+        assert!(
+            !reminder_units.contains(&0xd800),
+            "Native omits command names that fail its ASCII reminder-name gate"
+        );
+        assert!(
+            !reminder_units.contains(&0xfffd),
+            "the unsafe source name must not be converted to a replacement character and echoed"
+        );
+        assert!(context[0]
+            .string_at("")
+            .expect("reminder has a display string")
+            .contains("The user's message starts with a slash command, but no command with that name is available in this session, so it did not run."));
         assert_eq!(
             attachment.payload.string_at("/type"),
             Some("unknown_command_fallback")

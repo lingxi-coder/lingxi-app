@@ -7464,11 +7464,24 @@ mod tests {
                 Vec::new(),
             ),
         );
-        let errored_orch = slash_image_test_orchestrator(dir.path(), errored_stream.clone());
+        let error_output = Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let errored_orch = orchestrator::ConversationOrchestrator::into_shared(
+            orchestrator::ConversationOrchestrator::new_with_streaming(
+                orchestrator::OrchestratorConfig::default(),
+                Arc::new(orchestrator::test_support::MockApiClient::new(vec![])),
+                errored_stream.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(orchestrator::test_support::NoOpPermissionGate),
+                error_output.clone(),
+                Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
+                dir.path().to_path_buf(),
+            ),
+        );
         let image_path = dir.path().join("provider-error.png");
         std::fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
         let provider_dispatch_id = uuid::Uuid::new_v4();
-        let error = run_slash_prompt_with_images(
+        let outcome = run_slash_prompt_with_images(
             errored_orch.as_ref(),
             &"/loop inspect".into(),
             vec![image_path],
@@ -7477,10 +7490,38 @@ mod tests {
             provider_dispatch_id,
         )
         .await
-        .unwrap_err();
-        assert!(error.to_string().contains("provider connection failed"));
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            orchestrator::conversation::TurnOutcome::EndTurn
+        ));
         assert_slash_image_resolution(&mut rx, provider_dispatch_id, None);
         assert_provider_received_slash_image(&errored_stream.captured_calls().await);
+        let output_events = error_output.snapshot().await;
+        assert!(
+            output_events.iter().any(|event| matches!(
+                event,
+                lingxi_core::host::OutputEvent::Text { text }
+                    if text.string_at("") == Some("provider connection failed")
+            )),
+            "the graceful model-error outcome must surface the provider message"
+        );
+        assert!(
+            output_events.iter().any(|event| matches!(
+                event,
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. }
+                    if stop_reason == "model_error"
+            )),
+            "the provider failure must retain its model_error terminal reason"
+        );
+        assert!(
+            output_events.iter().any(|event| matches!(
+                event,
+                lingxi_core::host::OutputEvent::TerminalApiError { terminal_reason, .. }
+                    if terminal_reason == "api_error"
+            )),
+            "the output must retain the structured API-error event"
+        );
     }
 
     struct AdmissionCallbackBatchRunner {

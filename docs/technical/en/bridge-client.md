@@ -255,20 +255,20 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/packages/bridge-client)
 
-- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/packages/bridge-client/src/client.ts) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
-- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/packages/bridge-client/src/protocol.ts) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
-- [lingxi-app/packages/bridge-client/src/version.ts](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/packages/bridge-client/src/version.ts) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
-- [lingxi-app/packages/bridge-client/src/lockfile.ts](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/packages/bridge-client/src/lockfile.ts) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
-- [lingxi-app/packages/bridge-client/src/eventCorrelation.ts](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/packages/bridge-client/src/eventCorrelation.ts) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
-- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/apps/bridge-server/src/server.rs) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
-- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2/apps/bridge-server/src/router.rs) — Committed source (b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2)
+- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/packages/bridge-client/src/client.ts) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
+- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/packages/bridge-client/src/protocol.ts) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
+- [lingxi-app/packages/bridge-client/src/version.ts](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/packages/bridge-client/src/version.ts) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
+- [lingxi-app/packages/bridge-client/src/lockfile.ts](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/packages/bridge-client/src/lockfile.ts) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
+- [lingxi-app/packages/bridge-client/src/eventCorrelation.ts](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/packages/bridge-client/src/eventCorrelation.ts) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/apps/bridge-server/src/server.rs) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/d1d9e41246b96da0f5a3972a46f0d5bfc651e96f/apps/bridge-server/src/router.rs) — Committed source (d1d9e41246b96da0f5a3972a46f0d5bfc651e96f)
 - [harness-runtime/crates/bridge/src/wire.rs](https://github.com/lingxi-coder/harness-runtime/blob/c6d8f9ff22f62f30634ca949460a2f9784bfb00b/crates/bridge/src/wire.rs) — Committed source (c6d8f9ff22f62f30634ca949460a2f9784bfb00b)
 - [harness-runtime/crates/bridge/src/mcp_endpoint.rs](https://github.com/lingxi-coder/harness-runtime/blob/c6d8f9ff22f62f30634ca949460a2f9784bfb00b/crates/bridge/src/mcp_endpoint.rs) — Committed source (c6d8f9ff22f62f30634ca949460a2f9784bfb00b)
 - [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/c6d8f9ff22f62f30634ca949460a2f9784bfb00b/crates/client/src/protocol/commands.rs) — Committed source (c6d8f9ff22f62f30634ca949460a2f9784bfb00b)
 - [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/c6d8f9ff22f62f30634ca949460a2f9784bfb00b/crates/client/src/protocol/events.rs) — Committed source (c6d8f9ff22f62f30634ca949460a2f9784bfb00b)
 - [harness-runtime/crates/client/src/protocol/error.rs](https://github.com/lingxi-coder/harness-runtime/blob/c6d8f9ff22f62f30634ca949460a2f9784bfb00b/crates/client/src/protocol/error.rs) — Committed source (c6d8f9ff22f62f30634ca949460a2f9784bfb00b)
 
-- lingxi-app: HEAD b1f2fe6fc404d26afdf1e0d38c27aa6e3d1093b2; Referenced input fingerprint sha256:96aaaa09c420b5d84d4e26d3079dc7524e105cb649a749f9d8be0062f6211282
+- lingxi-app: HEAD d1d9e41246b96da0f5a3972a46f0d5bfc651e96f; Referenced input fingerprint sha256:96aaaa09c420b5d84d4e26d3079dc7524e105cb649a749f9d8be0062f6211282
 - harness-runtime: HEAD c6d8f9ff22f62f30634ca949460a2f9784bfb00b; Referenced input fingerprint sha256:a83d44fb79099d3a923f8fd33bfd18789edd02c2b1d5c683a16c589fffaf2578; Product pin c6d8f9ff22f62f30634ca949460a2f9784bfb00b
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

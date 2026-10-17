@@ -58,14 +58,14 @@ Computer Use and Local App Market have their own architecture and implementation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — Uncommitted source (7f1643af5fc10881b489d817c0c4a4e21d9e3cb5)
-- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/08813211974c0db4a57b1860a99604c5a6d6b6dc/crates/runtime/Cargo.toml) — Committed source (08813211974c0db4a57b1860a99604c5a6d6b6dc)
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/08813211974c0db4a57b1860a99604c5a6d6b6dc/crates/runtime/src/api.rs) — Committed source (08813211974c0db4a57b1860a99604c5a6d6b6dc)
+- lingxi-app/Cargo.toml — Uncommitted source (7d8f2da9bc1c75967f9d378478bf035128581b4c)
+- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/8daf175e172bb00002e3d3c002b8ec6ef8276786/crates/runtime/Cargo.toml) — Committed source (8daf175e172bb00002e3d3c002b8ec6ef8276786)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/8daf175e172bb00002e3d3c002b8ec6ef8276786/crates/runtime/src/api.rs) — Committed source (8daf175e172bb00002e3d3c002b8ec6ef8276786)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/lib.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
 - [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/Cargo.toml) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
 
-- lingxi-app: HEAD 7f1643af5fc10881b489d817c0c4a4e21d9e3cb5; Referenced input fingerprint sha256:b941137b3401cb29c37db674c672ece82f2aebc88ece540f4dce3bf00e73aa28
-- harness-runtime: HEAD 08813211974c0db4a57b1860a99604c5a6d6b6dc; Referenced input fingerprint sha256:17262ac652ec09f3f2cc282728a85bd756689c38ec992eaa4e8351a3a510ea19; Product pin 08813211974c0db4a57b1860a99604c5a6d6b6dc
+- lingxi-app: HEAD 7d8f2da9bc1c75967f9d378478bf035128581b4c; Referenced input fingerprint sha256:3d6913d52b7a73e9f0eedc01b43af646972a351250d9661d63444a9365558a9e
+- harness-runtime: HEAD 8daf175e172bb00002e3d3c002b8ec6ef8276786; Referenced input fingerprint sha256:a83d44fb79099d3a923f8fd33bfd18789edd02c2b1d5c683a16c589fffaf2578; Product pin 8daf175e172bb00002e3d3c002b8ec6ef8276786
 - llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
 - mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
 

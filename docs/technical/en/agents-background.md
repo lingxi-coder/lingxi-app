@@ -56,18 +56,18 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/agent/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/agent/src/context.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/agent/src/handle.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/agent/src/runner.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/agent/src/runner.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/agent/src/pool.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/agent/src/pool/capacity.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/runtime/src/desktop/background_agent.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/runtime/src/desktop/session_agents.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/runtime/src/desktop/session_agents.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/tasks/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/tasks/src/lib.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/tasks/src/handlers/local_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/tasks/src/handlers/local_agent.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/coordinator/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/coordinator/src/lib.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
-- [harness-runtime/crates/runtime/src/parked_agent_restore.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb8be1b7434045b0a85507315c1df9a5ddc27875/crates/runtime/src/parked_agent_restore.rs) — Committed source (bb8be1b7434045b0a85507315c1df9a5ddc27875)
+- [harness-runtime/crates/agent/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/agent/src/context.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/agent/src/handle.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/agent/src/runner.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/agent/src/runner.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/agent/src/pool.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/agent/src/pool/capacity.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/runtime/src/desktop/background_agent.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/runtime/src/desktop/session_agents.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/runtime/src/desktop/session_agents.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/tasks/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/tasks/src/lib.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/tasks/src/handlers/local_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/tasks/src/handlers/local_agent.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/coordinator/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/coordinator/src/lib.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
+- [harness-runtime/crates/runtime/src/parked_agent_restore.rs](https://github.com/lingxi-coder/harness-runtime/blob/e03def6e13ff326fe0d507372ea8c50f58b44100/crates/runtime/src/parked_agent_restore.rs) — Committed source (e03def6e13ff326fe0d507372ea8c50f58b44100)
 
-- harness-runtime: HEAD bb8be1b7434045b0a85507315c1df9a5ddc27875; Referenced input fingerprint sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; Product pin bb8be1b7434045b0a85507315c1df9a5ddc27875
+- harness-runtime: HEAD e03def6e13ff326fe0d507372ea8c50f58b44100; Referenced input fingerprint sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; Product pin e03def6e13ff326fe0d507372ea8c50f58b44100
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

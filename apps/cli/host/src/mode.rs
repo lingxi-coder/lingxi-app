@@ -2132,10 +2132,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // Setup and execution share the same admitted settings sources, while
     // writable strategy entries retain their individual source revisions.
     // Model candidates come from the live session catalog when setup opens.
+    let plugin_archive_session = tui_build.runtime.plugin_archive_session.clone();
     let fusion_admin_context = {
         let lingxi_home = permission_paths.lingxi_home.clone();
         let project_dir = permission_paths.cwd.clone();
         std::sync::Arc::new(configuration_admin::settings_bridge::SettingsContext {
+            plugin_archive_session: plugin_archive_session.clone(),
             fusion_layers: Some(tui_build.fusion_layers),
             paths: configuration_admin::settings_bridge::SettingsPaths {
                 lingxi_home,
@@ -2169,12 +2171,19 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let plugin_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let plugin_dir = plugin_home.join("plugins");
     let plugin_snapshot = std::sync::Arc::new(std::sync::Mutex::new(
-        load_plugins_snapshot(&plugin_dir, &plugin_home, &plugin_cwd).await,
+        load_plugins_snapshot(
+            &plugin_dir,
+            &plugin_home,
+            &plugin_cwd,
+            &plugin_archive_session,
+        )
+        .await,
     ));
     let plugin_snapshot_cb = plugin_snapshot.clone();
     let plugin_effect_home = plugin_home.clone();
     let plugin_effect_cwd = plugin_cwd.clone();
     let plugin_effect_dir = plugin_dir.clone();
+    let plugin_effect_archive_session = plugin_archive_session.clone();
     let plugin_handle = handle.clone();
     let plugin_turn_tx = turn_tx.clone();
     let on_plugin_action = move |action: tui::bottom_pane::PluginAction| {
@@ -2182,9 +2191,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let home = plugin_effect_home.clone();
         let cwd = plugin_effect_cwd.clone();
         let dir = plugin_effect_dir.clone();
+        let archive_session = plugin_effect_archive_session.clone();
         let tx = plugin_turn_tx.clone();
         plugin_handle.spawn(async move {
-            run_plugin_action(action, &dir, &home, &cwd, &slot, tx).await;
+            run_plugin_action(action, &dir, &home, &cwd, &archive_session, &slot, tx).await;
         });
     };
     // (`/reload-plugins`) The retained plugin subsystem — `None` when plugins are
@@ -4000,10 +4010,11 @@ async fn load_plugins_snapshot(
     plugins_dir: &std::path::Path,
     home: &std::path::Path,
     cwd: &std::path::Path,
+    archive_session: &plugin::PluginArchiveSession,
 ) -> tui::bottom_pane::plugins_view::PluginsSnapshot {
     use tui::bottom_pane::plugins_view::{PluginRow, PluginsSnapshot};
     let enabled_map = read_merged_enabled_plugins(home, cwd);
-    let discovered = plugin::discover_recorded_plugins(plugins_dir).await;
+    let discovered = plugin::discover_recorded_plugins(plugins_dir, archive_session).await;
     let plugins = discovered
         .into_iter()
         .map(|(_, m, _)| {
@@ -4032,6 +4043,7 @@ async fn run_plugin_action(
     plugins_dir: &std::path::Path,
     home: &std::path::Path,
     cwd: &std::path::Path,
+    archive_session: &plugin::PluginArchiveSession,
     slot: &std::sync::Arc<std::sync::Mutex<tui::bottom_pane::plugins_view::PluginsSnapshot>>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
@@ -4049,7 +4061,7 @@ async fn run_plugin_action(
         Err(e) => (e, true),
     };
     // Refresh the snapshot so the manager's next open reflects the toggle.
-    let fresh = load_plugins_snapshot(plugins_dir, home, cwd).await;
+    let fresh = load_plugins_snapshot(plugins_dir, home, cwd, archive_session).await;
     if let Ok(mut guard) = slot.lock() {
         *guard = fresh;
     }

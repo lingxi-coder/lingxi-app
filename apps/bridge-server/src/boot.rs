@@ -1483,7 +1483,7 @@ pub async fn assemble_with_credentials(
     // `effective` re-applies every time, makes the two agree on managed keys
     // forever, which is the correct answer: nothing IS pending on a key the
     // user cannot change.
-    let settings_context = {
+    let mut settings_context = {
         let paths = SettingsPaths {
             lingxi_home: cfg.lingxi_home.clone(),
             project_dir: cfg.cwd.clone(),
@@ -1510,6 +1510,7 @@ pub async fn assemble_with_credentials(
         let active = active_settings_baseline(&paths, &managed)
             .map_err(|error| settings_error_message(&error))?;
         SettingsContext {
+            plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: Some(Arc::new({
                 let config = cfg.clone();
                 move || harness_runtime::desktop::fusion_settings_layers_for_config(&config)
@@ -1666,6 +1667,9 @@ pub async fn assemble_with_credentials(
         harness_runtime::desktop::build_with_host_automation(cfg, output, permission_sink, shared)
             .await
             .map_err(|e| e.to_string())?;
+    // Replace the lazy placeholder with the exact session used by desktop
+    // discovery and PluginManager before the context is attached to the Router.
+    settings_context.plugin_archive_session = runtime.plugin_archive_session.clone();
     receive_gate.set(runtime.orchestrator.clone());
     // The runtime cloned the exact construction-only lease into its hydrated
     // coordinator. Do not let the bridge's process-registration guard pin the

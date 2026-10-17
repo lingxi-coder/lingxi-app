@@ -1050,10 +1050,13 @@ async fn run_evaluation(
     home: &Path,
     cwd: &Path,
 ) -> Result<(AggregateResult, i32), String> {
+    // The resolver returns an install path used throughout the full evaluation.
+    // Keep its V2 archive session alive until all cases and plugin hooks finish.
+    let archive_session = plugin::PluginArchiveSession::new();
     let started = std::time::Instant::now();
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let target_text = cli.target.clone().unwrap_or_else(|| ".".to_string());
-    let target = resolve_target(&target_text, plugins_dir, home, cwd).await?;
+    let target = resolve_target(&target_text, plugins_dir, home, cwd, &archive_session).await?;
     if cli.eval_dir.is_none() {
         if let Some(warning) = manifest_eval_setting(&target.root).warning {
             eprintln!("{warning}");
@@ -2933,6 +2936,7 @@ async fn resolve_target(
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
+    archive_session: &plugin::PluginArchiveSession,
 ) -> Result<ResolvedTarget, String> {
     let raw_path = Path::new(target);
     let candidate = if raw_path.is_absolute() {
@@ -2982,7 +2986,7 @@ async fn resolve_target(
         });
     }
 
-    let matches: Vec<PathBuf> = plugin::discover_recorded_plugins(plugins_dir)
+    let matches: Vec<PathBuf> = plugin::discover_recorded_plugins(plugins_dir, archive_session)
         .await
         .into_iter()
         .filter(|(_, manifest, _)| manifest.name == target)

@@ -96,6 +96,7 @@ mod settings_reload_error_source_tests {
         .unwrap();
 
         let settings = crate::settings_bridge::SettingsContext {
+            plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: None,
             paths: crate::settings_bridge::SettingsPaths {
                 lingxi_home: home,
@@ -318,6 +319,7 @@ mod skill_identity_source_tests {
         ));
 
         let settings = crate::settings_bridge::SettingsContext {
+            plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: None,
             paths: crate::settings_bridge::SettingsPaths {
                 lingxi_home: home_dir,

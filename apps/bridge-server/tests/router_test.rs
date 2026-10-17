@@ -3463,6 +3463,7 @@ async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
 
     let managed = Utf16JsonProjection::parse(r#"{"telemetryEnabled":false}"#).unwrap();
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3607,6 +3608,7 @@ async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
     .unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3662,6 +3664,7 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
     std::fs::create_dir_all(&home).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3715,6 +3718,7 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
     std::fs::create_dir_all(&home).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3803,6 +3807,7 @@ async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3859,6 +3864,7 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
     std::fs::create_dir_all(&home).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3917,6 +3923,7 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
     std::fs::write(home.join("settings.json"), "{ not json").unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -3973,6 +3980,7 @@ async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -4028,6 +4036,7 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,
@@ -4096,6 +4105,7 @@ async fn update_workspace_directories_writes_the_named_layer_and_preserves_other
     std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
 
     let router = router_with_settings(SettingsContext {
+        plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
         fusion_layers: None,
         paths: SettingsPaths {
             lingxi_home: home,

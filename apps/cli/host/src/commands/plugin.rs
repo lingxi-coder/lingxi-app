@@ -1029,7 +1029,8 @@ async fn run_list_with_bus(args: &ListArgs, analytics_bus: Option<&Arc<Analytics
     }
 
     let dir = plugins_dir();
-    let discovered = plugin::discover_recorded_plugins(&dir).await;
+    let archive_session = plugin::PluginArchiveSession::new();
+    let discovered = plugin::discover_recorded_plugins(&dir, &archive_session).await;
 
     if args.json {
         let (durable_installed, diagnostics) = installed_json_items(
@@ -1510,7 +1511,8 @@ async fn run_details_with_bus(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> i32 {
     let dir = plugins_dir();
-    let discovered = plugin::discover_recorded_plugins(&dir).await;
+    let archive_session = plugin::PluginArchiveSession::new();
+    let discovered = plugin::discover_recorded_plugins(&dir, &archive_session).await;
 
     // `name` may be bare (`foo`) or qualified (`foo@marketplace`); match on the
     // manifest's own name (the discovery loader stores the manifest `name`).

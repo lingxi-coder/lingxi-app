@@ -581,9 +581,9 @@ fn run_cli_case(
     // `getcwd()` to `/private/var/folders/...`. The session path encodes the
     // runtime cwd string, so use its canonical spelling for the fixture too.
     let cwd_path = std::fs::canonicalize(cwd.path()).expect("canonicalize CLI fixture cwd");
-    if matches!(case.id.as_str(), "unicode-skill-name" | "punctuation-skill-name") {
-        create_project_skills(&cwd_path);
-    }
+    // Native 2.1.295's fixed inputs place these two project Skills in the
+    // shared cwd for every replay case, including unknown-slash and stream-json.
+    create_project_skills(&cwd_path);
     let stub = LocalApiStub::start();
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"));

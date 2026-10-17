@@ -78,6 +78,34 @@ from pathlib import Path
 LOCALES = ["zh-Hans", "zh-Hant", "en", "ja", "ko"]
 BASE_LOCALE = "zh-Hans"
 
+# These six English UI labels intentionally match their English zh-Hans source
+# copy. Keep the exception exact: locale, key, and both values must all match.
+INTENTIONAL_IDENTICAL_TO_BASE = {
+    ("en", "drawer_tab_chats"): "Chat",
+    ("en", "drawer_tab_crons"): "Cron",
+    ("en", "drawer_tab_projects"): "Code",
+    ("en", "drawer_workspace_global"): "Global",
+    ("en", "session_mode_chat"): "Chat",
+    ("en", "session_mode_code"): "Code",
+}
+
+
+def _is_intentional_identical_to_base(locale, key, base_value, translated_value):
+    expected = INTENTIONAL_IDENTICAL_TO_BASE.get((locale, key))
+    return expected is not None and base_value == expected and translated_value == expected
+
+
+def _identical_to_base_count(locale, keys, base, translated):
+    return sum(
+        1
+        for key in keys
+        if translated.get(key) is not None
+        and translated.get(key) == base.get(key)
+        and not _is_intentional_identical_to_base(
+            locale, key, base.get(key), translated.get(key)
+        )
+    )
+
 # 与 generate.py 的 `_ANDROID_NAME` 逐字一致。⚠️ 那边改了这边必须跟着改，
 # 否则这个门会对着一个已经不存在的规则报告「没有回归」。
 ANDROID_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\Z")
@@ -152,6 +180,17 @@ ANDROID_GOOGLE_SERVICES_PLUGIN_APPLY = re.compile(
 IOS_LOCALIZED_CALL = re.compile(
     r'String\(localized:\s*"([a-zA-Z_][a-zA-Z0-9_.]*)"\)|(?<![\w.])localized\("([a-zA-Z_][a-zA-Z0-9_.]*)"\)'
 )
+# SwiftUI treats a string literal passed as a view's first argument as a
+# LocalizedStringKey. Only add project-style resource keys here: ordinary
+# readable labels such as "All" and "Retry" are valid literals too.
+IOS_SWIFTUI_LOCALIZED_CALL = re.compile(
+    r"\b(?:Text|Label|SecureField|TextField|Button|Toggle)\s*\("
+)
+IOS_SWIFTUI_RESOURCE_KEY = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+\Z")
+IOS_SWIFTUI_LITERAL = re.compile(r'\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*\Z')
+IOS_SWIFTUI_TERNARY = re.compile(
+    r'\s*[^"?]+\?\s*"([^"\\]*)"\s*:\s*"([^"\\]*)"\s*\Z'
+)
 # 排除 `android.R.string.*` / `androidx.R.string.*` 框架资源——那些从不在
 # 本仓库的 catalog 里，不是缺失。
 ANDROID_RSTRING_REF = re.compile(r"\b(android\.|androidx\.)?R\.string\.([a-zA-Z_][a-zA-Z0-9_]*)")
@@ -170,7 +209,7 @@ def fail(msg):
 
 
 def _ios_source_refs(repo_root):
-    """key -> 第一处引用它的文件路径（字符串字面量调用，不含插值）。"""
+    """key -> 第一处显式或 SwiftUI 字面量资源引用它的文件路径。"""
     refs = {}
     root = Path(repo_root) / IOS_SOURCE_ROOT
     for path in sorted(root.rglob("*.swift")):
@@ -178,7 +217,62 @@ def _ios_source_refs(repo_root):
         for m in IOS_LOCALIZED_CALL.finditer(text):
             key = m.group(1) or m.group(2)
             refs.setdefault(key, str(path))
+        for key in _swiftui_localized_resource_keys(text):
+            refs.setdefault(key, str(path))
     return refs
+
+
+def _swiftui_first_argument(text, open_paren):
+    """Return one SwiftUI call's first argument without parsing nested arguments."""
+    start = open_paren + 1
+    stack = []
+    i = start
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            # Skip a quoted Swift string (including escaped quotes) so commas
+            # inside its contents do not look like argument separators.
+            i += 1
+            while i < len(text):
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char in "([{":
+            stack.append({"(": ")", "[": "]", "{": "}"}[char])
+        elif char in ")]}":
+            if stack:
+                if char == stack[-1]:
+                    stack.pop()
+            elif char in ")}":
+                return text[start:i]
+        elif char == "," and not stack:
+            return text[start:i]
+        i += 1
+    return ""
+
+
+def _swiftui_localized_resource_keys(text):
+    keys = set()
+    for match in IOS_SWIFTUI_LOCALIZED_CALL.finditer(text):
+        argument = _swiftui_first_argument(text, match.end() - 1)
+        literal = IOS_SWIFTUI_LITERAL.fullmatch(argument)
+        if literal:
+            value = literal.group(1)
+            if IOS_SWIFTUI_RESOURCE_KEY.fullmatch(value):
+                keys.add(value)
+            continue
+        ternary = IOS_SWIFTUI_TERNARY.fullmatch(argument)
+        if ternary:
+            keys.update(
+                value for value in ternary.groups()
+                if IOS_SWIFTUI_RESOURCE_KEY.fullmatch(value)
+            )
+    return keys
 
 
 def _android_source_refs(repo_root):
@@ -333,7 +427,7 @@ def measure(locales, repo_root):
 
     ios_refs = _ios_source_refs(repo_root)
     if len(ios_refs) < MIN_IOS_SOURCE_REFS:
-        fail("found only %d distinct key(s) referenced by iOS String(localized:)/localized() under %s "
+        fail("found only %d distinct key(s) referenced by iOS localization calls or SwiftUI resource-key literals under %s "
              "— refusing to trust an enumeration this much smaller than the known count, the scan "
              "is probably broken"
              % (len(ios_refs), Path(repo_root) / IOS_SOURCE_ROOT))
@@ -368,7 +462,7 @@ def measure(locales, repo_root):
         m["empty"][loc] = sum(1 for k in keys if d.get(k, "") == "")
         m["identicalToBase"][loc] = (
             0 if loc == BASE_LOCALE
-            else sum(1 for k in keys if d.get(k) is not None and d.get(k) == base.get(k))
+            else _identical_to_base_count(loc, keys, base, d)
         )
     # 存**全量**而不是采样。基线只有 106 条,存全量的代价可以忽略,
     # 而采样会让新增的那个 key 落在样本外——门就只能说「多了一个」,
@@ -408,7 +502,7 @@ def compare(base, now):
             )
     if now["iosSourceOrphans"] > base.get("iosSourceOrphans", 0):
         problems.append(
-            "%d distinct key(s) referenced by iOS String(localized:)/localized() have NO entry "
+            "%d distinct key(s) referenced by iOS localization calls or SwiftUI resource-key literals have NO entry "
             "in %s.json, baseline was %d — String(localized:) falls back to displaying the raw key "
             "text when the catalog has no match. New orphans include: %s"
             % (now["iosSourceOrphans"], BASE_LOCALE, base.get("iosSourceOrphans", 0),

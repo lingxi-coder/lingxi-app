@@ -82,5 +82,91 @@ class GoogleServicesGeneratedResourceTests(unittest.TestCase):
         )
 
 
+class IntentionalIdenticalTranslationTests(unittest.TestCase):
+    def test_exact_english_ui_terms_are_excluded(self):
+        for (locale, key), value in check_i18n_pairing.INTENTIONAL_IDENTICAL_TO_BASE.items():
+            with self.subTest(key=key):
+                self.assertTrue(
+                    check_i18n_pairing._is_intentional_identical_to_base(
+                        locale, key, value, value
+                    )
+                )
+
+    def test_chinese_copy_wrong_locale_and_wrong_key_still_count(self):
+        base = {
+            "drawer_tab_chats": "Chat",
+            "drawer_tab_chat": "Chat",
+            "new_chinese_key": "对话",
+        }
+        english = {
+            "drawer_tab_chats": "Chat",
+            "drawer_tab_chat": "Chat",
+            "new_chinese_key": "对话",
+        }
+        japanese = {"drawer_tab_chats": "Chat"}
+        self.assertEqual(
+            check_i18n_pairing._identical_to_base_count(
+                "en", list(base), base, english
+            ),
+            2,
+        )
+        self.assertEqual(
+            check_i18n_pairing._identical_to_base_count(
+                "ja", ["drawer_tab_chats"], base, japanese
+            ),
+            1,
+        )
+        self.assertFalse(
+            check_i18n_pairing._is_intentional_identical_to_base(
+                "en", "drawer_tab_chats", "对话", "对话"
+            )
+        )
+
+
+class SwiftUILocalizedStringReferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_project_resource_keys_only_from_swiftui_first_arguments(self):
+        source_root = self.repo / check_i18n_pairing.IOS_SOURCE_ROOT
+        source_root.mkdir(parents=True)
+        (source_root / "Localized.swift").write_text(
+            r"""
+            Text("drawer_open_sidebar_a11y")
+            Label("account_title", systemImage: "account_system_image")
+            SecureField("account_password", text: $password)
+            TextField("account_email", text: $email)
+            Button("account_sign_in") {}
+            Toggle("account_enabled", isOn: $enabled)
+            Text(register ? "account_email_register" : "account_email_sign_in")
+            Text("All")
+            Button("Retry") {}
+            Text(custom ? "Pause" : "Resume")
+            Label("People", systemImage: "not_a_resource_key")
+            Text("account_form_title" + suffix)
+            Text("value \\(name)")
+            String(localized: "A")
+            """,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            set(check_i18n_pairing._ios_source_refs(self.repo)),
+            {
+                "drawer_open_sidebar_a11y",
+                "account_title",
+                "account_password",
+                "account_email",
+                "account_sign_in",
+                "account_enabled",
+                "account_email_register",
+                "account_email_sign_in",
+                # The pre-existing explicit localization scanner is unchanged.
+                "A",
+            },
+        )
 if __name__ == "__main__":
     unittest.main()

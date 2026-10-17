@@ -397,3 +397,4 @@ G3	packages/bridge-client/test/fusion-protocol.test.ts	.lingxi
 G7	apps/cli/host/src/commands/plugin_eval.rs	CLAUDE_PLUGIN_
 G7	apps/cli/host/src/commands/plugin_eval.rs	\.claude-plugin
 G7	apps/cli/host/src/commands/plugin_init.rs	CLAUDE_PLUGIN_
+G1	scripts/tests/test_android_jni_promotion.py	LINGXI

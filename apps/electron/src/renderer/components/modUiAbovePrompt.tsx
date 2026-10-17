@@ -28,7 +28,7 @@ import type {
   UiInvalidateEventDto,
   UiJsonValue,
 } from '@lingxi/bridge-client';
-import { ModUiClientTree, parseModUiClientTree, type ModUiClientIdentity } from './modUiClientTree';
+import { ModUiClientTree, parseModUiClientTree, type ModUiClientHeldEvent, type ModUiClientIdentity } from './modUiClientTree';
 import {
   ModUiParentTree,
   collectModUiClientElements,
@@ -976,7 +976,7 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     unmountOperationRef.current(currentRuntimeId, revision);
   }, [descriptor.key, descriptor.module, descriptor.plugin, site?.instanceId, site?.sessionId]);
 
-  const onPress = useCallback(async (request: Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>, _handle: number) => {
+  const onPress = useCallback(async (request: Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>, _handle: number, heldEvent?: ModUiClientHeldEvent) => {
     if (!controlAddressable || !context || !runtimeEpochAvailable
       || failedRuntimeEpochRef.current === runtimeEpochRef.current
       || (fault?.source === 'adapter' && fault.phase === 'run')
@@ -995,8 +995,22 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     const reachedElement = result.response.reached.element;
     const reachedHandle = heldHandleForElement(currentFrame.tree, reachedElement, descriptor.plugin);
     if (reachedHandle === null) return;
-    const event = result.response.reached.value;
-    if (request.event.type !== 'press' && typeof event !== 'string') return;
+    const reachedValue = result.response.reached.value;
+    let event: UiJsonValue | undefined;
+    if (request.event.type === 'input') {
+      if (typeof reachedValue !== 'string') return;
+      // Native's ui_client_press response returns the hook-reached element and
+      // value, while the original event kind remains authoritative. Preserve
+      // both so the Client Input adapter can distinguish change from submit.
+      event = { kind: request.event.kind, value: reachedValue };
+    } else if (request.event.type === 'select') {
+      if (typeof reachedValue !== 'string') return;
+      // Native Select callbacks receive the selected value as their first
+      // argument and `{ value }` as the event, matching the author API.
+      event = { value: reachedValue };
+    } else if (heldEvent !== undefined) {
+      event = { link: { href: heldEvent.link.href } };
+    }
     const operation = {
       type: 'runHeld',
       runtimeId: runtimeAtStart,

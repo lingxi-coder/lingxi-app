@@ -140,16 +140,57 @@ async function main() {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'typed');
       input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18 && call.request.event === 'normalized-input')`);
-    const inputUsesHookReachedValue = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18 && call.request.event === 'normalized-input').length === 1`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18 && call.request.event?.kind === 'change' && call.request.event?.value === 'normalized-input')`);
+    const inputUsesHookReachedValue = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18 && call.request.event?.kind === 'change' && call.request.event?.value === 'normalized-input').length === 1`);
+
+    await run(`(() => {
+      document.querySelector('.mod-ui-client-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    })()`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18 && call.request.event?.kind === 'submit' && call.request.event?.value === 'normalized-submitted-input')`);
+    const inputSubmitUsesHookReachedValue = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18 && call.request.event?.kind === 'submit' && call.request.event?.value === 'normalized-submitted-input').length === 1`);
+    const inputRunHeldEvents = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 18).map((call) => call.request.event)`);
 
     await run(`(() => {
       const select = document.querySelector('.mod-ui-client-select');
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, 'week');
       select.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 19 && call.request.event === 'week')`);
-    const selectUsesHookReachedValue = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 19 && call.request.event === 'week').length === 1`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 19 && call.request.event?.value === 'week')`);
+    const selectUsesHookReachedValue = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 19 && call.request.event?.value === 'week' && Object.keys(call.request.event).length === 1).length === 1`);
+    const selectRunHeldEvents = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 19).map((call) => call.request.event)`);
+
+    const allowedMarkdownClickPreventedNavigation = await run(`(() => {
+      const anchor = [...document.querySelectorAll('.mod-ui-client-markdown a')].find((item) => item.getAttribute('href') === 'https://example.test/docs');
+      return anchor?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) === false;
+    })()`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 20 && call.request.event?.link?.href === 'https://example.test/docs')`);
+    const contextMentionClickPreventedNavigation = await run(`(() => {
+      const href = window.__modUiClientFixture.contextMentionHref();
+      const anchor = [...document.querySelectorAll('.mod-ui-client-markdown a')].find((item) => item.getAttribute('href') === href);
+      return anchor?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) === false;
+    })()`);
+    const contextMentionHref = await run(`window.__modUiClientFixture.contextMentionHref()`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 20 && call.request.event?.link?.href === ${JSON.stringify(contextMentionHref)})`);
+    const contextMentionOpenEvents = await run(`window.__modUiClientFixture.contextMentionEvents()`);
+    const markdownLinkRunHeldEvents = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 20).map((call) => call.request.event)`);
+    const markdownLinkPressRequests = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_client_press' && call.request.element === 'docs').map((call) => call.request)`);
+    const ordinaryMentionClickPreventedNavigation = await run(`(() => {
+      const anchor = [...document.querySelectorAll('.mod-ui-client-markdown a')].find((item) => item.textContent === 'Ordinary mention');
+      return anchor?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) === false;
+    })()`);
+    const ordinaryMentionOpenEvents = await run(`window.__modUiClientFixture.contextMentionEvents()`);
+    const unlistedMarkdownClickPreventedNavigation = await run(`(() => {
+      const anchor = [...document.querySelectorAll('.mod-ui-client-markdown a')].find((item) => item.getAttribute('href') === 'https://example.test/private');
+      return anchor?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) === false;
+    })()`);
+    await delay(50);
+    const unlistedMarkdownLinkNotDispatched = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 20).length === 2`);
+    const markdownWithoutAllowlistPreventsNavigation = await run(`(() => {
+      const anchor = [...document.querySelectorAll('.mod-ui-client-markdown a')].find((item) => item.getAttribute('href') === 'https://example.test/open');
+      return anchor?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) === false;
+    })()`);
+    await wait(`window.__modUiClientFixture.calls.some((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 21 && call.request.event?.link?.href === 'https://example.test/open')`);
+    const markdownWithoutAllowlistRunHeldEvents = await run(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 21).map((call) => call.request.event)`);
 
     await run(`window.__modUiClientFixture.ignoreNextRunAsStale(); document.querySelector('.mod-ui-client-button').click()`);
     await wait(`window.__modUiClientFixture.calls.filter((call) => call.kind === 'operation' && call.request.type === 'runHeld' && call.request.handle === 17).length === 2`);
@@ -413,7 +454,7 @@ async function main() {
       return lateRenders.length > 0 && lateRenders.every((call) => call.returnedRevision !== undefined && lateUnmounts.has(call.returnedRevision));
     })()`);
 
-    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, selectUsesHookReachedValue, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
+    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, allowedMarkdownClickPreventedNavigation, markdownLinkRunHeldEvents, markdownLinkPressRequests, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, unlistedMarkdownClickPreventedNavigation, unlistedMarkdownLinkNotDispatched, markdownWithoutAllowlistPreventsNavigation, markdownWithoutAllowlistRunHeldEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
   } finally {
     window.destroy();
     app.quit();

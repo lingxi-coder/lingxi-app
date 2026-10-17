@@ -22,6 +22,7 @@ import {
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import { UiSurfaceLifecycleQueue } from '../../src/renderer/bridge/uiSurfaceLifecycle';
+import { contextMentionHref as buildContextMentionHref, OPEN_CONTEXT_MENTION_EVENT } from '../../src/renderer/bridge/composerMentions';
 
 interface FixtureApi {
   calls: Array<({ kind: 'control'; request: NativeUiControlRequest } | { kind: 'operation'; request: UiClientOperation }) & {
@@ -34,6 +35,8 @@ interface FixtureApi {
     handled?: boolean;
     workerFault?: boolean;
   }>;
+  contextMentionHref(): string;
+  contextMentionEvents(): unknown[];
   clientIdentitySnapshot(): {
     attachedClientIds: string[];
     primaryRenderClientId?: string;
@@ -77,6 +80,9 @@ const probeClientId = 'fixture-window-client-two';
 const identityProbeProps = {};
 const identityProbeViewport = { columns: 24, rows: 4 };
 const calls: FixtureApi['calls'] = [];
+const fixtureContextMentionHref = buildContextMentionHref({ kind: 'plugin', name: 'Fixture', target: 'plugin:fixture' });
+const contextMentionEvents: unknown[] = [];
+window.addEventListener(OPEN_CONTEXT_MENTION_EVENT, (event) => contextMentionEvents.push((event as CustomEvent).detail));
 const lifecycleCalls: Array<{ sessionId: string; command: AllowedClientCommand }> = [];
 const frameListeners = new Set<(event: UiClientFrameEventDto) => void>();
 const invalidationListeners = new Set<(event: UiInvalidateEventDto) => void>();
@@ -146,6 +152,9 @@ const surfaceTree = (displayTitle = title): UiClientFrameDto['tree'] => ({
     { type: 'Button', props: { key: 'run', label: 'Run' }, press: { plugin: 'fixture-plugin', handle: 17 } },
     { type: 'Input', props: { key: 'filter', label: 'Filter', value: '' }, press: { plugin: 'fixture-plugin', handle: 18 } },
     { type: 'Select', props: { key: 'period', label: 'Period', options: [{ value: 'day' }, { value: 'week' }] }, press: { plugin: 'fixture-plugin', handle: 19 } },
+    { type: 'Markdown', props: { key: 'docs', text: `[Allowed docs](https://example.test/docs) [Plugin mention](${fixtureContextMentionHref}) [Unlisted](https://example.test/private)`, pressableLinks: ['https://example.test/docs', fixtureContextMentionHref] }, press: { plugin: 'fixture-plugin', handle: 20 } },
+    { type: 'Markdown', props: { key: 'open-links', text: '[Open link](https://example.test/open)' }, press: { plugin: 'fixture-plugin', handle: 21 } },
+    { type: 'Markdown', props: { key: 'ordinary-mention', text: `[Ordinary mention](${fixtureContextMentionHref})` } },
   ],
 });
 
@@ -221,8 +230,8 @@ const host: ModUiClientHostApi = {
       };
       call.returnedRevision = metadata?.renderRevision;
     } else if (request.subtype === 'ui_client_press') {
-      if (request.event.type === 'press') response = { handled: true, reached: { element: 'run' } };
-      else if (request.event.type === 'input') response = { handled: true, reached: { element: 'filter', value: 'normalized-input' } };
+      if (request.event.type === 'press') response = { handled: true, reached: { element: request.element } };
+      else if (request.event.type === 'input') response = { handled: true, reached: { element: 'filter', value: request.event.kind === 'submit' ? 'normalized-submitted-input' : 'normalized-input' } };
       else response = { handled: true, reached: { element: 'period', value: 'week' } };
     } else if (request.subtype === 'ui_client_fault') {
       response = { handled: true };
@@ -383,6 +392,8 @@ function Fixture() {
 
 window.__modUiClientFixture = {
   calls,
+  contextMentionHref() { return fixtureContextMentionHref; },
+  contextMentionEvents() { return [...contextMentionEvents]; },
   clientIdentitySnapshot() {
     const renderCalls = calls.filter((call) => call.kind === 'control' && call.request.subtype === 'ui_render'
       && call.sessionId === sessionId);

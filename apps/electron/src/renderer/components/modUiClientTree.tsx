@@ -23,7 +23,10 @@ export interface ModUiClientIdentity {
   module: string;
 }
 
-export type ModUiClientPressEvent = NativeUiClientPressEventDto;
+export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto | { type: 'markdown-link'; href: string };
+export interface ModUiClientHeldEvent {
+  link: { href: string };
+}
 /** Exact bridge-client request consumed by Native's `ui_client_press` control. */
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
 
@@ -119,7 +122,7 @@ export interface ModUiClientTreeProps {
   site: ModUiRenderSite;
   client: ModUiClientIdentity;
   /** Native ui_client_press request dispatcher. Runtime policy/VM handoff stays outside React. */
-  onPress(request: NativeUiClientPressRequest, handle: number): void | Promise<unknown>;
+  onPress(request: NativeUiClientPressRequest, handle: number, heldEvent?: ModUiClientHeldEvent): void | Promise<unknown>;
   /** A rejected local VM callback run is reported by the owning host adapter. */
   onRunFault?(request: NativeUiClientPressRequest, reason: string): void;
   /** A render-tree validation failure is reported through the owning host adapter. */
@@ -350,10 +353,12 @@ function validateProps(node: Record<string, unknown>, type: ModUiSurfaceNodeType
       break;
     case 'Markdown':
       exactKeys(props, ['key', 'text', 'dimColor', 'pressableLinks'], ['text'], type);
-      if (props.key !== undefined && (typeof props.key !== 'string' || props.key.length > MAX_REQUEST_STRING)) fail('Markdown.props.key is invalid');
+      if (props.key !== undefined && (typeof props.key !== 'string' || props.key.length === 0 || props.key.length > MAX_REQUEST_STRING)) fail('Markdown.props.key is invalid');
       if (typeof props.text !== 'string' || props.text.length > MAX_TREE_CHARS) fail('Markdown.props.text is invalid');
       if (props.dimColor !== undefined && typeof props.dimColor !== 'boolean') fail('Markdown.props.dimColor must be boolean');
       if (props.pressableLinks !== undefined && (!Array.isArray(props.pressableLinks) || props.pressableLinks.length > 256 || props.pressableLinks.some((value) => typeof value !== 'string' || value.length === 0 || value.length > 2_048))) fail('Markdown.props.pressableLinks is invalid');
+      if (props.pressableLinks !== undefined && node.press === undefined) fail('Markdown.props.pressableLinks require a press handler');
+      if (node.press !== undefined && props.key === undefined) fail('pressable Markdown requires a key');
       break;
   }
 }
@@ -410,7 +415,7 @@ export function buildNativeUiClientPressRequest(
   site: ModUiRenderSite,
   client: ModUiClientIdentity,
   element: string,
-  event: ModUiClientPressEvent,
+  event: ModUiClientSurfaceEvent,
   pressPlugin = client.plugin,
 ): NativeUiClientPressRequest {
   validateString(site.component, 'site.component');
@@ -421,13 +426,21 @@ export function buildNativeUiClientPressRequest(
   validateString(element, 'element');
   validateString(pressPlugin, 'press.plugin');
   if (pressPlugin !== client.plugin) fail('press.plugin must match the owning Client plugin');
-  if (event.type === 'input') {
+  let requestEvent: NativeUiClientPressEventDto;
+  if (event.type === 'markdown-link') {
+    if (typeof event.href !== 'string' || event.href.length === 0 || event.href.length > 2_048) fail('Markdown link href is invalid');
+    requestEvent = { type: 'press' };
+  } else if (event.type === 'input') {
     if (event.kind !== 'change' && event.kind !== 'submit') fail('input event kind is invalid');
     if (typeof event.value !== 'string' || event.value.length > MAX_INPUT_VALUE) fail('input event value is invalid');
+    requestEvent = event;
   } else if (event.type === 'select') {
     if (typeof event.value !== 'string' || event.value.length > MAX_INPUT_VALUE) fail('select event value is invalid');
+    requestEvent = event;
   } else if (event.type !== 'press') {
     fail('press event is invalid');
+  } else {
+    requestEvent = event;
   }
   return {
     subtype: 'ui_client_press',
@@ -437,7 +450,7 @@ export function buildNativeUiClientPressRequest(
     client: client.key,
     module: client.module,
     element,
-    event,
+    event: requestEvent,
   };
 }
 
@@ -488,12 +501,15 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
     };
   }, [site.component, site.instanceId, client.plugin, client.key, client.module, renderRevision]);
 
-  const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientPressEvent) => {
+  const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent) => {
     if (!interactionsEnabled) return;
     const request = buildNativeUiClientPressRequest(site, client, element, event, press.plugin);
+    const heldEvent: ModUiClientHeldEvent | undefined = event.type === 'markdown-link'
+      ? { link: { href: event.href } }
+      : undefined;
     const activeGeneration = lifecycle.current;
     try {
-      void Promise.resolve(onPressRef.current(request, press.handle)).catch((error: unknown) => {
+      void Promise.resolve(onPressRef.current(request, press.handle, heldEvent)).catch((error: unknown) => {
         if (lifecycle.current !== activeGeneration) return;
         const reason = error instanceof Error ? error.message : String(error);
         onRunFaultRef.current?.(request, reason);
@@ -512,7 +528,7 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
 
 const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnabled }: {
   node: ModUiSurfaceNode;
-  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientPressEvent): void;
+  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): void;
   interactionsEnabled: boolean;
 }): ReactElement {
   const t = useT();
@@ -556,16 +572,29 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
         {node.props.path && <figcaption style={{ marginBottom: 5, color: t.text3, fontSize: 12 }}>{node.props.path}</figcaption>}
         <CodeBlock code={node.props.source} language={node.props.language} variant="tool" />
       </figure>;
-    case 'Markdown':
-      return <div className="mod-ui-client-markdown" data-pressable-links={node.props.pressableLinks?.join(' ')} style={node.props.dimColor ? { color: t.text3 } : undefined}>
+    case 'Markdown': {
+      const press = node.press;
+      const onClickCapture = press === undefined ? undefined : (event: React.MouseEvent<HTMLDivElement>) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const anchor = target.closest('a[href]');
+        const href = anchor?.getAttribute('href');
+        if (!href) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (href.length > 2_048 || node.props.pressableLinks !== undefined && !node.props.pressableLinks.includes(href)) return;
+        dispatch(press, node.props.key ?? '', { type: 'markdown-link', href });
+      };
+      return <div className="mod-ui-client-markdown" data-pressable-links={node.props.pressableLinks?.join(' ')} style={node.props.dimColor ? { color: t.text3 } : undefined} onClickCapture={onClickCapture}>
         <MarkdownContent text={node.props.text} />
       </div>;
+    }
   }
 });
 
 const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
   node: Extract<ModUiSurfaceNode, { type: 'Input' }>;
-  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientPressEvent): void;
+  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): void;
   disabled: boolean;
 }) {
   const t = useT();
@@ -598,7 +627,7 @@ const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
 
 const SurfaceSelect = memo(function SurfaceSelect({ node, dispatch, disabled }: {
   node: Extract<ModUiSurfaceNode, { type: 'Select' }>;
-  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientPressEvent): void;
+  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): void;
   disabled: boolean;
 }) {
   const t = useT();

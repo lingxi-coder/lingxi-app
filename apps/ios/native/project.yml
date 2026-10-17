@@ -71,6 +71,8 @@ targets:
         product: FirebaseMessaging
       - package: Firebase
         product: FirebaseInstallations
+      - package: Firebase
+        product: FirebaseCrashlytics
       - package: GoogleSignIn
         product: GoogleSignIn
       - target: ConversationWidget
@@ -118,6 +120,8 @@ targets:
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
         APS_ENVIRONMENT: development
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+        CRASHLYTICS_COLLECTION_ENABLED: "NO"
         OTHER_LDFLAGS: "$(inherited) -ObjC"
         # The Cargo-locked SDK lives outside SRCROOT; the build scripts only
         # write generated products under this app's build/ and Frameworks/.
@@ -128,6 +132,7 @@ targets:
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
         StoreRelease:
+          CRASHLYTICS_COLLECTION_ENABLED: "YES"
           APS_ENVIRONMENT: production
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml
@@ -137,6 +142,7 @@ targets:
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
         FullRelease:
+          CRASHLYTICS_COLLECTION_ENABLED: "YES"
           APS_ENVIRONMENT: production
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
@@ -208,6 +214,24 @@ targets:
           if [ -f "${AUTH_MANIFEST}" ]; then
             cp "${AUTH_MANIFEST}" "${DESTINATION}/AUTHORIZATION_MANIFEST.json"
           fi
+
+    postBuildScripts:
+      - name: Upload Crashlytics symbols
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(DWARF_DSYM_FOLDER_PATH)/$(DWARF_DSYM_FILE_NAME)
+          - $(DWARF_DSYM_FOLDER_PATH)/$(DWARF_DSYM_FILE_NAME)/Contents/Resources/DWARF/$(PRODUCT_NAME)
+          - $(DWARF_DSYM_FOLDER_PATH)/$(DWARF_DSYM_FILE_NAME)/Contents/Info.plist
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/GoogleService-Info.plist
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
+        script: |
+          set -eu
+          # Local/debug and simulator builds do not upload symbols or reports.
+          case "${CONFIGURATION}:${PLATFORM_NAME}" in
+            *Release:iphoneos) ;;
+            *) exit 0 ;;
+          esac
+          "${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"
 
   # XCTest simulator e2e (M10 A2 / P4): builds the in-process engine via
   # `buildIosEngine`, submits a prompt, and asserts the streamed ClientEvent path

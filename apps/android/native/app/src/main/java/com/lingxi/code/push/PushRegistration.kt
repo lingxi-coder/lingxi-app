@@ -38,6 +38,7 @@ import java.util.concurrent.TimeUnit
 class LingxiApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.lingxi.code.diagnostics.CrashReporting.initialize()
         PushRegistration.initialize(this)
     }
 }

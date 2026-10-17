@@ -34,6 +34,7 @@ final class FirebaseAccount {
     static func configure() {
         guard FirebaseApp.app() == nil else { return }
         FirebaseApp.configure()
+        CrashReporting.configure()
     }
     private init() {
         Self.configure()

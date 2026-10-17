@@ -7,6 +7,9 @@ FCM 的 Android/iOS 客户端、独立注册 API、30 天绑定租约和清理�
 Android 真机已验证注册、后台通知、消息到期移除、换账号隔离及离线退出后自动解绑；
 iOS APNs 配置由用户处理后继续验收。
 
+Android / iOS 的崩溃采集与符号配置见 [Firebase Crashlytics](firebase-crashlytics.md)。
+已启用 `firebasecrashlytics.googleapis.com`；沿用现有 Firebase apps，不新增服务账号私钥。
+
 ## 已授权并部署的资源
 
 | 资源 | 名称 / 限制 | 用途 |

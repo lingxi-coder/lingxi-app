@@ -65,6 +65,20 @@ test('renders the eight Native Client surface node kinds as inert JSON-backed Re
   assert.doesNotMatch(html, /<Client|plugin source/);
 });
 
+test('renders a root Client string as escaped text and preserves its UTF-16 value', () => {
+  const source = '<root & text> \uD800';
+  const parsed = parseModUiClientTree(source);
+  assert.equal(parsed, source);
+
+  const html = render(parsed);
+  assert.match(html, /&lt;root &amp; text&gt;/);
+  assert.doesNotMatch(html, /<root & text>/);
+
+  assert.throws(() => parseModUiClientTree('x'.repeat(100_000)), /serialized size limit/);
+  assert.throws(() => parseModUiClientTree(null), /nodes must be objects/);
+  assert.throws(() => parseModUiClientTree([]), /nodes must be objects/);
+});
+
 test('keeps links inert unless they use a supported external URL scheme', () => {
   const html = render({
     type: 'Box',

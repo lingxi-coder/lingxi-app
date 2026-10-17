@@ -392,7 +392,7 @@ function validateNode(value: unknown, depth: number, state: { nodes: number }, e
 }
 
 /** Validate a host-produced Client surface tree against Native's node bounds and element set. */
-export function parseModUiClientTree(value: unknown, expectedPlugin?: string): ModUiSurfaceNode {
+export function parseModUiClientTree(value: unknown, expectedPlugin?: string): ModUiSurfaceNode | string {
   let serialized: string;
   try {
     serialized = JSON.stringify(value);
@@ -400,6 +400,7 @@ export function parseModUiClientTree(value: unknown, expectedPlugin?: string): M
     fail('tree must be serializable JSON');
   }
   if (serialized === undefined || serialized.length > MAX_TREE_CHARS) fail('tree exceeds the serialized size limit');
+  if (typeof value === 'string') return value;
   validateNode(value, 0, { nodes: 0 }, expectedPlugin);
   return value;
 }
@@ -509,7 +510,7 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
   }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled]);
 
   return <div className="mod-ui-client-surface" data-mod-client={client.key} data-mod-plugin={client.plugin} data-mod-module={client.module}>
-    <SurfaceNode node={parsed} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />
+    {typeof parsed === 'string' ? parsed : <SurfaceNode node={parsed} dispatch={dispatch} interactionsEnabled={interactionsEnabled} />}
   </div>;
 });
 

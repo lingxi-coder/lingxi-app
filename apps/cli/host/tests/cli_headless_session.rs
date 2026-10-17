@@ -242,7 +242,7 @@ mod process_io {
             .current_dir(home.path())
             .env("LINGXI_CONFIG_DIR", home.path())
             .env("ANTHROPIC_API_KEY", "sk-test-fake")
-            .args(["--model", "claude-sonnet-4-5", "/version"])
+            .args(["--model", "anthropic/claude-sonnet-4-5", "/clear"])
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -270,20 +270,20 @@ mod process_io {
             .unwrap();
         let mut bytes = [0_u8; 8192];
         let count = reader.read(&mut bytes).unwrap();
-        assert!(String::from_utf8_lossy(&bytes[..count]).contains("lingxi-cli "));
+        assert!(String::from_utf8_lossy(&bytes[..count]).contains("Conversation cleared."));
     }
 
     #[test]
     fn print_mode_reads_and_writes_redirected_regular_files() {
         let home = tempfile::tempdir().unwrap();
         let mut input = tempfile::NamedTempFile::new().unwrap();
-        input.write_all(b"/version\n").unwrap();
+        input.write_all(b"/clear\n").unwrap();
         let output = tempfile::NamedTempFile::new().unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"))
             .current_dir(home.path())
             .env("LINGXI_CONFIG_DIR", home.path())
             .env("ANTHROPIC_API_KEY", "sk-test-fake")
-            .arg("--print")
+            .args(["--print", "--model", "anthropic/claude-sonnet-4-5"])
             .stdin(Stdio::from(input.reopen().unwrap()))
             .stdout(Stdio::from(output.reopen().unwrap()))
             .stderr(Stdio::null())
@@ -297,6 +297,6 @@ mod process_io {
         assert!(process.exited().success());
         assert!(std::fs::read_to_string(output.path())
             .unwrap()
-            .starts_with("lingxi-cli "));
+            .starts_with("Conversation cleared."));
     }
 }

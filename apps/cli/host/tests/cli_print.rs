@@ -18,13 +18,11 @@ use std::time::Duration;
 mod native_fallback;
 
 #[test]
-fn slash_version_dispatch_works_without_api() {
-    let home = tempfile::tempdir().unwrap();
+fn version_flag_prints_version_without_api() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()
-        .env("ANTHROPIC_API_KEY", "sk-test-fake")
-        .env("LINGXI_CONFIG_DIR", home.path())
-        .args(["--model", "claude-sonnet-4-5", "/version"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .arg("--version")
         .assert()
         .success()
         .stdout(predicate::str::starts_with("lingxi-cli "));
@@ -94,16 +92,18 @@ fn unknown_slash_command_runs_fallback_through_loopback_provider() {
 
 #[test]
 fn json_mode_emits_command_output_event() {
-    // /version dispatches synchronously; under --json the result lands as
-    // a `{"event":"command_output", …}` line.
+    // `/clear` is a Native-supported non-interactive local command. Under
+    // `--json` its stable result is emitted as a `command_output` event.
     let home = tempfile::tempdir().unwrap();
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .env("LINGXI_CONFIG_DIR", home.path())
-        .args(["--model", "claude-sonnet-4-5", "--json", "/version"])
+        .args(["--model", "anthropic/claude-sonnet-4-5", "--json", "/clear"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"event\":\"command_output\""))
-        .stdout(predicate::str::contains("\"display\":\"lingxi-cli "));
+        .stdout(predicate::str::contains(
+            "\"display\":\"Conversation cleared.\"",
+        ));
 }

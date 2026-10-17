@@ -23,6 +23,10 @@ export interface ModUiClientIdentity {
   module: string;
 }
 
+function modUiClientSurfaceIdentityKey(site: ModUiRenderSite, client: ModUiClientIdentity): string {
+  return JSON.stringify([site.component, site.instanceId, client.plugin, client.key, client.module]);
+}
+
 export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto;
 /** Exact bridge-client request consumed by Native's `ui_client_press` control. */
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
@@ -471,7 +475,7 @@ class ClientSurfaceErrorBoundary extends Component<{
 export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true, renderRevision }: ModUiClientTreeProps) {
   const body = React.createElement(ModUiClientTreeBody, { tree, site, client, onPress, onRunFault, interactionsEnabled, renderRevision });
   return React.createElement(ClientSurfaceErrorBoundary, {
-    key: `${client.plugin}\u0000${client.key}\u0000${client.module}\u0000${renderRevision ?? 0}`,
+    key: modUiClientSurfaceIdentityKey(site, client),
     onFault: onRenderFault,
     children: body,
   });

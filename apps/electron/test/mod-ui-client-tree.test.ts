@@ -1,7 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import reactPlugin from '@vitejs/plugin-react';
+import { build } from 'vite';
 import {
   buildNativeUiClientPressRequest,
   ModUiClientTree,
@@ -63,6 +70,180 @@ test('renders the eight Native Client surface node kinds as inert JSON-backed Re
   assert.match(html, /ready = /);
   assert.match(html, /class="mod-ui-client-markdown"[^>]*[\s\S]*All good/);
   assert.doesNotMatch(html, /<Client|plugin source/);
+});
+
+test('ReactDOM retains an edited Client input across parent revisions and resets on site or client identity changes', { timeout: 45_000 }, async () => {
+  const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+  const tempRoot = mkdtempSync(join(realpathSync(tmpdir()), 'lingxi-mod-ui-client-revision-'));
+  const fixtureRoot = join(tempRoot, 'fixture');
+  const buildDir = join(tempRoot, 'build');
+  const userData = join(tempRoot, 'user-data');
+  const fixtureHtml = join(fixtureRoot, 'index.html');
+  const fixtureMain = join(fixtureRoot, 'main.tsx');
+  const electronDriver = join(tempRoot, 'electron-driver.mjs');
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    mkdirSync(fixtureRoot, { recursive: true });
+    mkdirSync(userData, { recursive: true });
+    writeFileSync(fixtureHtml, '<!doctype html><html><body><div id="root"></div><script type="module" src="/main.tsx"></script></body></html>');
+    writeFileSync(fixtureMain, `
+      import * as React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { ModUiClientTree } from '@regression/modUiClientTree';
+      import { Theme } from '@regression/ThemeContext';
+      import { tokens } from '@regression/tokens';
+
+      function Fixture() {
+        const [revision, setRevision] = React.useState(1);
+        const [siteId, setSiteId] = React.useState('site-one');
+        const [module, setModule] = React.useState('surface.tsx');
+        const capturedInput = React.useRef(null);
+        const client = { plugin: 'fixture-plugin', key: 'message', module };
+        const site = { component: 'AbovePrompt', instanceId: siteId };
+        const tree = {
+          type: 'Input',
+          props: { key: 'message', label: 'Message', value: 'seed' },
+          press: { plugin: 'fixture-plugin', handle: 1 },
+        };
+        const input = () => document.querySelector('.mod-ui-client-input');
+        const snapshot = () => {
+          const current = input();
+          return {
+            revision,
+            siteId,
+            module,
+            value: current?.value ?? null,
+            focused: current !== null && document.activeElement === current,
+            sameNode: capturedInput.current !== null && capturedInput.current === current,
+          };
+        };
+        window.__modUiClientRevisionRegression = {
+          snapshot,
+          captureInput() { capturedInput.current = input(); },
+          typeDraft(value) {
+            const current = input();
+            if (!current) throw new Error('Client input is missing');
+            current.focus();
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(current, value);
+            current.dispatchEvent(new Event('input', { bubbles: true }));
+          },
+          bumpParentRevision() { setRevision((current) => current + 1); },
+          changeSite() { setSiteId('site-two'); },
+          changeClient() { setModule('surface-two.tsx'); },
+        };
+        return <Theme.Provider value={tokens(false)}>
+          <ModUiClientTree tree={tree} site={site} client={client} onPress={() => {}} renderRevision={revision} />
+        </Theme.Provider>;
+      }
+
+      createRoot(document.getElementById('root')).render(<Fixture />);
+    `);
+    writeFileSync(electronDriver, `
+      import { app, BrowserWindow } from 'electron';
+      const url = process.argv.at(-1);
+      app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const main = async () => {
+        await app.whenReady();
+        const window = new BrowserWindow({ show: false, width: 600, height: 400, webPreferences: { sandbox: true, backgroundThrottling: false } });
+        try {
+          await window.loadURL(url);
+          const run = (source) => window.webContents.executeJavaScript(source);
+          const wait = async (predicate) => {
+            const deadline = Date.now() + 8_000;
+            while (Date.now() < deadline) {
+              if (await run(predicate)) return;
+              await delay(20);
+            }
+            throw new Error('Timed out waiting for Client revision fixture');
+          };
+          await wait('Boolean(window.__modUiClientRevisionRegression?.snapshot().value)');
+          await run("window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.typeDraft('revision-draft')");
+          await wait("window.__modUiClientRevisionRegression.snapshot().value === 'revision-draft'");
+          await run('window.__modUiClientRevisionRegression.bumpParentRevision()');
+          await wait('window.__modUiClientRevisionRegression.snapshot().revision === 2');
+          const parentRevision = await run('window.__modUiClientRevisionRegression.snapshot()');
+
+          await run('window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.changeSite()');
+          await wait("window.__modUiClientRevisionRegression.snapshot().siteId === 'site-two'");
+          const siteChange = await run('window.__modUiClientRevisionRegression.snapshot()');
+
+          await run("window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.typeDraft('client-draft')");
+          await wait("window.__modUiClientRevisionRegression.snapshot().value === 'client-draft'");
+          await run('window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.changeClient()');
+          await wait("window.__modUiClientRevisionRegression.snapshot().module === 'surface-two.tsx'");
+          const clientChange = await run('window.__modUiClientRevisionRegression.snapshot()');
+          console.log(JSON.stringify({ parentRevision, siteChange, clientChange }));
+        } finally {
+          window.destroy();
+          await app.quit();
+        }
+      };
+      main().catch((error) => { console.error(error); process.exitCode = 1; app.quit(); });
+    `);
+
+    await build({
+      root: fixtureRoot,
+      base: './',
+      cacheDir: join(tempRoot, 'vite-cache'),
+      configFile: false,
+      logLevel: 'error',
+      plugins: [reactPlugin()],
+      resolve: {
+        alias: [
+          { find: 'react-dom/client', replacement: resolve(electronRoot, 'node_modules/react-dom/client.js') },
+          { find: 'react-dom', replacement: resolve(electronRoot, 'node_modules/react-dom/index.js') },
+          { find: 'react/jsx-runtime', replacement: resolve(electronRoot, 'node_modules/react/jsx-runtime.js') },
+          { find: 'react', replacement: resolve(electronRoot, 'node_modules/react/index.js') },
+          { find: '@regression/modUiClientTree', replacement: resolve(electronRoot, 'src/renderer/components/modUiClientTree.tsx') },
+          { find: '@regression/ThemeContext', replacement: resolve(electronRoot, 'src/renderer/theme/ThemeContext.tsx') },
+          { find: '@regression/tokens', replacement: resolve(electronRoot, 'src/renderer/theme/tokens.ts') },
+        ],
+        dedupe: ['react', 'react-dom'],
+      },
+      build: { outDir: buildDir, emptyOutDir: true, rollupOptions: { input: fixtureHtml } },
+    });
+
+    const output: string[] = [];
+    const errors: string[] = [];
+    child = spawn(process.execPath, [resolve(electronRoot, 'node_modules/electron/cli.js'), electronDriver, pathToFileURL(join(buildDir, 'index.html')).href], {
+      cwd: electronRoot,
+      env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', LINGXI_TEST_USER_DATA: userData },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout.on('data', (chunk: Buffer | string) => output.push(String(chunk)));
+    child.stderr.on('data', (chunk: Buffer | string) => errors.push(String(chunk)));
+    const result = await new Promise<{ parentRevision: { value: string; focused: boolean; sameNode: boolean }; siteChange: { value: string; focused: boolean; sameNode: boolean }; clientChange: { value: string; focused: boolean; sameNode: boolean } }>((resolveResult, rejectResult) => {
+      const timeout = setTimeout(() => {
+        child?.kill('SIGTERM');
+        rejectResult(new Error(`Electron Client revision fixture timed out\n${errors.join('')}`));
+      }, 35_000);
+      child?.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
+      child?.once('exit', (code, signal) => {
+        clearTimeout(timeout);
+        const line = output.join('').trim().split('\n').at(-1);
+        if (code !== 0 || !line) {
+          rejectResult(new Error(`Electron Client revision fixture exited ${code ?? signal}\n${errors.join('')}`));
+          return;
+        }
+        try { resolveResult(JSON.parse(line)); }
+        catch (error) { rejectResult(new Error(`Invalid Electron Client revision result: ${line}`, { cause: error })); }
+      });
+    });
+
+    assert.deepEqual(result.parentRevision, {
+      revision: 2, siteId: 'site-one', module: 'surface.tsx', value: 'revision-draft', focused: true, sameNode: true,
+    });
+    assert.deepEqual(result.siteChange, {
+      revision: 2, siteId: 'site-two', module: 'surface.tsx', value: 'seed', focused: false, sameNode: false,
+    });
+    assert.deepEqual(result.clientChange, {
+      revision: 2, siteId: 'site-two', module: 'surface-two.tsx', value: 'seed', focused: false, sameNode: false,
+    });
+  } finally {
+    if (child && child.exitCode === null) child.kill('SIGTERM');
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('renders a root Client string as escaped text and preserves its UTF-16 value', () => {

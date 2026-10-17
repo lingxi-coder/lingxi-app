@@ -255,20 +255,20 @@ cargo test --locked -p bridge --test protocol_roundtrip_test
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app/tree/main/packages/bridge-client)
 
-- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/packages/bridge-client/src/client.ts) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/packages/bridge-client/src/protocol.ts) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [lingxi-app/packages/bridge-client/src/version.ts](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/packages/bridge-client/src/version.ts) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [lingxi-app/packages/bridge-client/src/lockfile.ts](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/packages/bridge-client/src/lockfile.ts) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [lingxi-app/packages/bridge-client/src/eventCorrelation.ts](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/packages/bridge-client/src/eventCorrelation.ts) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/apps/bridge-server/src/server.rs) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/bf12d8217b18d91a37ae51ed90a9be0b975fb9b0/apps/bridge-server/src/router.rs) — 已提交源码 (bf12d8217b18d91a37ae51ed90a9be0b975fb9b0)
-- [harness-runtime/crates/bridge/src/wire.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/bridge/src/wire.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
-- [harness-runtime/crates/bridge/src/mcp_endpoint.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/bridge/src/mcp_endpoint.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/client/src/protocol/commands.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/client/src/protocol/events.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
-- [harness-runtime/crates/client/src/protocol/error.rs](https://github.com/lingxi-coder/harness-runtime/blob/d3165b04f670c898b75c90732af8907e28b05bd5/crates/client/src/protocol/error.rs) — 已提交源码 (d3165b04f670c898b75c90732af8907e28b05bd5)
+- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/packages/bridge-client/src/client.ts) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/packages/bridge-client/src/protocol.ts) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [lingxi-app/packages/bridge-client/src/version.ts](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/packages/bridge-client/src/version.ts) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [lingxi-app/packages/bridge-client/src/lockfile.ts](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/packages/bridge-client/src/lockfile.ts) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [lingxi-app/packages/bridge-client/src/eventCorrelation.ts](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/packages/bridge-client/src/eventCorrelation.ts) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/apps/bridge-server/src/server.rs) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/231aba61941741b79451348f2b08d6a2e0e30491/apps/bridge-server/src/router.rs) — 已提交源码 (231aba61941741b79451348f2b08d6a2e0e30491)
+- [harness-runtime/crates/bridge/src/wire.rs](https://github.com/lingxi-coder/harness-runtime/blob/1b202fef29353f48026c59712207b89d7d877273/crates/bridge/src/wire.rs) — 已提交源码 (1b202fef29353f48026c59712207b89d7d877273)
+- [harness-runtime/crates/bridge/src/mcp_endpoint.rs](https://github.com/lingxi-coder/harness-runtime/blob/1b202fef29353f48026c59712207b89d7d877273/crates/bridge/src/mcp_endpoint.rs) — 已提交源码 (1b202fef29353f48026c59712207b89d7d877273)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/1b202fef29353f48026c59712207b89d7d877273/crates/client/src/protocol/commands.rs) — 已提交源码 (1b202fef29353f48026c59712207b89d7d877273)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/1b202fef29353f48026c59712207b89d7d877273/crates/client/src/protocol/events.rs) — 已提交源码 (1b202fef29353f48026c59712207b89d7d877273)
+- [harness-runtime/crates/client/src/protocol/error.rs](https://github.com/lingxi-coder/harness-runtime/blob/1b202fef29353f48026c59712207b89d7d877273/crates/client/src/protocol/error.rs) — 已提交源码 (1b202fef29353f48026c59712207b89d7d877273)
 
-- lingxi-app: HEAD bf12d8217b18d91a37ae51ed90a9be0b975fb9b0; 所据文件指纹 sha256:be15e9524b52d312f415a56fb611a59c4c0e73f5a858b8c268772f4532863b2d
-- harness-runtime: HEAD d3165b04f670c898b75c90732af8907e28b05bd5; 所据文件指纹 sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; 产品固定版本 d3165b04f670c898b75c90732af8907e28b05bd5
+- lingxi-app: HEAD 231aba61941741b79451348f2b08d6a2e0e30491; 所据文件指纹 sha256:fe88b9d45247ebf9e2bad3a964a9ae5069e9628afd312ca0cfea2e6b1333429f
+- harness-runtime: HEAD 1b202fef29353f48026c59712207b89d7d877273; 所据文件指纹 sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; 产品固定版本 1b202fef29353f48026c59712207b89d7d877273
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

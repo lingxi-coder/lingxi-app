@@ -70,18 +70,18 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/cli/host/src/entrypoint.rs)
 
-- [lingxi-app/apps/cli/host/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/Cargo.toml) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/entrypoint.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/entrypoint.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/argv.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/init.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/init.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/mode.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/mode.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/headless_host.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/headless_host.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/sigint.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/sigint.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/host/src/exit_codes.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/host/src/exit_codes.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
-- [lingxi-app/apps/cli/tui/src/lib.rs](https://github.com/lingxi-coder/lingxi-app/blob/34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8/apps/cli/tui/src/lib.rs) — Committed source (34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8)
+- [lingxi-app/apps/cli/host/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/Cargo.toml) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/entrypoint.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/entrypoint.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/argv.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/init.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/init.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/mode.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/mode.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/headless_host.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/headless_host.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/sigint.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/sigint.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/host/src/exit_codes.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/host/src/exit_codes.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
+- [lingxi-app/apps/cli/tui/src/lib.rs](https://github.com/lingxi-coder/lingxi-app/blob/5444781d66f7d98dad4f55dda429e21276609f4c/apps/cli/tui/src/lib.rs) — Committed source (5444781d66f7d98dad4f55dda429e21276609f4c)
 - [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/dc6ce1217143b693d97ab6278ff66568beea20d3/crates/runtime/src/headless/mod.rs) — Committed source (dc6ce1217143b693d97ab6278ff66568beea20d3)
 
-- lingxi-app: HEAD 34cc3a8f5ce24b7c52677c59dce0ac6d6fe6bcf8; Referenced input fingerprint sha256:95dd1706054f3e5f077c2b531000a05c18b2d9a8c241b83a57f83b763ab220e0
+- lingxi-app: HEAD 5444781d66f7d98dad4f55dda429e21276609f4c; Referenced input fingerprint sha256:a67684b48dfcff6b38a3396131bb19e149d638025bbb87b282fbfe452d289c6e
 - harness-runtime: HEAD dc6ce1217143b693d97ab6278ff66568beea20d3; Referenced input fingerprint sha256:a83d44fb79099d3a923f8fd33bfd18789edd02c2b1d5c683a16c589fffaf2578; Product pin dc6ce1217143b693d97ab6278ff66568beea20d3
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -2219,7 +2219,14 @@ export class SessionRuntime {
     const response = validateNativeUiControlResponseJson(request, result.response_json);
     let metadata: ReturnType<typeof validateUiControlMetadataJson> | undefined;
     if (result.metadata_json !== undefined) metadata = validateUiControlMetadataJson(result.metadata_json);
-    if (request.subtype === 'ui_render' && metadata === undefined) throw new Error('UI render result is missing its render revision');
+    const isNoHostRenderFallback = request.subtype === 'ui_render'
+      && response !== null
+      && 'tree' in response
+      && response.tree === null
+      && metadata === undefined;
+    if (request.subtype === 'ui_render' && !isNoHostRenderFallback && metadata?.renderRevision === undefined) {
+      throw new Error('UI render result is missing its render revision');
+    }
     if (request.subtype !== 'ui_render' && metadata !== undefined) throw new Error('unexpected UI control metadata');
     return { response, ...(metadata === undefined ? {} : { metadata }) };
   }

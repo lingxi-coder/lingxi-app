@@ -3283,6 +3283,56 @@ test('Mod UI requests beyond the outstanding window wait in order for earlier re
   assert.equal(commands.length, 17, 'nothing waiting is sent after the interruption');
 });
 
+test('Mod UI render accepts only the no-host null-tree fallback without metadata', async () => {
+  const sessionId = '44444444-5555-4666-8777-888888888888';
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+    sessionId,
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  });
+  const commands: any[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  client.sendCommand = (command) => { commands.push(command); };
+  (runtime as any).client = client;
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).generation = 1;
+  (runtime as any).wireClient(client, 1);
+
+  const request = {
+    subtype: 'ui_render', surface: 'desktop', component: 'AbovePrompt', instance_id: 'no-host', props: {},
+  } as const;
+  const respond = (response: unknown, metadata_json?: string) => {
+    const pending = runtime.dispatchModUiControl(request);
+    const command = commands.at(-1)!;
+    client.emit('event', {
+      type: 'ui_control_result', request_id: command.request_id,
+      response_json: JSON.stringify(response),
+      ...(metadata_json === undefined ? {} : { metadata_json }),
+    });
+    return pending;
+  };
+
+  const noHostResponse = { tree: null, props: {}, rewritten: false, hooked: false };
+  assert.deepEqual(await respond(noHostResponse), { response: noHostResponse });
+
+  await assert.rejects(
+    respond({ tree: { type: 'engine', ref: 1 }, props: {}, rewritten: false, hooked: false }),
+    /UI render result is missing its render revision/,
+  );
+  await assert.rejects(
+    respond(noHostResponse, JSON.stringify({ renderRevision: '7' })),
+    /UI render revision/,
+    'the no-host fallback does not bypass malformed metadata validation',
+  );
+  await assert.rejects(
+    respond(noHostResponse, JSON.stringify({ clientStateToken: '42' })),
+    /UI render result is missing its render revision/,
+    'a metadata object without the render revision is not the no-host fallback',
+  );
+});
+
 test('live and pending Side Chats prevent implicit stop, restart and archive', async () => {
   const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   let stopped = 0;

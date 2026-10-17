@@ -3,6 +3,7 @@ import GoogleSignIn
 
 @main
 struct LingxiCodeApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(AppNotificationDelegate.self) private var appDelegate
     @State private var app = AppState()
     @State private var voice = VoiceCapabilityModel()
@@ -24,6 +25,9 @@ struct LingxiCodeApp: App {
         WindowGroup {
             RootView(voiceCapability: voice)
                 .onOpenURL { _ = GIDSignIn.sharedInstance.handle($0) }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { PushRegistration.shared.refresh() }
+                }
                 .environment(app)
                 .environment(voice)
                 .environment(LocalizationManager.shared)

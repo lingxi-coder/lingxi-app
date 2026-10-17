@@ -1,5 +1,7 @@
 import UIKit
 import UserNotifications
+import FirebaseAuth
+import FirebaseMessaging
 
 extension Notification.Name {
     static let lingxiCronNotificationOpened = Notification.Name("LingxiCronNotificationOpened")
@@ -16,6 +18,7 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        PushRegistration.shared.start()
         Self.cronBackgroundBridge.registerAtLaunch(
             taskIdentifier: cronBackgroundTaskIdentifier,
             registrar: Self.cronBackgroundRegistrarFactory()
@@ -23,11 +26,23 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         return true
     }
 
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Messaging.messaging().apnsToken = deviceToken
+        PushRegistration.shared.refresh()
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        conversationAction(from: notification.request.content.userInfo) == nil
+        if PushMessagePolicy.isRemote(notification.request.content.userInfo) {
+            return await MainActor.run {
+                PushMessagePolicy.accepts(notification.request.content.userInfo,
+                    uid: Auth.auth().currentUser?.uid, enabled: NotificationPreferencesStore.load().enabled)
+                    ? [.banner, .sound, .list] : []
+            }
+        }
+        return conversationAction(from: notification.request.content.userInfo) == nil
             ? [.banner, .sound, .list]
             : []
     }
@@ -37,6 +52,11 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         didReceive response: UNNotificationResponse
     ) async {
         let userInfo = response.notification.request.content.userInfo
+        if PushMessagePolicy.isRemote(userInfo) {
+            // Remote pushes open the app only; local conversation/cron payloads
+            // keep their existing routing and cannot be injected by an FCM send.
+            return
+        }
         if let action = conversationAction(from: userInfo) {
             await LingxiAppActionStore.shared.enqueue(action)
             return

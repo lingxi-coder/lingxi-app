@@ -2,18 +2,27 @@
 
 目标项目：`lingxi-5e4b2`。现有客户端账号继续使用同一个 Firebase Authentication。
 
+FCM 的 Android/iOS 客户端、独立注册 API、30 天绑定租约和清理代码见
+[Firebase Cloud Messaging](firebase-fcm.md)。用户已明确授权并完成该部分生产部署，
+Android 真机已验证注册、后台通知、消息到期移除、换账号隔离及离线退出后自动解绑；
+iOS APNs 配置由用户处理后继续验收。
+
 ## 已授权并部署的资源
 
 | 资源 | 名称 / 限制 | 用途 |
 | --- | --- | --- |
 | Firestore Native 数据库 | `local-app-market`，`us-central1`，删除保护 | 市场、用户角色、上传及任务状态 |
 | Firestore Native 数据库 | `model-catalog`，`us-central1`，删除保护 | 模型草稿、分片快照、发布指针及历史 |
+| Firestore Native 数据库 | `push-notifications`，`us-central1`，删除保护 | 私有设备绑定、FCM 注册唯一索引及 30 天 TTL |
 | Firebase Hosting | `lingxi-5e4b2`、`lingxi-5e4b2-market` | 官网与市场前端，按用户后续要求替换 Cloudflare 静态托管 |
 | Cloud Functions 第 2 代 | `marketGateway`，Node 22，512 MiB，并发 4，最小 0 / 最大 2 | Hosting 同域 API 入口，保留后端代理密钥及 Firebase token 校验 |
 | Cloud Functions 第 2 代 | `catalogApi`，Node 22，512 MiB，最小 0 / 最大 2 实例 | 目录公共 API 与管理 API |
+| Cloud Functions 第 2 代 | `pushApi`，Node 22，256 MiB，最小 0 / 最大 2 实例 | 设备绑定、解绑及有独立权限的推送 API |
+| Cloud Scheduler / Functions | `prunePushRegistrations`，每天，最大 1 实例 | 清理过期设备及相应注册索引，已手动触发验证成功 |
 | Cloud Run | `market-api`、`market-jobs`，最小 0 / 最大 2 实例 | 市场业务及私有任务处理 |
 | Cloud Tasks / Scheduler | 队列 `market`；每分钟调度 | 上传处理、清理、状态修复 |
 | IAM 服务账号 | `catalog-api`、`market-api`、`market-jobs`、`market-tasks`、`market-scheduler` | 按服务分配数据库和调用权限 |
+| IAM 服务账号 | `push-api`，Firestore 权限限定 `push-notifications`，Auth 只读及 FCM 发送权限 | 推送函数运行身份，无长期私钥 |
 | Secret Manager | 市场代理、内容网关和游标密钥 | 服务端密钥，值不进入 Git / Terraform state |
 | Artifact Registry / Cloud Build | 构建、保存后台镜像与 Functions 制品 | 服务发布 |
 

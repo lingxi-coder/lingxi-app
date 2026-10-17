@@ -120,6 +120,7 @@ final class FirebaseAccount {
     func signOut() {
         perform {
             try Auth.auth().signOut()
+            PushRegistration.shared.signedOut()
             GIDSignIn.sharedInstance.signOut()
         }
     }

@@ -88,6 +88,11 @@ class MainActivity : ComponentActivity() {
         super.attachBaseContext(LocaleWrapper.wrap(newBase))
     }
 
+    override fun onResume() {
+        super.onResume()
+        com.lingxi.code.push.PushRegistration.enqueue(applicationContext)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         pendingCronRunId.value = intent.getStringExtra(
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
@@ -117,7 +122,7 @@ class MainActivity : ComponentActivity() {
         // notifications) silently fails. Registered before STARTED; launched below.
         val notificationPermLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission(),
-        ) { /* best-effort: nothing to do on grant/deny — posting self-gates */ }
+        ) { com.lingxi.code.push.PushRegistration.enqueue(applicationContext) }
         val locationPermLauncher = activityResultRegistry.register(
             "$locationResultKey:permission", this, ActivityResultContracts.RequestMultiplePermissions(),
         ) { grants -> LocationController.onLocationPermission(locationOwner, grants) }

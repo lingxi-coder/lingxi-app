@@ -23,6 +23,12 @@
       "location": "us-central1",
       "rules": "infra/firebase/firestore.rules",
       "indexes": "infra/firebase/firestore.indexes.json"
+    },
+    {
+      "database": "push-notifications",
+      "location": "us-central1",
+      "rules": "infra/firebase/firestore.rules",
+      "indexes": "infra/firebase/push.indexes.json"
     }
   ],
   "storage": {

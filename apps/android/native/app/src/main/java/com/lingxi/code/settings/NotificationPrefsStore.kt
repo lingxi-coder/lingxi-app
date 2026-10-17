@@ -17,6 +17,7 @@ import com.lingxi.code.notify.NotificationPolicy
  * fields — see [NotificationPolicy] for why the vocabulary is borrowed.
  */
 class NotificationPrefsStore(context: Context) {
+    private val pushContext = context.applicationContext
     private val preferences = context.applicationContext.getSharedPreferences(
         PREFERENCES_NAME,
         Context.MODE_PRIVATE,
@@ -54,6 +55,7 @@ class NotificationPrefsStore(context: Context) {
                 NotificationPolicy.clampIdleThreshold(config.messageIdleNotifThresholdMs),
             )
             .apply()
+        com.lingxi.code.push.PushRegistration.enqueue(pushContext)
     }
 
     private companion object {

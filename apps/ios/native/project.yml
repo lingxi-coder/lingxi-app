@@ -67,6 +67,10 @@ targets:
       - package: ZIPFoundation
       - package: Firebase
         product: FirebaseAuth
+      - package: Firebase
+        product: FirebaseMessaging
+      - package: Firebase
+        product: FirebaseInstallations
       - package: GoogleSignIn
         product: GoogleSignIn
       - target: ConversationWidget
@@ -113,6 +117,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Account.entitlements
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
+        APS_ENVIRONMENT: development
         OTHER_LDFLAGS: "$(inherited) -ObjC"
         # The Cargo-locked SDK lives outside SRCROOT; the build scripts only
         # write generated products under this app's build/ and Frameworks/.
@@ -123,6 +128,7 @@ targets:
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
         StoreRelease:
+          APS_ENVIRONMENT: production
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
@@ -131,6 +137,7 @@ targets:
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
         FullRelease:
+          APS_ENVIRONMENT: production
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
           FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.55470483519-qtq162qv2bl6f5ft5pb2538ra9mmrf22
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"

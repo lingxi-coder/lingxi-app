@@ -409,8 +409,12 @@ import XCTest
                     hidden: false
                 ),
             ]))
-            let first = try XCTUnwrap(source.model.slashCommands.first)
-            let selected = try XCTUnwrap(source.model.slashCommands.last)
+            let first = try XCTUnwrap(source.model.slashCommands.first {
+                $0.sourceNameCodeUnits == [0xfffd]
+            })
+            let selected = try XCTUnwrap(source.model.slashCommands.first {
+                $0.sourceNameCodeUnits == [0xd800]
+            })
             XCTAssertNotEqual(first.id, selected.id)
             var submitted: [ClientCommand] = []
             source.setCommandSubmitterForTesting { submitted.append($0) }

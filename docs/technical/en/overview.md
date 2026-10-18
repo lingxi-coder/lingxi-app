@@ -47,13 +47,13 @@ The bridge is an internal Node.js package. Rust crates are not Python or npm SDK
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — Uncommitted source (9b4abdd5d66862ecae244e4180508d88a4cb67d9)
-- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/Cargo.toml) — Committed source (4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1)
+- lingxi-app/Cargo.toml — Uncommitted source (f71087b428665c30d0bd752e16f76cb53ab7fef6)
+- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b/crates/runtime/Cargo.toml) — Committed source (b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/lib.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
 - [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/Cargo.toml) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
 
-- lingxi-app: HEAD 9b4abdd5d66862ecae244e4180508d88a4cb67d9; Referenced input fingerprint sha256:252355d0de8ad961f559189585cdfe25441ca6e6799400b3e2b4df2613cfc2fd
-- harness-runtime: HEAD 4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1; Referenced input fingerprint sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a; Product pin 4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1
+- lingxi-app: HEAD f71087b428665c30d0bd752e16f76cb53ab7fef6; Referenced input fingerprint sha256:ffa4209174670963945fa96456c08bd3b6ef9ebb70e5420cba55d475fea5de3d
+- harness-runtime: HEAD b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; Referenced input fingerprint sha256:25269e99665402275451ca5949e4177e613143620f1cc8cabdbf422dcd7ab8a2; Product pin b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b
 - llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
 - mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
 

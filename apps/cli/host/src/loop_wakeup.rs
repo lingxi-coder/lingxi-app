@@ -134,6 +134,7 @@ impl CliLoopHost {
                 turn_companion: false,
                 message_origin: None,
                 prompt_source: None,
+                sdk_content_is_json_string: None,
                 // Scheduled triggers are synthetic meta entries, not a user
                 // row with a typed ingress classification.
                 prompt_ingress_kind: None,

@@ -114,6 +114,7 @@ impl TaskNotificationWake for ReplTaskWake {
                                 skip_model_query: false,
                                 message_origin: None,
                                 prompt_source: None,
+                                sdk_content_is_json_string: None,
                                 trailing_history_rows: Vec::new(),
                                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                                     serde_json::json!({"kind":"auto-continuation"})

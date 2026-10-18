@@ -2471,6 +2471,7 @@ async fn drain_main_thread(
                     .as_ref()
                     .and_then(|source| source.message_origin.clone()),
                 prompt_source: None,
+                sdk_content_is_json_string: None,
                 message_id: None,
                 pending_prompt_identity: None,
                 images: Vec::new(),

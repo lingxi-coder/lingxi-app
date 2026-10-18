@@ -569,73 +569,98 @@ fn session_user_message_path(config: &Path, cwd: &Path, session_id: &str) -> Pat
     session::session_path(config, &cwd.display().to_string(), session_id)
 }
 
+struct CliFixtureEnvironment {
+    _home: tempfile::TempDir,
+    config: tempfile::TempDir,
+    _cwd: tempfile::TempDir,
+    cwd_path: PathBuf,
+}
+
+impl CliFixtureEnvironment {
+    fn new() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let cwd_path = std::fs::canonicalize(cwd.path()).expect("canonicalize CLI fixture cwd");
+        create_project_skills(&cwd_path);
+        Self {
+            _home: home,
+            config,
+            _cwd: cwd,
+            cwd_path,
+        }
+    }
+
+    fn session_path(&self, session_id: &str) -> PathBuf {
+        session_user_message_path(self.config.path(), &self.cwd_path, session_id)
+    }
+
+    fn run_cli(
+        &self,
+        argv: &[String],
+        input: &[u8],
+        case_id: &str,
+    ) -> (std::process::Output, Vec<Vec<u8>>) {
+        let stub = LocalApiStub::start();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"));
+        command
+            .env_clear()
+            .current_dir(&self.cwd_path)
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", self._home.path())
+            .env("TMPDIR", self.config.path().parent().unwrap())
+            .env("LANG", "C.UTF-8")
+            .env("TZ", "UTC")
+            .env("TERM", "dumb")
+            .env("LINGXI_CONFIG_DIR", self.config.path())
+            .env("CLAUDE_CONFIG_DIR", self.config.path())
+            .env("LINGXI_API_BASE_URL", format!("http://{}", stub.address))
+            .env(
+                "LINGXI_NATIVE_ANTHROPIC_ENDPOINT",
+                format!("http://{}", stub.address),
+            )
+            .env("ANTHROPIC_API_KEY", API_KEY)
+            .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+            .env("DISABLE_TELEMETRY", "1")
+            .env("DO_NOT_TRACK", "1")
+            .args(argv.iter().skip(1).map(String::as_str))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = command.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("lingxi-cli timed out in command case {case_id}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let requests = stub.finish();
+        (output, requests)
+    }
+}
+
 fn run_cli_case(
     case: &CommandInputCase,
     receipt: &NativeReceiptCase,
     fixture_root: &Path,
 ) -> (std::process::Output, Vec<Vec<u8>>, String, Vec<u8>) {
-    let home = tempfile::tempdir().unwrap();
-    let config = tempfile::tempdir().unwrap();
-    let cwd = tempfile::tempdir().unwrap();
-    // TempDir may return `/var/folders/...` while the child process resolves
-    // `getcwd()` to `/private/var/folders/...`. The session path encodes the
-    // runtime cwd string, so use its canonical spelling for the fixture too.
-    let cwd_path = std::fs::canonicalize(cwd.path()).expect("canonicalize CLI fixture cwd");
-    // Native 2.1.295's fixed inputs place these two project Skills in the
-    // shared cwd for every replay case, including unknown-slash and stream-json.
-    create_project_skills(&cwd_path);
-    let stub = LocalApiStub::start();
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"));
-    command
-        .env_clear()
-        .current_dir(&cwd_path)
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", home.path())
-        // Keep the child temp root above config so the runtime selects its
-        // file-only credential store for this throwaway fixture.
-        .env("TMPDIR", config.path().parent().unwrap())
-        .env("LANG", "C.UTF-8")
-        .env("TZ", "UTC")
-        .env("TERM", "dumb")
-        .env("LINGXI_CONFIG_DIR", config.path())
-        .env("CLAUDE_CONFIG_DIR", config.path())
-        .env("LINGXI_API_BASE_URL", format!("http://{}", stub.address))
-        .env(
-            "LINGXI_NATIVE_ANTHROPIC_ENDPOINT",
-            format!("http://{}", stub.address),
-        )
-        .env("ANTHROPIC_API_KEY", API_KEY)
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .env("DISABLE_TELEMETRY", "1")
-        .env("DO_NOT_TRACK", "1")
-        .args(receipt.argv.iter().skip(1).map(String::as_str))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
+    let environment = CliFixtureEnvironment::new();
     let input = receipt
         .input_file
         .as_deref()
         .map(|path| fixture_file(fixture_root, path))
         .unwrap_or_default();
-    let mut child = command.spawn().unwrap();
-    child.stdin.take().unwrap().write_all(&input).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("lingxi-cli timed out in Native command case {}", case.id);
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let output = child.wait_with_output().unwrap();
-    let requests = stub.finish();
-    let transcript_path = session_user_message_path(config.path(), &cwd_path, &case.session_id);
+    let (output, requests) = environment.run_cli(&receipt.argv, &input, &case.id);
+    let transcript_path = environment.session_path(&case.session_id);
     let transcript = std::fs::read(&transcript_path).unwrap_or_else(|error| {
         panic!(
             "case {} session transcript missing at {}: {error}; exit status: {:?}; stdout: {}; stderr: {}; loopback requests: {}",
@@ -650,7 +675,7 @@ fn run_cli_case(
     (
         output,
         requests,
-        cwd_path.to_str().unwrap().to_owned(),
+        environment.cwd_path.to_str().unwrap().to_owned(),
         transcript,
     )
 }
@@ -1058,4 +1083,111 @@ fn actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields() 
             assert!(actual_result["usage"].is_object());
         }
     }
+}
+
+#[test]
+fn cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire() {
+    let fixture_root = fixture_root();
+    let inputs: CommandInputs =
+        serde_json::from_slice(&fixture_file(&fixture_root, "cases.json")).unwrap();
+    let case = inputs
+        .cases
+        .iter()
+        .find(|case| case.id == "unpaired-surrogate-skill-name")
+        .unwrap();
+    let receipt: NativeRerunReceipt =
+        serde_json::from_slice(&fixture_file(&fixture_root, "native-rerun-receipt.json")).unwrap();
+    let native_case = receipt
+        .cases
+        .iter()
+        .find(|native_case| native_case.id == case.id)
+        .unwrap();
+    let input = fixture_file(&fixture_root, native_case.input_file.as_deref().unwrap());
+    let environment = CliFixtureEnvironment::new();
+
+    let (first_output, first_requests) = environment.run_cli(&native_case.argv, &input, &case.id);
+    assert_eq!(
+        first_output.status.code(),
+        Some(native_case.native_exit_code)
+    );
+    assert_eq!(first_requests.len(), 1);
+    let transcript_path = environment.session_path(&case.session_id);
+    let first_transcript =
+        std::fs::read(&transcript_path).expect("first process saved its session");
+    assert!(first_transcript
+        .windows(6)
+        .any(|window| window == b"\\ud800"));
+    let first_units = session_user_content_units(
+        std::str::from_utf8(&first_transcript).unwrap(),
+        environment.cwd_path.to_str().unwrap(),
+    );
+    assert!(first_units.iter().any(|units| units.contains(&0xd800)));
+
+    let mut resume_argv = vec!["lingxi-cli".to_owned()];
+    let mut skip_value = false;
+    for argument in native_case.argv.iter().skip(1) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(argument.as_str(), "--session-id" | "--input-format") {
+            skip_value = true;
+            continue;
+        }
+        resume_argv.push(argument.clone());
+    }
+    let continuation_prompt = "continue after a cold resume";
+    resume_argv.extend([
+        "--resume".to_owned(),
+        case.session_id.clone(),
+        continuation_prompt.to_owned(),
+    ]);
+
+    // A fresh CLI process reloads the exact JSONL user units. The Anthropic
+    // SDK then applies Native generation's final well-formed-string projection,
+    // so the persisted row keeps U+D800 while the sent request contains U+FFFD.
+    let (resume_output, resume_requests) = environment.run_cli(&resume_argv, &[], &case.id);
+    assert_eq!(
+        resume_output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&resume_output.stderr)
+    );
+    assert_eq!(resume_requests.len(), 1, "one resumed model request");
+    let frames = stream_frames(&resume_output.stdout);
+    let init = frames
+        .iter()
+        .find(|frame| frame["type"] == "system" && frame["subtype"] == "init")
+        .expect("resumed stream initializes");
+    assert_eq!(init["session_id"].as_str(), Some(case.session_id.as_str()));
+
+    let (_, request_body) = request_parts(&resume_requests[0]);
+    let request_wire = std::str::from_utf8(&request_body).expect("Anthropic body is UTF-8 JSON");
+    assert!(
+        !request_wire.contains("\\ud800"),
+        "the final Anthropic body applies Native's well-formed-string projection"
+    );
+    let request: Value = serde_json::from_slice(&request_body).expect("normalized body is JSON");
+    assert_eq!(
+        relevant_request_text_blocks(case, &request, environment.cwd_path.to_str().unwrap()),
+        vec!["/skill_\u{fffd}_probe"],
+        "cold history is normalized at the final Anthropic request boundary"
+    );
+    assert_eq!(
+        request_wire.matches(continuation_prompt).count(),
+        1,
+        "the continuation prompt appears once"
+    );
+
+    let resumed_transcript =
+        std::fs::read(&transcript_path).expect("resumed session remains saved");
+    assert!(resumed_transcript.len() > first_transcript.len());
+    assert!(resumed_transcript
+        .windows(6)
+        .any(|window| window == b"\\ud800"));
+    let resumed_units = session_user_content_units(
+        std::str::from_utf8(&resumed_transcript).unwrap(),
+        environment.cwd_path.to_str().unwrap(),
+    );
+    assert!(resumed_units.iter().any(|units| units.contains(&0xd800)));
 }

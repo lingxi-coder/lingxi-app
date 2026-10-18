@@ -341,6 +341,7 @@ import XCTest
                     source: "user",
                     aliases: [],
                     argumentHint: nil,
+                    argumentNames: [],
                     menuDescription: nil,
                     hidden: false
                 ),
@@ -367,6 +368,7 @@ import XCTest
                     source: "user",
                     aliases: [ClientTextDto(codeUnits: aliasUnits)],
                     argumentHint: nil,
+                    argumentNames: [],
                     menuDescription: nil,
                     hidden: false
                 ),
@@ -392,6 +394,7 @@ import XCTest
                     source: "user",
                     aliases: [],
                     argumentHint: nil,
+                    argumentNames: [],
                     menuDescription: nil,
                     hidden: false
                 ),
@@ -401,6 +404,7 @@ import XCTest
                     source: "user",
                     aliases: [],
                     argumentHint: nil,
+                    argumentNames: [],
                     menuDescription: nil,
                     hidden: false
                 ),

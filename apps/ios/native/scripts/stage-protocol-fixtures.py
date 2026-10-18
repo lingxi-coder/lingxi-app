@@ -14,7 +14,7 @@ if shutil.which("cargo") is None:
 
 host = Path(__file__).resolve().parents[4]
 resolved = json.loads(subprocess.check_output([
-    "python3", str(host / "scripts/lib/runtime_source.py"), "--json",
+    sys.executable, str(host / "scripts/lib/runtime_source.py"), "--json",
 ], text=True))
 source = Path(resolved["root"]) / "crates/client/snapshots/compaction_hybrid_progress.json"
 # Read before creating output: a missing upstream oracle fails the build.

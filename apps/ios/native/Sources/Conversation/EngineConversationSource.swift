@@ -1220,7 +1220,7 @@ final class EngineConversationSource: ConversationSource {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.submitCommand(.runSlashCommand(raw: raw.clientTextDto, images: images, turnId: turnId))
+                try await self.submitCommand(.runSlashCommand(raw: raw, images: images, turnId: turnId))
             } catch {
                 guard self.activeConversationTurnToken == token else { return }
                 self.fail(.host, "\(error)")

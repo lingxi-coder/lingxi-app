@@ -313,7 +313,7 @@ private struct StructuredAIBlocks: View {
                     StructuredToolBlock(
                         id: id,
                         title: ToolDisplayText.title(header),
-                        summary: header.subLine?.text,
+                        summary: header.subLine?.text ?? "",
                         detail: inputJson,
                         icon: ToolDisplayText.icon(header: header, tool: tool),
                         iconColor: ToolDisplayText.iconColor(
@@ -331,7 +331,7 @@ private struct StructuredAIBlocks: View {
                         title: isError
                             ? String(localized: "chat_tool_failed \(tool)")
                             : String(localized: "chat_tool_returned \(tool)"),
-                        summary: ToolDisplayText.headline(display),
+                        summary: ToolDisplayText.headline(display) ?? "",
                         detail: display.body,
                         diff: display.diff,
                         detailWasTruncated: display.bodyTruncated,

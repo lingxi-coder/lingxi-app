@@ -64,6 +64,7 @@ final class MockConversationSource: ConversationSource {
                 tool: "shell",
                 status: terminalToolStatus,
                 inputSummary: "pwd",
+                elapsedMs: 42,
                 display: ConversationToolResultDisplay(
                     headline: cancelledRun ? "Shell 已取消" : "Shell 完成",
                     headlineKind: nil,
@@ -73,8 +74,7 @@ final class MockConversationSource: ConversationSource {
                     bodyLines: 0,
                     bodyTruncated: false,
                     collapsed: false
-                ),
-                elapsedMs: 42
+                )
             )
             let webSearchTrace = ConversationToolTrace(
                 id: "ui-web-search",
@@ -88,22 +88,22 @@ final class MockConversationSource: ConversationSource {
                 tool: "Read",
                 status: .completed,
                 inputSummary: "/home/lingxi/lingxi/ui-test/README.md",
+                elapsedMs: 18,
                 display: ConversationToolResultDisplay(
                     headline: "Read completed", headlineKind: nil, headlineArgs: [], diff: nil,
                     body: nil, bodyLines: 0, bodyTruncated: false, collapsed: false
-                ),
-                elapsedMs: 18
+                )
             )
             let searchTrace = ConversationToolTrace(
                 id: "ui-search",
                 tool: "Grep",
                 status: .completed,
                 inputSummary: "ConversationTimelineView",
+                elapsedMs: 29,
                 display: ConversationToolResultDisplay(
                     headline: "Search completed", headlineKind: nil, headlineArgs: [], diff: nil,
                     body: nil, bodyLines: 0, bodyTruncated: false, collapsed: false
-                ),
-                elapsedMs: 29
+                )
             )
             let toolTraces = cancelledRun ? [webSearchTrace, shellTrace] : [shellTrace, readTrace, searchTrace]
             let user = Message(role: .user, text: "Hello")

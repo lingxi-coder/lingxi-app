@@ -1,4 +1,5 @@
 #if canImport(harness_runtimeFFI)
+@testable import LingxiCode
 import harness_runtimeFFI
 
 func currentToolHeader(_ label: String = "Read") -> ToolHeaderDto {

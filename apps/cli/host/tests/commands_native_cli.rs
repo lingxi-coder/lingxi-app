@@ -1192,6 +1192,198 @@ fn cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire() {
     assert!(resumed_units.iter().any(|units| units.contains(&0xd800)));
 }
 
+#[test]
+fn cli_cold_resume_projects_object_tool_result_at_native_utf16_boundary() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cold-tool-result-source");
+    let original_row: Value = serde_json::from_slice(
+        &std::fs::read(fixture.join("resume-input-tool-result-session-row.raw.jsonl")).unwrap(),
+    )
+    .unwrap();
+    let expected_raw = std::fs::read(fixture.join("model-tool-result-content.raw.json")).unwrap();
+    let expected: String = serde_json::from_slice(&expected_raw).unwrap();
+    assert!(expected.ends_with("\n[6 more characters of this tool result not shown]"));
+    assert_eq!(
+        serde_json::to_string(&original_row["message"]["content"][0]["content"])
+            .unwrap()
+            .encode_utf16()
+            .count(),
+        50_007,
+        "the retained object exercises the original 50,000-unit cut"
+    );
+
+    let receipt: NativeRerunReceipt =
+        serde_json::from_slice(&fixture_file(&fixture_root(), "native-rerun-receipt.json"))
+            .unwrap();
+    let case = receipt
+        .cases
+        .iter()
+        .find(|case| case.id == "unicode-skill-name")
+        .unwrap();
+    let environment = CliFixtureEnvironment::new();
+    let (initial, _) = environment.run_cli(&case.argv, &[], "cold-tool-result-seed");
+    assert_eq!(
+        initial.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let path = environment.session_path(&case.session_id);
+    let mut rows: Vec<Value> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let assistant_index = rows
+        .iter()
+        .rposition(|row| row["type"] == "assistant")
+        .unwrap();
+    let tool_use_id = original_row["message"]["content"][0]["tool_use_id"]
+        .as_str()
+        .unwrap();
+    let assistant = &mut rows[assistant_index];
+    assistant["message"]["content"] = json!([{
+        "type": "tool_use", "id": tool_use_id, "name": "Bash",
+        "input": {"command": "printf fixture"}
+    }]);
+    assistant["message"]["stop_reason"] = json!("tool_use");
+    let assistant_uuid = assistant["uuid"].clone();
+    let timestamp = assistant["timestamp"].clone();
+    let mut stored_result = original_row.clone();
+    stored_result["parentUuid"] = assistant_uuid.clone();
+    stored_result["sourceToolAssistantUUID"] = assistant_uuid;
+    stored_result["sessionId"] = json!(case.session_id);
+    stored_result["cwd"] = json!(environment.cwd_path);
+    stored_result["timestamp"] = timestamp.clone();
+    rows.truncate(assistant_index + 1);
+    rows.push(stored_result.clone());
+    // The captured Native 2.1.293 cold-resume request contains an assistant
+    // "No response requested." row between this tool result and the later
+    // standalone total-token reminder/user prompt. Preserve that boundary so
+    // the reminder is not folded into the object projection under test.
+    let mut separator: Value = serde_json::from_slice(
+        &std::fs::read(fixture.join("resume-input-followup-assistant-row.raw.jsonl")).unwrap(),
+    )
+    .unwrap();
+    separator["uuid"] = json!("00000000-0000-4000-8000-000000002951");
+    separator["parentUuid"] = stored_result["uuid"].clone();
+    separator["sessionId"] = json!(case.session_id);
+    separator["cwd"] = json!(environment.cwd_path);
+    separator["timestamp"] = timestamp;
+    rows.push(separator);
+    let mut seeded_jsonl = Vec::new();
+    for row in rows {
+        serde_json::to_writer(&mut seeded_jsonl, &row).unwrap();
+        seeded_jsonl.push(b'\n');
+    }
+    std::fs::write(&path, &seeded_jsonl).unwrap();
+
+    let mut argv = vec!["lingxi-cli".to_owned()];
+    let mut skip = false;
+    for argument in case.argv.iter().skip(1) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if argument == "--session-id" {
+            skip = true;
+            continue;
+        }
+        if argument == "/skill-🧪-probe" {
+            continue;
+        }
+        argv.push(argument.clone());
+    }
+    argv.extend([
+        "--resume".to_owned(),
+        case.session_id.clone(),
+        "Continue after the saved tool result.".to_owned(),
+    ]);
+    let (resumed, requests) = environment.run_cli(&argv, &[], "cold-tool-result-resume");
+    assert_eq!(
+        resumed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "one request from a fresh resumed CLI process"
+    );
+    let (_, body) = request_parts(&requests[0]);
+    let request: Value = serde_json::from_slice(&body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    let tool_result_position = messages
+        .iter()
+        .position(|message| {
+            message["content"].as_array().is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block["type"] == "tool_result" && block["tool_use_id"] == tool_use_id
+                })
+            })
+        })
+        .expect("the real cold consumer keeps the paired tool result");
+    let separator_position = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "assistant"
+                && message["content"].as_array().is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block["type"] == "text" && block["text"] == "No response requested."
+                    })
+                })
+        })
+        .expect("the Native cold-resume assistant separator remains in the SDK request");
+    assert!(
+        separator_position > tool_result_position,
+        "the assistant separator follows the result before the resumed user prompt"
+    );
+    assert!(
+        messages.iter().skip(separator_position + 1).any(|message| {
+            message["role"] == "user"
+                && message["content"].as_array().is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block["type"] == "text"
+                            && block["text"]
+                                .as_str()
+                                .is_some_and(|text| text.contains("<total_tokens>"))
+                    })
+                })
+        }),
+        "the total-token reminder remains separate after the Native assistant separator"
+    );
+    let actual = messages
+        .iter()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == tool_use_id)
+        .expect("the real cold consumer keeps the paired tool result");
+    assert_eq!(
+        actual["content"].as_str(),
+        Some(expected.as_str()),
+        "the object result matches the complete Native UTF-16 projection"
+    );
+    assert!(
+        body.windows(expected_raw.len())
+            .any(|bytes| bytes == expected_raw),
+        "compare the complete Native JSON string bytes in the physical SDK request"
+    );
+
+    let after = std::fs::read(&path).unwrap();
+    let persisted = std::str::from_utf8(&after)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|row| row["uuid"] == stored_result["uuid"])
+        .expect("original source row remains durable after projection");
+    assert_eq!(
+        persisted["message"]["content"][0]["content"],
+        original_row["message"]["content"][0]["content"],
+        "normalization must not replace the stored object with its truncated model text"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn public_cli_sigint_during_stream_open_matches_native_2_1_295() {
@@ -1274,6 +1466,7 @@ fn public_cli_sigint_during_stream_open_matches_native_2_1_295() {
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(10)))
                         .unwrap();

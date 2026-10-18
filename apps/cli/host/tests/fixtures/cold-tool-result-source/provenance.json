@@ -1,0 +1,30 @@
+{
+  "public_native_version": "2.1.293",
+  "purpose": "Current CLI cold production consumer rebind against retained boundary input/output; 2.1.295 projection source bound separately in r377. Not a new Native 2.1.295 public capture.",
+  "source": "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-json-resume/native-baseline/cold-resume-object",
+  "files": [
+    {
+      "file": "resume-input-tool-result-session-row.raw.jsonl",
+      "sha256": "7cf08645bf6a723921019b1737029cd0ae2ae3ada7dd37fbfc9a46b57670533c",
+      "bytes": 50926
+    },
+    {
+      "file": "model-tool-result-content.raw.json",
+      "sha256": "9116513181209c00d7ce1d9be366acc5484a944d26ec44781ad5fecfc15a9bdb",
+      "bytes": 50055
+    },
+    {
+      "file": "resume-input-followup-assistant-row.raw.jsonl",
+      "sha256": "e46dbcffdf6c13cf4faeacbe82e4414ef2bb5e6dbe9bf985adfec140822bdcaa",
+      "bytes": 1250,
+      "source_sha256": "a65cfff797452bbc5ca8e691547dcc51557b47bd7bf9cf2da80e9d36331bc2a1",
+      "source": "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-json-resume/run-output/tool-result-json-resume-6fj2a40i/session.full.raw.jsonl",
+      "source_row": "assistant row with message.content[0].text = No response requested."
+    }
+  ],
+  "resume_request_context": {
+    "purpose": "Mirror the captured Native cold-resume request ordering: this assistant row follows the object tool_result and precedes the later standalone total_tokens reminder/resume prompt, so the reminder is not folded into the object projection under test.",
+    "native_request_sha256": "051921d7ebd59ce8dd2b330e4ac12db7717323f7e6ed9c0dc5ea229aa83c73bd",
+    "note": "This is a copy of an existing 2.1.293 captured session row, not a new Native capture; runtime-bound uuid/session/cwd/timestamp fields are rewritten by the candidate test."
+  }
+}

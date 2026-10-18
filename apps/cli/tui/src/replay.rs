@@ -426,6 +426,8 @@ mod tests {
     fn user_text(text: &str) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
@@ -497,6 +499,8 @@ mod tests {
             },
             ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
@@ -553,6 +557,8 @@ mod tests {
         let id = ToolUseId::new();
         let h = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id,
@@ -636,6 +642,8 @@ mod tests {
         // entry (provider replay envelope); it replays identically.
         let h = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::RedactedThinking {
                 data: "opaque".into(),
@@ -670,6 +678,8 @@ mod tests {
             },
             ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Image {
                     source: ImageSource::Url {

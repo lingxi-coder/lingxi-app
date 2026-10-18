@@ -66,14 +66,14 @@ cargo metadata --locked --format-version=1 --all-features
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — 未提交源码 (412953aaf0354442447172e229f8e8f52b67b90d)
-- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/412953aaf0354442447172e229f8e8f52b67b90d/rust-toolchain.toml) — 已提交源码 (412953aaf0354442447172e229f8e8f52b67b90d)
-- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/412953aaf0354442447172e229f8e8f52b67b90d/apps/setup.sh) — 已提交源码 (412953aaf0354442447172e229f8e8f52b67b90d)
-- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/412953aaf0354442447172e229f8e8f52b67b90d/scripts/lib/runtime_source.py) — 已提交源码 (412953aaf0354442447172e229f8e8f52b67b90d)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3/Cargo.toml) — 已提交源码 (a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3)
+- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3/rust-toolchain.toml) — 已提交源码 (a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3)
+- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3/apps/setup.sh) — 已提交源码 (a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3)
+- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3/scripts/lib/runtime_source.py) — 已提交源码 (a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3)
 - [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/Cargo.toml) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
 - [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/Cargo.toml) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
 
-- lingxi-app: HEAD 412953aaf0354442447172e229f8e8f52b67b90d; 所据文件指纹 sha256:9599eff51b5078b439c85bc3d8d22b4780569bb284e75cc3b493c047a79aa30f
+- lingxi-app: HEAD a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3; 所据文件指纹 sha256:9599eff51b5078b439c85bc3d8d22b4780569bb284e75cc3b493c047a79aa30f
 - harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; 所据文件指纹 sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; 产品固定版本 6548b9d5e702f8e9d42772412cd65b72881e24b4
 - llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
 

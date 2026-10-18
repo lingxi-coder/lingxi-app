@@ -28,7 +28,7 @@ import type {
   UiInvalidateEventDto,
   UiJsonValue,
 } from '@lingxi/bridge-client';
-import { ModUiClientTree, parseModUiClientTree, type ModUiClientIdentity } from './modUiClientTree';
+import { createNativeInputAck, ModUiClientTree, parseModUiClientTree, type ModUiClientIdentity, type ModUiSurfaceNode } from './modUiClientTree';
 import {
   ModUiParentTree,
   collectModUiClientElements,
@@ -209,6 +209,28 @@ export function heldHandleForElement(tree: UiJsonValue, element: string, plugin?
   }
   const matches = parsed.filter((entry) => entry.element === element);
   return matches.length === 1 ? matches[0].handle : null;
+}
+
+function inputValueForElement(tree: UiJsonValue, element: string, plugin: string): string | undefined {
+  let parsed: ModUiSurfaceNode | string;
+  try {
+    parsed = parseModUiClientTree(tree, plugin);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed === 'string') return undefined;
+  let matches = 0;
+  let value: string | undefined;
+  const visit = (node: ModUiSurfaceNode | string): void => {
+    if (typeof node === 'string') return;
+    if (node.type === 'Input' && node.props.key === element) {
+      matches += 1;
+      value = node.props.value;
+    }
+    if ('children' in node) for (const child of node.children ?? []) visit(child);
+  };
+  visit(parsed);
+  return matches === 1 ? value : undefined;
 }
 
 function collectInteractiveNodes(tree: UiJsonValue): Array<{ element: string; handle: number }> {
@@ -743,6 +765,10 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     if ((runtimeEpochRef.current !== null && failedRuntimeEpochRef.current === runtimeEpochRef.current)
       || (sourceRuntimeId !== undefined && failedRuntimeIdRef.current === sourceRuntimeId)) return false;
     latestFrameSequenceRef.current = nextFrame.frameSequence;
+    // Input dispatches are serialized below. Publish the accepted frame to
+    // queued operations before React commits the corresponding render so each
+    // event resolves its current held handle rather than a retired one.
+    frameRef.current = nextFrame;
     setFrame(nextFrame);
     // A Client run fault belongs to this drawn plugin/module/key identity.
     // Passive frames and same-identity prop updates don't prove the runtime
@@ -1027,7 +1053,13 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
       return;
     }
     if (isFrame(frameResult) && frameResult.renderRevision === revision) {
-      acceptFrame(frameResult, revision, runtimeAtStart);
+      if (!acceptFrame(frameResult, revision, runtimeAtStart)) return;
+      if (request.event.type !== 'input') return undefined;
+      // The Host returns this frame only after the callback's UI posts have
+      // settled. Its Input value is authoritative even when it transforms or
+      // clears the value that Native reached. An omitted value means the
+      // Input is uncontrolled and the local draft should be preserved.
+      return createNativeInputAck(inputValueForElement(frameResult.tree, request.element, descriptor.plugin));
     } else {
       throw new Error('Client module host returned an invalid run frame');
     }
@@ -1056,7 +1088,6 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
           reportCurrentFault('run', reason, revision);
         }}
         onRenderFault={(reason) => reportCurrentFault('render', reason, site?.renderRevision ?? -1)}
-        renderRevision={frame.renderRevision}
       />
         : <div className="mod-ui-client-loading" role="status" aria-label="Loading Mod surface" />}
   </div>;

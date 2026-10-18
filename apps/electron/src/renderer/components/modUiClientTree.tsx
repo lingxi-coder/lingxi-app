@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Component, memo, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
+import { Component, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement, ChangeEvent } from 'react';
 import type { NativeUiComponent, NativeUiControlRequest, NativeUiClientPressEventDto, UiJsonValue } from '@lingxi/bridge-client';
 import { useT } from '../theme/ThemeContext';
@@ -30,6 +30,25 @@ function modUiClientSurfaceIdentityKey(site: ModUiRenderSite, client: ModUiClien
 export type ModUiClientSurfaceEvent = NativeUiClientPressEventDto;
 /** Exact bridge-client request consumed by Native's `ui_client_press` control. */
 export type NativeUiClientPressRequest = Extract<NativeUiControlRequest, { subtype: 'ui_client_press' }>;
+
+const nativeInputAckBrand = Symbol('native-input-ack');
+type NativeInputAck = { readonly [nativeInputAckBrand]: true; readonly value?: string };
+
+/** Internal success result for Input dispatches; this never crosses the bridge. */
+export function createNativeInputAck(value: string | undefined): NativeInputAck {
+  return value === undefined
+    ? { [nativeInputAckBrand]: true }
+    : { [nativeInputAckBrand]: true, value };
+}
+
+/** Read only acknowledgements created by the local Host adapter. */
+export function readNativeInputAck(result: unknown): string | undefined | null {
+  if (typeof result !== 'object' || result === null) return null;
+  const candidate = result as { [nativeInputAckBrand]?: unknown; value?: unknown };
+  if (candidate[nativeInputAckBrand] !== true
+    || (candidate.value !== undefined && typeof candidate.value !== 'string')) return null;
+  return candidate.value as string | undefined;
+}
 
 export interface ModUiClientPressRef {
   plugin: string;
@@ -122,15 +141,16 @@ export interface ModUiClientTreeProps {
   site: ModUiRenderSite;
   client: ModUiClientIdentity;
   /** Native ui_client_press request dispatcher. Runtime policy/VM handoff stays outside React. */
-  onPress(request: NativeUiClientPressRequest, handle: number): void | Promise<unknown>;
+  onPress(request: NativeUiClientPressRequest, handle: number): unknown | Promise<unknown>;
   /** A rejected local VM callback run is reported by the owning host adapter. */
   onRunFault?(request: NativeUiClientPressRequest, reason: string): void;
   /** A render-tree validation failure is reported through the owning host adapter. */
   onRenderFault?(reason: string): void;
   /** Parent Client identities over Native ui_client_press's address bounds are rendered read-only. */
   interactionsEnabled?: boolean;
-  renderRevision?: number;
 }
+
+const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 const MAX_TREE_NODES = 20_000;
 const MAX_TREE_DEPTH = 32;
@@ -472,8 +492,8 @@ class ClientSurfaceErrorBoundary extends Component<{
 }
 
 /** React renderer for the bounded JSON tree returned by the Harness Node VM. It never imports or evaluates Mod source. */
-export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true, renderRevision }: ModUiClientTreeProps) {
-  const body = React.createElement(ModUiClientTreeBody, { tree, site, client, onPress, onRunFault, interactionsEnabled, renderRevision });
+export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, client, onPress, onRunFault, onRenderFault, interactionsEnabled = true }: ModUiClientTreeProps) {
+  const body = React.createElement(ModUiClientTreeBody, { tree, site, client, onPress, onRunFault, interactionsEnabled });
   return React.createElement(ClientSurfaceErrorBoundary, {
     key: modUiClientSurfaceIdentityKey(site, client),
     onFault: onRenderFault,
@@ -481,36 +501,37 @@ export const ModUiClientTree = memo(function ModUiClientTree({ tree, site, clien
   });
 });
 
-const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, client, onPress, onRunFault, interactionsEnabled = true, renderRevision }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
+const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, client, onPress, onRunFault, interactionsEnabled = true }: Omit<ModUiClientTreeProps, 'onRenderFault'>) {
   const parsed = parseModUiClientTree(tree, client.plugin);
   const lifecycle = useRef(0);
   const onPressRef = useRef(onPress);
   const onRunFaultRef = useRef(onRunFault);
+  const dispatchTail = useRef<Promise<void>>(Promise.resolve());
   onPressRef.current = onPress;
   onRunFaultRef.current = onRunFault;
 
-  useEffect(() => {
+  useClientLayoutEffect(() => {
     const activeGeneration = ++lifecycle.current;
     return () => {
       if (lifecycle.current === activeGeneration) lifecycle.current += 1;
     };
-  }, [site.component, site.instanceId, client.plugin, client.key, client.module, renderRevision]);
+  }, [site.component, site.instanceId, client.plugin, client.key, client.module]);
 
-  const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent) => {
-    if (!interactionsEnabled) return;
+  const dispatch = useCallback((press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown> => {
+    if (!interactionsEnabled) return Promise.resolve(undefined);
     const request = buildNativeUiClientPressRequest(site, client, element, event, press.plugin);
     const activeGeneration = lifecycle.current;
-    try {
-      void Promise.resolve(onPressRef.current(request, press.handle)).catch((error: unknown) => {
-        if (lifecycle.current !== activeGeneration) return;
-        const reason = error instanceof Error ? error.message : String(error);
-        onRunFaultRef.current?.(request, reason);
-      });
-    } catch (error) {
-      if (lifecycle.current !== activeGeneration) return;
+    const queued = dispatchTail.current.catch(() => undefined).then(() => {
+      if (lifecycle.current !== activeGeneration) return undefined;
+      return onPressRef.current(request, press.handle);
+    });
+    dispatchTail.current = queued.then(() => undefined, () => undefined);
+    return queued.catch((error: unknown) => {
+      if (lifecycle.current !== activeGeneration) return undefined;
       const reason = error instanceof Error ? error.message : String(error);
       onRunFaultRef.current?.(request, reason);
-    }
+      return undefined;
+    });
   }, [site.component, site.instanceId, client.plugin, client.key, client.module, interactionsEnabled]);
 
   return <div className="mod-ui-client-surface" data-mod-client={client.key} data-mod-plugin={client.plugin} data-mod-module={client.module}>
@@ -520,7 +541,7 @@ const ModUiClientTreeBody = memo(function ModUiClientTreeBody({ tree, site, clie
 
 const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnabled }: {
   node: ModUiSurfaceNode;
-  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): void;
+  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   interactionsEnabled: boolean;
 }): ReactElement {
   const t = useT();
@@ -574,28 +595,52 @@ const SurfaceNode = memo(function SurfaceNode({ node, dispatch, interactionsEnab
 
 const SurfaceInput = memo(function SurfaceInput({ node, dispatch, disabled }: {
   node: Extract<ModUiSurfaceNode, { type: 'Input' }>;
-  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): void;
+  dispatch(press: ModUiClientPressRef, element: string, event: ModUiClientSurfaceEvent): Promise<unknown>;
   disabled: boolean;
 }) {
   const t = useT();
   const { key, label, placeholder, value, submitLabel, autoFocus } = node.props;
   const [draft, setDraft] = useState(value ?? '');
-  useEffect(() => setDraft(value ?? ''), [key, value]);
+  const valueRef = useRef(value);
+  const editSequence = useRef(0);
+  const localEditRef = useRef<{ sequence: number } | null>(null);
+  valueRef.current = value;
+  useEffect(() => {
+    if (localEditRef.current || value === undefined) return;
+    setDraft(value);
+  }, [key, value]);
+  const dispatchInput = useCallback((kind: 'change' | 'submit', nextValue: string) => {
+    const edit = { sequence: ++editSequence.current };
+    localEditRef.current = edit;
+    void dispatch(node.press, key, { type: 'input', kind, value: nextValue }).then((result) => {
+      const currentEdit = localEditRef.current;
+      if (!currentEdit || currentEdit.sequence !== edit.sequence) return;
+      localEditRef.current = null;
+      const authoritativeValue = readNativeInputAck(result);
+      if (authoritativeValue !== null) {
+        if (authoritativeValue !== undefined) setDraft(authoritativeValue);
+        return;
+      }
+      // Failed, stale, or cancelled dispatches release the draft lock. A newer
+      // controlled value that arrived while pending is then authoritative.
+      if (valueRef.current !== undefined) setDraft(valueRef.current);
+    });
+  }, [dispatch, key, node.press]);
   const submit = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const input = event.currentTarget.querySelector('input');
-    dispatch(node.press, key, { type: 'input', kind: 'submit', value: input?.value ?? draft });
-  }, [dispatch, draft, key, node.press]);
+    dispatchInput('submit', input?.value ?? draft);
+  }, [dispatchInput, draft]);
   const onChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const nextValue = event.currentTarget.value;
     setDraft(nextValue);
-    dispatch(node.press, key, { type: 'input', kind: 'change', value: nextValue });
-  }, [dispatch, key, node.press]);
+    dispatchInput('change', nextValue);
+  }, [dispatchInput]);
   const submitOnEnter = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    dispatch(node.press, key, { type: 'input', kind: 'submit', value: event.currentTarget.value });
-  }, [dispatch, key, node.press]);
+    dispatchInput('submit', event.currentTarget.value);
+  }, [dispatchInput]);
   return <form className="mod-ui-client-input-row" onSubmit={submit} style={{ display: 'flex', gap: 8, minWidth: 0 }}>
     <label className="mod-ui-client-input-label" style={{ display: 'grid', flex: 1, minWidth: 0, gap: 4, color: t.text2 }}>
       {label && <span>{label}</span>}

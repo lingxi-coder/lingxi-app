@@ -6,14 +6,14 @@
       "repo": "lingxi-app",
       "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9",
       "sourceUrl": "https://github.com/lingxi-coder/lingxi-app",
-      "dirty": false,
-      "treeFingerprint": "sha256:3347f2641bfc3fafbc7595c66a1dac1b1b7db2f0851b8df8ccc3af1088259fd8"
+      "dirty": true,
+      "treeFingerprint": "sha256:252355d0de8ad961f559189585cdfe25441ca6e6799400b3e2b4df2613cfc2fd"
     },
     {
       "repo": "harness-runtime",
-      "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
+      "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
       "sourceUrl": "https://github.com/lingxi-coder/harness-runtime",
-      "productPinnedRevision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
+      "productPinnedRevision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
       "dirty": false,
       "treeFingerprint": "sha256:e9079905b280000c8013dd7f16954f3709e464fdcf67fca25de7e73176e1230a"
     },
@@ -39,16 +39,15 @@
       {
         "repo": "lingxi-app",
         "path": "Cargo.toml",
-        "sourceState": "committed",
-        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9",
-        "url": "https://github.com/lingxi-coder/lingxi-app/blob/9b4abdd5d66862ecae244e4180508d88a4cb67d9/Cargo.toml"
+        "sourceState": "working-tree",
+        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/Cargo.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/Cargo.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/Cargo.toml"
       },
       {
         "repo": "llm-client",
@@ -77,8 +76,8 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "llm-client",
@@ -100,36 +99,36 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/Cargo.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/Cargo.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/Cargo.toml"
       },
       {
         "repo": "harness-runtime",
         "path": "Cargo.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/Cargo.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/Cargo.toml"
       },
       {
         "repo": "harness-runtime",
         "path": "rust-toolchain.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/rust-toolchain.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/rust-toolchain.toml"
       }
     ],
     "harness-sessions": [
@@ -137,29 +136,29 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/sdk.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/sdk.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/sdk.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/core/src/host/orchestrator.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/core/src/host/orchestrator.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/core/src/host/orchestrator.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/adapter/output_stream.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/adapter/output_stream.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/adapter/output_stream.rs"
       }
     ],
     "harness-lifecycle": [
@@ -167,92 +166,92 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/sdk.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/sdk.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/sdk.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/session_state.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/session_state.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/session_state.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host/assembly.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host/assembly.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host/assembly.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/headless/mod.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/headless/mod.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/headless/mod.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/headless/config.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/headless/config.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/headless/config.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/headless/host.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/headless/host.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/headless/host.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/headless/io.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/headless/io.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/headless/io.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/headless/session.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/headless/session.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/headless/session.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/permission/src/gate.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/permission/src/gate.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/permission/src/gate.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/storage.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/storage.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/storage.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/resumer.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/resumer.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/resumer.rs"
       }
     ],
     "harness-tools": [
@@ -260,36 +259,36 @@
         "repo": "harness-runtime",
         "path": "crates/tool-api/src/tool_trait.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tool-api/src/tool_trait.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tool-api/src/tool_trait.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tool-api/src/context.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tool-api/src/context.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tool-api/src/context.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tool-api/src/registry.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tool-api/src/registry.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tool-api/src/registry.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tool-api/src/progress.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tool-api/src/progress.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tool-api/src/progress.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/turn_loop/tool_dispatch.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/turn_loop/tool_dispatch.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/turn_loop/tool_dispatch.rs"
       }
     ],
     "harness-plugins": [
@@ -297,29 +296,29 @@
         "repo": "harness-runtime",
         "path": "crates/plugin/src/manager.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/plugin/src/manager.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/plugin/src/manager.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/plugin/src/lifecycle.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/plugin/src/lifecycle.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/plugin/src/lifecycle.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/plugin/src/manifest.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/plugin/src/manifest.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/plugin/src/manifest.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/plugin/src/discovery.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/plugin/src/discovery.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/plugin/src/discovery.rs"
       }
     ],
     "harness-client": [
@@ -327,59 +326,58 @@
         "repo": "harness-runtime",
         "path": "crates/client/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/Cargo.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/Cargo.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/Cargo.toml"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/version.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/version.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/version.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/commands.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/commands.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/commands.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/events.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/events.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/events.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/adapter/output_stream.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/adapter/output_stream.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/adapter/output_stream.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/message.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/message.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/message.rs"
       }
     ],
     "llm-client": [
       {
         "repo": "lingxi-app",
         "path": "Cargo.toml",
-        "sourceState": "committed",
-        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9",
-        "url": "https://github.com/lingxi-coder/lingxi-app/blob/9b4abdd5d66862ecae244e4180508d88a4cb67d9/Cargo.toml"
+        "sourceState": "working-tree",
+        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9"
       },
       {
         "repo": "llm-client",
@@ -979,36 +977,36 @@
         "repo": "harness-runtime",
         "path": "crates/bridge/src/wire.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/bridge/src/wire.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/bridge/src/wire.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/bridge/src/mcp_endpoint.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/bridge/src/mcp_endpoint.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/bridge/src/mcp_endpoint.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/commands.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/commands.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/commands.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/events.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/events.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/events.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/error.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/error.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/error.rs"
       }
     ],
     "platform-integration": [
@@ -1086,15 +1084,15 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/audio.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/audio.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/audio.rs"
       }
     ],
     "agent-execution": [
@@ -1102,85 +1100,85 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/sdk.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/sdk.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/sdk.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/conversation/drivers/prepare.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/conversation/drivers/prepare.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/conversation/drivers/prepare.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/conversation/drivers/streaming.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/conversation/drivers/streaming.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/conversation/drivers/streaming.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/conversation/prompt.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/conversation/prompt.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/conversation/prompt.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/streaming_loop.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/streaming_loop.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/streaming_loop.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/streaming_executor.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/streaming_executor.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/streaming_executor.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/turn_loop/tool_dispatch.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/turn_loop/tool_dispatch.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/turn_loop/tool_dispatch.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/turn_loop/api_recovery.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/turn_loop/api_recovery.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/turn_loop/api_recovery.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/provider_adapter.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/provider_adapter.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/provider_adapter.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/llm-runtime/src/model/retry.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/llm-runtime/src/model/retry.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/llm-runtime/src/model/retry.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/llm-runtime/src/model/retry_scope.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/llm-runtime/src/model/retry_scope.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/llm-runtime/src/model/retry_scope.rs"
       }
     ],
     "configuration-security": [
@@ -1188,78 +1186,78 @@
         "repo": "harness-runtime",
         "path": "crates/core/src/settings/mod.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/core/src/settings/mod.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/core/src/settings/mod.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/core/src/settings/loader.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/core/src/settings/loader.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/core/src/settings/loader.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/core/src/settings/merger.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/core/src/settings/merger.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/core/src/settings/merger.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/core/src/settings/schema.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/core/src/settings/schema.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/core/src/settings/schema.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/settings_watch.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/settings_watch.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/settings_watch.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/credentials.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/credentials.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/credentials.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/platforms/posix/src/secure_storage/factory.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/platforms/posix/src/secure_storage/factory.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/platforms/posix/src/secure_storage/factory.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/platforms/posix/src/secure_storage/plaintext.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/platforms/posix/src/secure_storage/plaintext.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/platforms/posix/src/secure_storage/plaintext.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/permission/src/mode.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/permission/src/mode.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/permission/src/mode.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/permission/src/policy_gate.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/permission/src/policy_gate.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/permission/src/policy_gate.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/sandbox/src/decision.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/sandbox/src/decision.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/sandbox/src/decision.rs"
       }
     ],
     "session-storage": [
@@ -1267,85 +1265,85 @@
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/path.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/path.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/path.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/schema.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/schema.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/schema.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/reader.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/reader.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/reader.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/recovery.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/recovery.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/recovery.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/durable_writer.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/durable_writer.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/durable_writer.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/message_identity.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/message_identity.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/message_identity.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/transcript_compact.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/transcript_compact.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/transcript_compact.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/resumer.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/resumer.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/resumer.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/session/src/branch.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/branch.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/branch.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/conversation/compaction.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/conversation/compaction.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/conversation/compaction.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/adapter/lowering/messages.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/adapter/lowering/messages.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/adapter/lowering/messages.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/session_state/resume.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/session_state/resume.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/session_state/resume.rs"
       }
     ],
     "extensions-lifecycle": [
@@ -1353,78 +1351,78 @@
         "repo": "harness-runtime",
         "path": "crates/tool-api/src/registry.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tool-api/src/registry.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tool-api/src/registry.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/skill/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/skill/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/skill/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/skill_loader.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/skill_loader.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/skill_loader.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/hooks/src/events.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/hooks/src/events.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/hooks/src/events.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/hooks/src/executor.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/hooks/src/executor.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/hooks/src/executor.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/hooks/src/ssrf_guard.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/hooks/src/ssrf_guard.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/hooks/src/ssrf_guard.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/plugin/src/manager.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/plugin/src/manager.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/plugin/src/manager.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/mcp/src/registry.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/mcp/src/registry.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/mcp/src/registry.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/mcp/src/registry/catalog_refresh.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/mcp/src/registry/catalog_refresh.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/mcp/src/registry/catalog_refresh.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/lsp/src/registry.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/lsp/src/registry.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/lsp/src/registry.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/mobile_lsp.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/mobile_lsp.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/mobile_lsp.rs"
       }
     ],
     "agents-background": [
@@ -1432,78 +1430,78 @@
         "repo": "harness-runtime",
         "path": "crates/agent/src/context.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/agent/src/context.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/agent/src/context.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/agent/src/handle.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/agent/src/handle.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/agent/src/handle.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/agent/src/runner.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/agent/src/runner.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/agent/src/runner.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/agent/src/pool.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/agent/src/pool.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/agent/src/pool.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/agent/src/pool/capacity.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/agent/src/pool/capacity.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/agent/src/pool/capacity.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/background_agent.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/background_agent.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/background_agent.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/session_agents.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/session_agents.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/session_agents.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tasks/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tasks/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tasks/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tasks/src/handlers/local_agent.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tasks/src/handlers/local_agent.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tasks/src/handlers/local_agent.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/coordinator/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/coordinator/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/coordinator/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/parked_agent_restore.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/parked_agent_restore.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/parked_agent_restore.rs"
       }
     ],
     "automation-workflows-fusion": [
@@ -1511,106 +1509,106 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/assembly.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/assembly.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/assembly.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/cron_management.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/cron_management.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/cron_management.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host/automation.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host/automation.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host/automation.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host/assembly.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host/assembly.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host/assembly.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/cron/src/run_due.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/cron/src/run_due.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/cron/src/run_due.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tools/workflow/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tools/workflow/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tools/workflow/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tools/workflow/src/workflow_input_schema.json",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tools/workflow/src/workflow_input_schema.json"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tools/workflow/src/workflow_input_schema.json"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/workflow/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/workflow/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/workflow/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/workflow/src/description.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/workflow/src/description.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/workflow/src/description.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tasks/src/handlers/local_workflow.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tasks/src/handlers/local_workflow.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tasks/src/handlers/local_workflow.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/fusion_services.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/fusion_services.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/fusion_services.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/fusion_attempts.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/fusion_attempts.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/fusion_attempts.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/fusion_recorder.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/fusion_recorder.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/fusion_recorder.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/fusion_implement.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/fusion_implement.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/fusion_implement.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/fusion/src/orchestrator.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/fusion/src/orchestrator.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/fusion/src/orchestrator.rs"
       }
     ],
     "multimodal-host": [
@@ -1618,78 +1616,78 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/client/src/protocol/commands.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/client/src/protocol/commands.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/client/src/protocol/commands.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/orchestrator/src/image_input.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/orchestrator/src/image_input.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/orchestrator/src/image_input.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/audio-runtime/src/lib.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/audio-runtime/src/lib.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/audio-runtime/src/lib.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/audio-runtime/src/cloud.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/audio-runtime/src/cloud.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/audio-runtime/src/cloud.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop/configuration.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop/configuration.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop/configuration.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/audio_service.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/audio_service.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/audio_service.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host/audio_context.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host/audio_context.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host/audio_context.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/host/audio_realtime_owner.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/host/audio_realtime_owner.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/host/audio_realtime_owner.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/tests/mobile/realtime_owner.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/tests/mobile/realtime_owner.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/tests/mobile/realtime_owner.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/tests/desktop/audio_injection.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/tests/desktop/audio_injection.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/tests/desktop/audio_injection.rs"
       }
     ],
     "runtime-visualization": [
@@ -1697,78 +1695,78 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/inline_visualization.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/inline_visualization.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/inline_visualization.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/desktop_visualization.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/desktop_visualization.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/desktop_visualization.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/mobile/visualization_host.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/mobile/visualization_host.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/mobile/visualization_host.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/tools/ui/src/inline_visualization.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/tools/ui/src/inline_visualization.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/tools/ui/src/inline_visualization.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/visualization/src/store.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/visualization/src/store.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/visualization/src/store.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/visualization/src/service.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/visualization/src/service.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/visualization/src/service.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/visualization/src/document.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/visualization/src/document.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/visualization/src/document.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/visualization/src/context.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/visualization/src/context.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/visualization/src/context.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/visualization/src/checks.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/visualization/src/checks.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/visualization/src/checks.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/tests/inline_visualization.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/tests/inline_visualization.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/tests/inline_visualization.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/tests/mobile/visualization_host.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/tests/mobile/visualization_host.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/tests/mobile/visualization_host.rs"
       }
     ],
     "llm-files": [
@@ -2469,8 +2467,8 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/src/headless/mod.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/headless/mod.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/headless/mod.rs"
       }
     ],
     "web-product": [
@@ -2621,23 +2619,22 @@
       {
         "repo": "lingxi-app",
         "path": "Cargo.toml",
-        "sourceState": "committed",
-        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9",
-        "url": "https://github.com/lingxi-coder/lingxi-app/blob/9b4abdd5d66862ecae244e4180508d88a4cb67d9/Cargo.toml"
+        "sourceState": "working-tree",
+        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/Cargo.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/Cargo.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/Cargo.toml"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "llm-client",
@@ -2658,9 +2655,8 @@
       {
         "repo": "lingxi-app",
         "path": "Cargo.toml",
-        "sourceState": "committed",
-        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9",
-        "url": "https://github.com/lingxi-coder/lingxi-app/blob/9b4abdd5d66862ecae244e4180508d88a4cb67d9/Cargo.toml"
+        "sourceState": "working-tree",
+        "revision": "9b4abdd5d66862ecae244e4180508d88a4cb67d9"
       },
       {
         "repo": "lingxi-app",
@@ -2687,8 +2683,8 @@
         "repo": "harness-runtime",
         "path": "Cargo.toml",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/Cargo.toml"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/Cargo.toml"
       },
       {
         "repo": "llm-client",
@@ -2824,8 +2820,8 @@
         "repo": "harness-runtime",
         "path": "crates/runtime/tests/sdk_surface.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/tests/sdk_surface.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/tests/sdk_surface.rs"
       },
       {
         "repo": "llm-client",
@@ -2861,15 +2857,15 @@
         "repo": "harness-runtime",
         "path": "crates/session/src/jsonl/recovery.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/session/src/jsonl/recovery.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/session/src/jsonl/recovery.rs"
       },
       {
         "repo": "harness-runtime",
         "path": "crates/runtime/src/api.rs",
         "sourceState": "committed",
-        "revision": "1129e10ad0c8bc3c27e577245165e8290c7e2fec",
-        "url": "https://github.com/lingxi-coder/harness-runtime/blob/1129e10ad0c8bc3c27e577245165e8290c7e2fec/crates/runtime/src/api.rs"
+        "revision": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "url": "https://github.com/lingxi-coder/harness-runtime/blob/4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1/crates/runtime/src/api.rs"
       },
       {
         "repo": "llm-client",

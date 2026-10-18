@@ -89,7 +89,7 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
     writeFileSync(fixtureMain, `
       import * as React from 'react';
       import { createRoot } from 'react-dom/client';
-      import { ModUiClientTree } from '@regression/modUiClientTree';
+      import { createNativeInputAck, ModUiClientTree } from '@regression/modUiClientTree';
       import { Theme } from '@regression/ThemeContext';
       import { tokens } from '@regression/tokens';
 
@@ -98,6 +98,10 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
         const [siteId, setSiteId] = React.useState('site-one');
         const [module, setModule] = React.useState('surface.tsx');
         const capturedInput = React.useRef(null);
+        const adapterCalls = React.useRef([]);
+        const identityQueueStart = React.useRef(0);
+        const holdNextAdapter = React.useRef(false);
+        const firstAdapterRelease = React.useRef(null);
         const client = { plugin: 'fixture-plugin', key: 'message', module };
         const site = { component: 'AbovePrompt', instanceId: siteId };
         const tree = {
@@ -117,8 +121,33 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
             sameNode: capturedInput.current !== null && capturedInput.current === current,
           };
         };
+        const identityQueueSnapshot = () => ({
+          calls: adapterCalls.current.slice(identityQueueStart.current),
+          firstAdapterPending: firstAdapterRelease.current !== null,
+        });
+        const onPress = (request) => {
+          adapterCalls.current.push({ module, event: request.event });
+          const ack = request.event.type === 'input' ? createNativeInputAck(request.event.value) : undefined;
+          if (holdNextAdapter.current) {
+            holdNextAdapter.current = false;
+            return new Promise((resolve) => {
+              firstAdapterRelease.current = () => resolve(ack);
+            });
+          }
+          return ack;
+        };
         window.__modUiClientRevisionRegression = {
           snapshot,
+          identityQueueSnapshot,
+          startQueuedIdentityScenario() {
+            identityQueueStart.current = adapterCalls.current.length;
+            holdNextAdapter.current = true;
+          },
+          releaseFirstAdapter() {
+            const release = firstAdapterRelease.current;
+            firstAdapterRelease.current = null;
+            release?.();
+          },
           captureInput() { capturedInput.current = input(); },
           typeDraft(value) {
             const current = input();
@@ -132,7 +161,7 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
           changeClient() { setModule('surface-two.tsx'); },
         };
         return <Theme.Provider value={tokens(false)}>
-          <ModUiClientTree tree={tree} site={site} client={client} onPress={() => {}} renderRevision={revision} />
+          <ModUiClientTree tree={tree} site={site} client={client} onPress={onPress} />
         </Theme.Provider>;
       }
 
@@ -170,10 +199,14 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
 
           await run("window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.typeDraft('client-draft')");
           await wait("window.__modUiClientRevisionRegression.snapshot().value === 'client-draft'");
+          await run("window.__modUiClientRevisionRegression.startQueuedIdentityScenario(); window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.typeDraft('queued-one'); window.__modUiClientRevisionRegression.typeDraft('queued-two')");
+          await wait("window.__modUiClientRevisionRegression.identityQueueSnapshot().calls.length === 1 && window.__modUiClientRevisionRegression.identityQueueSnapshot().firstAdapterPending && window.__modUiClientRevisionRegression.snapshot().value === 'queued-two'");
           await run('window.__modUiClientRevisionRegression.captureInput(); window.__modUiClientRevisionRegression.changeClient()');
           await wait("window.__modUiClientRevisionRegression.snapshot().module === 'surface-two.tsx'");
           const clientChange = await run('window.__modUiClientRevisionRegression.snapshot()');
-          console.log(JSON.stringify({ parentRevision, siteChange, clientChange }));
+          await run('window.__modUiClientRevisionRegression.releaseFirstAdapter(); new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+          const identityQueue = await run('window.__modUiClientRevisionRegression.identityQueueSnapshot()');
+          console.log(JSON.stringify({ parentRevision, siteChange, clientChange, identityQueue }));
         } finally {
           window.destroy();
           await app.quit();
@@ -213,7 +246,7 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
     });
     child.stdout.on('data', (chunk: Buffer | string) => output.push(String(chunk)));
     child.stderr.on('data', (chunk: Buffer | string) => errors.push(String(chunk)));
-    const result = await new Promise<{ parentRevision: { value: string; focused: boolean; sameNode: boolean }; siteChange: { value: string; focused: boolean; sameNode: boolean }; clientChange: { value: string; focused: boolean; sameNode: boolean } }>((resolveResult, rejectResult) => {
+    const result = await new Promise<{ parentRevision: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; siteChange: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; clientChange: { revision: number; siteId: string; module: string; value: string; focused: boolean; sameNode: boolean }; identityQueue: { calls: Array<{ module: string }>; firstAdapterPending: boolean } }>((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child?.kill('SIGTERM');
         rejectResult(new Error(`Electron Client revision fixture timed out\n${errors.join('')}`));
@@ -240,6 +273,9 @@ test('ReactDOM retains an edited Client input across parent revisions and resets
     assert.deepEqual(result.clientChange, {
       revision: 2, siteId: 'site-two', module: 'surface-two.tsx', value: 'seed', focused: false, sameNode: false,
     });
+    assert.equal(result.identityQueue.firstAdapterPending, false);
+    assert.deepEqual(result.identityQueue.calls.map(({ module }) => module), ['surface.tsx'],
+      'a queued callback from the old Client identity must not call an adapter after the identity changes');
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     rmSync(tempRoot, { recursive: true, force: true });

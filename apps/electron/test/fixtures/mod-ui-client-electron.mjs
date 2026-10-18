@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { app, BrowserWindow } from 'electron';
 
 const url = process.argv.find((argument) => argument.startsWith('http://') || argument.startsWith('file://'));
@@ -444,7 +445,110 @@ async function main() {
       return lateRenders.length > 0 && lateRenders.every((call) => call.returnedRevision !== undefined && lateUnmounts.has(call.returnedRevision));
     })()`);
 
-    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
+    await run(`window.__modUiClientFixture.holdRapidPostAt(1); window.__modUiClientFixture.holdRapidPostAt(2); window.__modUiClientFixture.startRapidInputScenario('identity')`);
+    await wait(`Boolean(document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')) && Boolean(document.querySelector('.beta-rich-prompt'))`);
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').focus()`);
+    const sendText = (text) => {
+      for (const character of text) {
+        const physicalKey = character === '-' ? '-' : character.toUpperCase();
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: physicalKey });
+        window.webContents.sendInputEvent({ type: 'char', keyCode: character });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode: physicalKey });
+      }
+    };
+    const sendEnter = () => {
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ENTER' });
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ENTER' });
+    };
+    const rapidTarget = 'packaged-host-cua-valuexy';
+    sendText(rapidTarget);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === '${rapidTarget}' && window.__modUiClientFixture.rapidInputSnapshot().rapidPostOrdinal === 1`, 'rapid local edits while first Host post is delayed');
+    sendEnter();
+    await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-button').click()`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().controlRequests.length === 1 && window.__modUiClientFixture.rapidInputSnapshot().runHeld.length === 1`, 'queued events wait for the first settled post');
+    const rapidBeforeRelease = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(rapidBeforeRelease.value, rapidTarget);
+    assert.equal(rapidBeforeRelease.clientFocused, true);
+    assert.equal(rapidBeforeRelease.promptText, '');
+    assert.equal(rapidBeforeRelease.mainPromptSubmitCount, 0);
+    assert.equal(rapidBeforeRelease.controlRequests.length, 1);
+    assert.equal(rapidBeforeRelease.runHeld.length, 1);
+
+    await run(`window.__modUiClientFixture.releaseRapidPostAt(1)`);
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidPostOrdinal === 2 && window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === 2`, 'first settled frame arrives while the second post is held');
+    const rapidAfterFirstAck = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(rapidAfterFirstAck.rapidInputValue, rapidTarget.slice(0, 2));
+    assert.equal(rapidAfterFirstAck.rapidPropValue, rapidTarget[0]);
+    assert.equal(rapidAfterFirstAck.value, rapidTarget, 'the first value echo must not replace the newer local draft');
+    assert.equal(rapidAfterFirstAck.clientFocused, true);
+    assert.equal(rapidAfterFirstAck.mainPromptSubmitCount, 0);
+
+    await run(`window.__modUiClientFixture.releaseRapidPostAt(2)`);
+    await wait(`(() => { const s = window.__modUiClientFixture.rapidInputSnapshot(); return s.rapidControlOrdinal === ${rapidTarget.length + 2} && s.rapidInputCallbacks.length === ${rapidTarget.length + 1} && s.rapidButtonSubmitCount === 1 && s.rapidInputResult.includes('Button accepted: ${rapidTarget}'); })()`, 'all queued input, submit, and Button callbacks complete');
+    const rapidInputRegression = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    const rapidPrefixes = [...rapidTarget].map((_, index) => rapidTarget.slice(0, index + 1));
+    assert.deepEqual(rapidInputRegression.rapidInputCallbacks, [
+      ...rapidPrefixes.map((value) => ({ kind: 'change', value })),
+      { kind: 'submit', value: rapidTarget },
+    ]);
+    assert.deepEqual(rapidInputRegression.rapidButtonCallbacks, [rapidTarget]);
+    assert.deepEqual(rapidInputRegression.controlRequests.slice(0, rapidTarget.length).map((event) => event.value), rapidPrefixes);
+    assert.equal(rapidInputRegression.controlRequests.at(-2).kind, 'submit');
+    assert.equal(rapidInputRegression.controlRequests.at(-1).type, 'press');
+    const rapidHeldHandles = rapidInputRegression.runHeld.map(({ handle }) => handle);
+    assert.equal(new Set(rapidHeldHandles).size, rapidHeldHandles.length, 'each queued event must use the latest frame handle');
+    assert.equal(rapidInputRegression.value, rapidTarget);
+    assert.equal(rapidInputRegression.clientFocused, true);
+    assert.equal(rapidInputRegression.promptText, '');
+    assert.equal(rapidInputRegression.mainPromptSubmitCount, 0);
+
+    let callbackCount = rapidInputRegression.rapidInputCallbacks.length;
+    await run(`window.__modUiClientFixture.setRapidInputMode('uppercase'); window.__modUiClientFixture.emitRapidExternalValue('')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    sendText('ab');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === ${callbackCount + 2} && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'AB'`, 'author-transformed input is acknowledged from the settled frame');
+    const transformedValue = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.deepEqual(transformedValue.rapidInputCallbacks.slice(callbackCount), [
+      { kind: 'change', value: 'a' }, { kind: 'change', value: 'Ab' },
+    ]);
+    assert.equal(transformedValue.rapidPropValue, 'AB');
+    callbackCount += 2;
+
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('external-after-transform')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'external-after-transform'`, 'unlocked input accepts a later external value');
+    await run(`window.__modUiClientFixture.setRapidInputMode('clear-on-submit'); window.__modUiClientFixture.emitRapidExternalValue('')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    sendText('x');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === ${callbackCount + 1} && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'x'`);
+    sendEnter();
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === ${callbackCount + 2} && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`, 'an authoritative empty string clears the draft');
+    const clearedValue = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.deepEqual(clearedValue.rapidInputCallbacks.slice(callbackCount), [
+      { kind: 'change', value: 'x' }, { kind: 'submit', value: 'x' },
+    ]);
+    callbackCount += 2;
+
+    await run(`window.__modUiClientFixture.setRapidInputMode('uncontrolled'); window.__modUiClientFixture.emitRapidExternalValue(undefined)`);
+    sendText('draft');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === ${callbackCount + 5} && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'draft'`, 'uncontrolled acknowledgement preserves the local draft');
+    const uncontrolledValue = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
+    assert.equal(uncontrolledValue.rapidPropValue, undefined);
+    assert.deepEqual(uncontrolledValue.rapidInputCallbacks.slice(callbackCount), [
+      { kind: 'change', value: 'd' }, { kind: 'change', value: 'dr' }, { kind: 'change', value: 'dra' },
+      { kind: 'change', value: 'draf' }, { kind: 'change', value: 'draft' },
+    ]);
+    callbackCount += 5;
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('external-after-uncontrolled')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'external-after-uncontrolled'`, 'uncontrolled local edit does not retain a stale lock');
+
+    await run(`window.__modUiClientFixture.setRapidInputMode('identity'); window.__modUiClientFixture.emitRapidExternalValue(''); window.__modUiClientFixture.ignoreNextRapidRunAsStale()`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`);
+    sendText('z');
+    await wait(`window.__modUiClientFixture.rapidInputSnapshot().rapidInputCallbacks.length === ${callbackCount} && document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === ''`, 'stale dispatch releases the pending edit');
+    await run(`window.__modUiClientFixture.emitRapidExternalValue('external-after-stale')`);
+    await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === 'external-after-stale'`, 'external props apply after a stale dispatch');
+
+    process.stdout.write(`${JSON.stringify({ parentElementsRendered, parentButtonRequest, parentInputChangeRequest, parentInputSubmitRequest, parentSelectRequest, parentMarkdownRequest, parentControlRequestsMatchNativeBodies, clientIdentitySnapshot, clientIdentityPropagationMatchesAttach, buttonPressHandled, buttonUsesCurrentHandle, inputUsesHookReachedValue, inputSubmitUsesHookReachedValue, inputRunHeldEvents, selectUsesHookReachedValue, selectRunHeldEvents, markdownExternalLinkUsesNormalNavigation, markdownOpenLinkUsesNormalNavigation, markdownLinksDoNotDispatchClientCallbacks, contextMentionHref, contextMentionClickPreventedNavigation, contextMentionOpenEvents, ordinaryMentionClickPreventedNavigation, ordinaryMentionOpenEvents, preRegistrationFrameReplayed, staleOperationIgnoredWithoutFault, parentPropsUpdateRendered, staleRpcFrameIgnored, staleFrameIgnored, workerFaultRenderedWithoutDuplicateReport, workerFaultDiagnostics, workerFaultLeavesSiblingVisible, workerFaultNotClearedByParentRevision, workerFaultRecoveredFromEnvironmentRemount, asyncWorkerFaultRenderedWithoutDuplicateReport, bufferedAsyncWorkerFaultIsLeafLocal, statusReadyAfterAsyncClientRemoval, statusReadinessTimeline, adapterFaultReportedAsRun, faultLeavesSiblingVisible, adapterRunFaultSurvivedPassiveFrames, adapterRunFaultSurvivedNewRevisionSameIdentity, adapterRunFaultSurvivedSameIdentityPropsUpdate, adapterRunFaultRecoveredAfterStateTokenChange, adapterRunFaultRecoveredAfterClientRemount, pluginUnloadInvalidationRendered, emptyNoHostIsQuietAndCleansUp, runtimeLifecycleSnapshot, unmountReleasedRuntimeAndDrawIdentity, staleRenderCleanupPreservedNewerFrame, lateInitialRenderCleanedUp, rapidBeforeRelease: rapidBeforeRelease, rapidAfterFirstAck, rapidInputRegression, focusDiagnostics: { beforeActivation: documentFocusedBeforeActivation, afterActivation: documentFocusedAfterActivation } })}\n`);
   } finally {
     window.destroy();
     app.quit();

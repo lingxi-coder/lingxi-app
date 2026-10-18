@@ -176,20 +176,20 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/apps)
 
-- [lingxi-app/apps/ios/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/ios/ffi/src/host.rs) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/android/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/android/ffi/src/host.rs) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/ios/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/ios/ffi/src/callbacks.rs) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/android/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/android/ffi/src/callbacks.rs) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/ios/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/ios/ffi/src/configuration.rs) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/android/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/android/ffi/src/configuration.rs) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/ios/native/scripts/build-xcframework.sh) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/android/native/scripts/build-jni.sh) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/ios/native/Sources/Conversation/EngineConversationSource.swift](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/ios/native/Sources/Conversation/EngineConversationSource.swift) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt) — Committed source (8610f0535e719537e953ea553de3196f40a821ba)
+- [lingxi-app/apps/ios/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/ios/ffi/src/host.rs) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/android/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/android/ffi/src/host.rs) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/ios/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/ios/ffi/src/callbacks.rs) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/android/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/android/ffi/src/callbacks.rs) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/ios/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/ios/ffi/src/configuration.rs) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/android/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/android/ffi/src/configuration.rs) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/ios/native/scripts/build-xcframework.sh) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/android/native/scripts/build-jni.sh) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/ios/native/Sources/Conversation/EngineConversationSource.swift](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/ios/native/Sources/Conversation/EngineConversationSource.swift) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt) — Committed source (550ec4bc9f03342673dc498729ab2a8c2a745462)
 - [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/44f2eef5baf8ae16254934dbca451cbfd528d955/crates/runtime/src/mobile/host.rs) — Committed source (44f2eef5baf8ae16254934dbca451cbfd528d955)
 - [harness-runtime/crates/client/src/protocol/audio.rs](https://github.com/lingxi-coder/harness-runtime/blob/44f2eef5baf8ae16254934dbca451cbfd528d955/crates/client/src/protocol/audio.rs) — Committed source (44f2eef5baf8ae16254934dbca451cbfd528d955)
 
-- lingxi-app: HEAD 8610f0535e719537e953ea553de3196f40a821ba; Referenced input fingerprint sha256:5ed2e4d8ce8b971fe311f75369fd5ba6caff744a02eebe282446b32085baf11a
+- lingxi-app: HEAD 550ec4bc9f03342673dc498729ab2a8c2a745462; Referenced input fingerprint sha256:5ed2e4d8ce8b971fe311f75369fd5ba6caff744a02eebe282446b32085baf11a
 - harness-runtime: HEAD 44f2eef5baf8ae16254934dbca451cbfd528d955; Referenced input fingerprint sha256:25269e99665402275451ca5949e4177e613143620f1cc8cabdbf422dcd7ab8a2; Product pin 44f2eef5baf8ae16254934dbca451cbfd528d955
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

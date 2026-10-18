@@ -58,19 +58,19 @@ compile 与 mock 标签描述验证方法，不表示所有环境都已通过。
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/.github/workflows/ci.yml](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/.github/workflows/ci.yml) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/scripts/check-all.sh](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/scripts/check-all.sh) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/.github/workflows/documentation.yml](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/.github/workflows/documentation.yml) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/web/scripts/sync-docs.mjs](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/web/scripts/sync-docs.mjs) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/web/scripts/generate-handbook.ts](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/web/scripts/generate-handbook.ts) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/web/scripts/generate-doc-baseline.py](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/web/scripts/generate-doc-baseline.py) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/web/scripts/check-doc-examples.py](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/web/scripts/check-doc-examples.py) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
-- [lingxi-app/apps/web/examples/sdk_tools.py](https://github.com/lingxi-coder/lingxi-app/blob/8610f0535e719537e953ea553de3196f40a821ba/apps/web/examples/sdk_tools.py) — 已提交源码 (8610f0535e719537e953ea553de3196f40a821ba)
+- [lingxi-app/.github/workflows/ci.yml](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/.github/workflows/ci.yml) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/scripts/check-all.sh](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/scripts/check-all.sh) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/.github/workflows/documentation.yml](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/.github/workflows/documentation.yml) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/web/scripts/sync-docs.mjs](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/web/scripts/sync-docs.mjs) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/web/scripts/generate-handbook.ts](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/web/scripts/generate-handbook.ts) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/web/scripts/generate-doc-baseline.py](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/web/scripts/generate-doc-baseline.py) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/web/scripts/check-doc-examples.py](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/web/scripts/check-doc-examples.py) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
+- [lingxi-app/apps/web/examples/sdk_tools.py](https://github.com/lingxi-coder/lingxi-app/blob/550ec4bc9f03342673dc498729ab2a8c2a745462/apps/web/examples/sdk_tools.py) — 已提交源码 (550ec4bc9f03342673dc498729ab2a8c2a745462)
 - [harness-runtime/crates/runtime/tests/sdk_surface.rs](https://github.com/lingxi-coder/harness-runtime/blob/44f2eef5baf8ae16254934dbca451cbfd528d955/crates/runtime/tests/sdk_surface.rs) — 已提交源码 (44f2eef5baf8ae16254934dbca451cbfd528d955)
 - [llm-client/tests/downstream-docs/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/downstream-docs/src/lib.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
 - [mobile-linux-runtime/scripts/check-all.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/check-all.sh) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
 
-- lingxi-app: HEAD 8610f0535e719537e953ea553de3196f40a821ba; 所据文件指纹 sha256:5ed2e4d8ce8b971fe311f75369fd5ba6caff744a02eebe282446b32085baf11a
+- lingxi-app: HEAD 550ec4bc9f03342673dc498729ab2a8c2a745462; 所据文件指纹 sha256:5ed2e4d8ce8b971fe311f75369fd5ba6caff744a02eebe282446b32085baf11a
 - harness-runtime: HEAD 44f2eef5baf8ae16254934dbca451cbfd528d955; 所据文件指纹 sha256:25269e99665402275451ca5949e4177e613143620f1cc8cabdbf422dcd7ab8a2; 产品固定版本 44f2eef5baf8ae16254934dbca451cbfd528d955
 - llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
 - mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; 所据文件指纹 sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; 产品固定版本 6b033d41a2b6b736fda1e8f996f55a4b20bd885d

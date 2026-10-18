@@ -363,6 +363,9 @@ pub enum InitError {
     /// Explicit custom-agent configuration could not be parsed.
     #[error("Invalid --agents configuration: {0}")]
     InvalidAgents(String),
+    /// The embedding tool-alias map failed current runtime validation.
+    #[error("Invalid toolAliases configuration: {0}")]
+    InvalidToolAliases(String),
     /// Custom Anthropic beta headers require an API-key-backed first-party
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
@@ -390,6 +393,9 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
         match e {
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
+            harness_runtime::desktop::BuildError::InvalidToolAliases(m) => {
+                Self::InvalidToolAliases(m)
+            }
             harness_runtime::desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
             harness_runtime::desktop::BuildError::DurableSession(m) => Self::DurableSession(m),
             harness_runtime::desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),

@@ -1191,3 +1191,300 @@ fn cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire() {
     );
     assert!(resumed_units.iter().any(|units| units.contains(&0xd800)));
 }
+
+#[cfg(unix)]
+#[test]
+fn public_cli_sigint_during_stream_open_matches_native_2_1_295() {
+    const SESSION_ID: &str = "00000000-0000-4000-8000-000000002940";
+    const PROMPT: &str = "Reply with the fixed cancellation probe result.";
+    const INTERRUPT: &str = "[Request interrupted by user]";
+    const KEY: &str = "product-cli-cancel-fixture-dummy-key";
+    const NATIVE_FIXTURE: &str = "tests/fixtures/cli-cancel-native-295";
+
+    struct ChildGuard(Option<std::process::Child>);
+
+    impl ChildGuard {
+        fn child(&mut self) -> &mut std::process::Child {
+            self.0.as_mut().unwrap()
+        }
+
+        fn take(&mut self) -> std::process::Child {
+            self.0.take().unwrap()
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                if child.try_wait().ok().flatten().is_none() {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn user_row_contains(row: &Value, text: &str) -> bool {
+        if row["type"] != "user" || row["message"]["role"] != "user" {
+            return false;
+        }
+        match &row["message"]["content"] {
+            Value::String(content) => content.contains(text),
+            Value::Array(blocks) => blocks.iter().any(|block| {
+                block["type"] == "text"
+                    && block["text"]
+                        .as_str()
+                        .is_some_and(|content| content.contains(text))
+            }),
+            _ => false,
+        }
+    }
+
+    fn raw_object_member_value<'a>(object: &'a [u8], name: &str) -> Option<&'a [u8]> {
+        let mut key = serde_json::to_vec(name).ok()?;
+        key.push(b':');
+        let key_start = find_bytes(object, &key)?;
+        let mut value_start = key_start + key.len();
+        while object.get(value_start).is_some_and(u8::is_ascii_whitespace) {
+            value_start += 1;
+        }
+        let mut value =
+            serde_json::Deserializer::from_slice(&object[value_start..]).into_iter::<Value>();
+        value.next()?.ok()?;
+        let value_end = value.byte_offset();
+        Some(&object[value_start..value_start + value_end])
+    }
+
+    fn raw_message_content_token(row: &[u8]) -> &[u8] {
+        let message = raw_object_member_value(row, "message").expect("message field");
+        raw_object_member_value(message, "content").expect("message content field")
+    }
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(60);
+    let environment = CliFixtureEnvironment::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (post_tx, post_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let stub = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let stub_started = Instant::now();
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let request = read_http_request(&mut stream).unwrap();
+                    let (request_line, _) = request_parts(&request);
+                    requests.push(request.clone());
+                    if request_line.starts_with("POST /v1/messages") {
+                        post_tx.send(request).unwrap();
+                        let _ = release_rx.recv_timeout(Duration::from_secs(60));
+                        break;
+                    }
+                    let status = if request_line.starts_with("HEAD /api/hello")
+                        || request_line.starts_with("GET /api/hello")
+                    {
+                        200
+                    } else {
+                        404
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.0 {status} Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if matches!(
+                        release_rx.try_recv(),
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected)
+                    ) {
+                        break;
+                    }
+                    assert!(
+                        stub_started.elapsed() < Duration::from_secs(60),
+                        "CLI did not send its Messages request within 60 seconds"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("loopback stub failed: {error}"),
+            }
+        }
+        requests
+    });
+
+    let base_url = format!("http://127.0.0.1:{}", address.port());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"));
+    command
+        .env_clear()
+        .current_dir(&environment.cwd_path)
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", environment._home.path())
+        .env("TMPDIR", environment.config.path().parent().unwrap())
+        .env("LANG", "C.UTF-8")
+        .env("TZ", "UTC")
+        .env("TERM", "dumb")
+        .env("LINGXI_CONFIG_DIR", environment.config.path())
+        .env("CLAUDE_CONFIG_DIR", environment.config.path())
+        .env("LINGXI_API_BASE_URL", &base_url)
+        .env("LINGXI_NATIVE_ANTHROPIC_ENDPOINT", &base_url)
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .env("ANTHROPIC_API_KEY", KEY)
+        .env("ANTHROPIC_MAX_RETRIES", "0")
+        .env("LINGXI_SIMPLE", "1")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env("DISABLE_TELEMETRY", "1")
+        .env("DO_NOT_TRACK", "1")
+        .args([
+            "--setting-sources",
+            "project",
+            "--strict-mcp-config",
+            "--permission-mode",
+            "dontAsk",
+            "--print",
+            "--output-format",
+            "json",
+            "--tools",
+            "",
+            "--max-turns",
+            "1",
+            "--max-budget-usd",
+            "1",
+            "--model",
+            "claude-sonnet-4-5",
+            "--session-id",
+            SESSION_ID,
+            PROMPT,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ChildGuard(Some(command.spawn().unwrap()));
+
+    let post_request = post_rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .expect("public CLI reaches the loopback Messages endpoint");
+    let (request_line, request_body) = request_parts(&post_request);
+    assert!(request_line.starts_with("POST /v1/messages?beta=true"));
+    let headers_end = find_bytes(&post_request, b"\r\n\r\n").unwrap();
+    let headers = String::from_utf8_lossy(&post_request[..headers_end]);
+    assert!(headers.lines().any(|line| {
+        line.trim()
+            .eq_ignore_ascii_case(&format!("x-api-key: {KEY}"))
+    }));
+    let request: Value = serde_json::from_slice(&request_body).unwrap();
+    assert_eq!(request["model"], "claude-sonnet-4-5");
+    assert_eq!(request["stream"].as_bool(), Some(true));
+    assert!(String::from_utf8_lossy(&request_body).contains(PROMPT));
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(child.child().id()).unwrap()),
+        Some(nix::sys::signal::Signal::SIGINT),
+    )
+    .unwrap();
+    let mut exited_without_cleanup = false;
+    while Instant::now() < deadline {
+        if child.child().try_wait().unwrap().is_some() {
+            exited_without_cleanup = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !exited_without_cleanup {
+        let _ = child.child().kill();
+    }
+    let output = child.take().wait_with_output().unwrap();
+    let _ = release_tx.send(());
+    let requests = stub.join().unwrap();
+    assert!(exited_without_cleanup, "SIGINT must exit within 60 seconds");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(started.elapsed() < Duration::from_secs(60));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request_parts(request).0.starts_with("POST "))
+            .count(),
+        1
+    );
+
+    let native_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(NATIVE_FIXTURE);
+    let native_prompt = fixture_file(&native_root, "prompt-content.raw.json");
+    let native_interrupt = fixture_file(&native_root, "interrupt-content.raw.json");
+    assert_eq!(
+        sha256_hex(&fixture_file(&native_root, "stdout.raw")),
+        "589d30e369a75200eef22c16e72fc068716736f988352f1748991f9a559525c2"
+    );
+    assert_eq!(
+        sha256_hex(&native_prompt),
+        "63738af050e51a7c05269ea26e17169ada3ac1ba1d41fec1ff88be3a8fb9647b"
+    );
+    assert_eq!(
+        sha256_hex(&native_interrupt),
+        "ad710d55159f0013958b33520d37ce6d14c6f3647d93c09d005c7e545bebe228"
+    );
+    let native_stdout: Value = serde_json::from_slice(&fixture_file(&native_root, "stdout.raw"))
+        .expect("pinned Native 2.1.295 result fixture");
+    let stdout: Value = serde_json::from_slice(&output.stdout).expect("one JSON result");
+    for key in [
+        "type",
+        "is_error",
+        "terminal_reason",
+        "subtype",
+        "stop_reason",
+        "num_turns",
+        "session_id",
+        "errors",
+    ] {
+        assert_eq!(stdout[key], native_stdout[key], "result field {key}");
+    }
+
+    let transcript = std::fs::read(environment.session_path(SESSION_ID))
+        .expect("public CLI persists the interrupted session");
+    let rows: Vec<(Vec<u8>, Value)> = transcript
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            (
+                line.to_vec(),
+                serde_json::from_slice(line).expect("session row is valid JSON"),
+            )
+        })
+        .collect();
+    let prompt_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, row))| user_row_contains(row, PROMPT).then_some(index))
+        .collect();
+    let interrupt_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, row))| user_row_contains(row, INTERRUPT).then_some(index))
+        .collect();
+    assert_eq!(prompt_rows.len(), 1);
+    assert_eq!(interrupt_rows.len(), 1);
+    assert!(prompt_rows[0] < interrupt_rows[0]);
+    assert!(!rows
+        .iter()
+        .any(|(_, row)| { row["type"] == "assistant" || row["message"]["role"] == "assistant" }));
+    let session_ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|(_, row)| row["sessionId"].as_str())
+        .collect();
+    assert!(!session_ids.is_empty());
+    assert!(session_ids
+        .iter()
+        .all(|session_id| *session_id == SESSION_ID));
+
+    assert_eq!(
+        raw_message_content_token(&rows[prompt_rows[0]].0),
+        native_prompt.as_slice()
+    );
+    assert_eq!(
+        raw_message_content_token(&rows[interrupt_rows[0]].0),
+        native_interrupt.as_slice()
+    );
+}

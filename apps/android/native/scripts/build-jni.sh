@@ -369,7 +369,10 @@ if [[ "${PROFILE}" == "release" ]]; then
     for t in "${TARGETS[@]}"; do
       abi="$(abi_of "${t}")"
       so="${JNILIBS_DIR}/${abi}/${SONAME}"
-      "${_LLVM_STRIP}" "${so}" || log "  WARN: llvm-strip failed for ${so}"
+      "${_LLVM_STRIP}" "${so}" || {
+        echo "ERROR: llvm-strip failed for ${so}" >&2
+        exit 1
+      }
     done
   fi
 fi

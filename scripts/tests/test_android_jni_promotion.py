@@ -114,6 +114,9 @@ class AndroidJniPromotionTests(unittest.TestCase):
             strip = self.ndk / f"toolchains/llvm/prebuilt/{tag}/bin/llvm-strip"
             strip.parent.mkdir(parents=True)
             strip.write_text("#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n"
+                             "if os.environ.get('JNI_FIXTURE_FAIL_STRIP') == '1':\n"
+                             "    print('fixture llvm-strip failure', file=sys.stderr)\n"
+                             "    sys.exit(23)\n"
                              "if os.environ.get('JNI_FIXTURE_MARK_STRIPPED') == '1':\n"
                              "    Path(sys.argv[1]).write_bytes(b'stripped runtime')\n")
             strip.chmod(0o755)
@@ -216,6 +219,14 @@ class AndroidJniPromotionTests(unittest.TestCase):
         for abi in ABIS:
             self.assertEqual((self.symbols / abi / LIBRARY).read_bytes(), f"new-library-{abi}".encode())
             self.assertEqual((self.jni / abi / LIBRARY).read_bytes(), b"stripped runtime")
+
+    def test_llvm_strip_failure_preserves_previous_pair_and_cleans_staging(self):
+        self.seed_previous_pair()
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
+        result = self.run_script(JNI_FIXTURE_FAIL_STRIP="1")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ERROR: llvm-strip failed", result.stderr)
+        self.assert_preserved(before)
 
     def test_generation_failure_with_no_previous_artifacts_leaves_no_partial_pair(self):
         before = (files(self.jni), files(self.kotlin), files(self.symbols))

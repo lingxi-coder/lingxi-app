@@ -3502,7 +3502,7 @@ final class EngineConversationSource: ConversationSource {
         case let .promptSuggestion(suggestion, uuid, sessionId):
             guard model.activeSessionId == sessionId,
                   !model.streaming, !model.sessionTransitionPending, model.pendingQuestions.isEmpty else { return }
-            model.promptSuggestion = suggestion
+            model.promptSuggestion = suggestion.displayText
             model.promptSuggestionUuid = uuid
 
         case let .messageRetracted(messageId):

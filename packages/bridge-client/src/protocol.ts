@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '28.0.0';
+export const CLIENT_PROTOCOL_VERSION = '29.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read

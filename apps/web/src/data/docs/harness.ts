@@ -726,7 +726,7 @@ async fn headless_prompt(
         apis: [
           {
             name: 'CLIENT_PROTOCOL_VERSION',
-            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "25.0.0";',
+            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";',
             description: t('Protocol version declared in this inspected source tree. Native clients must version-lock generated binding layouts with the host they actually build.', '此检查源码树声明的协议版本。原生客户端生成绑定的布局应与实际构建的宿主版本一致。'),
           },
         ],

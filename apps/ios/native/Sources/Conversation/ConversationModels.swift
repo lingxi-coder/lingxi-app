@@ -421,6 +421,7 @@ final class ConversationModel: ObservableObject {
     /// overlapping sends and the Send→Stop swap, PR-4 items 1 & 2).
     @Published var streaming: Bool = false
     @Published var promptSuggestion: String?
+    @Published var promptSuggestionSourceCodeUnits: [UInt16]?
     @Published var promptSuggestionUuid: String?
     @Published var promptSuggestionEnabled = true
     @Published var promptSuggestionNotice: String?
@@ -529,6 +530,7 @@ final class ConversationModel: ObservableObject {
     @Published var activeSessionId: String = "" {
         didSet {
             promptSuggestion = nil
+            promptSuggestionSourceCodeUnits = nil
             promptSuggestionUuid = nil
             if oldValue != activeSessionId { contextUsage = nil }
             restoreTranscriptDisclosures()

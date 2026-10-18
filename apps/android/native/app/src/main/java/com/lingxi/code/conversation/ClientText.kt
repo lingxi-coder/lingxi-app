@@ -6,6 +6,11 @@ import com.lingxi.code.bindings.client.ClientTextDto
 internal fun String.toClientTextDto(): ClientTextDto =
     ClientTextDto(codeUnits = toCharArray().map { it.code.toUShort() })
 
+/** Rebuild the editable Kotlin string without replacing isolated UTF-16 units. */
+internal fun ClientTextDto.sourceText(): String = buildString(codeUnits.size) {
+    codeUnits.forEach { append(it.toInt().toChar()) }
+}
+
 /** Lossy conversion belongs at the final UI/error-string boundary only. */
 internal fun ClientTextDto.displayText(): String = buildString(codeUnits.size) {
     var index = 0

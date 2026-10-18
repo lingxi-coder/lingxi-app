@@ -112,9 +112,9 @@ final class EngineConversationSource: ConversationSource {
     private(set) var sideID: String?
     private var sideEnded = false
     private var sideClosing = false
-    private var pendingSideInput: (String, [ImageRefDto])?
-    private var failedSideInput: (String, [ImageRefDto])?
-    var onSideSubmissionFailure: ((String, [ImageRefDto]) -> Void)? {
+    private var pendingSideInput: (String, [UInt16]?, [ImageRefDto])?
+    private var failedSideInput: (String, [UInt16]?, [ImageRefDto])?
+    var onSideSubmissionFailure: ((String, [UInt16]?, [ImageRefDto]) -> Void)? {
         didSet { deliverFailedSideSubmission() }
     }
     var isSideChat: Bool { durableTurns == nil }
@@ -174,7 +174,7 @@ final class EngineConversationSource: ConversationSource {
     private var hasConfirmedSessionState = false
 
     private struct TurnPrompt: Equatable {
-        let text: String
+        let sourceCodeUnits: [UInt16]
         let promptMode: PromptModeDto?
         let images: [ImageRefDto]
         let turnId: UInt64
@@ -448,6 +448,9 @@ final class EngineConversationSource: ConversationSource {
         invalidateTurnContext()
         replayProjectionState = nil
         hasConfirmedSessionState = false
+        model.promptSuggestion = nil
+        model.promptSuggestionSourceCodeUnits = nil
+        model.promptSuggestionUuid = nil
         model.clearAgentState()
         model.contextUsage = nil
         if isNew {
@@ -1168,7 +1171,7 @@ final class EngineConversationSource: ConversationSource {
             guard let self else { return }
             do {
                 try await self.submitCommand(.sendPrompt(
-                    text: ClientTextDto(codeUnits: Array(prompt.text.utf16)),
+                    text: ClientTextDto(codeUnits: prompt.sourceCodeUnits),
                     promptMode: prompt.promptMode,
                     images: prompt.images,
                     turnId: prompt.turnId,
@@ -1239,17 +1242,18 @@ final class EngineConversationSource: ConversationSource {
 
     @discardableResult
     func send(_ text: String) -> ConversationTurnToken? {
-        send(text, images: [])
+        send(text, sourceCodeUnits: nil, images: [], selectedSlashCommand: nil)
     }
 
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
-        send(text, images: images, selectedSlashCommand: nil)
+        send(text, sourceCodeUnits: nil, images: images, selectedSlashCommand: nil)
     }
 
     @discardableResult
     func send(
         _ text: String,
+        sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
     ) -> ConversationTurnToken? {
@@ -1265,11 +1269,9 @@ final class EngineConversationSource: ConversationSource {
         else { return nil }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sourceUnits = Array(text.utf16)
+        let sourceUnits = sourceCodeUnits ?? Array(text.utf16)
         let isBashInput = sourceUnits.first == 0x0021
-        let promptText = isBashInput
-            ? String(decoding: sourceUnits.dropFirst(), as: UTF16.self)
-            : text
+        let promptSourceCodeUnits = isBashInput ? Array(sourceUnits.dropFirst()) : sourceUnits
         let promptMode: PromptModeDto? = isBashInput ? .bash : nil
         if isSideChat && SideChatCommand.input(trimmed) != nil {
             model.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_nested_rejected"))
@@ -1293,7 +1295,7 @@ final class EngineConversationSource: ConversationSource {
             )
             : nil)
         guard !isSideChat || !model.streaming else { return nil }
-        if isSideChat { pendingSideInput = (text, images) }
+        if isSideChat { pendingSideInput = (text, sourceCodeUnits, images) }
         if model.streaming {
             guard exactSlashCommand == nil, let token = activeConversationTurnToken else { return nil }
             model.isNew = false
@@ -1306,7 +1308,7 @@ final class EngineConversationSource: ConversationSource {
                 guard let self else { return }
                 do {
                     try await self.submitCommand(.sendPrompt(
-                        text: promptText.clientTextDto,
+                        text: ClientTextDto(codeUnits: promptSourceCodeUnits),
                         promptMode: promptMode,
                         images: images,
                         turnId: nil,
@@ -1331,7 +1333,12 @@ final class EngineConversationSource: ConversationSource {
         if let exactSlashCommand {
             let token = SlashCommandMatcher.commandToken(in: trimmed) ?? ""
             let tokenUnits = exactSlashCommand.sourceCodeUnits(for: token) ?? Array(token.utf16)
-            let inputUnits = Array(trimmed.utf16)
+            let trimmedSourceUnits = PromptSuggestionDraftSource.trimmingWhitespace(
+                sourceCodeUnits: sourceUnits,
+                displayText: text
+            )
+            guard sourceCodeUnits == nil || trimmedSourceUnits != nil else { return nil }
+            let inputUnits = trimmedSourceUnits ?? Array(trimmed.utf16)
             let suffixStart = min(1 + token.utf16.count, inputUnits.count)
             var rawUnits: [UInt16] = [0x002f]
             rawUnits.append(contentsOf: tokenUnits)
@@ -1344,7 +1351,7 @@ final class EngineConversationSource: ConversationSource {
             )
         }
         return startPrompt(TurnPrompt(
-            text: promptText,
+            sourceCodeUnits: promptSourceCodeUnits,
             promptMode: promptMode,
             images: images,
             turnId: turnId,
@@ -2992,6 +2999,7 @@ final class EngineConversationSource: ConversationSource {
         case .turnStarted:
             guard acceptTurnEvent(event) else { return }
             model.promptSuggestion = nil
+            model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
             model.suggestionTurn &+= 1
             assistantRowsByIdentity = [:]
@@ -3503,6 +3511,7 @@ final class EngineConversationSource: ConversationSource {
             guard model.activeSessionId == sessionId,
                   !model.streaming, !model.sessionTransitionPending, model.pendingQuestions.isEmpty else { return }
             model.promptSuggestion = suggestion.displayText
+            model.promptSuggestionSourceCodeUnits = suggestion.codeUnits
             model.promptSuggestionUuid = uuid
 
         case let .messageRetracted(messageId):
@@ -4015,6 +4024,7 @@ final class EngineConversationSource: ConversationSource {
                 return
             }
             model.promptSuggestion = nil
+            model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
             guard SessionMode(dto: mode) == sessionMode else { return }
             // A fresh session began on the connection (1:1 with a successful
@@ -4061,6 +4071,7 @@ final class EngineConversationSource: ConversationSource {
 
         case let .sessionResumed(sessionId, mode, messages):
             model.promptSuggestion = nil
+            model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
             guard SessionMode(dto: mode) == sessionMode else { return }
             // A prior session was resumed (1:1 with a successful
@@ -4116,6 +4127,7 @@ final class EngineConversationSource: ConversationSource {
 
         case .sessionEnded:
             model.promptSuggestion = nil
+            model.promptSuggestionSourceCodeUnits = nil
             model.promptSuggestionUuid = nil
             // The current session ended (e.g. cleared). Drop the active id;
             // the next `SessionStarted`/`SessionResumed` re-establishes one.
@@ -5270,7 +5282,7 @@ final class EngineConversationSource: ConversationSource {
     private func deliverFailedSideSubmission() {
         guard let failedSideInput, let onSideSubmissionFailure else { return }
         self.failedSideInput = nil
-        onSideSubmissionFailure(failedSideInput.0, failedSideInput.1)
+        onSideSubmissionFailure(failedSideInput.0, failedSideInput.1, failedSideInput.2)
     }
 
     // MARK: model selection (SHIP-BLOCKER #2)

@@ -12,6 +12,28 @@ enum SideChatCommand {
         guard input.isEmpty || input.first?.isWhitespace == true else { return nil }
         return String(input).trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    static func inputSourceCodeUnits(raw: String, sourceCodeUnits: [UInt16]?) -> [UInt16]? {
+        guard let sourceCodeUnits,
+              let expectedInput = input(raw),
+              let trimmedUnits = PromptSuggestionDraftSource.trimmingWhitespace(
+                sourceCodeUnits: sourceCodeUnits,
+                displayText: raw
+              ),
+              trimmedUnits.count >= 5,
+              String(decoding: Array(trimmedUnits.prefix(5)), as: UTF16.self) == "/side"
+        else { return nil }
+
+        let bodyUnits = Array(trimmedUnits.dropFirst(5))
+        let bodyText = String(decoding: bodyUnits, as: UTF16.self)
+        guard let inputUnits = PromptSuggestionDraftSource.trimmingWhitespace(
+            sourceCodeUnits: bodyUnits,
+            displayText: bodyText
+        ),
+              PromptSuggestionDraftSource.displayCodeUnits(for: inputUnits) == Array(expectedInput.utf16)
+        else { return nil }
+        return inputUnits
+    }
 }
 
 #if canImport(harness_runtimeFFI)
@@ -20,6 +42,7 @@ final class SideChatEntry: Identifiable {
     let id: String
     let source: EngineConversationSource
     var draft = ""
+    var draftSourceCodeUnits: [UInt16]?
     var attachment: ComposerAttachment?
     var closing = false
     var ending = false
@@ -28,9 +51,12 @@ final class SideChatEntry: Identifiable {
     init(source: EngineConversationSource, id: String) {
         self.source = source
         self.id = id
-        source.onSideSubmissionFailure = { [weak self] text, images in
+        source.onSideSubmissionFailure = { [weak self] text, sourceCodeUnits, images in
             guard let self, !closing else { return }
-            if draft.isEmpty { draft = text }
+            if draft.isEmpty {
+                draft = text
+                draftSourceCodeUnits = sourceCodeUnits
+            }
             if attachment == nil, let imageRef = images.first,
                let data = Data(base64Encoded: imageRef.base64), let image = UIImage(data: data) {
                 attachment = ComposerAttachment(image: image, width: Int(image.size.width), height: Int(image.size.height),
@@ -86,6 +112,7 @@ final class SideChatCollection {
         entry.voice.handleContextChange()
         entry.source.clearEndedSideChat()
         entry.draft = ""
+        entry.draftSourceCodeUnits = nil
         entry.attachment = nil
         entries.removeAll { $0.id == sideID }
         error = nil
@@ -99,7 +126,11 @@ final class SideChatCollection {
     }
 
     /// Manager owns the operation, so dismissing the sheet cannot cancel admission.
-    func create(input: String?, completion: @escaping (Bool) -> Void) {
+    func create(
+        input: String?,
+        inputSourceCodeUnits: [UInt16]? = nil,
+        completion: @escaping (Bool) -> Void
+    ) {
         guard !creating, let parent else { return }
         creating = true
         error = nil
@@ -123,9 +154,18 @@ final class SideChatCollection {
                 selectedID = entry.id
                 if let input, !input.isEmpty {
                     if !isBackgrounded && self.foregroundGeneration == foregroundGeneration {
-                        if child.send(input) == nil { entry.draft = input }
+                        if child.send(
+                            input,
+                            sourceCodeUnits: inputSourceCodeUnits,
+                            images: [],
+                            selectedSlashCommand: nil
+                        ) == nil {
+                            entry.draft = input
+                            entry.draftSourceCodeUnits = inputSourceCodeUnits
+                        }
                     } else {
                         entry.draft = input
+                        entry.draftSourceCodeUnits = inputSourceCodeUnits
                     }
                 }
                 completion(true)
@@ -146,6 +186,7 @@ final class SideChatCollection {
             do {
                 try await entry.source.endSideChat()
                 entry.draft = ""
+                entry.draftSourceCodeUnits = nil
                 entry.attachment = nil
                 entries.removeAll { $0.id == entry.id }
                 error = nil
@@ -270,7 +311,8 @@ private struct SideChatConversation: View {
     @Bindable var entry: SideChatEntry
     var body: some View {
         ChatView(session: SessionRef(id: entry.id, title: String(localized: "side_chat_title")), draft: $entry.draft,
-                 voiceInteraction: entry.voice, source: entry.source, attachmentBinding: $entry.attachment)
+                 voiceInteraction: entry.voice, source: entry.source,
+                 draftSourceCodeUnits: $entry.draftSourceCodeUnits, attachmentBinding: $entry.attachment)
             .background {
                 EnginePermissionPromptHost(model: entry.source.model,
                     onApprove: entry.source.approvePermission, onDeny: entry.source.denyPermission)

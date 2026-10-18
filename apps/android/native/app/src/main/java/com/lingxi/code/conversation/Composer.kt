@@ -141,7 +141,7 @@ fun Composer(
     onStop: () -> Unit = {},
     /** True when a recovered WaitingForUser turn can be discarded. */
     showDiscardRecovery: Boolean = false,
-    promptSuggestion: String? = null,
+    promptSuggestion: ClientTextDto? = null,
     promptSuggestionNotice: String? = null,
     slashCommands: List<ConversationSlashCommand> = emptyList(),
     suggestionTurnKey: String = "",
@@ -181,7 +181,7 @@ fun Composer(
     val acceptSuggestion: () -> Unit = {
         visibleSuggestion?.let { suggestion ->
             onSuggestionFeedback("accepted")
-            onTextChange(suggestion)
+            onTextChange(suggestion.sourceText())
         }
     }
     val shape = RoundedCornerShape(16.dp)
@@ -261,7 +261,7 @@ fun Composer(
                     },
                 )
                 if (visibleSuggestion != null) {
-                    Text(visibleSuggestion, color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    Text(visibleSuggestion.displayText(), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "Use suggestion", onClick = acceptSuggestion)
                             .testTag("composer.prompt-suggestion"))
                 }

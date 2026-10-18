@@ -51,15 +51,18 @@ struct Composer: View {
     /// hold-to-talk STT fills it with the recognized utterance (mirrors Android
     /// `onTranscript` → draft). The caller owns it (see ChatView).
     @Binding var draft: String
-    let onSend: (String, ConversationSlashCommand?) -> Void
+    @Binding var draftSourceCodeUnits: [UInt16]?
+    let onSend: (String, [UInt16]?, ConversationSlashCommand?) -> Bool
     @State private var selectedSlashCommand: ConversationSlashCommand? = nil
     var clearsDraftOnSend = true
     var promptSuggestion: String? = nil
+    var promptSuggestionSourceCodeUnits: [UInt16]? = nil
     var promptSuggestionNotice: String? = nil
     var suggestionTurnKey: String = ""
     var onSuggestionFeedback: (String) -> Void = { _ in }
     @State private var shownSuggestionKey: String?
     @State private var rejectedSuggestionKey: String?
+    @State private var draftSourceDisplayCodeUnits: [UInt16]?
 
     /// Engine-owned slash-command catalog. An empty loaded catalog is
     /// authoritative; `slashCommandsLoaded == false` renders a loading row and
@@ -147,8 +150,10 @@ struct Composer: View {
         onConfirmBypassPermissions: @escaping (Bool) -> Void = { _ in },
         recentModels: [String] = [],
         draft: Binding<String>,
-        onSend: @escaping (String, ConversationSlashCommand?) -> Void,
+        draftSourceCodeUnits: Binding<[UInt16]?>,
+        onSend: @escaping (String, [UInt16]?, ConversationSlashCommand?) -> Bool,
         promptSuggestion: String? = nil,
+        promptSuggestionSourceCodeUnits: [UInt16]? = nil,
         promptSuggestionNotice: String? = nil,
         suggestionTurnKey: String = "",
         onSuggestionFeedback: @escaping (String) -> Void = { _ in },
@@ -208,8 +213,10 @@ struct Composer: View {
         self.onConfirmBypassPermissions = onConfirmBypassPermissions
         self.recentModels = recentModels
         self._draft = draft
+        self._draftSourceCodeUnits = draftSourceCodeUnits
         self.onSend = onSend
         self.promptSuggestion = promptSuggestion
+        self.promptSuggestionSourceCodeUnits = promptSuggestionSourceCodeUnits
         self.promptSuggestionNotice = promptSuggestionNotice
         self.suggestionTurnKey = suggestionTurnKey
         self.onSuggestionFeedback = onSuggestionFeedback
@@ -280,13 +287,26 @@ struct Composer: View {
                     onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
                 )
                     .padding(.horizontal, 4).padding(.vertical, 2)
-                    .onChange(of: draft) { _, newValue in
-                        if dismissedSlashDraft != newValue {
+                    .onChange(of: Array(draft.utf16)) { _, newDisplayCodeUnits in
+                        updateDraftSourceCodeUnits(forDisplayCodeUnits: newDisplayCodeUnits)
+                        if dismissedSlashDraft != draft {
                             dismissedSlashDraft = nil
                         }
                     }
-                    .onAppear { recordSuggestionPresentation() }
-                    .onChange(of: suggestionTurnKey) { _, _ in recordSuggestionPresentation() }
+                    .onAppear {
+                        synchronizeDraftSourceCodeUnits()
+                        recordSuggestionPresentation()
+                    }
+                    .onChange(of: suggestionTurnKey) { _, _ in
+                        clearDraftSourceCodeUnits()
+                        recordSuggestionPresentation()
+                    }
+                    .onChange(of: draftSourceCodeUnits) { _, _ in
+                        synchronizeDraftSourceCodeUnits()
+                    }
+                    .onChange(of: promptSuggestionSourceCodeUnits) { _, _ in
+                        if draft.isEmpty { clearDraftSourceCodeUnits() }
+                    }
                     .overlay(alignment: .topLeading) {
                         if let visibleSuggestion {
                             Button(action: acceptSuggestion) {
@@ -774,8 +794,56 @@ struct Composer: View {
     private func acceptSuggestion() {
         guard let suggestion = visibleSuggestion else { return }
         onSuggestionFeedback("accepted")
+        let sourceCodeUnits = promptSuggestionSourceCodeUnits.flatMap { sourceUnits in
+            PromptSuggestionDraftSource.displayCodeUnits(for: sourceUnits) == Array(suggestion.utf16)
+                ? sourceUnits
+                : nil
+        }
         draft = suggestion
+        if let sourceCodeUnits {
+            draftSourceCodeUnits = sourceCodeUnits
+            draftSourceDisplayCodeUnits = Array(suggestion.utf16)
+        } else {
+            clearDraftSourceCodeUnits()
+        }
         inputFocused = true
+    }
+
+    private func updateDraftSourceCodeUnits(forDisplayCodeUnits newDisplayCodeUnits: [UInt16]) {
+        guard let sourceCodeUnits = draftSourceCodeUnits,
+              let previousDisplayCodeUnits = draftSourceDisplayCodeUnits else { return }
+        guard let updatedSourceCodeUnits = PromptSuggestionDraftSource.applyingEdit(
+            sourceCodeUnits: sourceCodeUnits,
+            previousDisplayCodeUnits: previousDisplayCodeUnits,
+            newDisplayCodeUnits: newDisplayCodeUnits
+        ) else {
+            clearDraftSourceCodeUnits()
+            return
+        }
+        if updatedSourceCodeUnits == newDisplayCodeUnits {
+            clearDraftSourceCodeUnits()
+        } else {
+            draftSourceCodeUnits = updatedSourceCodeUnits
+            draftSourceDisplayCodeUnits = newDisplayCodeUnits
+        }
+    }
+
+    private func synchronizeDraftSourceCodeUnits() {
+        guard let sourceCodeUnits = draftSourceCodeUnits else {
+            draftSourceDisplayCodeUnits = nil
+            return
+        }
+        let displayCodeUnits = Array(draft.utf16)
+        guard PromptSuggestionDraftSource.displayCodeUnits(for: sourceCodeUnits) == displayCodeUnits else {
+            clearDraftSourceCodeUnits()
+            return
+        }
+        draftSourceDisplayCodeUnits = displayCodeUnits
+    }
+
+    private func clearDraftSourceCodeUnits() {
+        draftSourceCodeUnits = nil
+        draftSourceDisplayCodeUnits = nil
     }
 
     private func send() {
@@ -792,9 +860,13 @@ struct Composer: View {
             acceptSlashCommand(suggestion.command)
             return
         }
-        onSend(draft, selectedSlashCommandForDraft)
+        let sourceCodeUnits = draftSourceCodeUnits
+        guard onSend(draft, sourceCodeUnits, selectedSlashCommandForDraft) else { return }
         selectedSlashCommand = nil
-        if clearsDraftOnSend { draft = "" }
+        if clearsDraftOnSend {
+            clearDraftSourceCodeUnits()
+            draft = ""
+        }
         dismissedSlashDraft = nil
     }
 }

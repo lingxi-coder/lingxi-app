@@ -1347,6 +1347,16 @@ private final class ControllerConversationSource: ConversationSource {
         return token
     }
 
+    @discardableResult
+    func send(
+        _ text: String,
+        sourceCodeUnits: [UInt16]?,
+        images: [ImageRefDto],
+        selectedSlashCommand: ConversationSlashCommand?
+    ) -> ConversationTurnToken? {
+        send(text)
+    }
+
     func complete(token: ConversationTurnToken, text: String) {
         model.streaming = false
         model.turnCompletion = ConversationTurnCompletion(

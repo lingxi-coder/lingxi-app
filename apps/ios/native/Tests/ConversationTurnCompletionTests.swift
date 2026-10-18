@@ -101,6 +101,26 @@ final class ConversationTurnCompletionTests: XCTestCase {
             )
         }
 
+        func testPromptSuggestionSourceUnitsReachSendPrompt() async {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+            let sourceUnits: [UInt16] = [0xD800, 0x0078]
+
+            XCTAssertNotNil(source.send(
+                "\u{FFFD}x",
+                sourceCodeUnits: sourceUnits,
+                images: [],
+                selectedSlashCommand: nil
+            ))
+            await flushTasks()
+
+            guard case let .sendPrompt(text, _, _, _, _) = submitted.first else {
+                return XCTFail("accepted suggestion must submit SendPrompt")
+            }
+            XCTAssertEqual(text.codeUnits, sourceUnits)
+        }
+
         func testEngineBackgroundingKeepsActiveTurnRunning() {
             let source = makeSource()
 

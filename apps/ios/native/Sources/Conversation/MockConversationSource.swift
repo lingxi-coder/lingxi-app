@@ -353,6 +353,9 @@ final class MockConversationSource: ConversationSource {
         turnToken &+= 1
         sessionEpoch &+= 1
         activeTurnToken = nil
+        model.promptSuggestion = nil
+        model.promptSuggestionSourceCodeUnits = nil
+        model.promptSuggestionUuid = nil
         model.messages = []
         model.items = []
         model.messageDetails = [:]
@@ -425,6 +428,16 @@ final class MockConversationSource: ConversationSource {
             self.model.activeTurnToken = nil
         }
         return token
+    }
+
+    @discardableResult
+    func send(
+        _ text: String,
+        sourceCodeUnits: [UInt16]?,
+        images: [ImageRefDto],
+        selectedSlashCommand: ConversationSlashCommand?
+    ) -> ConversationTurnToken? {
+        send(text, images: images)
     }
 
     func cancel() {

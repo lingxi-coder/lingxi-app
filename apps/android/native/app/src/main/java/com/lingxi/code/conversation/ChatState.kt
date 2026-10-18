@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.client.AskUserQuestionRequestDto
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.SessionRef
@@ -25,7 +26,8 @@ data class ChatState(
     val isNew: Boolean = false,
     /** True while the assistant reply streams — keeps the run trace live. */
     val streaming: Boolean = false,
-    val promptSuggestion: String? = null,
+    /** Keep the source code units until the user accepts/edits the suggestion. */
+    val promptSuggestion: ClientTextDto? = null,
     val promptSuggestionUuid: String? = null,
     val promptSuggestionEnabled: Boolean = true,
     val promptSuggestionNotice: String? = null,

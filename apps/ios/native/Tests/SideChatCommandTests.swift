@@ -17,6 +17,17 @@ final class SideChatCommandTests: XCTestCase {
         XCTAssertNil(SideChatCommand.input("/Side question"))
     }
 
+    func testSideInputSourceUnitsPreserveRawSurrogateAfterCommandTrim() {
+        let sourceUnits = Array("  /side \t".utf16) + [0xD800] + Array(" x \n".utf16)
+        let display = String(decoding: sourceUnits, as: UTF16.self)
+
+        XCTAssertEqual(SideChatCommand.input(display), "\u{FFFD} x")
+        XCTAssertEqual(
+            SideChatCommand.inputSourceCodeUnits(raw: display, sourceCodeUnits: sourceUnits) ?? [],
+            [UInt16(0xD800), 0x20, 0x78]
+        )
+    }
+
     @MainActor
     func testTemporaryTranscriptDisclosuresStayInMemory() {
         let suite = "side-chat-disclosures-\(UUID().uuidString)"
@@ -66,6 +77,31 @@ final class SideChatConversationSourceTests: XCTestCase {
 
     func testInitialPromptWaitsForForegroundCreationAdmission() async {
         await assertInitialPromptAdmission(background: false, resume: false)
+    }
+
+    func testInitialSidePromptPreservesRawSourceUnits() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let parent = makeSource(root: root)
+        let child = makeSource(root: root)
+        var commands: [ClientCommand] = []
+        child.setCommandSubmitterForTesting { commands.append($0) }
+        let sourceUnits: [UInt16] = [0xD800, 0x78]
+        let created = expectation(description: "side child admits exact source prompt")
+        let collection = SideChatCollection(parent: parent, createEntry: { _ in
+            SideChatEntry(source: child, id: "source-preserving-child")
+        })
+
+        collection.create(input: "\u{FFFD}x", inputSourceCodeUnits: sourceUnits) { success in
+            XCTAssertTrue(success)
+            created.fulfill()
+        }
+        await fulfillment(of: [created], timeout: 2)
+        for _ in 0..<20 { await Task.yield() }
+
+        guard case let .sendPrompt(text, _, _, _, _) = commands.first else {
+            return XCTFail("side child must submit its initial prompt")
+        }
+        XCTAssertEqual(text.codeUnits, sourceUnits)
     }
 
     func testCreationCompletingInBackgroundRetainsInitialPromptWithoutStartingWork() async {
@@ -154,9 +190,16 @@ final class SideChatConversationSourceTests: XCTestCase {
         let source = makeSource(root: root)
         source.setCommandSubmitterForTesting { _ in }
         let entry = SideChatEntry(source: source, id: "hidden-side")
-        XCTAssertNotNil(source.send("retry this prompt"))
+        let sourceUnits: [UInt16] = [0xD800, 0x78]
+        XCTAssertNotNil(source.send(
+            "\u{FFFD}x",
+            sourceCodeUnits: sourceUnits,
+            images: [],
+            selectedSlashCommand: nil
+        ))
         source.applyForTesting(.error(kind: .rejected, message: "not admitted".clientTextDto))
-        XCTAssertEqual(entry.draft, "retry this prompt")
+        XCTAssertEqual(entry.draft, "\u{FFFD}x")
+        XCTAssertEqual(entry.draftSourceCodeUnits, sourceUnits)
         XCTAssertFalse(source.model.streaming)
     }
 

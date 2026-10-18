@@ -364,6 +364,19 @@ class ChatViewModelReducerTest {
     private fun newVm() = ChatViewModel(StubSource())
 
     @Test
+    fun promptSuggestionRetainsIsolatedSurrogateForEditableDraft() {
+        val vm = newVm()
+        val suggestion = ClientTextDto(codeUnits = listOf(0xD800u.toUShort(), 0x78u.toUShort()))
+
+        vm.reduceClientEvent(ClientEvent.PromptSuggestion(suggestion, "suggestion-1", "new"))
+
+        val retained = vm.state.value.promptSuggestion
+        assertEquals(suggestion.codeUnits, retained?.codeUnits)
+        assertEquals("\uFFFDx", retained?.displayText())
+        assertEquals(suggestion.codeUnits, retained?.sourceText()?.toClientTextDto()?.codeUnits)
+    }
+
+    @Test
     fun retractAssistantMessage_usesIdentityAndPreservesAnotherResponse() {
         val vm = newVm()
         vm.reduce(ReplyEvent.ReasoningDelta("failed reasoning"))

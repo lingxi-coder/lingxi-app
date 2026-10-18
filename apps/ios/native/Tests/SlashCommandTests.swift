@@ -306,6 +306,31 @@ import XCTest
             XCTAssertNotNil(unknownTurnId)
         }
 
+        func testSelectedSlashKeepsRawArgumentSourceAfterWhitespaceTrim() async throws {
+            let source = makeSource()
+            source.model.activeSessionId = "session-a"
+            source.applyForTesting(.slashCommandCatalog(commands: [
+                command(name: "help", description: "Show help")
+            ]))
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+            let sourceUnits: [UInt16] = Array("  /help ".utf16) + [0xD800] + Array(" tail  ".utf16)
+            let display = String(decoding: sourceUnits, as: UTF16.self)
+
+            XCTAssertNotNil(source.send(
+                display,
+                sourceCodeUnits: sourceUnits,
+                images: [],
+                selectedSlashCommand: nil
+            ))
+            await flushTasks()
+
+            guard case let .runSlashCommand(raw, _, _) = try XCTUnwrap(submitted.first) else {
+                return XCTFail("expected a selected slash command")
+            }
+            XCTAssertEqual(raw.codeUnits, Array("/help ".utf16) + [0xD800] + Array(" tail".utf16))
+        }
+
         func testSelectedCommandUsesCatalogUtf16IdentityForSlashSubmission() async throws {
             let source = makeSource()
             let nameUnits: [UInt16] = [0xd800]
@@ -386,7 +411,7 @@ import XCTest
             var submitted: [ClientCommand] = []
             source.setCommandSubmitterForTesting { submitted.append($0) }
 
-            XCTAssertNotNil(source.send("/� item", images: [], selectedSlashCommand: selected))
+            XCTAssertNotNil(source.send("/� item", sourceCodeUnits: nil, images: [], selectedSlashCommand: selected))
             await flushTasks()
 
             guard case let .runSlashCommand(raw, _, _) = try XCTUnwrap(submitted.first) else {
@@ -592,7 +617,12 @@ import XCTest
             source.setCommandSubmitterForTesting { submitted.append($0) }
 
             let attachedImage = ImageRefDto(mediaType: "image/png", base64: "AQID")
-            let token = try XCTUnwrap(source.send("/� argument", images: [attachedImage], selectedSlashCommand: selected))
+            let token = try XCTUnwrap(source.send(
+                "/� argument",
+                sourceCodeUnits: nil,
+                images: [attachedImage],
+                selectedSlashCommand: selected
+            ))
             await flushTasks()
 
             guard case let .runSlashCommand(raw, images, turnId) = try XCTUnwrap(submitted.first) else {

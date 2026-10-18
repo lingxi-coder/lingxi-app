@@ -47,11 +47,12 @@ protocol ConversationSource: AnyObject {
     /// The default keeps mock and non-engine sources source-compatible.
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken?
-    /// Submit composer text with the exact catalog identity when it came from a
-    /// selected slash-command suggestion. The default preserves mock behavior.
+    /// Submit composer text, preserving exact source code units when the draft
+    /// carries identity that a display String cannot represent.
     @discardableResult
     func send(
         _ text: String,
+        sourceCodeUnits: [UInt16]?,
         images: [ImageRefDto],
         selectedSlashCommand: ConversationSlashCommand?
     ) -> ConversationTurnToken?
@@ -190,15 +191,6 @@ extension ConversationSource {
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
         send(text)
-    }
-
-    @discardableResult
-    func send(
-        _ text: String,
-        images: [ImageRefDto],
-        selectedSlashCommand: ConversationSlashCommand?
-    ) -> ConversationTurnToken? {
-        send(text, images: images)
     }
 
     func warmUp() {}

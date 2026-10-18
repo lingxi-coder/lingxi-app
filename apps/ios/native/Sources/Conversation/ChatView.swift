@@ -53,6 +53,11 @@ struct ChatView: View {
     // recognized text into the input AND so the root can persist it across the
     // app being backgrounded. ChatView binds to it; it no longer owns it.
     @Binding var draft: String
+    @State private var localDraftSourceCodeUnits: [UInt16]? = nil
+    private var externalDraftSourceCodeUnitsBinding: Binding<[UInt16]?>?
+    private var draftSourceCodeUnitsBinding: Binding<[UInt16]?> {
+        externalDraftSourceCodeUnitsBinding ?? $localDraftSourceCodeUnits
+    }
     // The captured-photo attachment, hoisted like the draft: the composer's
     // camera affordance drives an on-device capture and surfaces the JPEG here.
     @State private var localAttachment: ComposerAttachment? = nil
@@ -102,6 +107,7 @@ struct ChatView: View {
          draft: Binding<String>,
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
+         draftSourceCodeUnits: Binding<[UInt16]?>? = nil,
          attachmentBinding: Binding<ComposerAttachment?>? = nil,
          projectName: String? = nil,
          sessionMode: SessionMode = .code,
@@ -122,6 +128,7 @@ struct ChatView: View {
         self.session = session
         self.projectName = projectName
         self.sessionMode = sessionMode
+        self.externalDraftSourceCodeUnitsBinding = draftSourceCodeUnits
         self.workspaceName = workspaceName
         self.isPinned = isPinned
         self.canArchive = canArchive
@@ -229,10 +236,12 @@ struct ChatView: View {
                          onConfirmBypassPermissions: { source.confirmAndSetBypassPermissions(suppressWarning: $0) },
                          recentModels: recentModels,
                          draft: $draft,
-                         onSend: { text, selectedSlashCommand in
-                             send(text, selectedSlashCommand: selectedSlashCommand)
+                         draftSourceCodeUnits: draftSourceCodeUnitsBinding,
+                         onSend: { text, sourceCodeUnits, selectedSlashCommand in
+                             send(text, sourceCodeUnits: sourceCodeUnits, selectedSlashCommand: selectedSlashCommand)
                          },
                          promptSuggestion: convo.promptSuggestion,
+                         promptSuggestionSourceCodeUnits: convo.promptSuggestionSourceCodeUnits,
                          promptSuggestionNotice: convo.promptSuggestionNotice,
                          suggestionTurnKey: "\(convo.activeSessionId):\(convo.promptSuggestionUuid ?? "")",
                          onSuggestionFeedback: { action in
@@ -997,32 +1006,52 @@ struct ChatView: View {
         }
     }
 
-    private func send(_ txt: String, selectedSlashCommand: ConversationSlashCommand? = nil) {
+    @discardableResult
+    private func send(
+        _ txt: String,
+        sourceCodeUnits: [UInt16]? = nil,
+        selectedSlashCommand: ConversationSlashCommand? = nil
+    ) -> Bool {
         #if canImport(harness_runtimeFFI)
         if let engine = source as? EngineConversationSource,
            !engine.isSideChat,
            let input = SideChatCommand.input(txt) {
             guard attachment == nil else {
                 convo.error = ConversationError(kind: .rejected, message: String(localized: "side_chat_creation_text_only"))
-                return
+                return false
             }
             let submittedDraft = draft
-            engine.sideChats.create(input: input.isEmpty ? nil : input) { success in
+            let submittedSourceCodeUnits = sourceCodeUnits
+            let inputSourceCodeUnits = SideChatCommand.inputSourceCodeUnits(
+                raw: txt,
+                sourceCodeUnits: sourceCodeUnits
+            )
+            guard sourceCodeUnits == nil || input.isEmpty || inputSourceCodeUnits != nil else { return false }
+            engine.sideChats.create(
+                input: input.isEmpty ? nil : input,
+                inputSourceCodeUnits: input.isEmpty ? nil : inputSourceCodeUnits
+            ) { success in
                 if success {
-                    if draft == submittedDraft { draft = "" }
+                    if Array(draft.utf16) == Array(submittedDraft.utf16),
+                       draftSourceCodeUnitsBinding.wrappedValue == submittedSourceCodeUnits {
+                        draft = ""
+                        draftSourceCodeUnitsBinding.wrappedValue = nil
+                    }
                     sideChatSheetOpen = true
                 }
             }
-            return
+            return false
         }
         #endif
         let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
         guard let token = source.send(
             txt,
+            sourceCodeUnits: sourceCodeUnits,
             images: images,
             selectedSlashCommand: selectedSlashCommand
-        ) else { return }
+        ) else { return false }
         draft = ""
+        draftSourceCodeUnitsBinding.wrappedValue = nil
         // The source owns the durable transcript now; remove only after it has
         // accepted the turn so a failed send leaves the attachment retryable.
         attachment = nil
@@ -1031,6 +1060,7 @@ struct ChatView: View {
         // re-read something must not have their own prompt land off screen. The
         // re-arm happens only after the turn was accepted.
         followsLatestMessage = true
+        return true
     }
 
     // PR-4 item 2: interrupt the in-flight turn.

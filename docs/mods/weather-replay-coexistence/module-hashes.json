@@ -1,0 +1,10 @@
+{
+  "replay-theater": {
+    "before": "95b074e7ac440172150ae29b2b962307b0fb2797c13fadec0808de72a522d4fd",
+    "after": "f99ca68786885d61f0c0daf98a8c3580b51839505984302b648710efd0b3cc5a"
+  },
+  "token-weather": {
+    "before": "547cadbeaa2f9a662ce27cf9935d7963fc7833c377a938d2b872afe9f7fba3af",
+    "after": "4895ebf01f4729ab4dcf6f84e7600bdca1c400cffd1386cd432b3101e2f9e0f6"
+  }
+}

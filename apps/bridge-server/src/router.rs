@@ -1669,11 +1669,9 @@ impl CommandRouter for EngineCommandRouter {
                         .await;
                     }
                     Err(message) => {
-                        sink.emit(ClientEvent::Error {
-                            kind: ErrorKindDto::Rejected,
-                            message: message.into(),
-                        })
-                        .await;
+                        // Automatic metadata probes must not reject text sessions.
+                        // Explicit audio operations still validate their own route.
+                        tracing::debug!(%message, "audio session context unavailable");
                     }
                 }
             }

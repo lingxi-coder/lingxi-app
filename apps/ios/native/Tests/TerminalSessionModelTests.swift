@@ -3,6 +3,36 @@ import XCTest
 
 @MainActor
 final class TerminalSessionModelTests: XCTestCase {
+    func testExternalTerminalIDAttachesMatchingPTYWithoutOpeningOrExecuting() async {
+        let event = TerminalStreamEvent(sequence: 1, taskId: "t1", streamId: "pty-1", source: .pty, kind: .stdoutLine,
+            text: "$ ", data: nil, exitCode: nil, timedOut: false)
+        let client = Self.readyClient(eventBatches: [[event]])
+        var descriptor = Self.workspaceDescriptor()
+        descriptor.requestedSessionID = "pty-1"
+        descriptor.initialCommand = "echo review"
+        let model = TerminalSessionModel(descriptor: descriptor, client: client)
+        await model.startIfNeeded()
+        XCTAssertEqual(model.activeSessionID, "pty-1")
+        XCTAssertEqual(model.inputText, "echo review")
+        let opens = await client.recordedOpenRequestCount()
+        let writes = await client.recordedWrites()
+        XCTAssertEqual(opens, 0)
+        XCTAssertTrue(writes.isEmpty)
+        await model.close()
+    }
+
+    func testMissingExternalTerminalIDDoesNotCreateAnUnrelatedShell() async {
+        let client = Self.readyClient()
+        var descriptor = Self.workspaceDescriptor()
+        descriptor.requestedSessionID = "missing"
+        let model = TerminalSessionModel(descriptor: descriptor, client: client)
+        await model.startIfNeeded()
+        guard case .invalidRequest = model.availability else { return XCTFail("expected missing local terminal error") }
+        let opens = await client.recordedOpenRequestCount()
+        XCTAssertEqual(opens, 0)
+        XCTAssertNil(model.activeSessionID)
+    }
+
     func testStartIfNeededRejectsWrongWorkspaceInsteadOfFallingBack() async {
         let client = FakeTerminalRuntimeClient(
             capability: TerminalCapabilitySnapshot(
@@ -703,8 +733,9 @@ final class TerminalSessionModelTests: XCTestCase {
         let model = TerminalSessionModel(descriptor: descriptor, client: client)
 
         await model.startIfNeeded()
-        let wrote = await Self.waitUntil { model.history.contains("echo hi") }
-        XCTAssertTrue(wrote, "the first open must run the initial command")
+        XCTAssertEqual(model.inputText, "echo hi")
+        let initialWrites = await client.recordedWrites()
+        XCTAssertFalse(initialWrites.contains("echo hi\n"), "opening a terminal must not execute its draft")
         let failed = await Self.waitUntil { model.canRestart }
         XCTAssertTrue(failed, "fixture must reach a restartable state")
 
@@ -714,7 +745,7 @@ final class TerminalSessionModelTests: XCTestCase {
         for _ in 0..<5 { await Task.yield() }
         let writes = await client.recordedWrites()
         XCTAssertEqual(
-            writes.filter { $0 == "echo hi\n" }.count, 1,
+            writes.filter { $0 == "echo hi\n" }.count, 0,
             "restart must not replay the initial command, wrote: \(writes)"
         )
 

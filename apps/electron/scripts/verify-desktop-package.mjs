@@ -20,6 +20,7 @@ import {
   walkTree,
 } from './package-support.mjs';
 import { BROKER_RESOURCE_DIRNAME } from './credential-broker.mjs';
+import { verifyProtocolRegistration } from './protocol-registration.mjs';
 import { modBunFilename, verifyModBun } from './mod-bun.mjs';
 
 function requirePath(path, label) {
@@ -52,6 +53,7 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(sidecar, 'bridge-server sidecar');
   requirePath(executable, 'Electron executable');
   verifyModBun(resources, platform, arch);
+  if (platform !== 'darwin') verifyProtocolRegistration(paths.payloadRoot, platform);
   if (platform === 'darwin') {
     const brokerPaths = [
       join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'),

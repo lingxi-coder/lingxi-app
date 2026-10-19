@@ -266,6 +266,24 @@ pub trait TurnDriver: Send + Sync + 'static {
         self.run_turn(prompt).await;
     }
 
+    /// Carry the renderer's explicit turn identity to its durable transcript row.
+    async fn run_identified_turn(
+        &self,
+        prompt: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+        _row_token: Option<String>,
+        queued: bool,
+    ) {
+        if queued {
+            self.run_queued_turn_with_images(prompt, images, cancel)
+                .await;
+        } else {
+            self.run_turn_with_images_and_cancel(prompt, images, cancel)
+                .await;
+        }
+    }
+
     /// Cancel-aware multimodal sibling of [`Self::run_turn_with_images`].
     async fn run_turn_with_images_and_cancel(
         &self,
@@ -2346,10 +2364,12 @@ async fn drain_main_thread(
                                 native_source,
                                 orchestrator::mod_prompt_origin::with_origin(
                                     serde_json::json!({"kind":"bridge"}),
-                                    driver.run_queued_turn_with_images(
+                                    driver.run_identified_turn(
                                         prompt,
                                         payload.images,
                                         cancel,
+                                        payload.turn_id.map(|id| format!("client-turn:{id}")),
+                                        true,
                                     ),
                                 ),
                             )
@@ -4135,7 +4155,13 @@ impl BridgeConnection {
                     orchestrator::native_user_message_source::human(),
                     orchestrator::mod_prompt_origin::with_origin(
                         serde_json::json!({"kind":"bridge"}),
-                        driver.run_turn_with_images_and_cancel(text, images, seed_cancel),
+                        driver.run_identified_turn(
+                            text,
+                            images,
+                            seed_cancel,
+                            turn_id.map(|id| format!("client-turn:{id}")),
+                            false,
+                        ),
                     ),
                 )
                 .await;
@@ -5445,6 +5471,64 @@ mod tests {
             !cancel.is_cancelled(),
             "delivering a queued message must not cancel the old model turn"
         );
+    }
+
+    #[tokio::test]
+    async fn deeplink_user_identity_uses_client_turn_token_for_seed_and_queue() {
+        struct IdentityDriver {
+            calls: Arc<Mutex<Vec<(Option<String>, bool)>>>,
+            started: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+        #[async_trait]
+        impl TurnDriver for IdentityDriver {
+            async fn run_turn(&self, _: Utf16JsonProjection) {
+                panic!("identity entry required");
+            }
+            async fn run_identified_turn(
+                &self,
+                _: Utf16JsonProjection,
+                _: Vec<ImageRefDto>,
+                _: CancellationToken,
+                token: Option<String>,
+                queued: bool,
+            ) {
+                self.calls.lock().await.push((token, queued));
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let driver = Arc::new(IdentityDriver {
+            calls: calls.clone(),
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new().bind(gate, driver);
+        connection
+            .handle_send_prompt("same text".into(), Vec::new(), Some(71))
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        connection
+            .handle_send_prompt("same text".into(), Vec::new(), Some(72))
+            .await;
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().await,
+            vec![
+                (Some("client-turn:71".into()), false),
+                (Some("client-turn:72".into()), true)
+            ]
+        );
+        release.notify_one();
     }
 
     /// A `SendPrompt` carrying inline images must dispatch through

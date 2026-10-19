@@ -34,7 +34,7 @@ class TerminalViewModelTest {
     }
 
     @Test
-    fun initCommandRunsOnlyForFreshSession() = runTest(dispatcher) {
+    fun initCommandWaitsForExplicitConfirmation() = runTest(dispatcher) {
         val gateway = FakeGateway(startResults = ArrayDeque(listOf(TerminalStartResult(created = true))))
         val viewModel = TerminalViewModel(
             args = TerminalRouteArgs(sessionId = "session-1", initCommand = "python3 -V"),
@@ -46,7 +46,11 @@ class TerminalViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf("session-1"), gateway.startedSessions)
-        assertEquals(listOf("python3 -V"), gateway.writes.map(ByteArray::decodeToString))
+        assertTrue(gateway.writes.isEmpty())
+        assertEquals("python3 -V", viewModel.uiState.value.commandDraft)
+        viewModel.dispatch(TerminalAction.ConfirmCommand)
+        advanceUntilIdle()
+        assertEquals(listOf("python3 -V\n"), gateway.writes.map(ByteArray::decodeToString))
     }
 
     @Test
@@ -62,6 +66,20 @@ class TerminalViewModelTest {
 
         assertEquals(listOf("session-1"), gateway.startedSessions)
         assertTrue(gateway.writes.isEmpty())
+    }
+
+    @Test
+    fun multilineCommandCancellationNeverWritesToPty() = runTest(dispatcher) {
+        val gateway = FakeGateway()
+        val viewModel = TerminalViewModel(TerminalRouteArgs("s1", "echo one\necho two"), gateway)
+        viewModel.dispatch(TerminalAction.Start)
+        advanceUntilIdle()
+        assertTrue(gateway.writes.isEmpty())
+        viewModel.dispatch(TerminalAction.DismissCommand)
+        viewModel.dispatch(TerminalAction.ConfirmCommand)
+        advanceUntilIdle()
+        assertTrue(gateway.writes.isEmpty())
+        assertEquals(null, viewModel.uiState.value.commandDraft)
     }
 
     @Test

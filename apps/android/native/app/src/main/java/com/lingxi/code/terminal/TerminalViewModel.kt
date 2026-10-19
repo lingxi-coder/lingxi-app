@@ -21,7 +21,7 @@ class TerminalViewModel(
     private val args: TerminalRouteArgs,
     private val gateway: TerminalSessionGateway,
 ) : ViewModel() {
-    private val local = MutableStateFlow(TerminalUiState(args))
+    private val local = MutableStateFlow(TerminalUiState(args, commandDraft = args.initCommand?.takeIf { it.isNotBlank() }))
     private var startJob: Job? = null
     val emulator = TerminalEmulator()
 
@@ -41,6 +41,15 @@ class TerminalViewModel(
 
     fun dispatch(action: TerminalAction) {
         when (action) {
+            TerminalAction.DismissCommand -> local.value = local.value.copy(commandDraft = null)
+            is TerminalAction.EditCommand -> local.value = local.value.copy(commandDraft = action.text)
+            TerminalAction.ConfirmCommand -> {
+                val draft = local.value.commandDraft
+                if (draft != null && merged.value.connectionState == TerminalConnectionState.CONNECTED) {
+                    local.value = local.value.copy(commandDraft = null)
+                    send((draft + "\n").toByteArray())
+                }
+            }
             TerminalAction.Start -> start()
             TerminalAction.Close -> viewModelScope.launch { gateway.close() }
             TerminalAction.Clear -> viewModelScope.launch { gateway.clear() }
@@ -59,13 +68,7 @@ class TerminalViewModel(
         if (startJob != null) return
         startJob = viewModelScope.launch {
             try {
-                val result = gateway.start(args.sessionId)
-                args.initCommand
-                    ?.takeIf { it.isNotBlank() && result.created }
-                    ?.let {
-                        // Deliberately omit CR/LF: the command is editable at the prompt.
-                        gateway.write(it.toByteArray())
-                    }
+                gateway.start(args.sessionId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Throwable) {

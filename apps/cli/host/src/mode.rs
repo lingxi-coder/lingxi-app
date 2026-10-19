@@ -1851,6 +1851,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     initial_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
 ) -> RunOutcome {
+    let initial_draft = tui_build.initial_draft.clone();
+    let message_anchor = tui_build.message_anchor.clone();
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
     let policy_helper_refusal = tui_build.runtime.policy_helper_refusal.clone();
     let policy_semantic_worker_failure = tui_build
@@ -3638,6 +3640,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
         tui::app::run_app(
             initial,
             initial_prompt,
+            initial_draft,
+            message_anchor,
             handoff,
             session,
             bridge_rx,

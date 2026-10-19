@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.compose.foundation.background
+import androidx.activity.viewModels
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -49,7 +50,6 @@ import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.conversation.ConversationLaunchRequest
-import com.lingxi.code.conversation.ConversationNotificationRoute
 import com.lingxi.code.terminal.TerminalRoute
 import com.lingxi.code.terminal.TerminalRouteArgs
 import com.lingxi.code.terminal.createTerminalGateway
@@ -75,9 +75,17 @@ class MainActivity : ComponentActivity() {
     private val cameraResultKey = java.util.UUID.randomUUID().toString()
     private val locationResultKey = java.util.UUID.randomUUID().toString()
     private lateinit var deviceReadPermissions: DeviceReadPermissionController
-    private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
-    private val pendingTerminalArgs =
-        kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
+    private val linkInbox: com.lingxi.code.navigation.DeepLinkInbox by viewModels()
+    private fun enqueueCanonicalLink(intent: Intent, restoringActivity: Boolean = false) {
+        val raw = intent.dataString
+        if (raw == null) return
+        val notice = when {
+            com.lingxi.code.navigation.DeepLink.parse(raw) == null -> "Invalid or unsafe LingXi link."
+            !linkInbox.deliver(raw, restoringActivity) -> "Too many pending links. Open the link again after reviewing the current destination."
+            else -> null
+        }
+        notice?.let { android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_LONG).show() }
+    }
     private val pendingConversationLaunch =
         kotlinx.coroutines.flow.MutableStateFlow<ConversationLaunchRequest?>(null)
 
@@ -94,11 +102,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        pendingCronRunId.value = intent.getStringExtra(
-            com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
-        )
-        pendingTerminalArgs.value = intent.terminalRouteArgs()
-        pendingConversationLaunch.value = ConversationNotificationRoute.parse(intent)
         // Register the camera/picker launchers before the Activity is STARTED and
         // hand them to the process-global CameraController, which the UniFFI
         // AndroidCamera adapter drives across the FFI seam (the device-vision
@@ -190,6 +193,7 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        enqueueCanonicalLink(intent, restoringActivity = savedInstanceState != null)
 
         // Request POST_NOTIFICATIONS on Android 13+ if not already granted (launched
         // AFTER super.onCreate so the ActivityResultRegistry can dispatch). The OS
@@ -209,8 +213,8 @@ class MainActivity : ComponentActivity() {
             val settingsStore: SettingsStore =
                 viewModel(factory = SettingsStore.factory(applicationContext))
             val settingsState by settingsStore.state.collectAsState()
-            val requestedCronRunId by pendingCronRunId.collectAsState()
-            val requestedTerminalArgs by pendingTerminalArgs.collectAsState()
+            val canonicalLinks by linkInbox.links.collectAsState()
+            val activityLifecycle by lifecycle.currentStateFlow.collectAsState()
             val requestedConversationLaunch by pendingConversationLaunch.collectAsState()
             val scope = rememberCoroutineScope()
             val prefs by store.prefs.collectAsState(initial = AppearancePrefs())
@@ -232,8 +236,8 @@ class MainActivity : ComponentActivity() {
             // Settings is a full-surface overlay that slides up over the
             // conversation (the Android analog of the iOS settings sheet); the
             // drawer's account row opens it, system-back / close dismisses it.
-            var settingsOpen by remember { mutableStateOf(false) }
-            var settingsInitialRoute by remember { mutableStateOf(SettingsRoutes.MAIN) }
+            var settingsOpen by rememberSaveable { mutableStateOf(false) }
+            var settingsInitialRoute by rememberSaveable { mutableStateOf(SettingsRoutes.MAIN) }
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
@@ -257,17 +261,48 @@ class MainActivity : ComponentActivity() {
                 terminalOpen = true
                 settingsOpen = false
             }
-            LaunchedEffect(requestedCronRunId) {
-                requestedCronRunId?.let { runId ->
-                    settingsInitialRoute = SettingsRoutes.cronRun(runId)
-                    settingsOpen = true
-                    pendingCronRunId.value = null
-                }
-            }
-            LaunchedEffect(requestedTerminalArgs) {
-                requestedTerminalArgs?.let {
-                    openTerminal(it.sessionId, it.initCommand)
-                    pendingTerminalArgs.value = null
+            var preparedNativeLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
+            var requestedFeatureLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
+            var deepLinkBlocked by remember { mutableStateOf(false) }
+            var pendingImportRaw by rememberSaveable { mutableStateOf<String?>(null) }
+            val pendingImport = com.lingxi.code.navigation.DeepLink.parse(pendingImportRaw)
+            LaunchedEffect(canonicalLinks, settingsOpen, terminalOpen, requestedFeatureLink, pendingImport, prefs.setupDone, activeConversationSource, activeConversationBusy, activityLifecycle, deepLinkBlocked) {
+                val raw = linkInbox.next(com.lingxi.code.navigation.DeepLinkReadiness(
+                    foreground = activityLifecycle.isAtLeast(Lifecycle.State.RESUMED),
+                    onboardingComplete = prefs.setupDone,
+                    sourceBound = activeConversationSource != null,
+                    engineBusy = activeConversationBusy,
+                    blockingSurfaceOpen = settingsOpen || terminalOpen || requestedFeatureLink != null || pendingImport != null || deepLinkBlocked,
+                ))
+                val link = com.lingxi.code.navigation.DeepLink.parse(raw)
+                if (link != null) {
+                    val parts = link.route.split('/')
+                    val id = parts.last()
+                    var handled = true
+                    var awaitingFeature = false
+                    when {
+                        link.params["workspace"] != null && parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal") && preparedNativeLink != link -> { requestedFeatureLink = link; awaitingFeature = true }
+                        parts.first() in setOf("session", "new", "project", "apps", "market", "runtime", "import") -> { requestedFeatureLink = link; awaitingFeature = true }
+                        parts.first() == "terminal" -> openTerminal(id, link.payload["command"] as? String)
+                        parts.first() == "settings" -> {
+                            val pages = mapOf("general" to SettingsRoutes.GENERAL, "account" to SettingsRoutes.ACCOUNT, "appearance" to SettingsRoutes.APPEARANCE, "notifications" to SettingsRoutes.NOTIFICATIONS, "voice" to SettingsRoutes.VOICE, "custom-providers" to SettingsRoutes.CUSTOM_PROVIDERS, "fusion" to SettingsRoutes.FUSION, "permissions" to SettingsRoutes.ENGINE_PERMISSIONS, "tools-agent" to SettingsRoutes.TOOLS_AGENT, "skills" to SettingsRoutes.ENGINE_SKILLS, "mcp" to SettingsRoutes.ENGINE_MCP, "hooks" to SettingsRoutes.HOOKS, "plugins" to SettingsRoutes.PLUGINS, "diagnostics" to SettingsRoutes.DIAGNOSTICS, "about" to SettingsRoutes.ABOUT, "projects" to SettingsRoutes.PROJECTS, "archived-chats" to SettingsRoutes.ARCHIVED, "language" to SettingsRoutes.LANGUAGE, "input" to SettingsRoutes.INPUT, "privacy" to SettingsRoutes.PRIVACY, "permission-mode" to SettingsRoutes.PERMISSION_MODE, "open-source" to SettingsRoutes.OPEN_SOURCE, "linux-runtime" to SettingsRoutes.LINUX_RUNTIME, "typescript-lsp" to SettingsRoutes.TYPESCRIPT_LSP, "computer-use" to SettingsRoutes.COMPUTER_USE, "dream" to SettingsRoutes.DREAM, "cron" to SettingsRoutes.CRON, "provider-credentials" to SettingsRoutes.CREDENTIALS)
+                            pages[id]?.let { settingsInitialRoute = it; settingsOpen = true } ?: run { handled = false }
+                        }
+                        parts.first() == "provider" -> { settingsInitialRoute = SettingsRoutes.providerEdit(ProviderKind.Llm.name, android.net.Uri.encode(id)); settingsOpen = true }
+                        parts.first() == "extensions" -> {
+                            settingsInitialRoute = when (parts[1]) {
+                                "plugin" -> SettingsRoutes.pluginDetail(id)
+                                "mcp" -> SettingsRoutes.mcpEdit(android.net.Uri.encode(id), link.params["scope"])
+                                else -> SettingsRoutes.skillDetail(android.net.Uri.encode(id))
+                            }
+                            settingsOpen = true
+                        }
+                        parts.take(2) == listOf("cron", "run") -> { settingsInitialRoute = SettingsRoutes.cronRun(id); settingsOpen = true }
+                        parts.take(2) == listOf("cron", "job") -> { settingsInitialRoute = SettingsRoutes.cron(id); settingsOpen = true }
+                        else -> handled = false
+                    }
+                    if (!handled) android.widget.Toast.makeText(applicationContext, "This link destination is unavailable in this build", android.widget.Toast.LENGTH_LONG).show()
+                    if (!awaitingFeature) { preparedNativeLink = null; raw?.let(linkInbox::complete) }
                 }
             }
             LaunchedEffect(requestedConversationLaunch) {
@@ -351,6 +386,19 @@ class MainActivity : ComponentActivity() {
                         requestedProjectSwitch = pendingProjectSwitch,
                         onProjectSwitchHandled = { pendingProjectSwitch = null },
                         onConversationBusyChanged = { activeConversationBusy = it },
+                        requestedDeepLink = requestedFeatureLink,
+                        onDeepLinkBlockingChanged = { deepLinkBlocked = it },
+                        onDeepLinkNativeReady = { link -> preparedNativeLink = link },
+                        onDeepLinkImportReady = { link ->
+                            pendingImportRaw = com.lingxi.code.navigation.DeepLink.build(link.route, link.params, link.payload)
+                            settingsOpen = true
+                        },
+                        onDeepLinkHandled = { handledLink ->
+                            if (requestedFeatureLink == handledLink) {
+                                if (pendingImportRaw == null && preparedNativeLink == null) canonicalLinks.firstOrNull()?.let(linkInbox::complete)
+                                requestedFeatureLink = null
+                            }
+                        },
                         requestedConversationLaunch = requestedConversationLaunch,
                         onConversationLaunchHandled = { pendingConversationLaunch.value = null },
                     )
@@ -361,6 +409,8 @@ class MainActivity : ComponentActivity() {
                     ) {
                         SettingsHost(
                             engineSource = activeConversationSource,
+                            deepLinkImport = pendingImport,
+                            onDeepLinkImportDismiss = { canonicalLinks.firstOrNull()?.let(linkInbox::complete); pendingImportRaw = null; settingsOpen = false },
                             onOpenScheduledSession = { run ->
                                 run.sessionId?.let { sessionId ->
                                     pendingConversationLaunch.value = ConversationLaunchRequest(
@@ -512,21 +562,6 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pendingCronRunId.value = intent.getStringExtra(
-            com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
-        )
-        pendingTerminalArgs.value = intent.terminalRouteArgs()
-        pendingConversationLaunch.value = ConversationNotificationRoute.parse(intent)
+        enqueueCanonicalLink(intent)
     }
-}
-
-private fun Intent.terminalRouteArgs(): TerminalRouteArgs? {
-    val uri = data ?: return null
-    if (uri.scheme != "lingxi" || uri.host != "open_terminal") return null
-    return TerminalRouteArgs(
-        sessionId = uri.getQueryParameter("sessionId")
-            ?.takeIf(String::isNotBlank)
-            ?: "interactive",
-        initCommand = uri.getQueryParameter("initCommand"),
-    )
 }

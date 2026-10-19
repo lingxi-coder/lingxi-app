@@ -579,6 +579,10 @@ final class ConversationModel: ObservableObject {
     @Published var statusLine: String? = nil
     /// A persistent, dismissible, kind-aware error banner (PR-4 item 4).
     @Published var error: ConversationError? = nil
+    @Published var transcriptUUIDToolIDs: [UUID: String] = [:]
+    @Published var deepLinkScrollRevision: UInt64 = 0
+    @Published var deepLinkScrollRowID: String?
+    @Published var deepLinkRuntimeTarget: CanonicalDeepLink?
     /// A non-clean turn outcome (MaxTurns / Cancelled) surfaced distinctly from a
     /// normal end (PR-4 item 3). Cleared when a new turn starts.
     @Published var notice: TurnNotice? = nil

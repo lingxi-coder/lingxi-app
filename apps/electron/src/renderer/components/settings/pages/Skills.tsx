@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
 import { ExtensionGlyph } from './ExtensionHubIcons';
+import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { Toggle } from '../primitives';
 import { useT } from '../../../theme/ThemeContext';
@@ -130,7 +131,7 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
   return editingLayer === 'project' ? 'project' : 'user';
 }
 
-export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest }: PageContentProps) {
+export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
   const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills]);
@@ -140,6 +141,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const syncEnabled = boolFromLayer(snapshot, editingLayer, 'syncClaudeAiSkills');
 
   const [selection, setSelection] = useState<SkillSelection>({ kind: 'list' });
+  const appliedLink = useRef<string>();
   const creatingSkill = useRef(false);
   const [search, setSearch] = useState('');
   const [draftContent, setDraftContent] = useState('');
@@ -205,6 +207,21 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     }
   }, [activeSkills, document, selection.kind, draftCreateName]);
 
+  useEffect(() => {
+    if (linkRequest?.kind !== 'skill' || appliedLink.current === linkRequest.requestId) return;
+    if (linkRequest.payload) {
+      appliedLink.current = linkRequest.requestId;
+      setSelection({ kind: 'create' });
+      setDraftCreateName(asString(linkRequest.payload.name));
+      setDraftCreateContent(asString(linkRequest.payload.markdown ?? linkRequest.payload.content));
+      setDraftCreateScope(linkRequest.scope === 'project' ? 'project' : 'user');
+    } else if (bridge.skillCatalogEvent || bridge.skillsEvent) {
+      appliedLink.current = linkRequest.requestId;
+      const matches = activeSkills.filter(skill => (skill.id === linkRequest.id || skill.name === linkRequest.id) && (!linkRequest.scope || skill.source === linkRequest.scope));
+      if (matches.length === 1) setSelection({ kind: 'skill', id: matches[0]!.id });
+      else setPageError(matches.length ? 'This skill name exists in multiple sources. Include its scope in the link.' : 'This skill is unavailable on this device.');
+    }
+  }, [linkRequest, activeSkills, bridge.skillCatalogEvent, bridge.skillsEvent]);
   const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedTrash = selection.kind === 'trash' ? trashedSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedDocument = selectedSkill && document?.id === selectedSkill.id ? document : null;
@@ -256,6 +273,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
         ? trashDirty
         : false;
 
+  const closePrompt = useSettingsDraftGuard({ onClose, onNavigate, onRegisterCloseRequest }, detailDirty || syncDraft !== syncEnabled);
   const requestSelection = (next: SkillSelection) => {
     if (detailDirty) {
       setPendingSelection(next);
@@ -572,6 +590,9 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
 
   return (
     <ExtensionHubLayout>
+      {closePrompt}
+      {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
+      {linkRequest?.payload && selection.kind === 'create' && <p role="status">Review the imported Skill. Creating it below confirms the import.</p>}
       <ExtensionHubHeader title="Skills" description="Extend LingXi with task-specific skills" search={search} onSearch={setSearch} actions={<>
         <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? 'Reloading skills' : 'Reload skills'}><ExtensionGlyph name="refresh" size={16} /></button>
         <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label="Skill settings" aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>

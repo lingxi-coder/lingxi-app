@@ -1,0 +1,134 @@
+{
+  "valid": [
+    {
+      "url": "lingxi://session/abc?workspace=project.a",
+      "route": "session/abc"
+    },
+    {
+      "url": "https://lingxios.net/open/settings/general",
+      "route": "settings/general"
+    },
+    {
+      "url": "lingxi://extensions/mcp/server",
+      "route": "extensions/mcp/server"
+    },
+    {
+      "url": "https://lingxios.net/open/new#payload=%7B%22prompt%22%3A%22hello+world%26next%22%7D",
+      "route": "new"
+    },
+    {
+      "url": "lingxi://session/AbC?workspace=project.a&message=123e4567-e89b-12d3-a456-426614174000",
+      "route": "session/AbC"
+    },
+    {
+      "url": "https://lingxios.net/open/project/project.a",
+      "route": "project/project.a"
+    },
+    {
+      "url": "lingxi://provider/openai",
+      "route": "provider/openai"
+    },
+    {
+      "url": "lingxi://cron/job/job-1",
+      "route": "cron/job/job-1"
+    },
+    {
+      "url": "lingxi://cron/run/run-1",
+      "route": "cron/run/run-1"
+    },
+    {
+      "url": "lingxi://apps/app-1",
+      "route": "apps/app-1"
+    },
+    {
+      "url": "lingxi://market/app-1",
+      "route": "market/app-1"
+    },
+    {
+      "url": "lingxi://extensions/skill/item-1",
+      "route": "extensions/skill/item-1"
+    },
+    {
+      "url": "lingxi://extensions/plugin/item-1",
+      "route": "extensions/plugin/item-1"
+    },
+    {
+      "url": "lingxi://runtime/agent/item-1",
+      "route": "runtime/agent/item-1"
+    },
+    {
+      "url": "lingxi://runtime/task/item-1",
+      "route": "runtime/task/item-1"
+    },
+    {
+      "url": "lingxi://runtime/plan/item-1",
+      "route": "runtime/plan/item-1"
+    },
+    {
+      "url": "lingxi://runtime/review/item-1",
+      "route": "runtime/review/item-1"
+    },
+    {
+      "url": "lingxi://runtime/activity/item-1",
+      "route": "runtime/activity/item-1"
+    },
+    {
+      "url": "lingxi://terminal/terminal-1#payload=%7B%22command%22%3A%22echo+hello%5Cnnext%22%7D",
+      "route": "terminal/terminal-1"
+    },
+    {
+      "url": "lingxi://import/mcp#payload=%7B%22name%22%3A%22Review+before+install%22%7D",
+      "route": "import/mcp"
+    },
+    {
+      "url": "lingxi://import/plugin#payload=%7B%22name%22%3A%22Review+before+install%22%7D",
+      "route": "import/plugin"
+    },
+    {
+      "url": "lingxi://import/skill#payload=%7B%22name%22%3A%22Review+before+install%22%7D",
+      "route": "import/skill"
+    },
+    {
+      "url": "lingxi://import/provider#payload=%7B%22name%22%3A%22Review+before+install%22%7D",
+      "route": "import/provider"
+    },
+    {
+      "url": "lingxi://session/CasePreserved?message=123E4567-E89B-12D3-A456-426614174000",
+      "route": "session/CasePreserved",
+      "params": {
+        "message": "123e4567-e89b-12d3-a456-426614174000"
+      }
+    }
+  ],
+  "invalid": [
+    "https://lingxios.net.evil/open/new",
+    "lingxi://new?mode=chat&mode=code",
+    "lingxi://new?unknown=x",
+    "lingxi://session/%2fsecret",
+    "lingxi://session/%ZZ",
+    "lingxi://new#payload=%7B",
+    "lingxi://session/a?message=i1",
+    "lingxi://user:pass@new",
+    "http://lingxios.net/open/new",
+    "https://user:password@lingxios.net/open/new",
+    "https://lingxios.net:8443/open/new",
+    "lingxi://new?mode=agent",
+    "lingxi://new?message=123e4567-e89b-12d3-a456-426614174000",
+    "lingxi://session/%5Cescape",
+    "lingxi://session/%00",
+    "lingxi://session//a",
+    "lingxi://session/a?workspace=",
+    "lingxi://session/a?workspace=project.a&workspace=project.b",
+    "lingxi://session/a#payload=%7B%7D",
+    "lingxi://new#payload=%5B%5D",
+    "lingxi://new#payload=%7B%22command%22%3A%22echo%22%7D",
+    "lingxi://terminal/a#payload=%7B%22prompt%22%3A%22hello%22%7D",
+    "lingxi://import/provider#payload=%7B%22apiKey%22%3A%22secret%22%7D",
+    "lingxi://import/mcp#payload=%7B%22nested%22%3A%7B%22headers%22%3A%7B%7D%7D%7D",
+    "lingxi://import/provider#payload=%7B%22url%22%3A%22HTTPS%3A%2F%2Fexample.com%2F%3Fapi_key%3Dsecret%22%7D",
+    "lingxi://new#payload=%7B%7D&payload=%7B%7D",
+    "https://lingxios.net/open/session/../new",
+    "lingxi://session/../new",
+    "https://lingxios.net/open/session/%2e%2e/new"
+  ]
+}

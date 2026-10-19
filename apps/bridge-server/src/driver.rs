@@ -759,6 +759,7 @@ impl OrchestratorTurnDriver {
             notification_registry,
             in_human_turn,
             None,
+            None,
         )
         .await;
     }
@@ -773,6 +774,7 @@ impl OrchestratorTurnDriver {
         >,
         in_human_turn: bool,
         inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
+        row_token: Option<String>,
     ) {
         lingxi_core::host::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
@@ -807,7 +809,14 @@ impl OrchestratorTurnDriver {
                 .await
         } else {
             self.orchestrator
-                .run_turn_streaming_with_origin(prompt, sources, cancel, None, in_human_turn)
+                .run_turn_streaming_with_origin_and_row_token(
+                    prompt,
+                    sources,
+                    cancel,
+                    None,
+                    in_human_turn,
+                    row_token,
+                )
                 .await
         };
         // USER ABORT (binary `t3t`): the user interrupted this turn, so every
@@ -1105,6 +1114,7 @@ impl TurnDriver for OrchestratorTurnDriver {
             None,
             human,
             Some(inputs),
+            None,
         );
         if human {
             orchestrator::native_user_message_source::with_source(
@@ -1174,6 +1184,29 @@ impl TurnDriver for OrchestratorTurnDriver {
     async fn run_turn_with_cancel(&self, prompt: Utf16JsonProjection, cancel: CancellationToken) {
         self.drive_turn(prompt, Vec::new(), cancel, None, true)
             .await;
+    }
+
+    async fn run_identified_turn(
+        &self,
+        prompt: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+        row_token: Option<String>,
+        queued: bool,
+    ) {
+        if queued {
+            self.announce_engine_initiated_turn().await;
+        }
+        self.drive_turn_with_inputs(
+            prompt,
+            Self::to_image_sources(images),
+            cancel,
+            None,
+            true,
+            None,
+            row_token,
+        )
+        .await;
     }
 
     async fn run_turn_with_images_and_cancel(

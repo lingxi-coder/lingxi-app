@@ -296,7 +296,7 @@ class EngineReplyStreamTest {
     fun messageCompleteDoesNotTerminateBeforeTurnEnded() = runTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val message = com.lingxi.code.bindings.client.MessageDto(
-            role = "assistant",
+            transcriptUuid = null, role = "assistant",
             blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text("first".toClientTextDto())),
             images = emptyList(),
         )

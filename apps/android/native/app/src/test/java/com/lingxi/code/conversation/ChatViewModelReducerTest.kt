@@ -326,6 +326,39 @@ class ChatViewModelReducerTest {
         }
     }
 
+    @Test
+    fun userTranscriptIdentityUsesExactSubmittedTurnAndNeverTextMatching() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source = source)
+        vm.send("same text")
+        runCurrent()
+        val firstTurn = checkNotNull(source.submittedTurnId)
+        vm.send("same text")
+        runCurrent()
+        val queuedTurn = source.commands.filterIsInstance<ClientCommand.SendPrompt>().last().turnId!!
+        val uuid = "f4e89fba-1c3d-4a5c-9a6d-1b75d92ca85f"
+        vm.reduceClientEvent(ClientEvent.UserTranscriptRowIdentity("client-turn:$queuedTurn", uuid))
+        assertNull(vm.state.value.messages.first().transcriptUuid)
+        assertEquals(uuid, vm.state.value.messages.last().transcriptUuid)
+        vm.reduceClientEvent(ClientEvent.UserTranscriptRowIdentity("client-turn:$firstTurn", "9d34f2be-a1b2-42fa-bcde-2fe8d407f1ab"))
+        assertEquals("9d34f2be-a1b2-42fa-bcde-2fe8d407f1ab", vm.state.value.messages.first().transcriptUuid)
+    }
+
+    @Test
+    fun coalescedUserIdentityMapsEveryExplicitMemberToken() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source = source)
+        vm.send("first")
+        runCurrent()
+        val firstTurn = checkNotNull(source.submittedTurnId)
+        vm.send("second")
+        runCurrent()
+        val queuedTurn = source.commands.filterIsInstance<ClientCommand.SendPrompt>().last().turnId!!
+        val uuid = "f4e89fba-1c3d-4a5c-9a6d-1b75d92ca85f"
+        vm.reduceClientEvent(ClientEvent.UserTranscriptRowIdentity("client-turn:$firstTurn,$queuedTurn", uuid))
+        assertTrue(vm.state.value.messages.all { it.transcriptUuid == uuid })
+    }
+
     @Test fun fixedScheduleNoticeArrivesBeforeTurnWithoutLoopFoldMarker() {
         val vm = newVm()
         vm.reduceClientEvent(ClientEvent.ScheduledTaskFire("Fixed task is ready"))
@@ -1645,6 +1678,26 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun workspaceSwitchReusingCurrentSourceKeepsItAliveForSuccessiveNewSessions() = runTest(dispatcher) {
+        val reused = SessionControlSource()
+        reused.active.value = ActivatedSession("existing", emptyList(), SessionActivationKind.Started)
+        val vm = ChatViewModel(reused)
+
+        repeat(2) { index ->
+            assertTrue(vm.switchWorkspaceSource(projectId = null, createSource = { reused }))
+            runCurrent()
+            assertFalse("a reused source still owns the next session", reused.closed)
+            assertEquals(List(index + 1) { "new" }, reused.operations)
+            reused.active.value = ActivatedSession("created-$index", emptyList(), SessionActivationKind.Started)
+            runCurrent()
+            assertEquals("created-$index", vm.state.value.session.id)
+            assertTrue(vm.state.value.sessionReady)
+            assertFalse(vm.state.value.sessionTransitioning)
+            assertSame(reused, vm.engineSource.value)
+        }
+    }
+
+    @Test
     fun workspaceSwitchPersistenceFailureKeepsCurrentSourceAlive() = runTest(dispatcher) {
         val original = StubSource()
         val replacement = SessionControlSource()
@@ -2263,13 +2316,13 @@ class ChatViewModelReducerTest {
             ),
             ClientEvent.MessageComplete(
                 stopReason = "end_turn",
-                message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的".toClientTextDto()))),
+                message = MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("好的".toClientTextDto()))),
             ),
         )
 
         // Premise check: the wire message really does arrive with no tool block.
         val wireOnly = messageDtoToMessage(
-            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("好的".toClientTextDto()))),
+            MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("好的".toClientTextDto()))),
         )
         assertTrue(wireOnly.blocks.none { it is MessageContent.Tool })
 

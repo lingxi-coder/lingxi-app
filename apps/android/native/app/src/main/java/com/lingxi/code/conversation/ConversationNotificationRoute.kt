@@ -6,9 +6,6 @@ import android.net.Uri
 import com.lingxi.code.MainActivity
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.sessionModeFromWireValue
-import java.net.URI
-import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
 
 data class ConversationLaunchRequest(
     val sessionId: String,
@@ -30,32 +27,13 @@ object ConversationNotificationRoute {
     }
 
     internal fun parse(route: String?): ConversationLaunchRequest? {
-        val raw = route?.trim().takeUnless { it.isNullOrEmpty() } ?: return null
-        val uri = runCatching { URI(raw) }.getOrNull() ?: return null
-        val authority = uri.authority ?: uri.host
-        if (!uri.scheme.equals("lingxi", ignoreCase = true) ||
-            !authority.equals("open_conversation", ignoreCase = true)
-        ) {
-            return null
-        }
-        val params = uri.rawQuery
-            ?.split('&')
-            ?.mapNotNull { pair ->
-                if (pair.isEmpty()) return@mapNotNull null
-                val parts = pair.split('=', limit = 2)
-                val key = decode(parts[0]).trim()
-                val value = decode(parts.getOrElse(1) { "" }).trim()
-                key.takeIf(String::isNotEmpty)?.let { it to value }
-            }
-            ?.toMap()
-            .orEmpty()
-        val sessionId = params["sessionId"]?.takeUnless(String::isEmpty) ?: return null
-        val turnId = params["turnId"]?.takeUnless(String::isEmpty)?.toLongOrNull()
+        val link = com.lingxi.code.navigation.DeepLink.parse(route) ?: return null
+        if (!link.route.startsWith("session/")) return null
         return ConversationLaunchRequest(
-            sessionId = sessionId,
-            turnId = turnId,
-            workspaceKey = params["workspaceKey"]?.takeUnless(String::isEmpty),
-            sessionMode = sessionModeFromWireValue(params["sessionMode"]),
+            sessionId = link.route.substringAfter('/'),
+            turnId = null,
+            workspaceKey = link.params["workspace"],
+            sessionMode = sessionModeFromWireValue(link.params["mode"]),
         )
     }
 
@@ -63,19 +41,13 @@ object ConversationNotificationRoute {
         sessionId: String,
         turnId: Long? = null,
         recoverySpec: ConversationRecoverySpec? = null,
-    ): Uri =
-        Uri.Builder()
-            .scheme("lingxi")
-            .authority("open_conversation")
-            .appendQueryParameter("sessionId", sessionId)
-            .apply {
-                if (turnId != null) {
-                    appendQueryParameter("turnId", turnId.toString())
-                }
-                recoverySpec?.workspaceKey?.let { appendQueryParameter("workspaceKey", it) }
-                recoverySpec?.sessionMode?.let { appendQueryParameter("sessionMode", it.wireValue) }
-            }
-            .build()
+    ): Uri = Uri.parse(canonicalUrl(sessionId, recoverySpec))
+
+    internal fun canonicalUrl(sessionId: String, recoverySpec: ConversationRecoverySpec? = null): String =
+        com.lingxi.code.navigation.DeepLink.build("session/${sessionId.removePrefix("sess:")}", buildMap {
+            recoverySpec?.workspaceKey?.let { put("workspace", it) }
+            recoverySpec?.sessionMode?.let { put("mode", it.wireValue) }
+        })
 
     fun openIntent(
         context: Context,
@@ -126,11 +98,4 @@ object ConversationNotificationRoute {
         targetClassName = ConversationTurnService::class.java.name,
     )
 
-    // `URLDecoder.decode(String, Charset)` is API 33+; this module's minSdk is
-    // 26 and core-library desugaring is not enabled, so the Charset overload
-    // throws NoSuchMethodError on API 26-32 the moment a conversation
-    // notification is tapped. The charset-NAME overload has existed since API 1
-    // and decodes identically.
-    private fun decode(value: String): String =
-        URLDecoder.decode(value, StandardCharsets.UTF_8.name())
 }

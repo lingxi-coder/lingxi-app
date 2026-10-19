@@ -751,7 +751,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             source.applyForTesting(
                 .messageComplete(
                     stopReason: "end_turn",
-                    message: MessageDto(role: "assistant", blocks: [
+                    message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                         .thinking(thinking: "private reasoning", signature: nil),
                         .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: currentToolHeader()),
                         .text(text: "  spoken answer  ".clientTextDto),

@@ -63,7 +63,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [
-                MessageDto(role: "assistant", blocks: [.toolUse(id: "missing-result", tool: "Read", inputJson: "{}", header: currentToolHeader())])
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.toolUse(id: "missing-result", tool: "Read", inputJson: "{}", header: currentToolHeader())])
             ]))
             let runs = source.model.items.compactMap { item -> ConversationExecutionRun? in
                 if case let .run(run) = item { return run }; return nil
@@ -196,7 +196,7 @@ visionDelegationEnabled: true)
                     }
                     func deliverMessage() {
                         source.applyForTesting(.sessionAgentMessage(
-                            sessionId: "session-a", agentId: agentID, row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "Staging failed".clientTextDto)]))
+                            sessionId: "session-a", agentId: agentID, row: agentRow(index: 0, message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "Staging failed".clientTextDto)]))
                         ))
                     }
                     update("running", at: 1_000)
@@ -278,7 +278,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
-                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "child result".clientTextDto)])]),
+                messages: agentRows([MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "child result".clientTextDto)])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -312,7 +312,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail".clientTextDto)]))
+                row: agentRow(index: 0, message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "live tail".clientTextDto)]))
             ))
             XCTAssertFalse(source.model.agentTranscripts[agentID]?.loaded ?? true)
 
@@ -324,7 +324,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
-            let same = MessageDto(role: "assistant", blocks: [.text(text: "same".clientTextDto)])
+            let same = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
@@ -362,7 +362,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
-            let repeated = MessageDto(role: "assistant", blocks: [.text(text: "same".clientTextDto)])
+            let repeated = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
@@ -407,7 +407,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let initial = MessageDto(role: "assistant", blocks: [.text(text: "visible".clientTextDto)])
+            let initial = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "visible".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -421,7 +421,7 @@ visionDelegationEnabled: true)
             // Compaction can replace the content/details while retaining the
             // same number of visible rows. The raw revision is the only fence
             // that distinguishes this legitimate update from a stale reply.
-            let compacted = MessageDto(role: "assistant", blocks: [
+            let compacted = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                 .compactBoundary(messagesBefore: 4, messagesAfter: 1, summary: "fresh compact summary")
             ])
             source.applyForTesting(.sessionAgentTranscript(
@@ -460,7 +460,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let fresh = MessageDto(role: "assistant", blocks: [.text(text: "fresh".clientTextDto)])
+            let fresh = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "fresh".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -469,7 +469,7 @@ visionDelegationEnabled: true)
                 revision: 20
             ))
 
-            let delayed = MessageDto(role: "assistant", blocks: [.text(text: "delayed stale".clientTextDto)])
+            let delayed = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "delayed stale".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -500,7 +500,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let history = MessageDto(role: "assistant", blocks: [.text(text: "history".clientTextDto)])
+            let history = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "history".clientTextDto)])
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
@@ -511,7 +511,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                row: agentRow(index: 1, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail".clientTextDto)]))
+                row: agentRow(index: 1, message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "live tail".clientTextDto)]))
             ))
 
             // A hidden/lifecycle record can advance the raw revision before
@@ -542,7 +542,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [
+                row: agentRow(index: 0, message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                     .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: currentToolHeader())
                 ]))
             ))
@@ -555,7 +555,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                row: agentRow(index: 1, message: MessageDto(role: "user", blocks: [
+                row: agentRow(index: 1, message: MessageDto(transcriptUuid: nil, role: "user", blocks: [
                     .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, display: currentToolDisplay())
                 ]))
             ))
@@ -592,10 +592,10 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent(agentID)
 
-            let use = MessageDto(role: "assistant", blocks: [
+            let use = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                 .toolUse(id: "tool-snapshot", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: currentToolHeader())
             ])
-            let result = MessageDto(role: "user", blocks: [
+            let result = MessageDto(transcriptUuid: nil, role: "user", blocks: [
                 .toolResult(id: "tool-snapshot", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, display: currentToolDisplay())
             ])
             source.applyForTesting(.sessionAgentTranscript(
@@ -634,7 +634,7 @@ visionDelegationEnabled: true)
                 source.applyForTesting(.sessionAgentMessage(
                     sessionId: "session-a",
                     agentId: agentID,
-                    row: agentRow(index: UInt64(index), message: MessageDto(role: "assistant", blocks: [.text(text: text.clientTextDto)]))
+                    row: agentRow(index: UInt64(index), message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: text.clientTextDto)]))
                 ))
             }
             let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
@@ -718,7 +718,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-old",
                 agentId: agentID,
-                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "stale".clientTextDto)])]),
+                messages: agentRows([MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "stale".clientTextDto)])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -743,7 +743,7 @@ visionDelegationEnabled: true)
             ]))
             source.selectAgent("agent:child-1")
 
-            let live = MessageDto(role: "assistant", blocks: [.text(text: "live tail".clientTextDto)])
+            let live = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "live tail".clientTextDto)])
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
@@ -761,7 +761,7 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agentId: "agent:child-1",
                 messages: agentRows([
-                    MessageDto(role: "assistant", blocks: [.text(text: "history".clientTextDto)]),
+                    MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "history".clientTextDto)]),
                     live
                 ]),
                 nextMessageIndex: 2,
@@ -779,7 +779,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
-            let same = MessageDto(role: "assistant", blocks: [.text(text: "same".clientTextDto)])
+            let same = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "same".clientTextDto)])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
@@ -1083,7 +1083,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: sessionID,
                 agentId: agentID,
-                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "Design notes".clientTextDto)])]),
+                messages: agentRows([MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "Design notes".clientTextDto)])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -1110,19 +1110,19 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-b",
                 mode: .code,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "B".clientTextDto)])]
+                messages: [MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "B".clientTextDto)])]
             ))
             source.resumeSession("session-c")
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-c",
                 mode: .code,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "C".clientTextDto)])]
+                messages: [MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "C".clientTextDto)])]
             ))
 
             source.applyForTesting(.sessionResumed(
                 sessionId: "session-b",
                 mode: .code,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "late B".clientTextDto)])]
+                messages: [MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "late B".clientTextDto)])]
             ))
 
             XCTAssertEqual(source.model.activeSessionId, "session-c")
@@ -1201,8 +1201,8 @@ visionDelegationEnabled: true)
             source.model.streaming = true
 
             let messages: [MessageDto] = [
-                MessageDto(role: "user", blocks: [.text(text: "第一条用户消息".clientTextDto)]),
-                MessageDto(role: "assistant", blocks: [.text(text: "助手的回复".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "第一条用户消息".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "助手的回复".clientTextDto)]),
             ]
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: messages))
@@ -1228,7 +1228,7 @@ visionDelegationEnabled: true)
         /// or be rendered twice.
         func testSessionResumedSplitsRichAssistantBlocks() {
             let source = makeSource()
-            let assistant = MessageDto(role: "assistant", blocks: [
+            let assistant = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                 .text(text: "正文".clientTextDto),
                 .thinking(thinking: "推理", signature: nil),
                 .compactBoundary(messagesBefore: 8, messagesAfter: 2,
@@ -1293,8 +1293,8 @@ visionDelegationEnabled: true)
         func testSessionResumedReconstructsTerminalRunAfterItsFinalAssistantMessage() {
             let source = makeSource()
             let messages: [MessageDto] = [
-                MessageDto(role: "user", blocks: [.text(text: "执行检查".clientTextDto)]),
-                MessageDto(role: "assistant", blocks: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "执行检查".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                     .text(text: "开始".clientTextDto),
                     .toolUse(
                         id: "tool-restore",
@@ -1302,7 +1302,7 @@ visionDelegationEnabled: true)
                         inputJson: #"{"file_path":"a.rs"}"#,
                         header: currentToolHeader()),
                 ]),
-                MessageDto(role: "user", blocks: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [
                     .toolResult(
                         id: "tool-restore",
                         tool: "Read",
@@ -1345,7 +1345,7 @@ visionDelegationEnabled: true)
                             collapsed: true
                         )),
                 ]),
-                MessageDto(role: "assistant", blocks: [.text(text: "检查完成".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "检查完成".clientTextDto)]),
             ]
 
             source.expectSessionResumeForTesting(uuid())
@@ -1378,7 +1378,7 @@ visionDelegationEnabled: true)
         func testSessionResumedPreservesNarrativeToolInterleavingWithinOneAssistantMessage() {
             let source = makeSource()
             let messages: [MessageDto] = [
-                MessageDto(role: "assistant", blocks: [
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                     .text(text: "A".clientTextDto),
                     .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a"}"#, header: currentToolHeader()),
                     .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"result":"a"}"#, isError: false, display: currentToolDisplay()),
@@ -1413,15 +1413,15 @@ visionDelegationEnabled: true)
         func testSessionResumedDoesNotPromoteAToolOutcomeToTheAgentOutcome() {
             let source = makeSource()
             let messages: [MessageDto] = [
-                MessageDto(role: "user", blocks: [.text(text: "继续尝试".clientTextDto)]),
-                MessageDto(role: "assistant", blocks: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "继续尝试".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                     .toolUse(
                         id: "cancelled-tool",
                         tool: "Shell",
                         inputJson: #"{"command":"long job"}"#,
                         header: currentToolHeader()),
                 ]),
-                MessageDto(role: "user", blocks: [
+                MessageDto(transcriptUuid: nil, role: "user", blocks: [
                     .toolResult(
                         id: "cancelled-tool",
                         tool: "Shell",
@@ -1429,7 +1429,7 @@ visionDelegationEnabled: true)
                         isError: true,
                         display: currentToolDisplay()),
                 ]),
-                MessageDto(role: "assistant", blocks: [.text(text: "已改用其他方法".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "已改用其他方法".clientTextDto)]),
             ]
 
             source.expectSessionResumeForTesting(uuid())
@@ -1454,15 +1454,15 @@ visionDelegationEnabled: true)
         /// bubble at all.
         func testSessionResumedNeverRendersAToolResultAsAUserBubble() {
             let source = makeSource()
-            let assistant = MessageDto(role: "assistant", blocks: [
+            let assistant = MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                 .text(text: "我来读一下".clientTextDto),
                 .toolUse(id: "t9", tool: "Read", inputJson: "{\"file_path\":\"a.rs\"}", header: currentToolHeader()),
             ])
-            let toolTurn = MessageDto(role: "user", blocks: [
+            let toolTurn = MessageDto(transcriptUuid: nil, role: "user", blocks: [
                 .toolResult(id: "t9", tool: "Read", resultJson: "{\"result\":\"ok\"}",
                             isError: false, display: currentToolDisplay()),
             ])
-            let followUp = MessageDto(role: "user", blocks: [.text(text: "继续".clientTextDto)])
+            let followUp = MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "继续".clientTextDto)])
 
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(
@@ -1509,7 +1509,7 @@ visionDelegationEnabled: true)
         /// dropped.
         func testSessionResumedSystemRoleRendersAsAi() {
             let source = makeSource()
-            let system = MessageDto(role: "system", blocks: [.text(text: "系统提示".clientTextDto)])
+            let system = MessageDto(transcriptUuid: nil, role: "system", blocks: [.text(text: "系统提示".clientTextDto)])
             source.expectSessionResumeForTesting(uuid())
             source.applyForTesting(.sessionResumed(sessionId: uuid(), mode: .code, messages: [system]))
 

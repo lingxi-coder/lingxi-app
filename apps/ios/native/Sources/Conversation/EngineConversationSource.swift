@@ -80,6 +80,10 @@ final class EngineConversationSource: ConversationSource {
     private var currentResponseMessageIDs: [UUID] = []
     private var currentResponseReasoningIDs: Set<String> = []
     private var pendingAssistantIdentity: String?
+    private var pendingUserRowsByToken: [String: UUID] = [:]
+    private var currentAssistantBlockKey: UInt64?
+    private var assistantRowsByBlock: [UInt64: Set<UUID>] = [:]
+    private var assistantOrderedRowsByIdentity: [String: [UUID]] = [:]
     private var assistantRowsByIdentity: [String: Set<UUID>] = [:]
     private var assistantReasoningByIdentity: [String: Set<String>] = [:]
     /// Process-unique monotonic correlator, also passed as the engine
@@ -447,6 +451,13 @@ final class EngineConversationSource: ConversationSource {
         invalidateAudioSessionContext()
         invalidateTurnContext()
         replayProjectionState = nil
+        pendingUserRowsByToken = [:]
+        currentAssistantBlockKey = nil
+        assistantRowsByBlock = [:]
+        assistantOrderedRowsByIdentity = [:]
+        model.transcriptUUIDToolIDs = [:]
+        model.deepLinkScrollRowID = nil
+        model.deepLinkRuntimeTarget = nil
         hasConfirmedSessionState = false
         model.promptSuggestion = nil
         model.promptSuggestionSourceCodeUnits = nil
@@ -655,12 +666,13 @@ final class EngineConversationSource: ConversationSource {
         // identity stable while text/tag/detail are replaced; otherwise
         // SwiftUI treats every token as a row deletion + insertion and
         // re-lays out the transcript from scratch.
-        let stableMessage = Message(
+        var stableMessage = Message(
             id: oldMessage.id,
             role: message.role,
             tag: message.tag,
             text: message.text
         )
+        stableMessage.transcriptUUID = message.transcriptUUID ?? oldMessage.transcriptUUID
         model.withIndexRebuildSuppressed {
             model.messages[streamingIndex] = stableMessage
             if let itemIndex = streamingItemIndex,
@@ -687,6 +699,7 @@ final class EngineConversationSource: ConversationSource {
             return
         }
         var stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
+        stableMessage.transcriptUUID = message.transcriptUUID ?? model.messages[messageIndex].transcriptUUID
         stableMessage.visualization = message.visualization
         stableMessage.visualizationContext = message.visualizationContext
         model.withIndexRebuildSuppressed {
@@ -1304,6 +1317,9 @@ final class EngineConversationSource: ConversationSource {
             var queued = Message(role: .user, text: text, images: uiImages(from: images))
             queued.visualizationContext = chip
             appendMessage(queued)
+            let queuedTurnID = nextTurnId
+            nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
+            pendingUserRowsByToken["client-turn:\(queuedTurnID)"] = queued.id
             Task { [weak self] in
                 guard let self else { return }
                 do {
@@ -1311,7 +1327,7 @@ final class EngineConversationSource: ConversationSource {
                         text: ClientTextDto(codeUnits: promptSourceCodeUnits),
                         promptMode: promptMode,
                         images: images,
-                        turnId: nil,
+                        turnId: queuedTurnID,
                         visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }))
                 } catch {
                     guard self.activeConversationTurnToken == token else { return }
@@ -1330,6 +1346,7 @@ final class EngineConversationSource: ConversationSource {
 
         let turnId = nextTurnId
         nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
+        if exactSlashCommand == nil { pendingUserRowsByToken["client-turn:\(turnId)"] = prompt.id }
         if let exactSlashCommand {
             let token = SlashCommandMatcher.commandToken(in: trimmed) ?? ""
             let tokenUnits = exactSlashCommand.sourceCodeUnits(for: token) ?? Array(token.utf16)
@@ -2699,11 +2716,8 @@ final class EngineConversationSource: ConversationSource {
             finalizeOrphans: false
         )
         var current = previous ?? ConversationAgentTranscript()
-        // MessageDto has no wire id. Keep every occurrence here; collapsing
-        // by role/text would lose two legitimate adjacent messages that say
-        // the same thing. Full transcript replies are merged by deterministic
-        // occurrence IDs, while a live event is necessarily treated as one
-        // new occurrence.
+        // Keep repeated content distinct. Persisted UUIDs identify durable
+        // rows; occurrence identities cover events that have not persisted yet.
         current = appendTranscript(one, to: current)
         if let messageIndex {
             current.nextMessageIndex = max(current.nextMessageIndex, messageIndex + 1)
@@ -3004,6 +3018,9 @@ final class EngineConversationSource: ConversationSource {
             model.suggestionTurn &+= 1
             assistantRowsByIdentity = [:]
             assistantReasoningByIdentity = [:]
+            assistantRowsByBlock = [:]
+            assistantOrderedRowsByIdentity = [:]
+            currentAssistantBlockKey = nil
             currentResponseReasoningIDs = []
             pendingAssistantIdentity = nil
             if let currentTurnId {
@@ -3499,6 +3516,25 @@ final class EngineConversationSource: ConversationSource {
                 }
             }
 
+        case let .userTranscriptRowIdentity(rowToken, uuid):
+            guard rowToken.hasPrefix("client-turn:"), let identity = UUID(uuidString: uuid) else { return }
+            let tokens = rowToken.dropFirst("client-turn:".count).split(separator: ",").map { "client-turn:" + $0 }
+            let rows = Set(tokens.compactMap { pendingUserRowsByToken.removeValue(forKey: $0) })
+            bindTranscriptUUID(identity, to: rows)
+        case let .assistantBlockStart(blockKey):
+            guard acceptTurnEvent(event) else { return }
+            currentAssistantBlockKey = blockKey
+            streamingIndex = nil
+            streamingItemIndex = nil
+        case let .assistantBlockIdentity(blockKey, messageUuid):
+            guard let identity = UUID(uuidString: messageUuid), let rows = assistantRowsByBlock[blockKey] else { return }
+            bindTranscriptUUID(identity, to: rows)
+        case let .assistantTranscriptRowUuids(messageId, uuids):
+            let rows = assistantOrderedRowsByIdentity[messageId] ?? (pendingAssistantIdentity == messageId ? currentResponseMessageIDs : [])
+            guard rows.count == uuids.count else { return }
+            for (rowID, uuid) in zip(rows, uuids) {
+                if let identity = uuid.flatMap(UUID.init(uuidString:)) { bindTranscriptUUID(identity, to: [rowID]) }
+            }
         case let .messageIdentity(messageId):
             guard acceptTurnEvent(event) else { return }
             pendingAssistantIdentity = messageId
@@ -3587,6 +3623,7 @@ final class EngineConversationSource: ConversationSource {
             // belongs to a new narrative row after those tool activities.
             if let identity = pendingAssistantIdentity {
                 assistantRowsByIdentity[identity] = Set(currentResponseMessageIDs)
+                assistantOrderedRowsByIdentity[identity] = currentResponseMessageIDs
                 assistantReasoningByIdentity[identity] = currentResponseReasoningIDs
             }
             pendingAssistantIdentity = nil
@@ -4108,6 +4145,7 @@ final class EngineConversationSource: ConversationSource {
             model.messages = restored.messages
             model.items = restored.items
             model.messageDetails = restored.details
+            model.transcriptUUIDToolIDs = restored.transcriptUUIDToolIDs
             model.restoreTranscriptDisclosures()
             model.backgroundTasks = []
             model.planTasks = []
@@ -4345,7 +4383,18 @@ final class EngineConversationSource: ConversationSource {
             streamingIndex = model.messages.count - 1
             streamingItemIndex = model.items.count - 1
             currentResponseMessageIDs.append(opened.id)
+            if let blockKey = currentAssistantBlockKey { assistantRowsByBlock[blockKey, default: []].insert(opened.id) }
             return opened.id
+        }
+    }
+
+    private func bindTranscriptUUID(_ uuid: UUID, to rowIDs: Set<UUID>) {
+        for rowID in rowIDs {
+            guard let index = model.indexOfMessage(id: rowID) else { continue }
+            var message = model.messages[index]
+            message.transcriptUUID = uuid
+            model.messages[index] = message
+            if let itemIndex = model.indexOfMessageItem(id: rowID) { model.items[itemIndex] = .message(message) }
         }
     }
 
@@ -4616,6 +4665,7 @@ final class EngineConversationSource: ConversationSource {
                 text: text(from: narrative),
                 images: attachedImages ? [] : uiMessageImages(from: dto.images)
             )
+            message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
             if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
             segments.append(RenderedMessage(message: message, detail: detail))
             attachedImages = true
@@ -4630,17 +4680,18 @@ final class EngineConversationSource: ConversationSource {
                 }
             case let .visualization(reference):
                 flush()
-                segments.append(RenderedMessage(message: visualizationMessage(reference: reference), detail: nil))
+                var slot = visualizationMessage(reference: reference)
+                slot.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
+                segments.append(RenderedMessage(message: slot, detail: nil))
             case .thinking, .redactedThinking, .toolUse, .toolResult:
                 flush()
             }
         }
         flush()
         if !dto.images.isEmpty && !attachedImages {
-            segments.append(RenderedMessage(
-                message: Message(role: role, text: "", images: uiMessageImages(from: dto.images)),
-                detail: nil
-            ))
+            var imageMessage = Message(role: role, text: "", images: uiMessageImages(from: dto.images))
+            imageMessage.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
+            segments.append(RenderedMessage(message: imageMessage, detail: nil))
         }
         return segments
     }
@@ -4710,6 +4761,7 @@ final class EngineConversationSource: ConversationSource {
         var messages: [Message] = []
         var items: [ConversationRenderItem] = []
         var details: [UUID: ConversationMessageDetail] = [:]
+        var transcriptUUIDToolIDs: [UUID: String] = [:]
         var wireSignatures: [String] = []
         var wireIndices: [UInt64?] = []
     }
@@ -4827,9 +4879,8 @@ final class EngineConversationSource: ConversationSource {
         ].joined()
     }
 
-    /// Canonical identity for one wire message. The protocol currently has
-    /// no message id, so all fields that can distinguish a replayed message
-    /// are length-prefixed into a collision-resistant key.
+    /// Content signature for pending rows and live/history reconciliation.
+    /// Persisted transcript UUIDs take precedence for visible row identities.
     static func messageSignature(_ dto: MessageDto) -> String {
         func field(_ value: String) -> String { "\(value.utf8.count):\(value)" }
         func field(_ value: ClientTextDto) -> String {
@@ -4998,12 +5049,13 @@ final class EngineConversationSource: ConversationSource {
             out.wireSignatures.append(wireSignature)
             let wireIndex = wireIndices.indices.contains(dtoIndex) ? wireIndices[dtoIndex] : nil
             out.wireIndices.append(wireIndex)
-            let messageIdentity = wireIndex.map {
+            let messageIdentity = dto.transcriptUuid ?? wireIndex.map {
                 "\(identityPrefix)|message-index|\($0)"
             } ?? "\(identityPrefix)|message|\(wireSignature)|occurrence|\(occurrence)"
             if let fire = dto.loopWakeup {
                 finishPendingRun()
                 var wakeup = Message(id: stableUUID(messageIdentity), role: .ai, text: fire.message)
+                wakeup.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 wakeup.loopWakeupStreak = fire.streak
                 if fire.streak > 0, let start = out.items.lastIndex(where: { item in
                     if case let .message(message) = item { return message.loopWakeupStreak != nil }
@@ -5014,12 +5066,20 @@ final class EngineConversationSource: ConversationSource {
                 out.messages.append(wakeup)
                 out.items.append(.message(wakeup))
                 if let companion = fire.companion {
-                    let row = Message(id: stableUUID(messageIdentity + "|companion"), role: .ai, text: companion)
+                    var row = Message(id: stableUUID(messageIdentity + "|companion"), role: .ai, text: companion)
+                    row.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                     out.messages.append(row)
                     out.items.append(.message(row))
                 }
                 continue
             }
+            if let uuid = dto.transcriptUuid.flatMap(UUID.init(uuidString:)), let toolID = dto.blocks.compactMap({ block -> String? in
+                switch block {
+                case let .toolUse(id, _, _, _): return id
+                case let .toolResult(toolUseId, _, _, _, _, _, _, _): return toolUseId
+                default: return nil
+                }
+            }).first { out.transcriptUUIDToolIDs[uuid] = toolID }
             pendingRunIDHint = messageIdentity
             let role: Role = (dto.role == "user") ? .user : .ai
             let isAssistant = dto.role == "assistant"
@@ -5051,6 +5111,7 @@ final class EngineConversationSource: ConversationSource {
                     text: text(from: narrative),
                     images: attachedImages ? [] : dtoImages
                 )
+                message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
                 attachedImages = true
                 narrativeSequence += 1
@@ -5071,10 +5132,11 @@ final class EngineConversationSource: ConversationSource {
                 switch block {
                 case let .visualization(reference):
                     flushNarrative()
-                    let slot = visualizationMessage(
+                    var slot = visualizationMessage(
                         reference: reference,
                         id: stableUUID("\(messageIdentity)|visualization|\(narrativeSequence)")
                     )
+                    slot.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                     narrativeSequence += 1
                     out.messages.append(slot)
                     out.items.append(.message(slot))
@@ -5176,12 +5238,13 @@ final class EngineConversationSource: ConversationSource {
             }
             flushNarrative()
             if !dtoImages.isEmpty && !attachedImages {
-                let message = Message(
+                var message = Message(
                     id: stableUUID("\(messageIdentity)|images"),
                     role: role,
                     text: "",
                     images: dtoImages
                 )
+                message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 out.messages.append(message)
                 out.items.append(.message(message))
             }

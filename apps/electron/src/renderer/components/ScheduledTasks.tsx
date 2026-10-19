@@ -8,6 +8,7 @@ import {
   type ScheduledTaskDraft,
 } from '../bridge/scheduledTaskDraft';
 import { useT } from '../theme/ThemeContext';
+import type { ScheduledLinkRequest } from '../deepLinkRoutes';
 import { ScheduledTaskSetup } from './ScheduledTaskSetup';
 import { Icon } from './Icon';
 import './ScheduledTasks.css';
@@ -31,7 +32,7 @@ const SUGGESTIONS = [
 type ScopedJob = { job: ScheduledCronJob; scopeId: string };
 type Initial = { title: string; schedule: string; description: string; draft?: ScheduledTaskDraft };
 const taskKey = (item: ScopedJob) => `${item.scopeId}:${item.job.id}`;
-export function ScheduledTasks({ bridge, visible, onOpenChat }: { bridge: UseBridge; visible: boolean; onOpenChat?(): void }) {
+export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget }: { bridge: UseBridge; visible: boolean; onOpenChat?(): void; initialTarget?: ScheduledLinkRequest }) {
   const [jobs, setJobs] = useState<ScopedJob[]>([]);
   const [selected, setSelected] = useState<ScopedJob | null>(null);
   const [initial, setInitial] = useState<Initial | null>(null);
@@ -95,6 +96,41 @@ export function ScheduledTasks({ bridge, visible, onOpenChat }: { bridge: UseBri
   const open = (item: ScopedJob | null, value?: Initial) => {
     setSelected(item); setInitial(value ?? null); setEditorVersion((value) => value + 1); setDirty(false); setShowHistory(false); setDeleting(false); setNotice('');
   };
+  const consumedTarget = useRef<string>();
+  const [targetRunId, setTargetRunId] = useState<string>();
+  useEffect(() => {
+    if (!visible || !initialTarget || consumedTarget.current === initialTarget.requestId || !scopes.length) return;
+    let cancelled = false;
+    const target = initialTarget;
+    void (async () => {
+      const owners = target.scope ? scopes.filter(scope => scope.id === target.scope) : scopes;
+      if (!owners.length) throw new Error('This scheduled-task scope is unavailable on this device.');
+      const lists = await Promise.all(owners.map(async scope => (await bridge.manageScheduled(scope.id, { action: 'list' })).map(job => ({ job, scopeId: scope.id }))));
+      const all = lists.flat();
+      const matches: { item: ScopedJob; runs?: typeof history }[] = [];
+      for (const item of all) {
+        if (target.kind === 'job') { if (item.job.id === target.id) matches.push({ item }); }
+        else {
+          const runs = await bridge.readScheduledHistory(item.scopeId, item.job.id);
+          if (runs.some(run => run.id === target.id)) matches.push({ item, runs });
+        }
+      }
+      if (cancelled) return;
+      consumedTarget.current = target.requestId;
+      if (matches.length !== 1) throw new Error(matches.length ? 'This task ID occurs in multiple local scopes. Open a link with its workspace.' : 'This scheduled task or run is unavailable on this device.');
+      const match = matches[0]!;
+      const navigate = () => {
+        open(match.item);
+        setTargetRunId(target.kind === 'run' ? target.id : undefined);
+        if (match.runs) { setHistory(match.runs); setShowHistory(true); }
+      };
+      if (dirtyRef.current) setPending(() => navigate); else navigate();
+    })().catch(cause => { if (!cancelled) { consumedTarget.current = target.requestId; setError(cause instanceof Error ? cause.message : String(cause)); } });
+    return () => { cancelled = true; };
+  }, [visible, initialTarget?.requestId, scopesKey, bridge.manageScheduled, bridge.readScheduledHistory]);
+  useEffect(() => {
+    if (showHistory && targetRunId) requestAnimationFrame(() => document.getElementById(`scheduled-run-${targetRunId}`)?.scrollIntoView({ block: 'center' }));
+  }, [showHistory, targetRunId]);
   async function save(draft: ScheduledTaskDraft) {
     if (mutation.current) throw new Error('Wait for the current task change to finish.');
     const input = scheduledTaskInput(draft);
@@ -157,7 +193,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat }: { bridge: UseBri
     {editing && <aside className="scheduled-detail">
       <ScheduledTaskSetup key={editorVersion} initial={initial ?? undefined} editingJob={selected?.job} scopeId={selected?.scopeId ?? 'global'} scopes={scopes} sessions={sessions} models={bridge.desktop.modelDetails} defaultModel={bridge.desktop.currentModel} defaultReasoning={bridge.desktop.conversationControls?.reasoning.requested} onBack={() => choose(close)} onSave={save} onDirtyChange={setDirty} loadContext={bridge.scheduledContext} />
       {selected && <div className="scheduled-detail-actions"><button type="button" disabled={busy} onClick={() => void loadHistory()}>Run history</button><button type="button" disabled={busy} onClick={() => choose(() => open(null, { title: '', schedule: '', description: '', draft: { ...scheduledTaskFromJob(selected.job), automation: selected.job.automation ? { version: 2, model: selected.job.automation.model, reasoning: selected.job.automation.reasoning, notificationPolicy: selected.job.automation.notificationPolicy, status: 'active', statusReason: undefined, runMode: 'new_session', targetSessionId: undefined, ownedSessionId: undefined } : undefined } }))}>Copy to project</button>{deleting ? <><button type="button" disabled={busy} onClick={() => void remove()}>Confirm delete</button><button type="button" onClick={() => setDeleting(false)}>Cancel</button></> : <button type="button" disabled={busy} onClick={() => setDeleting(true)}>Delete task</button>}</div>}
-      {showHistory && <section className="scheduled-history" aria-label="Run history"><h3>Run history</h3>{history.length === 0 && <p>No runs yet.</p>}{history.map((run) => <article key={run.id}><strong>{run.status}</strong><time>{new Date(run.scheduledAt).toLocaleString()}</time><p>{run.model}</p>{run.startedAt && <p>Started {new Date(run.startedAt).toLocaleString()}{run.finishedAt ? ` · Finished ${new Date(run.finishedAt).toLocaleString()}` : ''}</p>}<p>{run.error ?? run.summary}</p>{run.sessionId && selected && <button type="button" onClick={() => void bridge.openScheduledSession(selected.scopeId, run.sessionId!).then(() => onOpenChat?.()).catch((cause) => setError(String(cause)))}>Open result</button>}</article>)}</section>}
+      {showHistory && <section className="scheduled-history" aria-label="Run history"><h3>Run history</h3>{history.length === 0 && <p>No runs yet.</p>}{history.map((run) => <article key={run.id} id={`scheduled-run-${run.id}`} aria-current={run.id === targetRunId ? 'true' : undefined} style={run.id === targetRunId ? { outline: '2px solid var(--scheduled-accent)', outlineOffset: 4 } : undefined}><strong>{run.status}</strong><time>{new Date(run.scheduledAt).toLocaleString()}</time><p>{run.model}</p>{run.startedAt && <p>Started {new Date(run.startedAt).toLocaleString()}{run.finishedAt ? ` · Finished ${new Date(run.finishedAt).toLocaleString()}` : ''}</p>}<p>{run.error ?? run.summary}</p>{run.sessionId && selected && <button type="button" onClick={() => void bridge.openScheduledSession(selected.scopeId, run.sessionId!).then(() => onOpenChat?.()).catch((cause) => setError(String(cause)))}>Open result</button>}</article>)}</section>}
     </aside>}
     {pending && <div className="scheduled-confirm" role="alertdialog" aria-modal="true" aria-label="Unsaved changes" onKeyDown={(event) => {
       if (event.key === 'Escape') { event.preventDefault(); setPending(null); }

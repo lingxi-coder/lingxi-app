@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "packages/deep-links-rs",
     "tools/ios-use",
     "packages/config-requirements",
     "apps/ios/ffi",

@@ -3,6 +3,7 @@ import type { Terminal as XTerminal } from '@xterm/xterm';
 import type { TerminalScope, TerminalSnapshot } from '../../shared/terminal';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
+import { terminalCommandInput } from '../deepLinkRoutes';
 
 const HEIGHT_KEY = 'lingxi.terminal.height.v1';
 export const terminalScopeKey = (scope: TerminalScope) => JSON.stringify([scope.projectPath, scope.sessionId]);
@@ -14,6 +15,7 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [focusRequest, setFocusRequest] = useState<{ id: string; serial: number } | null>(null);
+  const [commandReview, setCommandReview] = useState<{ scope: TerminalScope; terminalId?: string; command: string } | null>(null);
   const creating = useRef(false);
   const closedIds = useRef(new Set<string>());
   const exits = useRef(new Map<string, number | null>());
@@ -73,7 +75,7 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
     if (!scope || !enabled) return;
     const open = !state?.open;
     setStates(previous => ({ ...previous, [key]: { ...previous[key], open } }));
-    if (open && !visibleTabs.length) void create();
+    if (open && !visibleTabs.length && !(commandReview && terminalScopeKey(commandReview.scope) === key)) void create();
     else if (open && selected) setFocusRequest({ id: selected.id, serial: Date.now() });
   };
   useEffect(() => {
@@ -83,7 +85,46 @@ export function useTerminalPanel(scope: TerminalScope | null, enabled: boolean) 
     window.addEventListener('keydown', keydown);
     return () => window.removeEventListener('keydown', keydown);
   });
-  return { tabs, visibleTabs, selected, open: enabled && Boolean(state?.open), error, busy, focusRequest, toggle, create,
+  const openLink = async (owner: TerminalScope, terminalId: string, command?: string) => {
+    if (!window.lingxi?.terminal) throw new Error('Terminal is unavailable.');
+    const records = await window.lingxi.terminal.list(owner);
+    merge(records);
+    const existing = terminalId === 'interactive' ? undefined : records.find(tab => tab.id === terminalId);
+    if (terminalId !== 'interactive' && !existing) throw new Error('This terminal is no longer available on this device.');
+    const ownerKey = terminalScopeKey(owner);
+    setStates(previous => ({ ...previous, [ownerKey]: { open: true, selected: existing?.id } }));
+    if (command !== undefined) {
+      setCommandReview({ scope: owner, terminalId: existing?.id, command });
+    } else if (existing) setFocusRequest({ id: existing.id, serial: Date.now() });
+    else {
+      const tab = await window.lingxi.terminal.create(owner);
+      merge([tab]);
+      setStates(previous => ({ ...previous, [ownerKey]: { open: true, selected: tab.id } }));
+      setFocusRequest({ id: tab.id, serial: Date.now() });
+    }
+  };
+  const confirmCommand = async () => {
+    if (!commandReview || creating.current) return;
+    creating.current = true; setBusy(true); setError(null);
+    try {
+      const input = terminalCommandInput(commandReview.command);
+      const tab = commandReview.terminalId
+        ? (await window.lingxi!.terminal.list(commandReview.scope)).find(tab => tab.id === commandReview.terminalId)
+        : await window.lingxi!.terminal.create(commandReview.scope);
+      if (!tab || tab.status !== 'running') throw new Error('This shell is no longer running. Open a new terminal to run the command.');
+      merge([tab]);
+      await window.lingxi!.terminal.input(tab.id, input);
+      const ownerKey = terminalScopeKey(tab.scope);
+      setStates(previous => ({ ...previous, [ownerKey]: { open: true, selected: tab.id } }));
+      setCommandReview(null); setFocusRequest({ id: tab.id, serial: Date.now() });
+    } catch (reason) { setError(String(reason)); }
+    finally { creating.current = false; setBusy(false); }
+  };
+  return { tabs, visibleTabs, selected, open: enabled && Boolean(state?.open), error, busy, focusRequest, toggle, create, openLink,
+    hasCommandReview: commandReview !== null,
+    commandReview: commandReview && terminalScopeKey(commandReview.scope) === key ? commandReview : null,
+    editCommand: (command: string) => setCommandReview(previous => previous ? { ...previous, command } : null),
+    cancelCommand: () => setCommandReview(null), confirmCommand,
     hide: () => setStates(previous => ({ ...previous, [key]: { ...previous[key], open: false } })),
     select: (id: string) => { setStates(previous => ({ ...previous, [key]: { open: true, selected: id } })); setFocusRequest({ id, serial: Date.now() }); },
     close: async (id: string) => { try { await window.lingxi!.terminal.close(id); closedIds.current.add(id); setTabs(previous => previous.filter(tab => tab.id !== id)); return true; } catch (reason) { setError(String(reason)); return false; } },
@@ -130,8 +171,13 @@ export function TerminalPanel({ controller }: { controller: ReturnType<typeof us
       <div className="terminal-toolbar-spacer" />
       <button type="button" className="terminal-icon-button" aria-label="Hide terminal panel" title="Hide terminal panel (Ctrl+`)" onClick={controller.hide}><Icon name="x" size={18} /></button>
     </div>
+    {controller.commandReview && <div role="region" aria-label="Review linked terminal command" style={{ padding: 12, display: 'grid', gap: 8 }}>
+      <p style={{ margin: 0 }}>Run in {controller.commandReview.scope.projectPath} · {controller.commandReview.scope.sessionId === '__draft__' ? 'project terminal' : controller.commandReview.scope.sessionId}</p>
+      <label>Review command before running<textarea aria-label="Linked terminal command" value={controller.commandReview.command} disabled={controller.busy} onChange={event => controller.editCommand(event.target.value)} rows={3} style={{ width: '100%', fontFamily: 'monospace', resize: 'vertical' }} /></label>
+      <div style={{ display: 'flex', gap: 8 }}><button type="button" disabled={controller.busy || !controller.commandReview.command.trim()} onClick={() => void controller.confirmCommand()}>Confirm and run</button><button type="button" disabled={controller.busy} onClick={controller.cancelCommand}>Cancel</button></div>
+    </div>}
     {controller.error && <div role="alert" className="terminal-error">{controller.error}</div>}
-    {!controller.visibleTabs.length && <div className="terminal-empty">{controller.busy ? 'Starting shell…' : <button type="button" onClick={() => void controller.create()}>Open a terminal</button>}</div>}
+    {!controller.visibleTabs.length && !controller.commandReview && <div className="terminal-empty">{controller.busy ? 'Starting shell…' : <button type="button" onClick={() => void controller.create()}>Open a terminal</button>}</div>}
     <div className="terminal-surfaces">{controller.tabs.map(tab => <TerminalSurface key={tab.id} tab={tab} active={controller.open && tab.id === controller.selected?.id} focusRequest={controller.focusRequest} dark={t.dark} background={t.windowBg} />)}</div>
     {controller.selected?.status === 'exited' && <div className="terminal-exit-status">Shell exited{controller.selected.exitCode !== null ? ` (${controller.selected.exitCode})` : ''}. <button type="button" onClick={() => { const id = controller.selected!.id; void controller.close(id).then(closed => { if (closed) return controller.create(); }); }}>Restart shell</button></div>}
   </section>;

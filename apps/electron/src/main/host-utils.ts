@@ -601,6 +601,7 @@ export const ENV_ALLOWLIST = [
   'HOME', 'PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL',
   'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE',
   'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NIX_SSL_CERT_FILE',
+  'LINGXI_CONFIG_DIR',
 ] as const;
 
 export function buildBridgeEnvironment(source: NodeJS.ProcessEnv, apiBaseUrl?: string): NodeJS.ProcessEnv {

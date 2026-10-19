@@ -23,8 +23,9 @@ import com.lingxi.code.theme.LingXiTheme
 internal val LocalConversationDetail = staticCompositionLocalOf<((String) -> Unit)?> { null }
 
 @Composable
-internal fun ConversationDetailHost(state: ChatState, content: @Composable () -> Unit) {
+internal fun ConversationDetailHost(state: ChatState, linkedDetailKey: String? = null, onLinkedDetailHandled: () -> Unit = {}, content: @Composable () -> Unit) {
     var selected by rememberSaveable(state.session.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(linkedDetailKey) { if (linkedDetailKey != null) { selected = linkedDetailKey; onLinkedDetailHandled() } }
     val close = { selected = null }
     androidx.activity.compose.BackHandler(enabled = selected != null, onBack = close)
     CompositionLocalProvider(LocalConversationDetail provides { selected = it }) {
@@ -77,6 +78,7 @@ private fun ConversationDetailContent(key: String, state: ChatState, onClose: ()
             }
         }
         when {
+            call?.planMarkdown != null -> AIText(call.planMarkdown)
             call != null -> ToolResultContent(call)
             agent != null -> {
                 com.lingxi.code.theme.AgentAvatar(agent.agentId, Modifier.size(48.dp))

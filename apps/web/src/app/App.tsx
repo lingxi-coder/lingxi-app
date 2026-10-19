@@ -1,3 +1,4 @@
+import { OpenLinkPage } from '../pages/OpenLinkPage';
 import { lazy, Suspense, useEffect } from 'react';
 import { ConsoleLayout } from '../layouts/ConsoleLayout';
 import { DocsPage } from '../pages/DocsPage';
@@ -54,6 +55,8 @@ export function App() {
     onLocaleChange: setLocale,
     onRegionChange: setRegion,
   };
+
+  if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
 
   if (route === '/admin/models') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载管理后台…' : 'Loading administration…'}</main>}><AdminModelsPage locale={locale} /></Suspense>;
 

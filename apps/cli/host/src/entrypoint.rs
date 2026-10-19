@@ -106,6 +106,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             };
         }
     };
+    if let Some(crate::commands::Commands::Open(open)) = parsed.command.clone() {
+        if open.cli {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() { eprintln!("--cli requires an interactive terminal; use the default desktop handoff otherwise"); return 1; }
+            if let Err(error) = crate::commands::deep_links::prepare_cli(&open, &mut parsed) {
+                eprintln!("{error}"); return 1;
+            }
+        }
+    }
+
     startup_trace::init(parsed.debug_filter());
     startup_trace::mark("argv_parse");
 

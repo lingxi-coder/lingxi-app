@@ -16,7 +16,7 @@ export const appRoutes = [
   '/docs',
 ] as const;
 
-export type AppRoute = (typeof appRoutes)[number] | `/docs/${string}`;
+export type AppRoute = (typeof appRoutes)[number] | `/open/${string}` | `/docs/${string}`;
 
 export function normalizePath(path: string): string {
   const [pathname = '/'] = path.split(/[?#]/u);
@@ -29,6 +29,7 @@ export function normalizePath(path: string): string {
 }
 
 export function resolveRoute(path: string): AppRoute {
+  if (path.split(/[?#]/u)[0]?.startsWith("/open/")) return path.split(/[?#]/u)[0] as AppRoute;
   const normalized = normalizePath(path);
   if ((appRoutes as readonly string[]).includes(normalized)) {
     return normalized as AppRoute;

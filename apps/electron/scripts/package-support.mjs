@@ -472,6 +472,7 @@ export function rewriteInfoPlist(plistPath, version, bundleId = BUNDLE_ID) {
   for (const [key, value] of Object.entries(replacements)) {
     execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plistPath], { stdio: 'pipe' });
   }
+  execFileSync('/usr/bin/plutil', ['-replace', 'CFBundleURLTypes', '-json', JSON.stringify([{ CFBundleURLName: 'LingXi', CFBundleURLSchemes: ['lingxi'] }]), plistPath], { stdio: 'pipe' });
   try {
     execFileSync('/usr/bin/plutil', ['-remove', 'ElectronAsarIntegrity', plistPath], { stdio: 'pipe' });
   } catch {

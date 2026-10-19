@@ -34,7 +34,7 @@ class TranscriptToolGroupTest {
 
     @Test fun historicalReasoningDoesNotDivideWireToolGroups() {
         val message = messageDtoToMessage(com.lingxi.code.bindings.client.MessageDto(
-            role = "assistant", blocks = listOf(
+            transcriptUuid = null, role = "assistant", blocks = listOf(
                 com.lingxi.code.bindings.client.MessageBlockDto.ToolUse("a", "Read", "{}", currentToolHeaderFixture()),
                 com.lingxi.code.bindings.client.MessageBlockDto.Thinking("private reasoning", null),
                 com.lingxi.code.bindings.client.MessageBlockDto.RedactedThinking("opaque"),
@@ -63,6 +63,15 @@ class TranscriptToolGroupTest {
         assertEquals(listOf(listOf("a", "b"), listOf("c"), listOf("d")), groups.map { it.calls.map { call -> call.id } })
         assertEquals("tool-group:a", groups.first().key)
         assertEquals(rows.size, rows.map { it.key }.toSet().size)
+    }
+
+    @Test fun durableMessageLinkSeparatesItsExactToolEnvelopeWithoutChangingNormalGrouping() {
+        val uuid = "f4e89fba-1c3d-4a5c-9a6d-1b75d92ca85f"
+        val messages = listOf(message("before", tool("a")), message("target", tool("b")).copy(transcriptUuid = uuid), message("after", tool("c")))
+        assertEquals(1, buildChatRenderItems(state(*messages.toTypedArray())).filterIsInstance<ChatRenderItem.Tools>().size)
+        val anchored = buildChatRenderItems(state(*messages.toTypedArray()), uuid)
+        assertEquals(listOf(listOf("a"), listOf("b"), listOf("c")), anchored.filterIsInstance<ChatRenderItem.Tools>().map { it.calls.map { call -> call.id } })
+        assertEquals(1, messageLinkRenderIndex(anchored, messages, uuid))
     }
 
     @Test fun pinnedTerminalTurnStillSeparatesAdjacentToolGroups() {

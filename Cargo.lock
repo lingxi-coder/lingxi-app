@@ -1242,6 +1242,7 @@ checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 name = "cli"
 version = "0.12.0"
 dependencies = [
+ "lingxi-deep-links",
  "agent",
  "anyhow",
  "assert_cmd",
@@ -10670,4 +10671,13 @@ dependencies = [
  "serde",
  "syn 2.0.117",
  "winnow 1.0.4",
+]
+
+[[package]]
+name = "lingxi-deep-links"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "serde_json",
+ "url",
 ]

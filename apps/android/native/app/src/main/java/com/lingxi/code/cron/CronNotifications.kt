@@ -73,8 +73,7 @@ object CronNotifications {
             context,
             runId.hashCode(),
             Intent(context, MainActivity::class.java)
-                .putExtra(EXTRA_CRON_RUN_ID, runId)
-                .setData(android.net.Uri.parse("lingxi://cron/run/$runId"))
+                .setData(android.net.Uri.parse(com.lingxi.code.navigation.DeepLink.build("cron/run/$runId")))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )

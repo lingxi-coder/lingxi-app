@@ -484,6 +484,10 @@ extension ProviderConnectionRow: Equatable {
 }
 
 struct DesktopCustomProvidersPage: View {
+    var initialProfileID: String? = nil
+    var initialScope: String? = nil
+    @State private var initialSelectionResolved = false
+    @State private var initialSelectionError: String?
     @State private var repository = DesktopSettingsRepository.shared
     @State private var layer = DesktopSettingsLayer.user
     @State private var showingImport = false
@@ -509,6 +513,9 @@ struct DesktopCustomProvidersPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsConnectionStatus()
+            if let initialSelectionError {
+                ContentUnavailableView("Provider unavailable", systemImage: "link", description: Text(initialSelectionError))
+            }
             SettingsLayerPicker(selection: $layer)
             GroupBox("settings_provider_region") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -616,10 +623,29 @@ struct DesktopCustomProvidersPage: View {
                 }.textFieldStyle(.roundedBorder).disabled(!repository.canEdit(key: "routing", layer: layer))
             }
             DisclosureGroup("Advanced provider and routing JSON") { SettingsValueEditor(key: "providers", layer: layer); SettingsValueEditor(key: "routing", layer: layer) }
-        }.onAppear { select(nil) }
+        }.disabled(initialSelectionError != nil)
+        .onAppear { if initialProfileID == nil { select(nil) } else { resolveLinkedProfile() } }
         .sheet(isPresented: $showingImport) { ProviderBulkImportPage(layer: layer) }
-        .onChange(of: layer) { _, _ in reset() }
-        .onChange(of: repository.sourceGeneration) { _, _ in reset() }
+        .onChange(of: layer) { _, _ in
+            if let initialProfileID, selected == initialProfileID, own[initialProfileID] != nil { select(initialProfileID) }
+            else { reset() }
+        }
+        .onChange(of: repository.revision) { _, _ in resolveLinkedProfile() }
+        .onChange(of: repository.sourceGeneration) { _, _ in
+            initialSelectionResolved = false; initialSelectionError = nil; reset()
+        }
+    }
+    private func resolveLinkedProfile() {
+        guard let initialProfileID, !initialSelectionResolved, repository.loaded else { return }
+        initialSelectionResolved = true
+        let matches = DesktopSettingsLayer.allCases.filter { candidate in
+            (initialScope == nil || initialScope == candidate.rawValue) && (repository.ownValue(key: "providers", layer: candidate) as? [String: Any])?[initialProfileID] != nil
+        }
+        guard matches.count == 1, let match = matches.first else {
+            initialSelectionError = matches.count > 1 ? "This provider exists in several settings layers. Open a link with its scope." : "This provider is not stored in the requested local settings layer."
+            return
+        }
+        layer = match; select(initialProfileID)
     }
     private func select(_ id: String?) {
         selected = id; profileID = id ?? ""

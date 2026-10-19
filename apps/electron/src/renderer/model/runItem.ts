@@ -42,6 +42,8 @@ export interface ToolRunItem {
   readonly nativeOutput?: UiJsonValue;
   /** Persisted outer JSONL row UUID, resolved by assistant-block identity events. */
   readonly transcriptUuid?: string;
+  /** Other durable rows projected into this same visual item, such as tool results. */
+  readonly transcriptUuids?: readonly string[];
   /** Host-only content-block key used until the completed row UUID arrives. */
   readonly blockKey?: number;
   /** Latest `tool_heartbeat` elapsed time, quantized to whole seconds. */
@@ -99,8 +101,12 @@ export interface NarrationRunItem {
   readonly streamed?: boolean;
   /** Persisted outer JSONL row UUID, resolved at assistant block completion. */
   readonly transcriptUuid?: string;
+  /** Other durable rows projected into this same visual item, such as tool results. */
+  readonly transcriptUuids?: readonly string[];
   /** Host-only content-block key used until the completed row UUID arrives. */
   readonly blockKey?: number;
+  /** Explicit host-issued correlation token; never inferred from prompt text. */
+  readonly transcriptRowToken?: string;
   /** Model serving this response after a native server-fallback hop, if any. */
   readonly servedModel?: string;
   /** Durable image projections attached to a user prompt. */
@@ -255,7 +261,7 @@ export interface VisualizationFollowup {
 }
 
 /** One row of the transcript. */
-export type RunItem =
+export type RunItem = (
   | NarrationRunItem
   | VisualizationRunItem
   | ToolRunItem
@@ -264,7 +270,19 @@ export type RunItem =
   | AudioRunItem
   | ThinkingRunItem
   | CommandRunItem
-  | CompactionRunItem;
+  | CompactionRunItem) & { readonly transcriptUuid?: string; readonly transcriptUuids?: readonly string[] };
+
+/** One visual card may project both a tool call row and its durable result row. */
+export function transcriptRowUuids(item: { readonly transcriptUuid?: string; readonly transcriptUuids?: readonly string[] }): readonly string[] {
+  return [...new Set([...(item.transcriptUuid ? [item.transcriptUuid] : []), ...(item.transcriptUuids ?? [])])];
+}
+
+/** Keep the first durable identity as the copy target while retaining exact aliases. */
+export function attachTranscriptRowUuid<T extends RunItem>(item: T, uuid: string): T {
+  if (transcriptRowUuids(item).includes(uuid)) return item;
+  if (!item.transcriptUuid) return { ...item, transcriptUuid: uuid };
+  return { ...item, transcriptUuids: [...(item.transcriptUuids ?? []), uuid] };
+}
 
 /** Compact transcript content may show at most this many code points before folding. */
 export const NARRATION_COLLAPSE_MAX_CHARS = 640;

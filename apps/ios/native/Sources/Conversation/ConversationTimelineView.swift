@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Desktop-style compact transcript. Disclosure state is owned by the session
 /// model so recycled rows retain the user's choices. Historical reasoning stays
@@ -20,6 +21,11 @@ struct ConversationTimelineView: View {
     var showThinking = true
     /// Session whose store owns the inline widgets of this transcript.
     var visualizationSessionId: String = ""
+    var linkWorkspaceKey: String? = nil
+    var linkSessionMode: String? = nil
+    var highlightedRowID: String? = nil
+    var transcriptUUIDToolIDs: [UUID: String] = [:]
+    var allowsMessageLinks = true
     var onVisualizationFollowup: (VisualizationFollowup) -> Void = { _ in }
 
     var body: some View {
@@ -27,6 +33,7 @@ struct ConversationTimelineView: View {
         LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
                 segmentView(segment)
+                    .background(t.accent.opacity(highlightedRowID == segment.id ? 0.12 : 0), in: .rect(cornerRadius: 10))
                     .padding(.top, index == 0 ? 0 : Self.spacing(before: segments[index - 1], current: segment))
             }
         }
@@ -63,6 +70,7 @@ struct ConversationTimelineView: View {
                 onFollowup: onVisualizationFollowup
             )
             .id(rowID)
+            .contextMenu { copyMessageLink(message.transcriptUUID) }
         case let .message(rowID, message):
             MessageBubble(
                 message: message,
@@ -85,6 +93,7 @@ struct ConversationTimelineView: View {
                 onToggleAssistantExpanded: { onToggleToolCall("assistant:\(rowID)") }
             )
             .id(rowID)
+            .contextMenu { copyMessageLink(message.transcriptUUID) }
         case let .commandOutput(rowID, output):
             SlashCommandOutputCard(output: output)
                 .id(rowID)
@@ -106,6 +115,12 @@ struct ConversationTimelineView: View {
                 onToggleBatch: { onToggleToolCall(id) },
                 onToggleTool: onToggleToolCall
             )
+            .id(id)
+            .contextMenu {
+                ForEach(transcriptUUIDToolIDs.keys.filter { uuid in tools.contains(where: { $0.id == transcriptUUIDToolIDs[uuid] }) }.sorted(by: { $0.uuidString < $1.uuidString }), id: \.self) { uuid in
+                    copyMessageLink(uuid)
+                }
+            }
         case let .notice(id, notice):
             ConversationTimelineNoticeRow(notice: notice)
                 .id(id)
@@ -116,6 +131,14 @@ struct ConversationTimelineView: View {
                 onSelect: onSelectAgent
             )
             .id(id)
+        }
+    }
+
+    @ViewBuilder
+    private func copyMessageLink(_ uuid: UUID?) -> some View {
+        if allowsMessageLinks, let uuid,
+           let url = ConversationDeepLink.makeURL(sessionID: visualizationSessionId, turnID: nil, workspaceKey: linkWorkspaceKey, sessionMode: linkSessionMode, messageUUID: uuid.uuidString) {
+            Button("Copy message link", systemImage: "link") { UIPasteboard.general.url = url }
         }
     }
 

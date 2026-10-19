@@ -58,15 +58,34 @@ struct ComposerTextInput: UIViewRepresentable {
         var parent: ComposerTextInput
         weak var view: ComposerInputView?
         var updating = false
+        private var focusSynchronizationScheduled = false
 
-        init(parent: ComposerTextInput) { self.parent = parent }
+        init(parent: ComposerTextInput) {
+            self.parent = parent
+            super.init()
+            NotificationCenter.default.addObserver(self, selector: #selector(didBecomeActive),
+                                                   name: UIApplication.didBecomeActiveNotification, object: nil)
+        }
+
+        deinit { NotificationCenter.default.removeObserver(self) }
+
+        @objc private func didBecomeActive() { synchronizeFocus() }
 
         func synchronizeFocus() {
-            guard let textView = view?.textView, textView.window != nil else { return }
-            if parent.isFocused && !textView.isFirstResponder {
-                textView.becomeFirstResponder()
-            } else if !parent.isFocused && textView.isFirstResponder {
-                textView.resignFirstResponder()
+            guard !focusSynchronizationScheduled else { return }
+            focusSynchronizationScheduled = true
+            // UIKit focus changes can reenter SwiftUI's focus graph. Wait until
+            // the representable's current layout transaction has completed.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.focusSynchronizationScheduled = false
+                guard let textView = self.view?.textView, textView.window != nil,
+                      UIApplication.shared.applicationState == .active else { return }
+                if self.parent.isFocused && !textView.isFirstResponder {
+                    textView.becomeFirstResponder()
+                } else if !self.parent.isFocused && textView.isFirstResponder {
+                    textView.resignFirstResponder()
+                }
             }
         }
 

@@ -41,6 +41,9 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -131,6 +134,15 @@ fun TerminalScreen(
     onAction: (TerminalAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    state.commandDraft?.let { draft ->
+        AlertDialog(
+            onDismissRequest = { onAction(TerminalAction.DismissCommand) },
+            title = { Text("Review command") },
+            text = { OutlinedTextField(value = draft, onValueChange = { onAction(TerminalAction.EditCommand(it)) }, label = { Text("Command") }) },
+            confirmButton = { TextButton(enabled = state.connectionState == TerminalConnectionState.CONNECTED && draft.isNotBlank(), onClick = { onAction(TerminalAction.ConfirmCommand) }) { Text("Run") } },
+            dismissButton = { TextButton(onClick = { onAction(TerminalAction.DismissCommand) }) { Text("Cancel") } },
+        )
+    }
     val input = rememberTerminalInputController()
     val send: (ByteArray) -> Unit = {
         emulator.scrollOffset = 0

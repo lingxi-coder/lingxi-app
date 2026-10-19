@@ -1,0 +1,35 @@
+--- a/replay-theater/hooks/replay-theater.mjs
++++ b/replay-theater/hooks/replay-theater.mjs
+@@ -226,3 +226,2 @@
+-  on("ui.render", { component: "AbovePrompt" }, ($, e, next) => {
+-    if (state.isOpen && state.inBand) return replayView($, e, true);
+-    if (!state.replay.length || state.isOpen) return next(e);
++  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
++    const base = await next(e);
+@@ -230 +229,6 @@
+-    return Box({
++    const emptyBase = base?.type === "engine" && typeof base.ref === "string";
++    // Keep an empty draw registered so later invalidations can populate this site.
++    if (!state.replay.length || (state.isOpen && !state.inBand)) {
++      return emptyBase ? Box({ flexDirection: "column", children: [] }) : base;
++    }
++    const own = state.isOpen && state.inBand ? replayView($, e, true) : Box({
+@@ -236,0 +241,2 @@
++    // The Host terminal marker is not an embeddable UI node; AbovePrompt has no native body.
++    return base == null || emptyBase ? own : Box({ flexDirection: "column", children: [base, own] });
+--- a/token-weather/hooks/token-weather.mjs
++++ b/token-weather/hooks/token-weather.mjs
+@@ -49,2 +49,2 @@
+-  on("ui.render", { component: "AbovePrompt" }, ($, e, next) => {
+-    if (e.hasSurvey || readings.length === 0) {
++  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
++    if (e.hasSurvey) {
+@@ -52,0 +53 @@
++    const base = await next(e);
+@@ -54 +55,5 @@
+-    return band(Box, Text, e.bodyColumns ?? 80);
++    // Keep an empty draw registered until the first usage reading arrives.
++    const emptyBase = base?.type === "engine" && typeof base.ref === "string";
++    if (readings.length === 0) return emptyBase ? Box({ flexDirection: "column", children: [] }) : base;
++    const own = band(Box, Text, e.bodyColumns ?? 80);
++    return base == null || emptyBase ? own : Box({ flexDirection: "column", children: [base, own] });

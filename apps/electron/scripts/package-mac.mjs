@@ -51,6 +51,7 @@ import {
   ensureAudioHelperResourceLayout,
 } from './audio-helper.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
+import { stageCrashlytics, signCrashlytics } from './desktop-crashlytics.mjs';
 
 function log(message) {
   process.stdout.write(`[package:mac] ${message}\n`);
@@ -166,6 +167,7 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
   signBinary(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identity, identifiers.clientIdentifier);
   signAppBundle(audioHelperAppPath, identity, audioEntitlementsPath);
   signAppBundle(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identity, brokerEntitlementsPath);
+  signCrashlytics(join(contents, 'Resources'), identity);
   signAppBundle(appPath, identity, appEntitlementsPath);
   verifyIdentifier(packagedSidecar, identifiers.bridgeServerIdentifier, teamId);
   verifyIdentifier(modCompilerPath, `${identifiers.desktopBundleId}.mod-compiler`, teamId);
@@ -288,6 +290,9 @@ async function main() {
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));
   const mainExecutable = renameElectronExecutable(paths.appPath);
   rewriteInfoPlist(join(contents, 'Info.plist'), metadata.version, identifiers.desktopBundleId);
+  execFileSync('/usr/bin/plutil', ['-replace', 'NSApplicationCrashOnExceptions', '-bool', 'YES', join(contents, 'Info.plist')]);
+  execFileSync('/usr/bin/plutil', ['-replace', 'FirebaseCrashlyticsCollectionEnabled', '-bool', 'YES', join(contents, 'Info.plist')]);
+  stageCrashlytics(resources, { channel: brokerChannel, bundleId: identifiers.desktopBundleId, symbolsDirectory: join(paths.appContainer, 'symbols') });
 
   assertArm64Executable(mainExecutable, `${APP_NAME} executable`);
   assertArm64Executable(packagedSidecar, 'packaged bridge-server sidecar');

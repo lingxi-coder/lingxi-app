@@ -229,6 +229,8 @@ pub struct Runtime {
 /// so every `emit_text` / `emit_tool_call` / `emit_end_turn` lands on
 /// `bridge_rx` as a [`tui_core::orchestrator_bridge::TurnEvent`].
 pub struct TuiBuild {
+    pub initial_draft: Option<String>,
+    pub message_anchor: Option<String>,
     /// Reload the exact Fusion sources admitted by this CLI session.
     pub fusion_layers: Arc<
         dyn Fn() -> Result<Vec<lingxi_core::host::fusion_strategy::FusionSettingsLayer>, String>
@@ -1909,6 +1911,8 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
         .map(permission::permission_mode_from_cli_string)
         .unwrap_or(permission_mode);
     Ok(TuiBuild {
+        initial_draft: argv.resolve_prefill(),
+        message_anchor: argv.deep_link_message.clone(),
         fusion_layers,
         runtime,
         managed_model_allowlist,

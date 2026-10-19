@@ -61,6 +61,10 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
             await LingxiAppActionStore.shared.enqueue(action)
             return
         }
+        if let raw = userInfo["lingxi.url"] as? String, let url = URL(string: raw), let action = LingxiDeepLink.action(from: url) {
+            await LingxiAppActionStore.shared.enqueue(action)
+            return
+        }
         await MainActor.run {
             NotificationCenter.default.post(
                 name: .lingxiCronNotificationOpened,

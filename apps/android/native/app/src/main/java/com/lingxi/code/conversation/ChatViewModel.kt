@@ -229,6 +229,9 @@ class ChatViewModel(
     /** Monotonic reply-stream generation used to reject stale turn events. */
     private var turnToken: Long = 0L
     private var pendingAssistantIdentity: String? = null
+    private val optimisticRowsByToken = mutableMapOf<String, String>()
+    private val assistantTranscriptUuidsByIdentity = mutableMapOf<String, List<String>>()
+    private val pendingAssistantTranscriptUuids = linkedSetOf<String>()
     private val assistantRowsByIdentity = mutableMapOf<String, String>()
     private var reasoningBeforeResponse: String? = null
     private val assistantReasoningByIdentity = mutableMapOf<String, Pair<String, String>>()
@@ -317,6 +320,9 @@ class ChatViewModel(
      * source being replaced during provider reconnect.
      */
     private fun bindSource() {
+        optimisticRowsByToken.clear()
+        assistantTranscriptUuidsByIdentity.clear()
+        pendingAssistantTranscriptUuids.clear()
         sourceBindingJob?.cancel()
         _state.update { it.copy(slashCommands = emptyList()) }
         val boundSource = source
@@ -428,6 +434,29 @@ class ChatViewModel(
             return
         }
         when (event) {
+            is ClientEvent.UserTranscriptRowIdentity -> {
+                if (!event.rowToken.startsWith("client-turn:")) return
+                val rowIds = event.rowToken.removePrefix("client-turn:").split(',')
+                    .mapNotNull { id -> id.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.let { optimisticRowsByToken.remove("client-turn:$it") } }.toSet()
+                if (rowIds.isEmpty()) return
+                _state.update { state -> state.copy(messages = state.messages.map { message ->
+                    if (message.id in rowIds) message.copy(transcriptUuid = event.uuid) else message
+                }) }
+            }
+            is ClientEvent.AssistantBlockIdentity -> {
+                pendingAssistantTranscriptUuids.add(event.messageUuid)
+                _state.update { state -> state.copy(streamingMessage = state.streamingMessage?.let {
+                    it.copy(transcriptUuid = it.transcriptUuid ?: event.messageUuid, transcriptAliases = it.transcriptAliases + event.messageUuid)
+                }) }
+            }
+            is ClientEvent.AssistantTranscriptRowUuids -> {
+                val uuids = event.uuids.filterNotNull()
+                assistantTranscriptUuidsByIdentity[event.messageId] = uuids
+                val rowId = assistantRowsByIdentity[event.messageId]
+                if (rowId != null) _state.update { state -> state.copy(messages = state.messages.map { message ->
+                    if (message.id == rowId) message.copy(transcriptUuid = uuids.firstOrNull() ?: message.transcriptUuid, transcriptAliases = message.transcriptAliases + uuids) else message
+                }) }
+            }
             is ClientEvent.SlashCommandCatalog -> _state.update { state ->
                 state.copy(slashCommands = event.commands.map { command ->
                     ConversationSlashCommand(
@@ -439,6 +468,7 @@ class ChatViewModel(
                 })
             }
             is ClientEvent.TurnStarted -> {
+                pendingAssistantTranscriptUuids.clear()
                 _state.update { it.copy(promptSuggestion = null, promptSuggestionUuid = null, suggestionTurn = it.suggestionTurn + 1) }
             }
             is ClientEvent.PromptSuggestionState -> _state.update {
@@ -1542,7 +1572,7 @@ class ChatViewModel(
         }
         bindSource()
         onCommitted()
-        previous.close()
+        if (previous !== replacement) previous.close()
         beginSessionTransition(
             target = target,
             newSession = newSession,
@@ -2106,18 +2136,16 @@ class ChatViewModel(
         val visualizationChip = _state.value.visualizationChip
 
         if (_state.value.streaming) {
+            val queuedTurnId = DurableConversationTurnIds.next()
+            val queuedUserMessage = Message(role = Role.User, text = trimmed, images = images, visualizationContext = visualizationChip)
+            optimisticRowsByToken["client-turn:$queuedTurnId"] = queuedUserMessage.id
             savedState?.set(KEY_DRAFT, "")
             _state.update {
                 it.copy(
                     isNew = false,
                     error = null,
                     visualizationChip = null,
-                    messages = it.messages + Message(
-                        role = Role.User,
-                        text = trimmed,
-                        images = images,
-                        visualizationContext = visualizationChip,
-                    ),
+                    messages = it.messages + queuedUserMessage,
                 )
             }
             viewModelScope.launch {
@@ -2127,7 +2155,7 @@ class ChatViewModel(
                             text = submittedText.toClientTextDto(),
                             promptMode = promptMode,
                             images = images,
-                            turnId = null,
+                            turnId = queuedTurnId.toULong(),
                             visualizationContext = visualizationChip?.reference?.toDto(),
                         ),
                     )
@@ -2151,6 +2179,8 @@ class ChatViewModel(
         turnToken++
         val token = turnToken
         val submittedTurnId = DurableConversationTurnIds.next()
+        val userMessage = Message(role = Role.User, text = trimmed, images = images, visualizationContext = visualizationChip)
+        optimisticRowsByToken["client-turn:$submittedTurnId"] = userMessage.id
         durableTurnId = submittedTurnId
         recoveredTurnToken = null
         recoveryReplayTurnId = null
@@ -2167,12 +2197,7 @@ class ChatViewModel(
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
                 liveTurnWaitingForUser = false,
-                messages = it.messages + Message(
-                    role = Role.User,
-                    text = trimmed,
-                    images = images,
-                    visualizationContext = visualizationChip,
-                ),
+                messages = it.messages + userMessage,
                 visualizationChip = null,
                 streamingMessage = null,
                 agentRun = AgentRunState(turnId = token),
@@ -2394,7 +2419,7 @@ class ChatViewModel(
                     // First delta of the turn: open a new assistant message.
                     s.copy(
                         streaming = true,
-                        streamingMessage = Message(role = Role.Ai, text = event.text),
+                        streamingMessage = Message(role = Role.Ai, text = event.text, transcriptUuid = pendingAssistantTranscriptUuids.firstOrNull(), transcriptAliases = pendingAssistantTranscriptUuids.toSet()),
                         agentRun = run,
                     )
                 }
@@ -2627,9 +2652,10 @@ class ChatViewModel(
                 val identity = pendingAssistantIdentity
                 pendingAssistantIdentity = null
                 _state.update { state ->
-                    val completed = state.streamingMessage
-                        ?.let { live -> message.copy(id = live.id) }
-                        ?: message
+                    val uuids = assistantTranscriptUuidsByIdentity[identity].orEmpty().ifEmpty { pendingAssistantTranscriptUuids.toList() }
+                    val completed = (state.streamingMessage?.let { live -> message.copy(id = live.id) } ?: message)
+                        .copy(transcriptUuid = message.transcriptUuid ?: uuids.firstOrNull(), transcriptAliases = message.transcriptAliases + uuids)
+                    pendingAssistantTranscriptUuids.clear()
                     if (identity != null) assistantRowsByIdentity[identity] = completed.id
                     // Some hosts emit MessageComplete before TurnEnded. Settle
                     // the live run here so tool rows survive the later terminal

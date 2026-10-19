@@ -1,61 +1,23 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.model.SessionMode
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.*
 import org.junit.Test
 
 class ConversationNotificationRouteTest {
-    @Test
-    fun `conversation route parses session and turn ids`() {
-        assertEquals(
-            ConversationLaunchRequest(
-                sessionId = "session-a",
-                turnId = 42L,
-                workspaceKey = "app.weather",
-                sessionMode = SessionMode.Chat,
-            ),
-            ConversationNotificationRoute.parse(
-                "lingxi://open_conversation?sessionId=session-a&turnId=42&workspaceKey=app.weather&sessionMode=chat",
-            ),
-        )
+    @Test fun `notification produces the shared canonical contract`() {
+        val url = ConversationNotificationRoute.canonicalUrl("sess:session-a")
+        assertEquals("https://lingxios.net/open/session/session-a", url)
+        assertEquals(ConversationLaunchRequest("session-a", null), ConversationNotificationRoute.parse(url))
     }
-
-    @Test
-    fun `conversation route rejects missing session id and bad turn id`() {
-        assertNull(
-            ConversationNotificationRoute.parse("lingxi://open_conversation?turnId=42"),
-        )
-        assertEquals(
-            ConversationLaunchRequest(sessionId = "session-a", turnId = null),
-            ConversationNotificationRoute.parse(
-                "lingxi://open_conversation?sessionId=session-a&turnId=nope",
-            ),
-        )
+    @Test fun `canonical notification resolves workspace mode`() {
+        assertEquals(ConversationLaunchRequest("session-a", null, "project.a", SessionMode.Chat), ConversationNotificationRoute.parse("lingxi://session/session-a?workspace=project.a&mode=chat"))
+        assertNull(ConversationNotificationRoute.parse("https://evil.test/open/session/a"))
     }
-
-    @Test
-    fun `legacy conversation route defaults to code mode`() {
-        assertEquals(
-            ConversationLaunchRequest(
-                sessionId = "session-a",
-                turnId = null,
-                workspaceKey = null,
-                sessionMode = SessionMode.Code,
-            ),
-            ConversationNotificationRoute.parse(
-                "lingxi://open_conversation?sessionId=session-a",
-            ),
-        )
-    }
-
-    @Test
-    fun `stop route is private service command and never an activity deep link`() {
+    @Test fun `stop route remains a private service command`() {
         val route = ConversationNotificationRoute.cancelRouteSpec("session-a", 42L)
-
         assertEquals(ConversationTurnService.ACTION_CANCEL, route.action)
         assertEquals(ConversationTurnService::class.java.name, route.targetClassName)
-        assertEquals("session-a", route.sessionId)
         assertEquals(42L, route.turnId)
     }
 }

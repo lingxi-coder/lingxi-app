@@ -277,6 +277,12 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<HostPermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  deepLinks: {
+    copySessionLink(projectPath: string, sessionId: string, messageUuid?: string): Promise<void>;
+    next(): Promise<{ id: string; target: import('../../../../packages/deep-links/index').DeepLinkTarget; projectPath?: string } | null>;
+    acknowledge(id: string, error?: string): Promise<void>;
+    onAvailable(callback: () => void): Unsubscribe;
+  };
   onApplicationMenu(cb: (action: ApplicationMenuAction) => void): Unsubscribe;
   audio: NativeAudioApi;
   visualization: VisualizationApi;
@@ -383,6 +389,12 @@ const api: LingxiApi = {
   onPermission: (callback) => subscribe(CH_PERMISSION, callback),
   onComputerAccess: (callback) => subscribe(CH_COMPUTER_ACCESS, callback),
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
+  deepLinks: {
+    copySessionLink: (projectPath, sessionId, messageUuid) => ipcRenderer.invoke('lingxi:deep-link:session-url', projectPath, sessionId, messageUuid),
+    next: () => ipcRenderer.invoke('lingxi:deep-link:next'),
+    acknowledge: (id, error) => ipcRenderer.invoke('lingxi:deep-link:ack', id, error),
+    onAvailable: callback => subscribe('lingxi:deep-link:available', callback),
+  },
   onApplicationMenu: (callback) => subscribe(CH_APPLICATION_MENU, callback),
   modUi: {
     control: <T extends NativeUiControlRequest>(sessionId: string, request: T) =>

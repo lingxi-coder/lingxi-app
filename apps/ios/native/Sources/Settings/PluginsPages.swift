@@ -346,7 +346,7 @@ struct PluginDetailPage: View {
             } else if repository.connected && repository.catalogs["plugin"] == nil {
                 ProgressView().frame(maxWidth: .infinity).padding(24)
             } else {
-                PluginNoteRow(text: String(localized: "plugins_installed_empty"))
+                ContentUnavailableView("Plugin unavailable", systemImage: "link", description: Text("The linked plugin is not installed in local data on this device."))
             }
         }
         .task(id: repository.sourceGeneration) {

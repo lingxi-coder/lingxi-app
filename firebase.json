@@ -51,8 +51,9 @@
     "public": "apps/web/dist",
     "ignore": [
       "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/.DS_Store"
     ],
     "headers": [
       {
@@ -83,6 +84,19 @@
           {
             "key": "Cache-Control",
             "value": "no-store"
+          }
+        ]
+      },
+      {
+        "source": "/.well-known/**",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=300"
           }
         ]
       }

@@ -155,7 +155,7 @@ class VisualizationTest {
         val messages = transcriptFromDtos(
             listOf(
                 MessageDto(
-                    role = "assistant",
+                    transcriptUuid = null, role = "assistant",
                     blocks = listOf(
                         MessageBlockDto.Text("Chart:".toClientTextDto()),
                         MessageBlockDto.Visualization(VisualizationRefDto("chart", 1u)),
@@ -163,7 +163,7 @@ class VisualizationTest {
                     ),
                 ),
                 MessageDto(
-                    role = "user",
+                    transcriptUuid = null, role = "user",
                     blocks = listOf(MessageBlockDto.Text("Why the dip?".toClientTextDto())),
                     visualizationContext = VisualizationContextDto("chart", 1u, "Sales"),
                 ),
@@ -184,7 +184,7 @@ class VisualizationTest {
         val messages = transcriptFromDtos(
             listOf(
                 MessageDto(
-                    role = "assistant",
+                    transcriptUuid = null, role = "assistant",
                     blocks = listOf(MessageBlockDto.Visualization(VisualizationRefDto("chart", 1u))),
                 ),
             ),

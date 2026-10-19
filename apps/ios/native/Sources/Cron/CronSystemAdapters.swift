@@ -42,6 +42,9 @@ final class UserNotificationCronNotifier: CronNotificationDelivering, @unchecked
                 "lingxi.cron.task_id": payload.taskID,
                 "lingxi.cron.status": payload.status.rawValue,
             ]
+            if let url = ConversationDeepLink.makeURL(route: ["cron", payload.taskOnly ? "job" : "run", payload.taskOnly ? payload.taskID : payload.runID], parameters: ["scope": payload.scopeID]) {
+                content.userInfo["lingxi.url"] = url.absoluteString
+            }
             let request = UNNotificationRequest(
                 identifier: "cron-run-\(payload.runID)",
                 content: content,

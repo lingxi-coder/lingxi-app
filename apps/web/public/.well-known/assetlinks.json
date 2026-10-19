@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.lingxi.code.direct",
+      "sha256_cert_fingerprints": [
+        "88:61:45:6D:EC:29:98:66:09:86:8D:27:94:2D:12:33:29:AE:5E:2C:A3:AA:43:20:54:B6:6A:34:02:98:46:54"
+      ]
+    }
+  }
+]

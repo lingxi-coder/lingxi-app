@@ -1066,6 +1066,9 @@ pub struct Argv {
     #[arg(long = "deep-link-origin", hide = true)]
     pub deep_link_origin: bool,
 
+    #[arg(long, hide = true)]
+    pub deep_link_message: Option<String>,
+
     /// Repo slug the deep link ?repo= parameter resolved to the current cwd
     #[arg(long = "deep-link-repo", value_name = "slug", hide = true)]
     pub deep_link_repo: Option<String>,

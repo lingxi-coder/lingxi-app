@@ -49,9 +49,9 @@ class ClientEventMapperTest {
 
     @Test fun restoredLoopWakeupsKeepMetadataAndFoldQuietMessages() {
         val messages = transcriptFromDtos(listOf(
-            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.client.LoopWakeupDto("first", null, 0u, 0uL)),
-            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("quiet".toClientTextDto()))),
-            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.client.LoopWakeupDto("second", "healthy", 1u, 1uL)),
+            MessageDto(transcriptUuid = null, role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.client.LoopWakeupDto("first", null, 0u, 0uL)),
+            MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("quiet".toClientTextDto()))),
+            MessageDto(transcriptUuid = null, role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.client.LoopWakeupDto("second", "healthy", 1u, 1uL)),
         ))
         assertEquals(listOf("first", "quiet", "second", "healthy"), messages.map { it.text })
         assertEquals(messages.take(2).map { it.id }.toSet(), messages[2].loopFoldedItemIds)
@@ -253,7 +253,7 @@ class ClientEventMapperTest {
         val r = clientEventToReply(
             ClientEvent.MessageComplete(
                 stopReason = "end_turn",
-                message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("done".toClientTextDto()))),
+                message = MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("done".toClientTextDto()))),
             ),
         )
         assertTrue(r is ReplyEvent.MessageComplete)
@@ -321,7 +321,7 @@ class ClientEventMapperTest {
             ClientEvent.SessionResumed(
                 sessionId = "s",
                 mode = SessionModeDto.CODE,
-                messages = listOf(MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("hi".toClientTextDto())))),
+                messages = listOf(MessageDto(transcriptUuid = null, role = "user", blocks = listOf(MessageBlockDto.Text("hi".toClientTextDto())))),
             ),
         )
         assertNull(r)
@@ -332,7 +332,7 @@ class ClientEventMapperTest {
     @Test
     fun messageDtoToMessage_userRole_mapsToUser_withFlatText() {
         val m = messageDtoToMessage(
-            MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("你好".toClientTextDto()))),
+            MessageDto(transcriptUuid = null, role = "user", blocks = listOf(MessageBlockDto.Text("你好".toClientTextDto()))),
         )
         assertEquals(Role.User, m.role)
         assertEquals("你好", m.text)
@@ -341,7 +341,7 @@ class ClientEventMapperTest {
     @Test
     fun messageDtoToMessage_assistantRole_mapsToAi() {
         val m = messageDtoToMessage(
-            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("回答".toClientTextDto()))),
+            MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("回答".toClientTextDto()))),
         )
         assertEquals(Role.Ai, m.role)
         assertEquals("回答", m.text)
@@ -352,7 +352,7 @@ class ClientEventMapperTest {
         // System messages have no dedicated UI role — they render as the
         // assistant (avatar+markdown) bubble.
         val m = messageDtoToMessage(
-            MessageDto(role = "system", blocks = listOf(MessageBlockDto.Text("系统提示".toClientTextDto()))),
+            MessageDto(transcriptUuid = null, role = "system", blocks = listOf(MessageBlockDto.Text("系统提示".toClientTextDto()))),
         )
         assertEquals(Role.Ai, m.role)
         assertEquals("系统提示", m.text)
@@ -528,9 +528,9 @@ class ClientEventMapperTest {
         // would render a header with no result and an empty user bubble.
         val transcript = transcriptFromDtos(
             listOf(
-                MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("改一下".toClientTextDto()))),
+                MessageDto(transcriptUuid = null, role = "user", blocks = listOf(MessageBlockDto.Text("改一下".toClientTextDto()))),
                 MessageDto(
-                    role = "assistant",
+                    transcriptUuid = null, role = "assistant",
                     blocks = listOf(
                         MessageBlockDto.Text("好的".toClientTextDto()),
                         MessageBlockDto.ToolUse(
@@ -551,7 +551,7 @@ class ClientEventMapperTest {
                     ),
                 ),
                 MessageDto(
-                    role = "user",
+                    transcriptUuid = null, role = "user",
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "e1",
@@ -594,13 +594,13 @@ class ClientEventMapperTest {
         val transcript = transcriptFromDtos(
             listOf(
                 MessageDto(
-                    role = "assistant",
+                    transcriptUuid = null, role = "assistant",
                     blocks = listOf(
                         MessageBlockDto.ToolUse(id = "r1", tool = "Read", inputJson = "{}", header = currentToolHeaderFixture()),
                     ),
                 ),
                 MessageDto(
-                    role = "user",
+                    transcriptUuid = null, role = "user",
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "r1", tool = "Read", resultJson = """"boom"""", isError = true,
@@ -620,9 +620,9 @@ class ClientEventMapperTest {
         // is gone. It still belongs to the turn before it.
         val transcript = transcriptFromDtos(
             listOf(
-                MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("继续".toClientTextDto()))),
+                MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("继续".toClientTextDto()))),
                 MessageDto(
-                    role = "user",
+                    transcriptUuid = null, role = "user",
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
@@ -648,7 +648,7 @@ class ClientEventMapperTest {
         val transcript = transcriptFromDtos(
             listOf(
                 MessageDto(
-                    role = "user",
+                    transcriptUuid = null, role = "user",
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
@@ -656,7 +656,7 @@ class ClientEventMapperTest {
                         ),
                     ),
                 ),
-                MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("继续".toClientTextDto()))),
+                MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("继续".toClientTextDto()))),
             ),
         )
 
@@ -684,10 +684,10 @@ class ClientEventMapperTest {
         // that happens to sit in front of it.
         val transcript = transcriptFromDtos(
             listOf(
-                MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("在查".toClientTextDto()))),
-                MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("好".toClientTextDto()))),
+                MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("在查".toClientTextDto()))),
+                MessageDto(transcriptUuid = null, role = "user", blocks = listOf(MessageBlockDto.Text("好".toClientTextDto()))),
                 MessageDto(
-                    role = "user",
+                    transcriptUuid = null, role = "user",
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
@@ -710,7 +710,7 @@ class ClientEventMapperTest {
     @Test
     fun messageDtoToMessage_textOnlyMessage_hasNoStructuredToolBlocks() {
         val m = messageDtoToMessage(
-            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("纯文本".toClientTextDto()))),
+            MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(MessageBlockDto.Text("纯文本".toClientTextDto()))),
         )
         assertEquals("纯文本", m.text)
         assertTrue(m.blocks.none { it is MessageContent.Tool })

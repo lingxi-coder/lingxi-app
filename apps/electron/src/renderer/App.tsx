@@ -1,3 +1,6 @@
+import type { TerminalScope } from '../shared/terminal';
+import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type ScheduledLinkRequest } from './deepLinkRoutes';
+import { SETTINGS_NAV } from './components/settings/nav';
 import { useSideChats } from './bridge/useSideChats';
 import { SideChatPanel } from './components/SideChatPanel';
 import { conversationPlans } from './bridge/planDocuments';
@@ -41,6 +44,11 @@ import './components/TerminalPanel.css';
 import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
 
 export function App() {
+  const [messageTarget, setMessageTarget] = useState<string | null>(null);
+  const [messageRequest, setMessageRequest] = useState<{ projectPath: string; sessionId: string; uuid: string } | null>(null);
+  const messageCompletion = useRef<((found: boolean) => void) | null>(null);
+  const [terminalLinkScope, setTerminalLinkScope] = useState<TerminalScope | null>(null);
+  const [scheduledTarget, setScheduledTarget] = useState<ScheduledLinkRequest | undefined>();
   const [activityView, setActivityView] = useState(false);
   const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
@@ -90,8 +98,9 @@ export function App() {
   const settledSession = bridge.activeSession?.sessionId?.startsWith('pending-new:') ? undefined : bridge.activeSession;
   const sideChats = useSideChats(settledSession?.sessionId);
   const gitScope = selectedGitScope(bridge.bootstrap?.settings.activeProject, settledSession, workspace?.path);
-  const terminalProject = bridge.activeSession?.projectPath ?? workspace?.path;
-  const terminal = useTerminalPanel(terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null, page === 'chat' && settingsRoute === null);
+  const terminalProject = terminalLinkScope?.projectPath ?? bridge.activeSession?.projectPath ?? workspace?.path;
+  const terminal = useTerminalPanel(terminalLinkScope ?? (terminalProject ? { projectPath: terminalProject, sessionId: settledSession?.sessionId ?? '__draft__' } : null), page === 'chat' && settingsRoute === null);
+  useEffect(() => { if (!terminal.hasCommandReview) setTerminalLinkScope(null); }, [settledSession?.sessionId, terminal.hasCommandReview]);
   const providerConfigured = Boolean(bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured));
   const ready = Boolean(
     !bridge.loading
@@ -113,12 +122,15 @@ export function App() {
     setTheme(value);
     void bridge.setThemePreference(value).catch(() => undefined);
   };
-  const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference'>) => {
+  const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference' | 'linkRequest'>) => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
   }, []);
   useEffect(() => window.lingxi?.onApplicationMenu?.((action) => {
-    if (action === 'settings') {
+    if (action === 'copy-session-link') {
+      const active = bridge.activeSession;
+      if (active) void window.lingxi?.deepLinks.copySessionLink(active.projectPath, active.sessionId).catch(() => undefined);
+    } else if (action === 'settings') {
       // Preserve the original focus restoration target when already open.
       if (!settingsRoute) openSettings();
     } else if (action === 'activity' && !settingsRoute) {
@@ -126,7 +138,107 @@ export function App() {
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
     }
-  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen]);
+  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen, bridge.activeSession]);
+
+  const linkBusy = useRef(false);
+  const linkSurfacePending = useRef(false);
+  useEffect(() => { linkSurfacePending.current = Boolean(settingsRoute || terminal.hasCommandReview); }, [settingsRoute, terminal.hasCommandReview]);
+  const linkHandler = useRef<() => void>(() => {});
+  linkHandler.current = () => {
+    const api = window.lingxi?.deepLinks;
+    if (!api || !bridge.bootstrap || bridge.sessionLoading || settingsRoute || terminal.hasCommandReview || linkSurfacePending.current || linkBusy.current) return;
+    linkBusy.current = true;
+    let delivered = false;
+    void (async () => {
+      const delivery = await api.next();
+      if (!delivery) return;
+      delivered = true;
+      let error: string | undefined;
+      try {
+        const { route, params } = delivery.target;
+        const [kind, id, detailId] = route.split('/');
+        const settingsTarget = settingsLinkRequest(delivery.target, delivery.id);
+        // Project/local settings are owned by the selected conversation's engine.
+        // Merely changing activeProject leaves that engine in the previous cwd.
+        if ((settingsTarget || kind === 'settings' || kind === 'provider') && delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) {
+          const catalog = await bridge.listProjectSessions(delivery.projectPath);
+          const session = catalog?.sessions[0];
+          if (!session) throw new Error('Open a local conversation in this project before opening its configuration.');
+          if (!await bridge.openSession(delivery.projectPath, session.uuid)) throw new Error('Unable to open the linked project’s local conversation.');
+        }
+        if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
+        else if (kind === 'settings') {
+          if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error('This settings page is unavailable.');
+          linkSurfacePending.current = true;
+          openSettings({ pageId: id });
+        } else if (kind === 'provider') { linkSurfacePending.current = true; openSettings({ pageId: 'provider-credentials', providerId: id }); }
+        else if (kind === 'session' || kind === 'project') {
+          setMessageTarget(null);
+          if (!delivery.projectPath) throw new Error('This project is not registered on this device.');
+          if (kind === 'session' && !await bridge.openSession(delivery.projectPath, id!)) throw new Error('Unable to open this local conversation.');
+          if (kind === 'project') await bridge.activateProject(delivery.projectPath);
+          setPage('chat');
+          setActivityView(false);
+          if (params.message) {
+            await new Promise<void>((resolve, reject) => {
+              messageCompletion.current = found => { messageCompletion.current = null; found ? resolve() : reject(new Error('This message is unavailable in the local conversation.')); };
+              setMessageRequest({ projectPath: delivery.projectPath!, sessionId: id!, uuid: params.message! });
+            });
+          }
+        } else if (kind === 'new') {
+          const project = delivery.projectPath ?? bridge.bootstrap?.settings.activeProject;
+          if (!project) throw new Error('Select a local project before creating a conversation.');
+          const session = await bridge.newSession(project);
+          if (!session) throw new Error('Unable to create conversation.');
+          if (typeof delivery.target.payload?.prompt === 'string') bridge.offerLinkDraft({ sessionId: session.sessionId, text: delivery.target.payload.prompt, requestId: delivery.id });
+          setPage('chat');
+        } else if (kind === 'terminal') {
+          const projectPath = delivery.projectPath ?? bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject;
+          if (!projectPath) throw new Error('Select a local project before opening a terminal.');
+          if (projectPath !== bridge.activeSession?.projectPath) await bridge.activateProject(projectPath);
+          setPage('chat');
+          setActivityView(false);
+          const scope = { projectPath, sessionId: params.scope ?? (bridge.activeSession?.projectPath === projectPath ? settledSession?.sessionId ?? '__draft__' : '__draft__') };
+          setTerminalLinkScope(scope);
+          if (typeof delivery.target.payload?.command === 'string') linkSurfacePending.current = true;
+          await terminal.openLink(scope, id!, typeof delivery.target.payload?.command === 'string' ? delivery.target.payload.command : undefined);
+        } else if (kind === 'cron') {
+          setScheduledTarget({ requestId: delivery.id, kind: id as 'job' | 'run', id: detailId!, scope: delivery.projectPath ?? params.scope });
+          setPage('scheduled');
+        } else if (kind === 'runtime') {
+          if (delivery.projectPath && delivery.projectPath !== bridge.activeSession?.projectPath) throw new Error('Open this local project’s conversation before opening its runtime details.');
+          const item = runtimeLinkItem(id!, detailId!, bridge, planCalls);
+          setPage('chat');
+          if (item === 'activity') { setActivityView(true); bridge.setRuntimeCenterOverviewOpen(true); }
+          else { setActivityView(false); bridge.openRuntimeItem(item); }
+        } else throw new Error('This destination is not available in Desktop.');
+      } catch (cause) { linkSurfacePending.current = false; error = cause instanceof Error ? cause.message : 'Unable to open destination'; }
+      await api.acknowledge(delivery.id, error);
+    })().catch(() => undefined).finally(() => {
+      linkBusy.current = false;
+      if (delivered) queueMicrotask(() => linkHandler.current());
+    });
+  };
+  useEffect(() => {
+    const unsubscribe = window.lingxi?.deepLinks?.onAvailable(() => linkHandler.current());
+    linkHandler.current();
+    return unsubscribe;
+  }, [bridge.bootstrap, bridge.sessionLoading, settingsRoute, terminal.hasCommandReview]);
+  useEffect(() => {
+    if (!messageRequest || bridge.sessionLoading) return;
+    if (bridge.activeSession?.sessionId !== messageRequest.sessionId || bridge.activeSession?.projectPath !== messageRequest.projectPath) {
+      messageCompletion.current?.(false);
+      setMessageRequest(null);
+      return;
+    }
+    if (bridge.conversation.sessionKey !== messageRequest.sessionId) return;
+    setMessageTarget(messageRequest.uuid);
+  }, [messageRequest, bridge.sessionLoading, bridge.activeSession?.sessionId, bridge.activeSession?.projectPath, bridge.conversation.sessionKey]);
+  const onMessageLocated = useCallback((found: boolean) => {
+    if (!messageCompletion.current) return;
+    messageCompletion.current(found);
+    setMessageRequest(null);
+  }, []);
 
   const emptyMessage = bridge.sessionLoading
     ? 'Loading session…'
@@ -176,7 +288,7 @@ export function App() {
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
-          <ScheduledTasks bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => setPage('chat')} />
+          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => setPage('chat')} />
           </div>
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <ErrorBanner bridge={bridge} />
@@ -184,6 +296,12 @@ export function App() {
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}
                 <Stage
+                  messageTarget={!bridge.sessionLoading && (!messageRequest || bridge.conversation.sessionKey === messageRequest.sessionId) ? messageTarget : null}
+                  onMessageLocated={onMessageLocated}
+                  onCopyMessage={(uuid) => {
+                    const active = bridge.activeSession;
+                    if (active) void window.lingxi?.deepLinks.copySessionLink(active.projectPath, active.sessionId, uuid).catch(() => undefined);
+                  }}
                   activityView={activityView}
                   onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
                   submittedPlans={bridge.sessionLoading ? [] : planCalls}
@@ -294,6 +412,7 @@ export function App() {
             bridge={bridge}
             theme={theme}
             onTheme={changeTheme}
+            linkRequest={settingsRoute.linkRequest}
             initialPageId={settingsRoute.pageId}
             initialProviderId={settingsRoute.providerId}
             pendingModelReference={settingsRoute.pendingModelReference}
@@ -334,6 +453,7 @@ export function SettingsBackground({ active, children }: { active: boolean; chil
 
 export interface SettingsRoute {
   pageId?: string;
+  linkRequest?: SettingsLinkRequest;
   providerId?: string;
   pendingModelReference?: string;
   restoreFocus?: () => void;

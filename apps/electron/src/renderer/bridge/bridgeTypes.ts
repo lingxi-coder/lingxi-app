@@ -113,6 +113,9 @@ export interface TrackedSpeechEvent {
 }
 
 export interface UseBridge {
+  linkDraft: { sessionId: string; text: string; requestId: string } | null;
+  offerLinkDraft(value: { sessionId: string; text: string; requestId: string }): void;
+  clearLinkDraft(): void;
   /** Stable per-renderer identity shared by ui_attach and parent UI requests. */
   readonly uiSurfaceClientId: string;
   updatePromptSuggestionContext(context: { session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }): Promise<void>;
@@ -203,7 +206,7 @@ export interface UseBridge {
   touchSession(projectPath: string, sessionId: string): Promise<void>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string): Promise<void>;
+  openSession(projectPath: string, sessionId: string): Promise<boolean>;
   listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState | undefined>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
@@ -312,7 +315,7 @@ export interface UseBridge {
   audioCancel(): Promise<void>;
   audioFinishListen(): Promise<void>;
   refresh(): Promise<void>;
-  newSession(projectPath?: string): Promise<void>;
+  newSession(projectPath?: string): Promise<import("../../shared/settings").SessionRef | undefined>;
   resumeSession(sessionId: string): Promise<void>;
   setModel(model: string): Promise<void>;
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;

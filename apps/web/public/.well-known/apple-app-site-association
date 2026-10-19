@@ -1,0 +1,17 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": [
+          "AZ4AX7J833.com.lingxi.code",
+          "AZ4AX7J833.com.lingxi.code.full"
+        ],
+        "components": [
+          {
+            "/": "/open/*"
+          }
+        ]
+      }
+    ]
+  }
+}

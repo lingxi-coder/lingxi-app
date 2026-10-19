@@ -45,6 +45,9 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// opt-in so other transcript clients retain their existing anchor.
     var alignShortContentToTop = false
 
+    var requestedRowID: String? = nil
+    var requestedScrollRevision: UInt64 = 0
+
     @ViewBuilder var content: () -> Content
 
     @State private var scrollPosition = ScrollPosition(idType: String.self)
@@ -85,7 +88,10 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             // A modal can temporarily recreate this surface. Restore the
             // bottom only when the reader was already following the latest
             // message; otherwise preserve the user's reading position.
-            scrollToLatest(animated: false, requiresFollow: true)
+            if let requestedRowID {
+                followsLatest = false
+                scrollPosition.scrollTo(id: requestedRowID, anchor: .center)
+            } else { scrollToLatest(animated: false, requiresFollow: true) }
         }
         .onChange(of: follow) { _, _ in
             // Unanimated on purpose. A streamed turn changes `follow` tens of
@@ -98,6 +104,14 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             // prior anchor and start the new transcript at its tail.
             scrollPosition = ScrollPosition(idType: String.self)
             scrollToLatest(animated: false, requiresFollow: false)
+        }
+        .onChange(of: requestedScrollRevision) { _, _ in
+            guard let row = requestedRowID else { return }
+            followsLatest = false
+            Task { @MainActor in
+                await Task.yield()
+                scrollPosition.scrollTo(id: row, anchor: .center)
+            }
         }
         .onChange(of: focused) { _, isFocused in
             // Respects the reader now: the keyboard must not pull someone who

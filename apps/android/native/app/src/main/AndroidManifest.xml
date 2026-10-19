@@ -106,6 +106,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTop"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.LingXiCode"
@@ -116,23 +117,26 @@
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
-
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-
-                <data
-                    android:host="open_terminal"
-                    android:scheme="lingxi" />
+                <data android:scheme="lingxi" android:host="session" />
+                <data android:scheme="lingxi" android:host="terminal" />
+                <data android:scheme="lingxi" android:host="settings" />
+                <data android:scheme="lingxi" android:host="provider" />
+                <data android:scheme="lingxi" android:host="cron" />
+                <data android:scheme="lingxi" android:host="new" />
+                <data android:scheme="lingxi" android:host="project" />
+                <data android:scheme="lingxi" android:host="extensions" />
+                <data android:scheme="lingxi" android:host="apps" />
+                <data android:scheme="lingxi" android:host="market" />
+                <data android:scheme="lingxi" android:host="runtime" />
+                <data android:scheme="lingxi" android:host="import" />
             </intent-filter>
-            <intent-filter>
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
-
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-
-                <data
-                    android:host="open_conversation"
-                    android:scheme="lingxi" />
+                <data android:scheme="https" android:host="lingxios.net" android:pathPrefix="/open/" />
             </intent-filter>
         </activity>
 

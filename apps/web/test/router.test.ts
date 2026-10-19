@@ -14,3 +14,8 @@ test('resolves known routes and falls back to the public homepage', () => {
   assert.equal(resolveRoute('/docs/mobile-ios'), '/docs/mobile-ios');
   assert.equal(resolveRoute('/docs/no-such-sdk'), '/');
 });
+
+
+test('deep link route preserves case-sensitive resource identity', () => {
+  assert.equal(resolveRoute('/open/session/AbC?workspace=project.X#payload=ignored'), '/open/session/AbC');
+});

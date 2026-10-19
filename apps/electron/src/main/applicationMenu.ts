@@ -17,6 +17,10 @@ export function applicationMenuTemplate(
       { role: 'unhide' as const }, { type: 'separator' as const }, { role: 'quit' as const },
     ] }] : [{ label: 'File', submenu: [settings, { type: 'separator' as const }, { role: 'quit' as const }] }]),
     { role: 'editMenu' },
+    { label: 'Links', submenu: [
+      { label: 'Copy Session Link', click: () => dispatch('copy-session-link') },
+      { label: 'Open Link from Clipboard', click: () => dispatch('open-link') },
+    ] },
     { label: 'View', submenu: [
       { label: 'Activity', accelerator: 'CommandOrControl+Alt+U', click: () => dispatch('activity') },
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },

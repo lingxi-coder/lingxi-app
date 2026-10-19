@@ -46,6 +46,7 @@ import {
   buildCredentialBrokerResources,
   signBinary,
 } from './credential-broker.mjs';
+import { writeProtocolRegistration } from './protocol-registration.mjs';
 import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 
 function log(message) {
@@ -205,6 +206,7 @@ async function assemblePortable(paths, metadata, electronDist, sidecar, modCompi
     chmodSync(executable, 0o755);
     chmodSync(packagedSidecar, 0o755);
   }
+  writeProtocolRegistration(paths.payloadRoot, paths.platform);
   assertBinaryArchitecture(executable, paths, `${APP_NAME} executable`);
   assertBinaryArchitecture(packagedSidecar, paths, 'packaged bridge-server sidecar');
 }

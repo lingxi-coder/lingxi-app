@@ -40,7 +40,7 @@ import {
   ensureAudioHelperResourceLayout,
   writeAudioHelperInfoPlist,
 } from '../scripts/audio-helper.mjs';
-import { assertSandboxedPreloadBundle } from '../scripts/verify-package.mjs';
+import { assertSandboxedPreloadBundle, assertLingxiProtocolInfoPlist } from '../scripts/verify-package.mjs';
 
 /**
  * A minimal but structurally real Info.plist — the same shape Electron's own
@@ -592,5 +592,17 @@ test('runtime dependency copy handles overlapping Firebase-style globs without c
     assert.equal(readFileSync(join(destination, 'fixture', 'compat', 'index.d.ts'), 'utf8'), 'export {};');
     assert.equal(existsSync(join(destination, 'fixture', 'firebase-auth.js')), true);
     assert.equal(existsSync(join(destination, 'fixture', 'node_modules')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('macOS package verification requires the actual signed bundle to declare lingxi', { skip: process.platform !== 'darwin' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-protocol-plist-'));
+  try {
+    const plistPath = join(root, 'Info.plist');
+    writeFileSync(plistPath, SEED_INFO_PLIST);
+    rewriteInfoPlist(plistPath, '0.1.0');
+    assertLingxiProtocolInfoPlist(plistPath);
+    execFileSync('/usr/bin/plutil', ['-replace', 'CFBundleURLTypes', '-json', '[{"CFBundleURLSchemes":["wrong-scheme"]}]', plistPath]);
+    assert.throws(() => assertLingxiProtocolInfoPlist(plistPath), /does not register lingxi/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

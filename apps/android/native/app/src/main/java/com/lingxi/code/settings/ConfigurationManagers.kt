@@ -13,11 +13,11 @@ import org.json.JSONObject
 internal fun JSONArray.records(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 
 @Composable
-internal fun McpConfigurationPage(bridge: SettingsEngineBridge) {
+internal fun McpConfigurationPage(bridge: SettingsEngineBridge, initialName: String? = null, initialScope: String? = null) {
     val state by bridge.state.collectAsState()
     val coroutine = rememberCoroutineScope()
-    var scope by remember(state.generation) { mutableStateOf("user") }
-    var name by remember(state.generation, scope) { mutableStateOf("") }
+    var scope by remember(state.generation, initialScope) { mutableStateOf(initialScope ?: "user") }
+    var name by remember(state.generation, scope, initialName) { mutableStateOf(initialName.orEmpty()) }
     var config by remember(state.generation, scope) { mutableStateOf("{}") }
     var error by remember { mutableStateOf<String?>(null) }
     var deleteRequested by remember { mutableStateOf(false) }
@@ -26,6 +26,19 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge) {
     val current = scopes.firstOrNull { it.optString("scope") == scope }
     val raw = runCatching { JSONObject(current?.optString("raw_json") ?: "{}") }.getOrDefault(JSONObject())
     val servers = raw.optJSONObject("mcpServers") ?: JSONObject()
+    var initialServerLoaded by remember(state.generation, initialName, initialScope) { mutableStateOf(false) }
+    var deepLinkMissing by remember(state.generation, initialName, initialScope) { mutableStateOf(false) }
+    LaunchedEffect(state.catalogs["mcp"], initialName, initialScope, scope) {
+        if (!initialServerLoaded && initialName != null && state.catalogs["mcp"] != null) {
+            val destination = runCatching { resolveMcpDeepLinkScope(scopes, initialName, initialScope) }.getOrElse {
+                error = it.message; deepLinkMissing = true; initialServerLoaded = true; return@LaunchedEffect
+            }
+            if (scope != destination.optString("scope")) { scope = destination.optString("scope"); return@LaunchedEffect }
+            name = initialName
+            config = prettyJsonValue(JSONObject(destination.optString("raw_json")).getJSONObject("mcpServers").get(initialName))
+            initialServerLoaded = true
+        }
+    }
     val matchesStored = runCatching { jsonEquivalent(JSONObject(config),servers.optJSONObject(name)) }.getOrDefault(false)
     ReportSettingsDraft("mcp/$scope",(name.isNotBlank() || config != "{}") && !matchesStored)
     var revisionAtEdit by remember(state.generation, scope) { mutableStateOf<String?>(null) }
@@ -39,6 +52,11 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(settingsLabel("MCP storage scopes are independent of settings layers. Writes use the loaded revision to prevent overwriting external edits."))
         if (!state.connected) { Text(settingsLabel("Connect an engine to manage MCP servers.")); return@Column }
+        if (deepLinkMissing) {
+            Text(error ?: "MCP server is unavailable.", color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = { deepLinkMissing = false; name = ""; config = "{}"; scope = "user"; error = null }) { Text("Back to servers") }
+            return@Column
+        }
         TextButton(onClick = ::load) { Text(settingsLabel("Refresh servers")) }
         SingleChoiceRow(listOf("user", "project", "local"), scope, { scope = it })
         // 「与设置层无关」上面那行已经说了，但没说清差在哪 —— 而「本地」两边的含义
@@ -89,10 +107,10 @@ internal fun McpConfigurationPage(bridge: SettingsEngineBridge) {
 }
 
 @Composable
-internal fun SkillManager(bridge: SettingsEngineBridge) {
+internal fun SkillManager(bridge: SettingsEngineBridge, initialId: String? = null) {
     val state by bridge.state.collectAsState()
     val coroutine = rememberCoroutineScope()
-    var selected by remember(state.generation) { mutableStateOf<String?>(null) }
+    var selected by remember(state.generation, initialId) { mutableStateOf(initialId) }
     var name by remember(state.generation) { mutableStateOf("") }
     var markdown by remember(state.generation) { mutableStateOf("") }
     var scope by remember(state.generation) { mutableStateOf("user") }
@@ -101,6 +119,9 @@ internal fun SkillManager(bridge: SettingsEngineBridge) {
     val document = runCatching { JSONObject(state.catalogs["document"] ?: "{}") }.getOrDefault(JSONObject())
     val loaded = selected != null && document.optString("id") == selected
     LaunchedEffect(state.connected) { if (state.connected) runCatching { bridge.admin("skills", "get_catalog") } }
+    LaunchedEffect(state.connected, initialId) {
+        if (state.connected && initialId != null) runCatching { bridge.admin("skills", "get_document", target = initialId) }.onFailure { error = it.message }
+    }
     var loadedDocumentId by remember(state.generation) { mutableStateOf<String?>(null) }
     var documentRevision by remember(state.generation) { mutableStateOf<String?>(null) }
     var baselineMarkdown by remember(state.generation) { mutableStateOf("") }
@@ -252,4 +273,16 @@ internal fun HookManager(bridge: SettingsEngineBridge, layer: String) {
         if (loaded) { Text(settingsLabel("Effective hooks")); SelectionContainer { Text(prettyJson(document.optString("effective_json","{}"))) } }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
+}
+
+/** Never substitute a same-named definition from a different scope. */
+internal fun resolveMcpDeepLinkScope(scopes: List<JSONObject>, name: String, requestedScope: String?): JSONObject {
+    require(requestedScope == null || requestedScope in setOf("user", "project", "local")) { "Unsupported MCP scope." }
+    val candidates = scopes.filter { entry ->
+        (requestedScope == null || entry.optString("scope") == requestedScope) &&
+            runCatching { JSONObject(entry.optString("raw_json", "{}")).optJSONObject("mcpServers")?.has(name) == true }.getOrDefault(false)
+    }
+    require(candidates.isNotEmpty()) { "This MCP server does not exist in the requested workspace and scope." }
+    require(candidates.size == 1) { "This MCP server exists in multiple scopes. Open a link with an explicit scope." }
+    return candidates.single()
 }

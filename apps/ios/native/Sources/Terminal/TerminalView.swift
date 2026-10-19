@@ -15,6 +15,7 @@ struct TerminalView: View {
     @FocusState private var inputFocused: Bool
     var onDismiss: (() -> Void)?
     var onOpenRuntimeSettings: (() -> Void)?
+    var onDraftChanged: ((Bool) -> Void)?
     // No onRepairRuntime callback exists anymore, deliberately: the only
     // implementation anyone ever wired was byte-identical to
     // `onOpenRuntimeSettings` — it popped the terminal (destroying the
@@ -32,22 +33,26 @@ struct TerminalView: View {
     init(
         model: TerminalSessionModel,
         onDismiss: (() -> Void)? = nil,
-        onOpenRuntimeSettings: (() -> Void)? = nil
+        onOpenRuntimeSettings: (() -> Void)? = nil,
+        onDraftChanged: ((Bool) -> Void)? = nil
     ) {
         _model = State(initialValue: model)
         self.onDismiss = onDismiss
         self.onOpenRuntimeSettings = onOpenRuntimeSettings
+        self.onDraftChanged = onDraftChanged
     }
 
     init(
         descriptor: TerminalRuntimeDescriptor,
         client: TerminalRuntimeClient,
         onDismiss: (() -> Void)? = nil,
-        onOpenRuntimeSettings: (() -> Void)? = nil
+        onOpenRuntimeSettings: (() -> Void)? = nil,
+        onDraftChanged: ((Bool) -> Void)? = nil
     ) {
         _model = State(initialValue: TerminalSessionModel(descriptor: descriptor, client: client))
         self.onDismiss = onDismiss
         self.onOpenRuntimeSettings = onOpenRuntimeSettings
+        self.onDraftChanged = onDraftChanged
     }
 
     var body: some View {
@@ -74,7 +79,9 @@ struct TerminalView: View {
                 try? await Task.sleep(for: .milliseconds(150))
                 inputFocused = true
             }
+            .onChange(of: model.inputText) { _, value in onDraftChanged?(!value.isEmpty) }
             .onAppear {
+                onDraftChanged?(!model.inputText.isEmpty)
                 // A disappear that is followed by an appear was a transition,
                 // not a dismissal. Cancel the pending teardown.
                 pendingClose?.cancel()

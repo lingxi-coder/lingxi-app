@@ -335,6 +335,12 @@ test('bridge environment is allowlisted and never inherits credentials', () => {
   assert.deepEqual(result, { HOME: '/home/user', PATH: '/bin', LINGXI_API_BASE_URL: 'https://api.example.test' });
 });
 
+test('bridge environment preserves only the explicit engine configuration directory override', () => {
+  const source = { HOME: '/home/user', LINGXI_CONFIG_DIR: '/tmp/isolated-lingxi', LINGXI_OTHER_CONFIG: '/private/unrelated', OPENAI_API_KEY: 'never-forward' };
+  assert.deepEqual(buildBridgeEnvironment(source), { HOME: '/home/user', LINGXI_CONFIG_DIR: '/tmp/isolated-lingxi' });
+  assert.equal(source.HOME, '/home/user', 'config isolation must preserve the real home');
+});
+
 test('Mod UI Bun resolution uses the packaged sidecar and otherwise only an explicit development path', () => {
   assert.equal(
     resolveModBunExecutable({ isPackaged: true, resourcesPath: '/app/resources', configuredPath: '/ignored/bun' }),

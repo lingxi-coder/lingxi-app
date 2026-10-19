@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ProviderBulkImportPage: View {
     let layer: DesktopSettingsLayer
+    var initialInput: String? = nil
     @State private var repository = DesktopSettingsRepository.shared
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
@@ -66,7 +67,10 @@ struct ProviderBulkImportPage: View {
             errorMessage = String(localized: "settings_parity_import_source_changed")
         }
         .onDisappear { importTask?.cancel(); input = ""; rejectedInput = nil; document = nil }
-        .task { await repository.refreshCredentials() }
+        .task {
+            await repository.refreshCredentials()
+            if let initialInput { input = initialInput; preview() }
+        }
     }
 
     private func reviewRow(_ entry: ProviderImportEntry) -> some View {

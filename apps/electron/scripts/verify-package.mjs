@@ -50,6 +50,11 @@ function plistValue(plistPath, key) {
   }).trim();
 }
 
+export function assertLingxiProtocolInfoPlist(plistPath) {
+  const urlTypes = JSON.parse(execFileSync('/usr/bin/plutil', ['-extract', 'CFBundleURLTypes', 'json', '-o', '-', plistPath], { encoding: 'utf8' }));
+  if (!Array.isArray(urlTypes) || !urlTypes.some(entry => entry.CFBundleURLSchemes?.includes('lingxi'))) throw new Error('The packaged app does not register lingxi:');
+}
+
 function plistHasKey(plistPath, key) {
   try {
     plistValue(plistPath, key);
@@ -157,6 +162,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     const actual = plistValue(plistPath, key);
     if (actual !== value) throw new Error(`${key} is ${actual}; expected ${value}`);
   }
+  assertLingxiProtocolInfoPlist(plistPath);
   const helperPlistPath = join(resources, AUDIO_HELPER_APP, 'Contents', 'Info.plist');
   const expectedHelperPlist = {
     CFBundleExecutable: AUDIO_HELPER_EXECUTABLE,

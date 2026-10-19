@@ -12,18 +12,18 @@ final class ClientTextIdentityTests: XCTestCase {
         ]
         XCTAssertEqual(Set(texts.map(\.displayText)).count, 1)
         let signatures = texts.map {
-            EngineConversationSource.messageSignature(MessageDto(role: "assistant", blocks: [.text(text: $0)]))
+            EngineConversationSource.messageSignature(MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: $0)]))
         }
         XCTAssertEqual(Set(signatures).count, texts.count)
         XCTAssertEqual(
             signatures[0],
-            EngineConversationSource.messageSignature(MessageDto(role: "assistant", blocks: [.text(text: texts[0])]))
+            EngineConversationSource.messageSignature(MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: texts[0])]))
         )
     }
 
     func testReplaySignatureKeepsCodeUnitAndBlockBoundaries() {
         func signature(_ blocks: [[UInt16]]) -> String {
-            EngineConversationSource.messageSignature(MessageDto(
+            EngineConversationSource.messageSignature(MessageDto(transcriptUuid: nil,
                 role: "assistant",
                 blocks: blocks.map { .text(text: ClientTextDto(codeUnits: $0)) }
             ))

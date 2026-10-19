@@ -28,9 +28,13 @@ data class TerminalUiState(
     val errorMessage: String? = null,
     val keyboardVisible: Boolean = false,
     val ctrlActive: Boolean = false,
+    val commandDraft: String? = null,
 )
 
 sealed interface TerminalAction {
+    data class EditCommand(val text: String) : TerminalAction
+    data object DismissCommand : TerminalAction
+    data object ConfirmCommand : TerminalAction
     data object Start : TerminalAction
     data object Close : TerminalAction
     data object Clear : TerminalAction

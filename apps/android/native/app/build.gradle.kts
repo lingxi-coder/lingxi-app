@@ -1,3 +1,4 @@
+import java.util.Properties
 import groovy.json.JsonSlurper
 import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
 
@@ -21,6 +22,21 @@ kotlin {
     }
 }
 
+// Local release credentials stay in the ignored .signing directory. CI may
+// supply this file separately; a checkout without it keeps release unsigned.
+val localReleaseSigningFile = rootProject.file(".signing/release-signing.properties")
+val localReleaseSigning = localReleaseSigningFile.takeIf { it.isFile }?.let { file ->
+    Properties().apply { file.inputStream().use { load(it) } }
+}
+
+// Release verification may build one architecture explicitly; never package a
+// stale second JNI library while waiting for its current SDK build.
+val targetAbis = providers.gradleProperty("lingxiTargetAbis").orNull
+    ?.split(',')?.map { it.trim() } ?: listOf("arm64-v8a", "x86_64")
+require(targetAbis.isNotEmpty() && targetAbis.all { it in setOf("arm64-v8a", "x86_64") }) {
+    "lingxiTargetAbis must contain arm64-v8a, x86_64, or both"
+}
+
 android {
     namespace = "com.lingxi.code"
     compileSdk = 37
@@ -40,7 +56,7 @@ android {
         ndk {
             // MobileLinux/PTY/legacy shell artifacts are release-gated for
             // exactly these two architectures.
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += targetAbis
         }
         vectorDrawables {
             useSupportLibrary = true
@@ -75,6 +91,15 @@ android {
     }
 
     signingConfigs {
+        localReleaseSigning?.let { credentials ->
+            create("localRelease") {
+                storeFile = localReleaseSigningFile.parentFile.resolve(credentials.getProperty("storeFile"))
+                storePassword = credentials.getProperty("storePassword")
+                keyAlias = credentials.getProperty("keyAlias")
+                keyPassword = credentials.getProperty("keyPassword")
+                storeType = "PKCS12"
+            }
+        }
         getByName("debug") {
             storeFile = rootProject.file(".signing/lingxi-5e4b2-debug.keystore")
             storePassword = "android"
@@ -90,6 +115,7 @@ android {
             manifestPlaceholders["crashlyticsCollectionEnabled"] = false
         }
         release {
+            if (localReleaseSigning != null) signingConfig = signingConfigs.getByName("localRelease")
             manifestPlaceholders["crashlyticsCollectionEnabled"] = true
             configure<CrashlyticsExtension> {
                 nativeSymbolUploadEnabled = true
@@ -180,6 +206,7 @@ listOf("play", "direct").forEach { distribution ->
                 "--source", layout.buildDirectory.dir("mobileLinuxNative/$distribution/native-support").get().asFile,
                 "--jni-root", file("src/$distribution/jniLibs"),
                 "--assets-source", layout.buildDirectory.dir("generated/mobileLinux/$distribution/assets/mobile-linux").get().asFile,
+                "--abis", targetAbis.joinToString(","),
             )
         }
         tasks.matching { it.name == "pre${variantName}Build" }.configureEach {

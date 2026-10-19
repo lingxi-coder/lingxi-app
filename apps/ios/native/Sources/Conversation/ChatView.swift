@@ -22,6 +22,8 @@ struct ChatView: View {
     /// line, the new-chat bar and the session panel.
     let sessionMode: SessionMode
     let workspaceName: String
+    var workspaceKey: String = "global"
+    var onDraftMediaChanged: (Bool) -> Void = { _ in }
     var isPinned = false
     /// An existing (not brand-new) session can be archived.
     var canArchive = false
@@ -112,6 +114,8 @@ struct ChatView: View {
          projectName: String? = nil,
          sessionMode: SessionMode = .code,
          workspaceName: String = "",
+         workspaceKey: String = "global",
+         onDraftMediaChanged: @escaping (Bool) -> Void = { _ in },
          isPinned: Bool = false,
          canArchive: Bool = false,
          onSelectNewChatMode: @escaping (SessionMode) -> Void = { _ in },
@@ -130,6 +134,8 @@ struct ChatView: View {
         self.sessionMode = sessionMode
         self.externalDraftSourceCodeUnitsBinding = draftSourceCodeUnits
         self.workspaceName = workspaceName
+        self.workspaceKey = workspaceKey
+        self.onDraftMediaChanged = onDraftMediaChanged
         self.isPinned = isPinned
         self.canArchive = canArchive
         self.onSelectNewChatMode = onSelectNewChatMode
@@ -287,8 +293,8 @@ struct ChatView: View {
         .onChange(of: draft) { _, _ in reportSuggestionContext() }
         .onChange(of: scenePhase) { _, _ in reportSuggestionContext() }
         .onChange(of: convo.activeSessionId) { _, _ in reportSuggestionContext() }
-        .onChange(of: attachment) { _, _ in reportSuggestionContext() }
-        .onChange(of: convo.visualizationChip?.id) { _, _ in reportSuggestionContext() }
+        .onChange(of: attachment) { _, value in reportSuggestionContext(); onDraftMediaChanged(value != nil || convo.visualizationChip != nil) }
+        .onChange(of: convo.visualizationChip?.id) { _, _ in reportSuggestionContext(); onDraftMediaChanged(attachment != nil || convo.visualizationChip != nil) }
         .onChange(of: convo.pendingQuestions.map(\.requestId)) { _, _ in reportSuggestionContext() }
     }
 
@@ -304,6 +310,7 @@ struct ChatView: View {
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
             // (`ModelList`) populates the picker before the first send. No-op on the mock.
             source.warmUp()
+            onDraftMediaChanged(attachment != nil || convo.visualizationChip != nil)
             reportSuggestionContext()
             source.listSessionAgents()
             recentModels = modelRecents.resolved(against: visibleAvailableModels)
@@ -565,6 +572,13 @@ struct ChatView: View {
 
     private var summaryMenu: some View {
         Menu {
+            if let url = ConversationDeepLink.makeURL(sessionID: convo.activeSessionId, turnID: nil, workspaceKey: workspaceKey, sessionMode: sessionMode.rawValue) {
+                Button("Copy conversation link", systemImage: "link") { UIPasteboard.general.url = url }
+            }
+            if convo.selectedAgentID != ConversationModel.mainAgentID,
+               let url = ConversationDeepLink.makeURL(route: ["runtime", "agent", convo.selectedAgentID], parameters: ["workspace": workspaceKey, "mode": sessionMode.rawValue]) {
+                Button("Copy agent link", systemImage: "link") { UIPasteboard.general.url = url }
+            }
             ForEach(summaryCategories) { category in
                 Button {
                     summaryDetent = .medium
@@ -653,7 +667,9 @@ struct ChatView: View {
             accessibilityIdentifier: showsSelectedAgent ? "conversation.agent-message-list" : "conversation.message-list",
             maxContentWidth: 860,
             scrollScope: "\(session.id):\(showsSelectedAgent ? convo.selectedAgentID : ConversationModel.mainAgentID)",
-            alignShortContentToTop: true
+            alignShortContentToTop: true,
+            requestedRowID: showsSelectedAgent ? nil : convo.deepLinkScrollRowID,
+            requestedScrollRevision: showsSelectedAgent ? 0 : convo.deepLinkScrollRevision
         ) {
             if !showsSelectedAgent {
                 if visibleRenderItems.isEmpty,
@@ -677,6 +693,11 @@ struct ChatView: View {
                     showThinking: canShowTranscriptThinking,
                     // An agent's widgets live in its origin session's store.
                     visualizationSessionId: convo.activeSessionId,
+                    linkWorkspaceKey: workspaceKey,
+                    linkSessionMode: sessionMode.rawValue,
+                    highlightedRowID: convo.deepLinkScrollRowID,
+                    transcriptUUIDToolIDs: convo.transcriptUUIDToolIDs,
+                    allowsMessageLinks: !showsSelectedAgent,
                     onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             } else if convo.isAgentTranscriptLoading {
@@ -697,9 +718,17 @@ struct ChatView: View {
                     showThinking: canShowTranscriptThinking,
                     // An agent's widgets live in its origin session's store.
                     visualizationSessionId: convo.activeSessionId,
+                    linkWorkspaceKey: workspaceKey,
+                    linkSessionMode: sessionMode.rawValue,
+                    highlightedRowID: convo.deepLinkScrollRowID,
+                    transcriptUUIDToolIDs: convo.transcriptUUIDToolIDs,
+                    allowsMessageLinks: !showsSelectedAgent,
                     onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             }
+        }
+        .sheet(item: $convo.deepLinkRuntimeTarget) { target in
+            DeepLinkRuntimeDetail(target: target, source: source, convo: convo)
         }
     }
 

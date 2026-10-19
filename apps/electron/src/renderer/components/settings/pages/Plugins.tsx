@@ -1,3 +1,4 @@
+import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
@@ -94,7 +95,7 @@ function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLay
   return objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
 }
 
-export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onRegisterNavigationRequest, initialPluginId }: PageContentProps) {
+export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onRegisterNavigationRequest, onClose, onRegisterCloseRequest, initialPluginId, linkRequest }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { pluginAdmin?: unknown }).pluginAdmin === 'function';
   const catalog = useMemo(() => parseEventEnvelope<PluginCatalogEnvelope>(bridge.pluginCatalogEvent?.catalog_json, { installed: [], revisions: {} }), [bridge.pluginCatalogEvent?.catalog_json]);
@@ -107,6 +108,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const availablePlugins = catalog.available ?? [];
   const marketplaceNames = [...new Set([...Object.keys(marketplaces), ...(catalog.marketplaces ?? []).map((entry) => entry.name)])].sort();
 
+  const appliedLink = useRef<string>();
   const [selection, setSelection] = useState<PluginSelection>(initialPluginId ? { kind: 'plugin', id: initialPluginId } : { kind: 'list' });
   const [search, setSearch] = useState('');
   const [draftEnabled, setDraftEnabled] = useState(enabledPlugins);
@@ -135,6 +137,22 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     setDraftMarketplaces(marketplaces);
   }, [editingLayer, enabledPlugins, marketplaces, pluginConfigs]);
 
+  useEffect(() => {
+    if (linkRequest?.kind !== 'plugin' || appliedLink.current === linkRequest.requestId) return;
+    if (linkRequest.payload) {
+      appliedLink.current = linkRequest.requestId;
+      const source = asString(linkRequest.payload.source ?? linkRequest.payload.url);
+      const plugin = asString(linkRequest.payload.plugin ?? linkRequest.payload.id);
+      if (source) { setMarketplaceSource(source); setSelection({ kind: 'marketplace-add' }); }
+      else if (plugin) setSelection({ kind: 'available', id: plugin });
+      else setPageError('This plugin import needs a plugin ID or marketplace source.');
+    } else if (bridge.pluginCatalogEvent) {
+      appliedLink.current = linkRequest.requestId;
+      if (pluginIds.includes(linkRequest.id!)) setSelection({ kind: 'plugin', id: linkRequest.id! });
+      else if (availablePlugins.some(plugin => plugin.id === linkRequest.id)) setSelection({ kind: 'available', id: linkRequest.id! });
+      else { setSelection({ kind: 'list' }); setPageError('This plugin is unavailable on this device.'); }
+    }
+  }, [linkRequest, bridge.pluginCatalogEvent, pluginIds.join('\n'), availablePlugins]);
   const selectedPlugin = selection.kind === 'plugin' ? selection.id : null;
   const selectedAvailable = selection.kind === 'available'
     ? availablePlugins.find((entry) => entry.id === selection.id) ?? null
@@ -150,8 +168,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     || JSON.stringify(draftConfigs) !== JSON.stringify(pluginConfigs)
     || JSON.stringify(draftMarketplaces) !== JSON.stringify(marketplaces);
 
+  const guardedDirty = dirty || Boolean(marketplaceSource.trim()) || preparedOperation !== null;
+  const closePrompt = useSettingsDraftGuard({ onClose, onNavigate, onRegisterCloseRequest }, guardedDirty);
   const requestHubNavigation = (pageId: string, pluginId?: string) => {
-    if (dirty) {
+    if (guardedDirty) {
       setPendingHubPage({ pageId, pluginId });
       return;
     }
@@ -166,6 +186,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     setDraftMarketplaces(marketplaces);
     setPreparedOperation(null);
     setPendingSelection(null);
+    setMarketplaceSource('');
     setSelection(pendingHubPage.pageId === 'plugins' && pendingHubPage.pluginId ? { kind: 'plugin', id: pendingHubPage.pluginId } : { kind: 'list' });
     if (pendingHubPage.pageId !== 'plugins') onNavigate(pendingHubPage.pageId, pendingHubPage.pluginId);
     setPendingHubPage(null);
@@ -199,7 +220,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   });
 
   const requestSelection = (next: PluginSelection) => {
-    if (dirty) {
+    if (guardedDirty) {
       setPendingSelection(next);
       return;
     }
@@ -284,7 +305,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       revision,
       payload_json: JSON.stringify({ ...preparedOperation.payload, scope: editingLayer, confirmed: true }),
     }))
-      .then(() => setPreparedOperation(null))
+      .then(() => { setPreparedOperation(null); setMarketplaceSource(''); })
       .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法执行插件操作。'))
       .finally(() => setBusy(false));
   };
@@ -320,6 +341,9 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
 
   return (
     <ExtensionHubLayout>
+      {closePrompt}
+      {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
+      {linkRequest?.payload && <p role="status">Review this plugin import. Use preview and confirm to install or add its marketplace.</p>}
       {!isPluginDetail && <>
         <ExtensionHubHeader title="Plugins" description="Connect plugins to let LingXi work across your tools" search={search} onSearch={setSearch} actions={<>
           <button type="button" onClick={refreshCatalog} disabled={busy} className="extension-hub-icon-button" aria-label="Refresh plugins"><ExtensionGlyph name="refresh" size={16} /></button>
@@ -403,7 +427,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
               <div style={noteStyle(t, 'warn')}>
                 当前配置有未保存修改。请保存，或丢弃后切换。
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); setSelection(pendingSelection); setPendingSelection(null); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
+                  <button type="button" onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); setMarketplaceSource(''); setPreparedOperation(null); setSelection(pendingSelection); setPendingSelection(null); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
                   <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
                 </div>
               </div>

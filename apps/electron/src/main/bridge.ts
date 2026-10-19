@@ -2213,6 +2213,7 @@ export class SessionRuntime {
     const result = await this.requestModUiResult((request_id) => buildNativeUiControlCommand(request, request_id));
     if (result.error !== undefined) {
       if (result.response_json !== undefined || result.metadata_json !== undefined) throw new Error('UI control result mixed error and response fields');
+      this.diagnostics.add('warn', 'bridge', diagnosticEvent('mod_ui_control_failed', { subtype: request.subtype, reason: sanitizeDiagnostic(result.error).slice(0, 256) }));
       throw new Error(result.error);
     }
     if (result.response_json === undefined) throw new Error('UI control result is missing its response');
@@ -2249,6 +2250,7 @@ export class SessionRuntime {
     commandFor: (requestId: string) => ClientCommand,
   ): Promise<Extract<ClientEvent, { type: 'ui_control_result' }>> {
     if (this.outstandingModUiRequests < MAX_OUTSTANDING_MOD_UI_REQUESTS) return this.sendModUiRequest(commandFor);
+    if (this.queuedModUiRequests.length >= 64) return Promise.reject(new Error('Mod UI request backlog is full.'));
     return new Promise((resolve, reject) => {
       this.queuedModUiRequests.push({ send: () => this.sendModUiRequest(commandFor).then(resolve, reject), reject });
     });

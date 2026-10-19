@@ -347,7 +347,7 @@ export function App() {
                   />
                 </ModUiParentSite>}
                 <ModUiAbovePrompt
-                  sessionId={bridge.conversation.sessionKey}
+                  sessionId={settledSession?.sessionId ?? ''}
                   enabled={page === 'chat' && settingsRoute === null && !bridge.sessionLoading}
                 />
                 <BetaComposer

@@ -402,6 +402,8 @@ test('UI frames and invalidations stay scoped to their owning session', () => {
       { surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-a' },
     ],
   });
+  assert.deepEqual(parseUiInvalidateEvent('session-a', 'sess:session-a', 'uuid-a'), { sessionId: 'session-a', uuid: 'uuid-a' });
+  assert.throws(() => parseUiInvalidateEvent('session-a', 'sess:session-b', 'uuid-a'), /session mismatch/);
   assert.throws(() => parseUiInvalidateEvent('session-a', 'session-b', 'uuid-a'), /session mismatch/);
   assert.throws(() => validateClientEvent({ type: 'ui_client_frame', runtime_id: 'runtime-a', frame_json: 'not-json' }), /invalid UI client frame/);
 });

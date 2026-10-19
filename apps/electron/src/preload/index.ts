@@ -1,3 +1,4 @@
+import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
@@ -94,6 +95,7 @@ const CH_PLUGIN_SECRET_GET = 'lingxi:plugin-secret:get';
 const CH_PLUGIN_SECRET_SET = 'lingxi:plugin-secret:set';
 const CH_PLUGIN_SECRET_CLEAR = 'lingxi:plugin-secret:clear';
 const CH_BRIDGE_RESTART = 'lingxi:bridge:restart';
+const modUiIpcQueue = new ModUiIpcQueue();
 const CH_DIAGNOSTICS_GET = 'lingxi:diagnostics:get';
 const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
 const CH_DIAGNOSTICS_EXPORT = 'lingxi:diagnostics:export';
@@ -398,9 +400,15 @@ const api: LingxiApi = {
   onApplicationMenu: (callback) => subscribe(CH_APPLICATION_MENU, callback),
   modUi: {
     control: <T extends NativeUiControlRequest>(sessionId: string, request: T) =>
-      ipcRenderer.invoke(CH_MOD_UI_CONTROL, sessionId, request) as Promise<UiControlCallResultDto<NativeUiControlResponseFor<T>>>,
+      modUiIpcQueue.request(
+        request.subtype === 'ui_render'
+          ? JSON.stringify([sessionId, request.surface, request.component, request.instance_id, request.client_id])
+          : undefined,
+        request,
+        () => ipcRenderer.invoke(CH_MOD_UI_CONTROL, sessionId, request),
+      ) as Promise<UiControlCallResultDto<NativeUiControlResponseFor<T>>>,
     operation: <T extends UiClientOperation>(sessionId: string, operation: T) =>
-      ipcRenderer.invoke(CH_MOD_UI_OPERATION, sessionId, operation) as Promise<UiClientOperationResponseFor<T>>,
+      modUiIpcQueue.request(undefined, operation, () => ipcRenderer.invoke(CH_MOD_UI_OPERATION, sessionId, operation)) as Promise<UiClientOperationResponseFor<T>>,
     onFrame: (callback) => subscribe(CH_MOD_UI_FRAME, (envelope: RuntimeEventEnvelope<Omit<UiClientFrameEventDto, 'sessionId'>>) => {
       callback({ sessionId: envelope.sessionId, ...envelope.event });
     }),

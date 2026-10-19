@@ -1071,7 +1071,8 @@ export function parseUiFrameEvent(sessionId: string, runtimeId: string, frameJso
 }
 
 export function parseUiInvalidateEvent(sessionId: string, eventSessionId: string, uuid: string, instancesJson?: unknown) {
-  if (eventSessionId !== sessionId) throw new Error('UI invalidation session mismatch');
+  // Native SessionId display includes its typed prefix; Product routes by UUID.
+  if (eventSessionId !== sessionId && eventSessionId !== `sess:${sessionId}`) throw new Error('UI invalidation session mismatch');
   return {
     sessionId,
     ...(instancesJson === undefined ? {} : { instances: parseUiInvalidateInstances(instancesJson) }),

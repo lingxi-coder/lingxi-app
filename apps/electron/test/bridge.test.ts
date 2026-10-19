@@ -3198,7 +3198,7 @@ test('Mod UI requests and event frames stay bound to their session and request i
     }),
   });
   first.client.emit('event', {
-    type: 'ui_invalidate', session_id: firstId, uuid: 'invalidate-1',
+    type: 'ui_invalidate', session_id: `sess:${firstId}`, uuid: 'invalidate-1',
     instances_json: JSON.stringify([{ surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1' }]),
   });
   first.client.emit('event', { type: 'ui_invalidate', session_id: secondId, uuid: 'wrong-session' });

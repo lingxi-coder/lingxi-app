@@ -92,7 +92,7 @@ sealed interface ChatRenderItem {
  * assistant message. `AskUserQuestion` uses a modal sheet. Pure — unit-tested
  * on the JVM.
  */
-fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<ChatRenderItem> {
+fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null): List<ChatRenderItem> = buildList<ChatRenderItem> {
     val pinnedTurnId = agentRunForBottomPanel(state)?.turnId
     if (state.isNew && state.messages.isEmpty() && !state.streaming) {
         add(ChatRenderItem.Empty)
@@ -118,7 +118,9 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
     }
     val foldedMessageIds = state.messages.flatMap { it.loopFoldedItemIds }.toSet()
     state.messages.forEachIndexed { messageIndex, message ->
-        if (message.id in foldedMessageIds) return@forEachIndexed
+        val isLinkAnchor = anchoredMessageUuid?.let(message::matchesTranscriptUuid) == true
+        if (message.id in foldedMessageIds && !isLinkAnchor) return@forEachIndexed
+        if (isLinkAnchor) canMergeTools = false
         if (message.loopWakeupStreak != null) canMergeTools = false
         if (message.role == com.lingxi.code.model.Role.Ai && message.blocks.isNotEmpty()) {
             val projectedBlocks = message.blocks.map { block ->
@@ -164,7 +166,7 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
         if (!syntheticInterior) {
             run?.takeUnless { it.turnId == pinnedTurnId }?.let { add(ChatRenderItem.AgentRun(it)) }
         }
-        if (message.role == com.lingxi.code.model.Role.User || (run != null && !syntheticInterior)) {
+        if (isLinkAnchor || message.role == com.lingxi.code.model.Role.User || (run != null && !syntheticInterior)) {
             canMergeTools = false
         }
     }
@@ -192,7 +194,8 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
         add(ChatRenderItem.StreamingIndicator)
     }
 }.let { rows ->
-    val hidden = state.messages.flatMap { it.loopFoldedItemIds }.toSet()
+    val anchoredIds = state.messages.filter { anchoredMessageUuid?.let(it::matchesTranscriptUuid) == true }.map { it.id }.toSet()
+    val hidden = state.messages.flatMap { it.loopFoldedItemIds }.toSet() - anchoredIds
     if (hidden.isEmpty()) rows else rows.filterNot { it.key in hidden }
 }
 

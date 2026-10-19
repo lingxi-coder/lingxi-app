@@ -29,7 +29,7 @@ class NativeConversationParityFixtureTest {
             val blocks = (0 until events.length()).flatMap { index ->
                 val event = events.getJSONObject(index)
                 when (event.getString("kind")) {
-                    "reasoning" -> messageDtoToMessage(MessageDto("assistant", listOf(
+                    "reasoning" -> messageDtoToMessage(MessageDto(null, "assistant", listOf(
                         MessageBlockDto.Thinking(event.getString("text"), null)
                     ))).blocks
                     "tool" -> listOf(MessageContent.Tool(ToolCallUi(

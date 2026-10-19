@@ -941,6 +941,7 @@ export interface LoopWakeupDto {
 }
 
 export interface MessageDto {
+  transcript_uuid?: string | null;
   /** Original persisted message time in Unix milliseconds. */
   sent_at_ms?: number | null;
   loop_wakeup?: LoopWakeupDto | null;

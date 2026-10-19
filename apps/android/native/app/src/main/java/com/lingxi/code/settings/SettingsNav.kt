@@ -37,7 +37,7 @@ object SettingsRoutes {
     const val SKILLS = "settings/skills"
     const val SKILL_DETAIL = "settings/skills/{id}"
     const val MCP_LIST = "settings/mcp"
-    const val MCP_EDIT = "settings/mcp/{id}"
+    const val MCP_EDIT = "settings/mcp/{id}/{scope}"
     const val LINUX_RUNTIME = "settings/linux-runtime"
     const val TYPESCRIPT_LSP = "settings/typescript-lsp"
     const val COMPUTER_USE = "settings/computer-use"
@@ -64,7 +64,7 @@ object SettingsRoutes {
     fun providerPicker(kind: String) = "settings/providers/$kind/add"
     fun providerEdit(kind: String, id: String) = "settings/providers/$kind/edit/$id"
     fun skillDetail(id: String) = "settings/skills/$id"
-    fun mcpEdit(id: String) = "settings/mcp/$id"
+    fun mcpEdit(id: String, scope: String? = null) = "settings/mcp/$id/${android.net.Uri.encode(scope ?: "_")}"
     fun pluginDetail(id: String) = "settings/plugin/${android.net.Uri.encode(id)}"
     fun cron(taskKey: String? = null): String =
         taskKey?.takeIf(String::isNotBlank)

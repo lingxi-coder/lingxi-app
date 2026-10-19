@@ -2200,6 +2200,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setVisualizationChip(null);
   }, [activeSessionId]);
 
+  const linkDraft = bridge.linkDraft;
+  useEffect(() => {
+    if (!linkDraft || linkDraft.sessionId !== activeSessionId || !input.current) return;
+    // New-session drafts never replace a user's existing editor content.
+    const current = richPromptSnapshot(input.current).text;
+    input.current.textContent = current ? `${current}\n${linkDraft.text}` : linkDraft.text;
+    syncPromptState();
+    bridge.clearLinkDraft();
+    input.current.focus();
+  }, [linkDraft, activeSessionId]);
+
   // A widget drafted a follow-up: put the question in the editor (after any
   // text already typed) and attach the widget as this prompt's context.
   const visualizationFollowup = bridge.visualizationFollowup;

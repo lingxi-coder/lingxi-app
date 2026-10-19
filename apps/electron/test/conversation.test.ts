@@ -30,7 +30,7 @@ import {
   type ConversationState,
 } from '../src/renderer/bridge/conversation';
 import type { ToolRunItem } from '../src/renderer/model/runItem';
-import { toolHasBody } from '../src/renderer/model/runItem';
+import { transcriptRowUuids, toolHasBody } from '../src/renderer/model/runItem';
 import { visibleRows } from '../src/renderer/components/loopFold';
 
 type Narration = Extract<ConversationState['items'][number], { type: 'narration' }>;
@@ -1226,4 +1226,46 @@ test('host suggestion state toggles presentation without discarding its candidat
   assert.equal(state.promptSuggestionEnabled, true);
   assert.equal(state.promptSuggestionNotice, null);
   assert.equal(state.promptSuggestion, candidate);
+});
+
+test('restored loop wakeup and companion retain the persisted row identity', () => {
+  const state = conversationFromMessages([{ role: 'system', blocks: [], transcript_uuid: 'wakeup-uuid', loop_wakeup: { message: 'wake', companion: 'healthy', streak: 1, since_ms: 1 } }]);
+  assert.equal(state.items.length, 2);
+  assert.deepEqual(state.items.map(item => transcriptRowUuids(item)), [['wakeup-uuid'], ['wakeup-uuid']]);
+});
+
+test('one tool card retains call and result durable identities across replay', () => {
+  const state = conversationFromMessages([
+    { role: 'assistant', transcript_uuid: 'call-row', blocks: [{ type: 'tool_use', id: 'tool', tool: 'Read', input_json: '{}' }] },
+    { role: 'user', transcript_uuid: 'result-row', blocks: [{ type: 'tool_result', id: 'tool', tool: 'Read', is_error: false, result_json: '"ok"' }] },
+    { role: 'user', transcript_uuid: 'result-row-2', blocks: [{ type: 'tool_result', id: 'tool', tool: 'Read', is_error: false, result_json: '"newer"' }] },
+  ]);
+  assert.equal(state.items.length, 1);
+  assert.equal(state.items[0]?.transcriptUuid, 'call-row');
+  assert.deepEqual(transcriptRowUuids(state.items[0]!), ['call-row', 'result-row', 'result-row-2']);
+});
+
+test('tombstones remove only the deleted durable alias from a combined tool card', () => {
+  let state = conversationFromMessages([
+    { role: 'assistant', transcript_uuid: 'call-row', blocks: [{ type: 'tool_use', id: 'tool', tool: 'Read', input_json: '{}' }] },
+    { role: 'user', transcript_uuid: 'result-row', blocks: [{ type: 'tool_result', id: 'tool', tool: 'Read', is_error: false, result_json: '"ok"' }] },
+  ]);
+  state = reduceEvent(state, { type: 'tombstone', message: { uuid: 'result-row' } } as ClientEvent);
+  assert.equal(state.items.length, 1);
+  assert.deepEqual(transcriptRowUuids(state.items[0]!), ['call-row']);
+  state = reduceEvent(state, { type: 'tombstone', message: { uuid: 'call-row' } } as ClientEvent);
+  assert.equal(state.items.length, 0);
+});
+
+test('live user row identity uses only explicit turn correlation, never equal prompt text', () => {
+  let state = appendPendingUserPrompt(emptyConversation(), 'same prompt', [], 1, 'client-turn:first');
+  state = appendPendingUserPrompt(state, 'same prompt', [], 2, 'client-turn:second');
+  const beforeUnknown = state;
+  state = reduceEvent(state, { type: 'user_transcript_row_identity', row_token: 'unknown', uuid: 'wrong-row' });
+  assert.equal(state, beforeUnknown);
+  state = reduceEvent(state, { type: 'user_transcript_row_identity', row_token: 'client-turn:second', uuid: 'second-row' });
+  assert.equal(state.items[0]?.transcriptUuid, undefined);
+  assert.equal(state.items[1]?.transcriptUuid, 'second-row');
+  state = reduceEvent(state, { type: 'user_transcript_row_identity', row_token: 'client-turn:first', uuid: 'first-row' });
+  assert.deepEqual(state.items.map(item => item.transcriptUuid), ['first-row', 'second-row']);
 });

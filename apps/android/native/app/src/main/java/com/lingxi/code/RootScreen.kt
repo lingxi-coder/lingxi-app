@@ -267,6 +267,11 @@ fun RootScreen(
     onConversationSourceChanged: (ConversationSource) -> Unit = {},
     onConversationBusyChanged: (Boolean) -> Unit = {},
     viewModel: ChatViewModel? = null,
+    requestedDeepLink: com.lingxi.code.navigation.DeepLink? = null,
+    onDeepLinkHandled: (com.lingxi.code.navigation.DeepLink) -> Unit = {},
+    onDeepLinkBlockingChanged: (Boolean) -> Unit = {},
+    onDeepLinkImportReady: (com.lingxi.code.navigation.DeepLink) -> Unit = {},
+    onDeepLinkNativeReady: (com.lingxi.code.navigation.DeepLink) -> Unit = {},
     requestedConversationLaunch: ConversationLaunchRequest? = null,
     onConversationLaunchHandled: () -> Unit = {},
     // 设置页请求切换到的项目 id。设置页自己做不了这件事：项目层/本地层写到哪个目录
@@ -422,6 +427,17 @@ fun RootScreen(
     fun projectSnapshotForScope(scope: ConversationScope): ProjectSnapshot? = when (scope) {
         ConversationScope.Global, ConversationScope.Scheduled -> null
         is ConversationScope.Project -> projectState.projects.firstOrNull { it.record.id == scope.projectId }
+    }
+
+    fun resolveLinkedScope(key: String?): ConversationScope? {
+        val direct = conversationScopeFromKey(key)
+        if (direct != null && (direct !is ConversationScope.Project || projectSnapshotForScope(direct) != null)) return direct
+        if (key == null) return null
+        return projectState.projects.firstOrNull { project ->
+            val canonical = runCatching { java.io.File(project.workspace.hostPath).canonicalPath }.getOrNull() ?: return@firstOrNull false
+            val hash = java.security.MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+            key == "project.$hash"
+        }?.let { ConversationScope.Project(it.record.id) }
     }
 
     fun workspaceForScope(scope: ConversationScope) = when (scope) {
@@ -1530,6 +1546,168 @@ fun RootScreen(
     val drawerApps = remember(installedApps, installedAppInfo, chatApps) {
         myApps(installedApps, installedAppInfo, updates = emptyList(), operations = emptyMap(), chatApps = chatApps)
     }
+    var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
+    var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var linkedDetailKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var linkedMessageUuid by rememberSaveable { mutableStateOf<String?>(null) }
+    var linkedSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var linkedScopeModeKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var linkedMessageRequest by rememberSaveable { mutableLongStateOf(0L) }
+    var linkedMessageSource by remember { mutableStateOf<com.lingxi.code.conversation.ConversationSource?>(null) }
+    var linkedTargetError by rememberSaveable { mutableStateOf<String?>(null) }
+    var draftLinkReview by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
+    var approvedDraftLink by remember { mutableStateOf<com.lingxi.code.navigation.DeepLink?>(null) }
+    var routingDeepLink by remember { mutableStateOf(false) }
+    val latestRequestedDeepLink by rememberUpdatedState(requestedDeepLink)
+    val latestScopeModeKey by rememberUpdatedState(sourceScope.sessionStateKey(activeSessionMode))
+    val latestSessionId by rememberUpdatedState(state.session.id.removePrefix("sess:"))
+    androidx.compose.runtime.SideEffect {
+        onDeepLinkBlockingChanged(linkedTargetError != null || linkedMessageUuid != null || draftLinkReview != null || routingDeepLink)
+    }
+    LaunchedEffect(sourceScope, activeSessionMode, currentEngineSource, state.session.id, state.sessionReady, state.sessionTransitioning, linkedMessageUuid) {
+        if (linkedMessageUuid == null || !state.sessionReady || state.sessionTransitioning) return@LaunchedEffect
+        if (linkedScopeModeKey != latestScopeModeKey || linkedSessionId != latestSessionId || (linkedMessageSource != null && linkedMessageSource !== currentEngineSource)) {
+            linkedMessageUuid = null
+            linkedMessageSource = null
+        } else if (linkedMessageSource == null) {
+            linkedMessageSource = currentEngineSource
+        }
+    }
+    LaunchedEffect(requestedDeepLink, projectState.loading, state.sessionReady, state.sessionTransitioning, state.streaming, approvedDraftLink, sourceScope, currentEngineSource, runtimeAppId, flowActive, voiceActive, captureState.phase, attachment, showCreateProject, activeProjectSyncing, workspacePickerOpen, routingDeepLink, draftLinkReview, linkedTargetError, linkedMessageUuid) {
+        val link = requestedDeepLink ?: return@LaunchedEffect
+        if (routingDeepLink || draftLinkReview != null || linkedTargetError != null || linkedMessageUuid != null) return@LaunchedEffect
+        if (projectState.loading || !state.sessionReady || state.sessionTransitioning || state.streaming || runtimeAppId != null || flowActive || voiceActive || attachment != null || showCreateProject || activeProjectSyncing || workspacePickerOpen) return@LaunchedEffect
+        if (captureState.phase in setOf(com.lingxi.code.voice.VoiceCapturePhase.Starting, com.lingxi.code.voice.VoiceCapturePhase.Listening, com.lingxi.code.voice.VoiceCapturePhase.Stopping)) return@LaunchedEffect
+        routingDeepLink = true
+        scope.launch {
+            val routingSource = chatViewModel.engineSource.value
+            try {
+                val parts = link.route.split('/')
+                val id = parts.last()
+                fun resolveScope(): ConversationScope? {
+                    val key = link.params["workspace"]
+                    if (key != null) return resolveLinkedScope(key)
+                    if (parts.first() == "new") return sourceScope
+                    val matches = buildList {
+                        if (projectState.globalSessions.any { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") }) add(ConversationScope.Global)
+                        if (cronState.generatedSessions.any { it.projectId == null && it.sessionId?.removePrefix("sess:") == id.removePrefix("sess:") }) add(ConversationScope.Scheduled)
+                        projectState.projects.filter { project -> project.sessions.any { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") } }.forEach { add(ConversationScope.Project(it.record.id)) }
+                    }
+                    return matches.singleOrNull()
+                }
+                try {
+                    if (parts.first() !in setOf("project", "apps", "market")) {
+                        projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketAppId = null; sessionPanelOpen = false
+                    }
+                    if (parts.first() in setOf("settings", "provider", "extensions", "cron", "terminal", "runtime", "import") && link.params["workspace"] != null) {
+                        val targetScope = resolveLinkedScope(link.params["workspace"])
+                            ?: error("Workspace does not exist on this device.")
+                        if (sourceScope != targetScope) {
+                            scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true)) { "Workspace is busy." }
+                            return@launch
+                        }
+                    }
+                    when (parts.first()) {
+                        "settings", "provider", "extensions", "cron", "terminal" -> onDeepLinkNativeReady(link)
+                        "session" -> {
+                            val targetScope = resolveScope() ?: error("Conversation is missing or its workspace is ambiguous on this device.")
+                            val rows = when (targetScope) {
+                                is ConversationScope.Project -> projectSnapshotForScope(targetScope)?.sessions.orEmpty()
+                                ConversationScope.Global -> projectState.globalSessions
+                                ConversationScope.Scheduled -> emptyList()
+                            }
+                            val row = rows.firstOrNull { it.sessionId.removePrefix("sess:") == id.removePrefix("sess:") }
+                            val scheduled = if (targetScope == ConversationScope.Scheduled) cronState.generatedSessions.firstOrNull { it.projectId == null && it.sessionId?.removePrefix("sess:") == id.removePrefix("sess:") } else null
+                            check(row != null || scheduled != null) { "Conversation does not exist in this workspace." }
+                            val storedMode = row?.mode ?: SessionMode.Code
+                            val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) } ?: storedMode
+                            check(mode == storedMode) { "Conversation mode does not match this link." }
+                            scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), SessionRef(id, row?.title ?: scheduled?.prompt.orEmpty().take(120)), false, sessionModeOverride = mode)) { "Conversation is busy. Try the link again." }
+                            setConversationMode(mode)
+                            linkedSessionId = id.removePrefix("sess:")
+                            linkedScopeModeKey = targetScope.sessionStateKey(mode)
+                            linkedMessageSource = chatViewModel.engineSource.value
+                            linkedMessageRequest += 1
+                            linkedMessageUuid = link.params["message"]
+                            if (linkedMessageUuid != null) onDeepLinkBlockingChanged(true)
+                        }
+                        "new" -> {
+                            val targetScope = resolveScope() ?: error("Workspace does not exist on this device.")
+                            val mode = link.params["mode"]?.let { com.lingxi.code.model.sessionModeFromWireValue(it) } ?: activeSessionMode
+                            val destinationDraft = if (targetScope == sourceScope && mode == activeSessionMode) draft else scopeStore.read(targetScope.sessionStateKey(mode))?.draft.orEmpty()
+                            if (destinationDraft.isNotBlank() && approvedDraftLink != link) {
+                                draftLinkReview = link
+                                return@launch
+                            }
+                            scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                            val prompt = link.payload["prompt"] as? String ?: ""
+                            check(switchEngineScope(targetScope, projectSnapshotForScope(targetScope), null, true, sessionModeOverride = mode)) { "Conversation is busy. Try the link again." }
+                            setConversationMode(mode)
+                            scopeStore.persistDraft(targetScope.sessionStateKey(mode), prompt)
+                            draft = prompt
+                            draftScopeKey = targetScope.sessionStateKey(mode)
+                            chatViewModel.onDraftChanged(prompt)
+                            approvedDraftLink = null
+                        }
+                        "import" -> onDeepLinkImportReady(link)
+                        "project" -> {
+                            val project = (resolveLinkedScope(id) as? ConversationScope.Project)?.projectId
+                                ?: projectState.projects.firstOrNull { it.record.id == id }?.record?.id
+                                ?: error("Project does not exist on this device.")
+                            projectPageId = project
+                        }
+                        "market" -> { marketAppId = id }
+                        "apps" -> {
+                            check(installedApps.any { it.appId == id } || localApps.chat.exists(id) == true) { "App is not installed on this device." }
+                            runtimeAppId = if (localApps.chat.exists(id) == true) chatAppKey(id) else id
+                        }
+                        "runtime" -> {
+                            when (parts[1]) {
+                                "activity" -> { check(id.removePrefix("sess:") == state.session.id.removePrefix("sess:")) { "Activity does not belong to the current conversation." }; sessionPanelOpen = true }
+                                "agent" -> { check(state.sessionAgents.any { it.agentId == id }) { "Agent is no longer available in this conversation." }; linkedDetailKey = "agent:$id" }
+                                "task" -> { check(state.backgroundTasks.containsKey(id)) { "Task is no longer available in this conversation." }; linkedDetailKey = "task:$id" }
+                                "plan", "review" -> {
+                                    val tools = state.messages.flatMap { it.blocks }.filterIsInstance<com.lingxi.code.conversation.MessageContent.Tool>().map { it.call } + state.agentRun?.tools.orEmpty().map { it.toToolCall() }
+                                    check(tools.any { it.id == id && (if (parts[1] == "plan") it.planMarkdown != null else it.tool.contains("review", ignoreCase = true)) }) { "This document is no longer available in this conversation." }
+                                    linkedDetailKey = "tool:$id"
+                                }
+                            }
+                        }
+                    }
+                } catch (error: Exception) {
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    if (latestRequestedDeepLink == link && chatViewModel.engineSource.value === routingSource) {
+                        val message = error.message ?: "Unable to open this link."
+                        linkedTargetError = message
+                        onDeepLinkBlockingChanged(true)
+                        chatViewModel.reportHostError(message)
+                    }
+                }
+                if (latestRequestedDeepLink == link) onDeepLinkHandled(link)
+            } finally {
+                routingDeepLink = false
+            }
+        }
+    }
+    linkedTargetError?.let { message ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { linkedTargetError = null },
+            title = { androidx.compose.material3.Text("Unable to open link") },
+            text = { androidx.compose.material3.Text(message) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { linkedTargetError = null }) { androidx.compose.material3.Text("OK") } },
+        )
+    }
+    if (draftLinkReview != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { val reviewed = draftLinkReview; draftLinkReview = null; reviewed?.let(onDeepLinkHandled) },
+            title = { androidx.compose.material3.Text("Replace the existing draft?") },
+            text = { androidx.compose.material3.Text("This workspace and mode already contain a draft. Review the linked prompt before replacing it:\n\n" + (draftLinkReview?.payload?.get("prompt") as? String).orEmpty()) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { approvedDraftLink = draftLinkReview; draftLinkReview = null }) { androidx.compose.material3.Text("Replace draft") } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { val reviewed = draftLinkReview; draftLinkReview = null; reviewed?.let(onDeepLinkHandled) }) { androidx.compose.material3.Text("Keep existing draft") } },
+        )
+    }
     val localAppCardLinks = remember(localApps, chatApps) {
         LocalAppCardLinks(
             open = { id ->
@@ -1594,8 +1772,6 @@ fun RootScreen(
             email = user.email,
         )
     }
-    var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
-    var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
     // A scheduled-task workspace is not a place to start chatting: new chats from
     // there go to the global workspace.
     val newChatScope = if (sourceScope == ConversationScope.Scheduled) ConversationScope.Global else sourceScope
@@ -1831,7 +2007,24 @@ fun RootScreen(
                     .windowInsetsPadding(WindowInsets.systemBars)
                     .imePadding(),
             ) {
+                val requestedMessageUuid = linkedMessageUuid.takeIf { linkedSessionId == state.session.id.removePrefix("sess:") }
+                val messageRequest = linkedMessageRequest
                 ChatScreen(
+                    linkedDetailKey = linkedDetailKey,
+                    onLinkedDetailHandled = { linkedDetailKey = null },
+                    linkedMessageUuid = requestedMessageUuid,
+                    linkWorkspace = sourceScope.persistenceKey(),
+                    onMessageLinkHandled = messageHandled@ { found ->
+                        if (requestedMessageUuid == null || linkedMessageUuid != requestedMessageUuid || messageRequest != linkedMessageRequest || linkedSessionId != latestSessionId || linkedScopeModeKey != latestScopeModeKey || linkedMessageSource !== chatViewModel.engineSource.value) return@messageHandled
+                        if (!found) {
+                            val message = "This message is no longer available in the local conversation."
+                            linkedTargetError = message
+                            onDeepLinkBlockingChanged(true)
+                            chatViewModel.reportHostError(message)
+                        }
+                        linkedMessageUuid = null
+                        linkedMessageSource = null
+                    },
                     onSuggestionContext = chatViewModel::updatePromptSuggestionContext,
                     onSuggestionFeedback = chatViewModel::promptSuggestionFeedback,
                     pendingPermission = pendingPermission != null,

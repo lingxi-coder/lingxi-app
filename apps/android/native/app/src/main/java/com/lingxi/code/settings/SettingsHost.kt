@@ -65,6 +65,8 @@ import kotlinx.coroutines.flow.first
 fun SettingsHost(
     appearanceStore: AppearanceStore,
     engineSource: ConversationSource? = null,
+    deepLinkImport: com.lingxi.code.navigation.DeepLink? = null,
+    onDeepLinkImportDismiss: () -> Unit = {},
     projectStore: com.lingxi.code.project.ProjectStore? = null,
     isDark: Boolean,
     accentId: String,
@@ -140,7 +142,12 @@ fun SettingsHost(
         if (navController.previousBackStackEntry != null) navController.popBackStack() else onClose()
     }
     // System back.
-    BackHandler(enabled = true) { goBack() }
+    BackHandler(enabled = true) { if (deepLinkImport != null) onDeepLinkImportDismiss() else goBack() }
+
+    if (deepLinkImport != null) {
+        DeepLinkImportPage(deepLinkImport, engineBridge, onDeepLinkImportDismiss)
+        return
+    }
 
     androidx.compose.material3.Surface(
         color = t.windowBg,
@@ -376,13 +383,7 @@ fun SettingsHost(
                     )
                 }
                 page(SettingsRoutes.SKILL_DETAIL) {
-                    val id = it.arguments?.getString("id") ?: ""
-                    SkillDetailPage(
-                        skillId = id,
-                        state = state,
-                        store = resolvedStore,
-                        onPop = { navController.popBackStack() },
-                    )
+                    SkillManager(engineBridge, initialId = it.arguments?.getString("id"))
                 }
                 // Preserve the legacy route while directing it to authoritative configuration.
                 page(SettingsRoutes.MCP_LIST) { McpConfigurationPage(engineBridge) }
@@ -402,7 +403,7 @@ fun SettingsHost(
                         },
                     )
                 }
-                page(SettingsRoutes.MCP_EDIT) { McpConfigurationPage(engineBridge) }
+                page(SettingsRoutes.MCP_EDIT) { entry -> McpConfigurationPage(engineBridge, initialName = entry.arguments?.getString("id"), initialScope = entry.arguments?.getString("scope")?.takeUnless { it == "_" }) }
                 page(SettingsRoutes.DREAM) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
                 page(SettingsRoutes.CRON) {
                     com.lingxi.code.cron.CronScreen(engineSource = engineSource, projectStore = projectStore, onOpenSession = onOpenScheduledSession)

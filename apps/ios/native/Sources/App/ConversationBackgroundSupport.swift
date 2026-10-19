@@ -28,6 +28,9 @@ enum ConversationNotificationRoute {
             workspaceKeyKey: workspaceKey,
             sessionModeKey: sessionMode.rawValue,
         ]
+        if let url = ConversationDeepLink.makeURL(sessionID: sessionID, turnID: turnID, workspaceKey: workspaceKey, sessionMode: sessionMode.rawValue) {
+            userInfo["lingxi.url"] = url.absoluteString
+        }
         if let turnID {
             userInfo[turnIDKey] = String(turnID)
         }
@@ -41,6 +44,11 @@ enum ConversationNotificationRoute {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !sessionID.isEmpty
         else { return nil }
+        if let raw = userInfo["lingxi.url"] as? String {
+            guard let url = URL(string: raw), let target = CanonicalDeepLink.parse(url), target.parts[0] == "session" else { return nil }
+            return .openConversation(sessionID: target.parts[1], turnID: (userInfo[turnIDKey] as? String).flatMap(UInt64.init),
+                workspaceKey: target.params["workspace"], mode: target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? .code)
+        }
         let turnID = (userInfo[turnIDKey] as? String).flatMap(UInt64.init)
         let workspaceKey = (userInfo[workspaceKeyKey] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)

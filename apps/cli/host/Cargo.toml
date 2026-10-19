@@ -14,6 +14,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+lingxi-deep-links = { path = "../../../packages/deep-links-rs" }
 lingxi-llm-client.workspace = true
 http-client.workspace = true
 configuration-admin = { workspace = true }
@@ -122,6 +123,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = "0.10"
 serde_yaml = "0.9"
 shlex = "1.3"
 regex = "1"
@@ -137,8 +139,6 @@ predicates = "3"
 tempfile = "3"
 # Deterministic mtime staggering for the resume-loader fixture test.
 filetime = "0.2"
-# WIZARD-06 auto-mode-setup e2e: compute the proposal's --expect-sha256.
-sha2 = "0.10"
 # `archive` marketplace-source download tests build a real plugin zip fixture.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

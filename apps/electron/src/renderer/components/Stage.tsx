@@ -8,6 +8,7 @@ import { useT } from '../theme/ThemeContext';
 import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
 import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
 import {
+  transcriptRowUuids,
   commandDefaultOpen,
   narrationDefaultOpen,
   narrationShouldCollapse,
@@ -283,10 +284,13 @@ const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { 
   );
 });
 
-import { visibleRows } from './loopFold';
+import { foldOwners, visibleRows } from './loopFold';
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
+  messageTarget?: string | null;
+  onCopyMessage?(uuid: string): void;
+  onMessageLocated?(found: boolean): void;
   activityView?: boolean;
   onReviewFiles?(id: string, files: readonly TurnFileChange[], path?: string): void;
   submittedPlans?: readonly SubmittedPlan[];
@@ -344,7 +348,7 @@ interface StageProps {
  */
 const BOTTOM_SLACK = 24;
 
-export function Stage({ activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -356,6 +360,7 @@ export function Stage({ activityView = false, onReviewFiles, submittedPlans = []
    * to drive the jump-to-bottom control.
    */
   const followTail = useRef(true);
+  const locatedMessage = useRef<string | null>(null);
   const [atTail, setAtTail] = useState(true);
   /** A pointer is down inside the transcript, so layout drift must not move it. */
   const pointerHeld = useRef(false);
@@ -408,10 +413,17 @@ export function Stage({ activityView = false, onReviewFiles, submittedPlans = []
   // fold row is opened. A fold row defaults to CLOSED — folding a streak the
   // reader then has to close by hand would defeat the point.
   const items: readonly RunItem[] = useMemo(
-    () =>
-      visibleRows(liveItems, foldedItemIds, (foldRowId) =>
-        collapseOpen(visible, sessionKey, foldRowId) ?? false),
-    [liveItems, foldedItemIds, visible, sessionKey],
+    () => {
+      const unfolded = visibleRows(liveItems, foldedItemIds, (foldRowId) =>
+        collapseOpen(visible, sessionKey, foldRowId) ?? false);
+      // Completed reasoning is normally hidden. A link to a reasoning-only
+      // persisted row still needs a real, inspectable destination.
+      const targetAlreadyVisible = messageTarget && unfolded.some(item => item.type !== 'thinking' && transcriptRowUuids(item).includes(messageTarget));
+      return !messageTarget || targetAlreadyVisible ? unfolded : unfolded.map(item => item.type === 'thinking' && transcriptRowUuids(item).includes(messageTarget)
+        ? { ...item, type: 'narration' as const, text: `Reasoning\n\n${item.text}`, tone: 'muted' as const }
+        : item);
+    },
+    [liveItems, foldedItemIds, visible, sessionKey, messageTarget],
   );
 
   const [placement, setPlacement] = useState<{ sessionKey: string; source: typeof agents; items: typeof liveItems; anchors: AgentAnchors }>(() => ({
@@ -425,6 +437,7 @@ export function Stage({ activityView = false, onReviewFiles, submittedPlans = []
   const rows = useMemo(() => placeTranscriptAgents(
     transcriptRows(items, running, Boolean(pendingActivity?.trim())), liveItems, agents ?? [], anchors,
   ), [items, liveItems, running, pendingActivity, agents, anchors]);
+  const liveItemById = useMemo(() => new Map(liveItems.map(item => [item.id, item])), [liveItems]);
   const firstAssistantById = useMemo(() => assistantFirstOfReplyByItem(liveItems), [liveItems]);
 
   const tailThinking = rows.at(-1)?.type === 'thinking' ? rows.at(-1) : undefined;
@@ -533,6 +546,27 @@ export function Stage({ activityView = false, onReviewFiles, submittedPlans = []
    * a prompt, opens a session, or presses the control — never from a timer. An
    * idle reader who scrolled up is reading, not waiting to be moved back.
    */
+  useLayoutEffect(() => {
+    if (!messageTarget) { locatedMessage.current = null; return; }
+    if (locatedMessage.current === `${sessionKey}:${messageTarget}`) return;
+    const source = liveItems.find(item => transcriptRowUuids(item).includes(messageTarget));
+    if (source) {
+      const owner = foldOwners(liveItems, foldedItemIds).get(source.id);
+      if (owner && collapseOpen(visible, sessionKey, owner) !== true) { setOpen(owner, true); return; }
+      const rendered = items.find(item => item.id === source.id);
+      if (rendered?.type === 'narration' && narrationShouldCollapse(rendered) && !(collapseOpen(visible, sessionKey, rendered.id) ?? narrationDefaultOpen(rendered))) { setOpen(rendered.id, true); return; }
+    }
+    const nodes = feedRef.current?.querySelectorAll<HTMLElement>('[data-message-uuids]');
+    const target = Array.from(nodes ?? []).find(node => node.dataset.messageUuids?.split(' ').includes(messageTarget));
+    if (!target) { onMessageLocated?.(false); return; }
+    locatedMessage.current = `${sessionKey}:${messageTarget}`;
+    followTail.current = false;
+    setAtTail(false);
+    anchor.current = null;
+    target.scrollIntoView({ block: 'center' });
+    onMessageLocated?.(true);
+  }, [messageTarget, sessionKey, rows, items, liveItems, foldedItemIds, visible, setOpen, onMessageLocated]);
+
   const armTail = useCallback(() => {
     followTail.current = true;
     setAtTail(true);
@@ -681,6 +715,7 @@ export function Stage({ activityView = false, onReviewFiles, submittedPlans = []
           inserted, which is exactly what a streaming transcript does.
         */}
         {rows.map((item) => {
+          const content = (() => {
           if (activityView && item.type === 'tool-group' && !item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
           }
@@ -808,6 +843,14 @@ export function Stage({ activityView = false, onReviewFiles, submittedPlans = []
             );
           }
           return null;
+          })();
+          const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : [item.id];
+          const uuids = [...new Set(sourceIds.flatMap(id => {
+            const source = liveItemById.get(id);
+            return source ? transcriptRowUuids(source) : [];
+          }))];
+          const uuid = messageTarget && uuids.includes(messageTarget) ? messageTarget : uuids[0];
+          return <div key={item.id} data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined} style={uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : undefined}>{content}</div>;
         })}
 
         {/* Keep the tail slot mounted even when thinking yields to another activity. */}

@@ -56,9 +56,9 @@ import XCTest
         private let lock = NSLock()
         private var _events: [ClientEvent] = []
         /// Fulfilled the first time a terminal event is observed.
-        let terminal: XCTestExpectation
+        let terminal: XCTestExpectation?
 
-        init(terminal: XCTestExpectation) {
+        init(terminal: XCTestExpectation? = nil) {
             self.terminal = terminal
         }
 
@@ -82,7 +82,7 @@ import XCTest
             if isTerminal {
                 // Fulfil exactly once; XCTestExpectation tolerates extra fulfils
                 // only when assertForOverFulfill is off, so guard with a flag.
-                terminal.fulfill()
+                terminal?.fulfill()
             }
         }
 
@@ -379,6 +379,58 @@ import XCTest
             for (_, message) in errorEvents {
                 assertRealHttpAttempt(message)
             }
+
+        }
+
+        func testPersistedMainHistoryUUIDsSurviveNativeResume() async throws {
+            let sandbox = FileManager.default.temporaryDirectory
+                .appendingPathComponent("uuid-" + UUID().uuidString.prefix(6), isDirectory: true)
+            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: sandbox) }
+            let cwd = sandbox.resolvingSymlinksInPath().path
+            // Mirrors the session store's ASCII project directory naming for
+            // this short fixture path; no engine or transcript state is mocked.
+            XCTAssertLessThan(cwd.count, 200)
+            let projectName = String(cwd.map { $0.isASCII && $0.isLetter || $0.isASCII && $0.isNumber ? $0 : "-" })
+            let directory = sandbox.appendingPathComponent(".lingxi/projects/\(projectName)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let sessionID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+            let userUUID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+            let assistantUUID = "cccccccc-3333-4333-8333-cccccccccccc"
+            let rows: [[String: Any]] = [
+                ["type": "user", "uuid": userUUID, "parentUuid": NSNull(),
+                 "sessionId": sessionID, "timestamp": "2026-05-25T12:00:00.000Z",
+                 "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+                 "message": ["role": "user", "content": "same visible text"]],
+                ["type": "assistant", "uuid": assistantUUID, "parentUuid": userUUID,
+                 "sessionId": sessionID, "timestamp": "2026-05-25T12:00:01.000Z",
+                 "cwd": cwd, "version": "0.6.0", "isSidechain": false,
+                 "message": ["role": "assistant", "content": [["type": "text", "text": "same visible text"]]]]
+            ]
+            let jsonl = try rows.map { try JSONSerialization.data(withJSONObject: $0) }
+                .reduce(into: Data()) { $0.append($1); $0.append(10) }
+            try jsonl.write(to: directory.appendingPathComponent("\(sessionID).jsonl"))
+            let listener = CollectingListener()
+            let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+            let handle = try buildIosEngine(
+                apiBase: "https://api.anthropic.com", apiKey: "", model: "claude-sonnet-4-20250514",
+                appSandboxRoot: sandbox.path, listener: listener, audio: audio,
+                camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(),
+                clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: nil,
+                secureStorage: nil, deviceControl: nil)
+            try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
+            var restoredMessages: [MessageDto]?
+            for _ in 0..<200 {
+                restoredMessages = listener.events.compactMap { event -> [MessageDto]? in
+                    guard case let .sessionResumed(id, _, messages) = event,
+                          id == sessionID else { return nil }
+                    return messages
+                }.last
+                if restoredMessages != nil { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTAssertEqual(restoredMessages?.map(\.transcriptUuid), [userUUID, assistantUUID],
+                           "real disk history must retain each exact persisted UUID across UniFFI")
         }
 
         /// The real catalog is readable before a provider is configured, but

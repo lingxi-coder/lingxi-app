@@ -2,6 +2,7 @@ import AppIntents
 import Foundation
 
 enum LingxiAppAction: Codable, Equatable, Sendable {
+    case canonical(CanonicalDeepLink)
     case openApp
     case newConversation
     case ask(String)
@@ -20,13 +21,18 @@ enum LingxiDeepLink {
     /// Matches Android's public `lingxi://open_terminal` route. Unknown hosts,
     /// non-Lingxi schemes and oversized commands are rejected fail-closed.
     static func action(from url: URL) -> LingxiAppAction? {
+        if let target = CanonicalDeepLink.parse(url) { return .canonical(target) }
         guard
             url.scheme?.lowercased() == "lingxi",
             let host = url.host?.lowercased(),
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return nil }
 
+        guard url.absoluteString.utf8.count <= 32768, components.user == nil, components.password == nil,
+              components.port == nil, components.percentEncodedPath.isEmpty, components.fragment == nil else { return nil }
         let items = components.queryItems ?? []
+        let allowed = host == "open_conversation" ? ["sessionId", "turnId", "workspaceKey", "sessionMode"] : ["sessionId", "initCommand"]
+        guard Set(items.map(\.name)).count == items.count, items.allSatisfy({ allowed.contains($0.name) }) else { return nil }
         let values = Dictionary(
             items.map { ($0.name, $0.value ?? "") },
             uniquingKeysWith: { _, newest in newest }
@@ -104,7 +110,9 @@ actor LingxiAppActionStore {
 
     func enqueue(_ action: LingxiAppAction) {
         var actions = load()
+        actions.removeAll { $0 == action }
         actions.append(action)
+        if actions.count > 8 { actions.removeFirst(actions.count - 8) }
         if let data = try? JSONEncoder().encode(actions) {
             defaults.set(data, forKey: storageKey)
         }

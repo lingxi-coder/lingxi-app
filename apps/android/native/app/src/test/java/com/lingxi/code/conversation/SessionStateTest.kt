@@ -238,10 +238,10 @@ class SessionStateTest {
     // --- sessionActivationFrom: the out-of-band session activation path -------
 
     private fun userDto(text: String) =
-        MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text(text.toClientTextDto())))
+        MessageDto(transcriptUuid = null, role = "user", blocks = listOf(MessageBlockDto.Text(text.toClientTextDto())))
 
     private fun assistantDto(vararg blocks: MessageBlockDto) =
-        MessageDto(role = "assistant", blocks = blocks.toList())
+        MessageDto(transcriptUuid = null, role = "assistant", blocks = blocks.toList())
 
     @Test
     fun sessionActivationFrom_sessionResumed_lowersTranscriptOldestFirst() {

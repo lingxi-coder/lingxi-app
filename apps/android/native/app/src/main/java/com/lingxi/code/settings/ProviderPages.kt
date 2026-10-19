@@ -410,7 +410,7 @@ fun ProviderEditPage(
     val t = LingXiTheme.palette
     val editing = state.providers(kind).firstOrNull { it.id == providerId }
     if (editing == null) {
-        LaunchedEffect(providerId) { onPop() }
+        Text(settingsLabel("This provider is not configured on this device."), color = t.text3)
         return
     }
     val preset = kind.preset(of = editing)

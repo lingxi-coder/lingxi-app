@@ -138,6 +138,10 @@ struct DesktopPluginsPage: View {
 /// MCP's three storage scopes are independent of settings file layers.
 struct DesktopMCPAdminPage: View {
     let host: SettingsHost
+    var initialName: String? = nil
+    var initialScope: String? = nil
+    @State private var initialSelectionError: String?
+    @State private var initialSelectionResolved = false
     @State private var repository = DesktopSettingsRepository.shared
     @State private var scope = "user"
     @State private var selectedName: String?
@@ -161,10 +165,13 @@ struct DesktopMCPAdminPage: View {
         default: String(localized: "mcp_scope_user_desc")
         }
     }
-    private var writable: Bool { repository.connected && !repository.saving && draftRevision != nil }
+    private var writable: Bool { repository.connected && !repository.saving && draftRevision != nil && initialSelectionError == nil }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
+            if let initialSelectionError {
+                ContentUnavailableView("MCP server unavailable", systemImage: "link", description: Text(initialSelectionError))
+            }
             Picker("MCP storage scope", selection: $scope) {
                 Text("User").tag("user"); Text("Local workspace").tag("local"); Text("Project .mcp.json").tag("project")
             }.pickerStyle(.segmented)
@@ -202,11 +209,33 @@ struct DesktopMCPAdminPage: View {
                 }
             }
         }.task(id: repository.sourceGeneration) { await load() }
-        .onChange(of: scope) { _, _ in select(nil) }
-        .onChange(of: repository.sourceGeneration) { _, _ in select(nil) }
-        .onChange(of: repository.catalogs["mcp"]) { _, _ in select(selectedName.flatMap { servers[$0] == nil ? nil : $0 }) }
+        .onChange(of: scope) { _, newScope in
+            if let initialName, selectedName == initialName,
+               MCPDeepLinkSelection.resolve(name: initialName, requestedScope: initialScope, snapshot: snapshot) == .selected(scope: newScope) { select(initialName) }
+            else { select(nil) }
+        }
+        .onChange(of: repository.sourceGeneration) { _, _ in
+            initialSelectionResolved = false; initialSelectionError = nil; select(nil)
+        }
+        .onChange(of: repository.catalogs["mcp"]) { _, _ in
+            resolveInitialSelection()
+            select(selectedName.flatMap { servers[$0] == nil ? nil : $0 })
+        }
     }
-    private func load() async { await repository.admin(domain: "mcp", action: "get_snapshot") }
+    private func load() async {
+        await repository.admin(domain: "mcp", action: "get_snapshot")
+        resolveInitialSelection()
+    }
+    private func resolveInitialSelection() {
+        guard let initialName, !initialSelectionResolved, !snapshot.isEmpty else { return }
+        initialSelectionResolved = true
+        switch MCPDeepLinkSelection.resolve(name: initialName, requestedScope: initialScope, snapshot: snapshot) {
+        case .selected(let selectedScope): scope = selectedScope; select(initialName)
+        case .missing: initialSelectionError = "This server is not stored in the requested local scope."
+        case .ambiguous: initialSelectionError = "This server name exists in several scopes. Open a link that specifies its scope."
+        case .invalidScope: initialSelectionError = "This link specifies an invalid MCP scope."
+        }
+    }
     private func select(_ selected: String?) {
         selectedName = selected
         name = selected ?? ""
@@ -222,6 +251,10 @@ struct DesktopMCPAdminPage: View {
 }
 
 struct DesktopSkillsAdminPage: View {
+    var initialID: String? = nil
+    var initialScope: String? = nil
+    @State private var initialSkillError: String?
+    @State private var openedInitialID = false
     @State private var repository = DesktopSettingsRepository.shared
     @State private var target: SkillAdminIdentity?
     @State private var scope = "user"
@@ -234,6 +267,9 @@ struct DesktopSkillsAdminPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
+            if initialID != nil, repository.skillCatalog != nil, !openedInitialID {
+                ContentUnavailableView("Skill unavailable", systemImage: "link", description: Text(initialSkillError ?? "This skill is not stored in the local catalog."))
+            }
             HStack {
                 Button("settings_parity_refresh_catalog") { Task { await load() } }.disabled(!repository.connected)
                 Button("settings_parity_create_skill") { target = nil; name = ""; markdown = ""; revision = nil; writable = true }
@@ -280,6 +316,7 @@ struct DesktopSkillsAdminPage: View {
         }.task(id: repository.sourceGeneration) { await load() }
         .onChange(of: repository.sourceGeneration) { _, _ in target = nil; markdown = ""; revision = nil; writable = false }
         .onChange(of: repository.skillCatalog) { _, catalog in
+            openInitialSkill()
             if let target, catalog?.entries.contains(where: { $0.identity == target }) != true {
                 self.target = nil; writable = false; markdown = ""; revision = nil
             }
@@ -294,7 +331,19 @@ struct DesktopSkillsAdminPage: View {
             writable = document.writable
         }
     }
-    private func load() async { await repository.admin(domain: "skill", action: "get_catalog") }
+    private func load() async { await repository.admin(domain: "skill", action: "get_catalog"); openInitialSkill() }
+    private func openInitialSkill() {
+        guard !openedInitialID, let initialID else { return }
+        let candidates = entries.filter { entry in
+            (initialScope == nil || entry.source == initialScope) && (entry.identity.id == initialID || entry.identity.displayValue == initialID || entry.name.displayValue == initialID)
+        }
+        guard candidates.count == 1, let entry = candidates.first else {
+            initialSkillError = candidates.count > 1 ? "Several skills have this name. Open a link with its source scope or full skill identity." : "This skill is not stored in the local catalog."
+            return
+        }
+        openedInitialID = true; target = entry.identity; writable = false
+        Task { await repository.admin(domain: "skill", action: "get_document", skillTarget: entry.identity) }
+    }
     private func move(to destination: String) {
         let id = target
         let expectedRevision = revision

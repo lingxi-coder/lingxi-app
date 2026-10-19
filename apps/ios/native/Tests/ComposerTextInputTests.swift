@@ -122,4 +122,61 @@ final class ComposerTextInputTests: XCTestCase {
         XCTAssertEqual(view.textView.text(in: after), markedText)
         XCTAssertEqual(view.textView.text, "/review 正在输入")
     }
+    func testFocusChangesWaitForLayoutAndUseLatestRequestWithoutChangingDraft() async throws {
+        var focused = true
+        var draft = "Keep this external-link draft"
+        let editor = ComposerTextInput(
+            text: Binding(get: { draft }, set: { draft = $0 }),
+            isFocused: Binding(get: { focused }, set: { focused = $0 }),
+            placeholder: "", textColor: .primary, hintColor: .secondary,
+            argumentHint: { _, _ in nil }, onSubmit: {}, onAcceptSuggestion: nil
+        )
+        let coordinator = editor.makeCoordinator()
+        let view = input(text: draft)
+        coordinator.view = view
+        view.textView.delegate = coordinator
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIViewController()
+        window.rootViewController?.view.addSubview(view)
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previousWindow?.makeKey() }
+
+        coordinator.synchronizeFocus()
+        XCTAssertFalse(view.textView.isFirstResponder, "Focus must not change within updateUIView's layout transaction")
+        focused = false
+        coordinator.synchronizeFocus()
+        await drainMainQueue()
+        XCTAssertFalse(view.textView.isFirstResponder, "A newer focus request must win over a queued one")
+
+        focused = true
+        coordinator.synchronizeFocus()
+        XCTAssertFalse(view.textView.isFirstResponder)
+        await drainMainQueue()
+        XCTAssertTrue(view.textView.isFirstResponder)
+        focused = false
+        coordinator.synchronizeFocus()
+        XCTAssertTrue(view.textView.isFirstResponder)
+        await drainMainQueue()
+        XCTAssertFalse(view.textView.isFirstResponder)
+        focused = true
+        coordinator.synchronizeFocus()
+        view.removeFromSuperview()
+        await drainMainQueue()
+        XCTAssertFalse(view.textView.isFirstResponder, "Detached editors must not receive pending focus")
+        window.rootViewController?.view.addSubview(view)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await drainMainQueue()
+        XCTAssertTrue(view.textView.isFirstResponder, "Activation must retry the latest focus request")
+        XCTAssertEqual(view.textView.text, draft)
+        XCTAssertEqual(draft, "Keep this external-link draft")
+    }
+
+    private func drainMainQueue() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
 }

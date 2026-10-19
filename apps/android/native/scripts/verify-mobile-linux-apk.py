@@ -70,17 +70,23 @@ def archive_sha256(archive, name):
     return digest.hexdigest()
 
 
-def verify_apk(apk, source, jni_root, assets_root):
+def verify_apk(apk, source, jni_root, assets_root, abis=None):
+    abis = set(native.ABIS if abis is None else abis)
+    if not abis or not abis <= native.ABIS.keys():
+        raise ValueError("APK ABIs must contain arm64-v8a, x86_64, or both")
     native.verify(source, jni_root)
     assets = staged_assets(assets_root, source)
     expected = {
         f"lib/{abi}/{name}": native.sha256((source / "jniLibs" if name in native.SUPPORT else jni_root) / abi / name)
-        for abi in native.ABIS for name in native.SUPPORT | {"libandroid_aar.so"}
+        for abi in abis for name in native.SUPPORT | {"libandroid_aar.so"}
     }
     with zipfile.ZipFile(apk) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)):
             raise ValueError("duplicate entries in APK")
+        packaged_abis = {name.split("/")[1] for name in names if name.startswith("lib/") and name.endswith(".so")}
+        if packaged_abis != abis:
+            raise ValueError(f"APK ABIs differ from requested architectures: {sorted(packaged_abis)}")
         for name, digest in expected.items():
             entry = archive.getinfo(name)
             if hashlib.sha256(archive.read(entry)).hexdigest() != digest:
@@ -108,13 +114,14 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--jni-root", type=Path, required=True)
     parser.add_argument("--assets-source", type=Path, required=True)
+    parser.add_argument("--abis", default=",".join(native.ABIS))
     args = parser.parse_args()
     try:
         apks = sorted(args.apk_dir.glob("*.apk"))
         if not apks:
             raise ValueError(f"no final APKs under {args.apk_dir}")
         for apk in apks:
-            verify_apk(apk, args.source, args.jni_root, args.assets_source)
+            verify_apk(apk, args.source, args.jni_root, args.assets_source, args.abis.split(","))
             print(f"verified final MobileLinux APK: {apk}")
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
         parser.exit(1, f"mobile-linux-apk: {error}\n")

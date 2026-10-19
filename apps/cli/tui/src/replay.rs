@@ -168,15 +168,10 @@ fn rebuild_from_jsonl_impl(
         }
         if with_request_ids && !m.uuid.is_empty() {
             for row in &mut acc.out[first_row..] {
-                if matches!(
-                    row,
-                    RenderedMessage::UserText { .. } | RenderedMessage::AssistantText { .. }
-                ) {
-                    *row = RenderedMessage::IdentifiedTranscriptRow {
-                        message: Box::new(row.clone()),
-                        request_id: m.uuid.clone(),
-                    };
-                }
+                *row = RenderedMessage::IdentifiedTranscriptRow {
+                    message: Box::new(row.clone()),
+                    request_id: m.uuid.clone(),
+                };
             }
         }
     }

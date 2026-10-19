@@ -76,6 +76,7 @@ struct TerminalRuntimeDescriptor: Equatable, Sendable {
     var launchCommand: String = "/bin/sh"
     var launchArguments: [String] = ["-i"]
     var initialCommand: String? = nil
+    var requestedSessionID: String? = nil
     var launchCwd: String? = nil
     var requestedCwdDisplay: String? = nil
     var invalidRequestedCwdMessage: String? = nil
@@ -99,7 +100,8 @@ extension TerminalRuntimeDescriptor {
         project: ProjectSnapshot?,
         linuxRuntime: LinuxRuntimeState,
         initialCommand: String? = nil,
-        requestedCwd: TerminalRouteCwd? = nil
+        requestedCwd: TerminalRouteCwd? = nil,
+        requestedSessionID: String? = nil
     ) -> TerminalRuntimeDescriptor {
         let manifest = LXISHRuntimeBundleMetadata.current()
         // A shell does not belong to a project. With no project open the
@@ -158,6 +160,7 @@ extension TerminalRuntimeDescriptor {
                 explicit: initialCommand,
                 fallback: linuxRuntime.terminal.draftCommand
             ),
+            requestedSessionID: requestedSessionID,
             launchCwd: requestedResolution.cwd,
             requestedCwdDisplay: requestedCwd?.displayValue,
             invalidRequestedCwdMessage: requestedResolution.errorMessage,

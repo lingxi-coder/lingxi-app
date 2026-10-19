@@ -427,6 +427,8 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
 /// The chat surface: owns the conversation state and the interactive footer,
 /// leaving only loop plumbing (terminal, channels, callbacks) to the app.
 pub struct ChatWidget {
+    message_anchor: Option<String>,
+    history_offset: isize,
     loop_interrupt: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Conversation history: committed cells + the active streaming cell +
     /// the native-scrollback commit cursor + verbose/render mode.
@@ -737,6 +739,8 @@ impl ChatWidget {
         Self {
             loop_interrupt: None,
             transcript: Transcript::from_messages(messages),
+            message_anchor: None,
+            history_offset: 0,
             bottom_pane: BottomPane::new(theme),
             session,
             hyperlink_cwd_provider: None,
@@ -969,7 +973,7 @@ impl ChatWidget {
         let snapshot_cwd = (!self.session.doctor.cwd.is_empty())
             .then(|| std::path::Path::new(self.session.doctor.cwd.as_str()));
         self.transcript
-            .request_id_for_fullscreen_rows(
+            .request_id_for_fullscreen_rows_at(
                 usize::from(first_row - area.y),
                 usize::from(last_row - area.y),
                 usize::from(history_height),
@@ -977,6 +981,16 @@ impl ChatWidget {
                 &self.theme,
                 crate::terminal::hyperlinks_supported(),
                 live_cwd.as_deref().or(snapshot_cwd),
+                self.anchored_history_start(
+                    area.width,
+                    crate::terminal::hyperlinks_supported(),
+                    live_cwd.as_deref().or(snapshot_cwd),
+                    self.fullscreen_history_lines(
+                        area.width,
+                        crate::terminal::hyperlinks_supported(),
+                        live_cwd.as_deref().or(snapshot_cwd),
+                    ).len(),
+                ),
             )
             .map(str::to_owned)
     }
@@ -1162,7 +1176,17 @@ impl ChatWidget {
     /// handling (active view, completion, vim, composer), execute the
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
+    pub fn restore_link_draft(&mut self, text: &str) { self.bottom_pane.restore_composer_text(text); }
+    pub fn anchor_message(&mut self, uuid: String) { self.message_anchor = Some(uuid); self.history_offset = 0; self.brief_transcript = false; }
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        if self.message_anchor.is_some() {
+            match key.code {
+                crossterm::event::KeyCode::PageUp => { self.history_offset -= 10; return ChatOutcome::Continue; }
+                crossterm::event::KeyCode::PageDown => { self.history_offset += 10; return ChatOutcome::Continue; }
+                crossterm::event::KeyCode::End => { self.message_anchor = None; self.history_offset = 0; return ChatOutcome::Continue; }
+                _ => ()
+            }
+        }
         if self.session_clear_pending {
             return if key.kind == crossterm::event::KeyEventKind::Press
                 && key
@@ -3078,10 +3102,11 @@ impl ChatWidget {
         let hyperlink_cwd = live_hyperlink_cwd.as_deref().or(snapshot_hyperlink_cwd);
         let history =
             self.fullscreen_history_lines(history_area.width, hyperlinks_enabled, hyperlink_cwd);
-        let skip = history
-            .len()
-            .saturating_sub(usize::from(history_area.height));
-        for (row, line) in history.iter().skip(skip).enumerate() {
+        let skip = self.anchored_history_start(
+            history_area.width, hyperlinks_enabled, hyperlink_cwd, history.len(),
+        )
+            .unwrap_or_else(|| history.len().saturating_sub(usize::from(history_area.height)));
+        for (row, line) in history.iter().skip(skip).take(usize::from(history_area.height)).enumerate() {
             let row_area = Rect::new(
                 history_area.x,
                 history_area.y + u16::try_from(row).unwrap_or(u16::MAX),
@@ -3108,6 +3133,21 @@ impl ChatWidget {
             frame.set_cursor_position(pos);
             frame.set_cursor_style(self.bottom_pane.cursor_style(pane_area));
         }
+    }
+
+    fn anchored_history_start(
+        &self,
+        width: u16,
+        hyperlinks_enabled: bool,
+        cwd: Option<&std::path::Path>,
+        history_len: usize,
+    ) -> Option<usize> {
+        self.message_anchor.as_ref()
+            .and_then(|uuid| self.transcript.message_line_offset(
+                uuid, width, &self.theme, hyperlinks_enabled, cwd,
+            ))
+            .map(|offset| offset.saturating_add_signed(self.history_offset)
+                .min(history_len.saturating_sub(1)))
     }
 
     fn fullscreen_history_lines(
@@ -7099,6 +7139,110 @@ mod tests {
 
     fn widget() -> ChatWidget {
         ChatWidget::new(Vec::new(), SessionInfo::default())
+    }
+
+    #[test]
+    fn deeplink_draft_restoration_waits_for_explicit_submission() {
+        let mut widget = widget();
+        let draft = "待确认的草稿 👩🏽‍💻\n  保留缩进";
+        widget.restore_link_draft(draft);
+        assert_eq!(widget.bottom_pane.composer().text(), draft);
+        assert!(widget.transcript().is_empty());
+        assert!(!widget.turn_running());
+        let _ = fullscreen_output(&mut widget);
+        assert_eq!(widget.bottom_pane.composer().text(), draft);
+        assert!(widget.transcript().is_empty());
+        assert!(!widget.turn_running());
+        let ChatOutcome::Submit(prompt, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("explicit Enter must submit the restored draft");
+        };
+        assert_eq!(prompt.string_at("").as_deref(), Some(draft));
+    }
+
+    #[test]
+    fn deeplink_anchor_survives_resize_new_output_and_history_keys() {
+        let mut widget = widget();
+        for index in 0..30 {
+            widget
+                .transcript
+                .push_message(RenderedMessage::IdentifiedTranscriptRow {
+                    message: Box::new(RenderedMessage::UserText {
+                        body: "相同内容 👩🏽‍💻 e\u{301} ".repeat(8),
+                        timestamp: 0,
+                    }),
+                    request_id: format!("row-{index}"),
+                });
+        }
+        widget.brief_transcript = true;
+        widget.anchor_message("row-12".into());
+        assert!(!widget.brief_transcript);
+        for width in [80, 24, 55, 80] {
+            let area = Rect::new(0, 0, width, 24);
+            assert_eq!(
+                widget.fullscreen_selection_request_id(0, 0, area),
+                Some("row-12".into())
+            );
+            widget.transcript.push_message(RenderedMessage::SystemText {
+                body: format!("new output at width {width}"),
+                timestamp: 0,
+                is_error: false,
+            });
+            assert_eq!(
+                widget.fullscreen_selection_request_id(0, 0, area),
+                Some("row-12".into())
+            );
+        }
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::PageDown)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(widget.history_offset, 10);
+        assert_eq!(widget.message_anchor.as_deref(), Some("row-12"));
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::PageUp)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(widget.history_offset, 0);
+        assert_eq!(
+            widget.fullscreen_selection_request_id(0, 0, Rect::new(0, 0, 80, 24)),
+            Some("row-12".into())
+        );
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::End)),
+            ChatOutcome::Continue
+        ));
+        assert!(widget.message_anchor.is_none());
+        assert_eq!(widget.history_offset, 0);
+    }
+
+    #[test]
+    fn deeplink_anchor_paged_past_history_selects_the_rendered_last_cell() {
+        let mut widget = widget();
+        for uuid in ["anchor-row", "last-row"] {
+            widget
+                .transcript
+                .push_message(RenderedMessage::IdentifiedTranscriptRow {
+                    message: Box::new(RenderedMessage::SystemText {
+                        body: uuid.into(),
+                        timestamp: 0,
+                        is_error: false,
+                    }),
+                    request_id: uuid.into(),
+                });
+        }
+        widget.anchor_message("anchor-row".into());
+        for _ in 0..5 {
+            widget.handle_key(press(KeyCode::PageDown));
+        }
+        let output = strip_ansi(&fullscreen_output(&mut widget));
+        assert!(
+            output.contains("last-row"),
+            "clamped viewport must display the final cell"
+        );
+        assert_eq!(
+            widget.fullscreen_selection_request_id(0, 0, Rect::new(0, 0, 80, 24)),
+            Some("last-row".into())
+        );
     }
 
     #[test]

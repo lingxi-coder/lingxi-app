@@ -56,6 +56,7 @@ import { orphanToolHeader } from '@lingxi/bridge-client/toolview';
 import { isSupportedImageMediaType } from '../../shared/imageInput';
 
 import type { CommandRunItem, RunItem } from '../model/runItem';
+import { attachTranscriptRowUuid, transcriptRowUuids } from '../model/runItem';
 import { collectTurnFileChanges } from '../model/turnFileChanges';
 
 /**
@@ -260,11 +261,17 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
 function removeTranscriptRows(state: ConversationState, uuids: readonly string[]): ConversationState {
   const removedUuids = new Set(uuids);
   if (removedUuids.size === 0) return state;
-  const removedIds = new Set(state.items.flatMap((item) =>
-    (item.type === 'narration' || item.type === 'tool')
-      && item.transcriptUuid && removedUuids.has(item.transcriptUuid) ? [item.id] : []));
-  if (removedIds.size === 0) return state;
-  const items = state.items.filter((item) => !removedIds.has(item.id));
+  const removedIds = new Set(state.items.filter(item => {
+    const uuids = transcriptRowUuids(item);
+    return uuids.length > 0 && uuids.every(uuid => removedUuids.has(uuid));
+  }).map(item => item.id));
+  const hasRemovedAlias = state.items.some(item => transcriptRowUuids(item).some(uuid => removedUuids.has(uuid)));
+  if (!hasRemovedAlias) return state;
+  const items = state.items.filter(item => !removedIds.has(item.id)).map(item => {
+    const uuids = transcriptRowUuids(item);
+    const remaining = uuids.filter(uuid => !removedUuids.has(uuid));
+    return remaining.length === uuids.length ? item : { ...item, transcriptUuid: remaining[0], transcriptUuids: remaining.slice(1) };
+  });
   const toolIndex: Record<string, number> = {};
   for (const [toolId, index] of Object.entries(state.toolIndex)) {
     const id = state.items[index]?.id;
@@ -299,7 +306,7 @@ function removeTranscriptRows(state: ConversationState, uuids: readonly string[]
 }
 
 /** A user message immediately echoed when the composer submits (optimistic). */
-export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = [], now = Date.now()): ConversationState {
+export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = [], now = Date.now(), transcriptRowToken?: string): ConversationState {
   const trimmed = text.trim();
   if (!hasVisibleText(trimmed)) return state;
   const items = state.items.slice();
@@ -314,6 +321,7 @@ export function appendUserPrompt(state: ConversationState, text: string, images:
     // Stamped here rather than read at render time: the message's clock must
     // not move when the window re-renders or the transcript is scrolled.
     sentAt: now,
+    ...(transcriptRowToken ? { transcriptRowToken } : {}),
     ...(images.length ? { images: images.map(messageImageFromRef) } : {}),
   });
   return {
@@ -443,8 +451,8 @@ function finishCompaction(
  * asynchronous `turn_started` event arrives. The real terminal event remains
  * the only successful release path.
  */
-export function appendPendingUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = [], now = Date.now()): ConversationState {
-  const next = appendUserPrompt(state, text, images, now);
+export function appendPendingUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = [], now = Date.now(), transcriptRowToken?: string): ConversationState {
+  const next = appendUserPrompt(state, text, images, now, transcriptRowToken);
   // An ordinary prompt is definitionally not a pending slash command. Clearing
   // `pendingSlashName` here closes off a stale claim left by a bare picker
   // command (`/model`, `/permissions`, `/effort`, `/theme`, `/config` with no
@@ -551,10 +559,15 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       };
     }
 
-    case 'user_transcript_row_identity':
-      // The desktop prompt path has no TUI row token to resolve. Keep the event
-      // typed and replayable; the terminal consumer owns this correlation.
-      return state;
+    case 'user_transcript_row_identity': {
+      // Only an explicit host-issued token may associate a live echo with JSONL.
+      // Desktop submissions without that token remain uncorrelated until replay.
+      const index = state.items.findIndex(item => item.type === 'narration' && item.role === 'user' && item.transcriptRowToken === event.row_token);
+      if (index < 0) return state;
+      const items = state.items.slice();
+      items[index] = attachTranscriptRowUuid(items[index]!, event.uuid);
+      return items[index] === state.items[index] ? state : { ...state, items };
+    }
 
     case 'assistant_transcript_row_uuids': {
       const responseItems = new Set(state.assistantAttemptItems?.[event.message_id] ?? state.pendingAssistantItems ?? []);
@@ -1208,6 +1221,7 @@ export function conversationFromMessages(
   let foldedItemIds: readonly string[] = [];
 
   for (const message of messages) {
+    const messageStart = items.length;
     if (message.loop_wakeup) {
       const restored = reduceEvent({ ...emptyConversation(), items, nextId, foldedItemIds }, {
         type: 'loop_wakeup', ...message.loop_wakeup,
@@ -1216,6 +1230,9 @@ export function conversationFromMessages(
       items = restored.items;
       nextId = restored.nextId;
       foldedItemIds = restored.foldedItemIds;
+      if (message.transcript_uuid) {
+        for (let index = messageStart; index < items.length; index++) items[index] = attachTranscriptRowUuid(items[index]!, message.transcript_uuid);
+      }
       continue;
     }
 
@@ -1314,7 +1331,8 @@ export function conversationFromMessages(
           };
           const previous = idx === undefined ? undefined : items[idx];
           if (idx !== undefined && previous?.type === 'tool') {
-            items[idx] = { ...previous, ...settled };
+            const merged = { ...previous, ...settled };
+            items[idx] = message.transcript_uuid ? attachTranscriptRowUuid(merged, message.transcript_uuid) : merged;
           } else {
             items.push({
               type: 'tool',
@@ -1339,6 +1357,9 @@ export function conversationFromMessages(
         sentAt,
         images,
       });
+    }
+    if (message.transcript_uuid) {
+      for (let index = messageStart; index < items.length; index++) items[index] = attachTranscriptRowUuid(items[index]!, message.transcript_uuid);
     }
   }
 

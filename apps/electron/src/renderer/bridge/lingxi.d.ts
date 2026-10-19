@@ -216,6 +216,12 @@ export interface LingxiApi {
   onPermission(cb: (request: RuntimeEventEnvelope<HostPermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
+  deepLinks: {
+    copySessionLink(projectPath: string, sessionId: string, messageUuid?: string): Promise<void>;
+    next(): Promise<{ id: string; target: import('../../../../../packages/deep-links/index').DeepLinkTarget; projectPath?: string } | null>;
+    acknowledge(id: string, error?: string): Promise<void>;
+    onAvailable(callback: () => void): Unsubscribe;
+  };
   onApplicationMenu(cb: (action: import('../../shared/applicationMenu').ApplicationMenuAction) => void): Unsubscribe;
   audio: NativeAudioApi;
   visualization: VisualizationApi;

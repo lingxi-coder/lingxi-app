@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { WritableScopeDto } from '@lingxi/bridge-client';
 import { ExtensionGlyph } from './ExtensionHubIcons';
+import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -173,7 +174,7 @@ function JsonPropertyEditor({
   );
 }
 
-export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: PageContentProps) {
+export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, onClose, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { mcpAdmin?: unknown }).mcpAdmin === 'function';
   const snapshot = useMemo(() => parseSnapshot(bridge), [bridge.mcpConfigurationSnapshotEvent?.snapshot_json, bridge.mcpServersEvent?.servers]);
@@ -181,6 +182,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: 
   const entries = useMemo(() => parseEntries(snapshot), [snapshot]);
   const scopes = snapshot.scopes ?? [];
   const approval = snapshot.approval ?? {};
+  const appliedLink = useRef<string>();
   const [selection, setSelection] = useState<Selection>({ kind: 'list' });
   const [search, setSearch] = useState('');
   const [draftScope, setDraftScope] = useState<WritableScopeDto>('user');
@@ -226,9 +228,28 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: 
     }
   }, [selected, selection]);
 
+  useEffect(() => {
+    if (linkRequest?.kind !== 'mcp' || appliedLink.current === linkRequest.requestId) return;
+    if (linkRequest.payload) {
+      appliedLink.current = linkRequest.requestId;
+      setSelection({ kind: 'create', scope: linkRequest.scope === 'project' || linkRequest.scope === 'local' ? linkRequest.scope : 'user' });
+    } else if (scopes.length) {
+      appliedLink.current = linkRequest.requestId;
+      const matches = entries.filter(entry => (entry.id === linkRequest.id || entry.name === linkRequest.id) && (!linkRequest.scope || entry.scope === linkRequest.scope));
+      if (matches.length === 1) setSelection({ kind: 'server', id: matches[0]!.id });
+      else setPageError(matches.length ? 'This MCP server name exists in multiple scopes. Include a scope in its link.' : 'This MCP server is unavailable on this device.');
+    }
+  }, [linkRequest, entries, scopes.length]);
+  useEffect(() => {
+    if (selection.kind !== 'create' || linkRequest?.kind !== 'mcp' || !linkRequest.payload) return;
+    const payload = linkRequest.payload;
+    setDraftName(asString(payload.name));
+    setDraftConfigText(prettyJson(asRecord(payload.config ?? payload.server ?? payload)));
+  }, [selection, linkRequest]);
   const dirty = selection.kind !== 'list' && (selected
     ? draftConfigText !== prettyJson(selected.config)
     : draftName.trim().length > 0 || draftConfigText !== '{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
+  const closePrompt = useSettingsDraftGuard({ onClose, onNavigate, onRegisterCloseRequest }, dirty);
   const requestHubNavigation = (pageId: string, pluginId?: string) => {
     if (dirty) {
       setPendingHubPage({ pageId, pluginId });
@@ -390,6 +411,9 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: 
 
   return (
     <ExtensionHubLayout>
+      {closePrompt}
+      {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
+      {linkRequest?.payload && selection.kind === 'create' && <p role="status">Review this imported MCP configuration. The server is saved only when you confirm below.</p>}
         <ExtensionHubHeader title="MCP 服务器" description="Connect MCP servers to bring your tools into LingXi" search={search} onSearch={setSearch} actions={<>
           <button type="button" aria-label="Refresh MCP servers" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to refresh tools.'))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
           <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">Add <ExtensionGlyph name="plus" size={14} /></button>
@@ -567,7 +591,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest }: 
               </div>
             )}
             <div className="mcp-editor-actions">
-              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>保存</button>
+              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>{linkRequest?.payload && selection.kind === 'create' ? 'Confirm import MCP server' : '保存'}</button>
               {selected && <button type="button" onClick={remove} style={ghostButtonStyle(t, false, true)}>移除</button>}
             </div>
             <div style={noteStyle(t)}>

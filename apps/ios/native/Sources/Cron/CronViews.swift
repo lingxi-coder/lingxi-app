@@ -7,6 +7,7 @@ struct CronRootView: View {
     let initialPrompt: String?
     let onDismiss: (() -> Void)?
     @State private var closeAlert = false
+    @State private var linkedResourceMissing = false
 
     init(
         repository: CronRepository,
@@ -24,7 +25,10 @@ struct CronRootView: View {
         Group {
             // RootView owns navigation on both phone and tablet. Keep one
             // navigation bar and let the repository retain editor/run history.
-            if let route = repository.routePath.last {
+            if linkedResourceMissing {
+                ContentUnavailableView("Scheduled item unavailable", systemImage: "link", description: Text("This scheduled item is not stored locally on this device."))
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_close") { onDismiss?() } } }
+            } else if let route = repository.routePath.last {
                 destination(route)
             } else {
                 taskList.navigationTitle("Scheduled")
@@ -37,9 +41,14 @@ struct CronRootView: View {
             guard repository.routePath.isEmpty else { return }
             switch initialRoute {
             case .task(let scopeID, let taskID):
-                if let taskID { repository.beginEdit(scopeID: scopeID, taskID: taskID) }
+                if let taskID {
+                    guard repository.state.tasks.contains(where: { $0.scope.scopeID == scopeID && $0.task.id == taskID }) else { linkedResourceMissing = true; return }
+                    repository.beginEdit(scopeID: scopeID, taskID: taskID)
+                }
                 else { repository.beginCreate(scopeID: scopeID, prompt: initialPrompt ?? "") }
-            case .run(let runID): repository.openRun(runID)
+            case .run(let runID):
+                guard repository.state.history.contains(where: { $0.runID == runID }) else { linkedResourceMissing = true; return }
+                repository.openRun(runID)
             case .list, .none: break
             }
         }

@@ -182,15 +182,9 @@ impl Transcript {
             request_id,
         } = message
         {
-            if matches!(
-                inner.as_ref(),
-                RenderedMessage::UserText { .. } | RenderedMessage::AssistantText { .. }
-            ) {
-                self.request_ids
-                    .insert(self.committed.len(), request_id.clone());
-                self.row_uuids
-                    .insert(self.committed.len(), vec![request_id]);
-            }
+            let index = self.committed.len();
+            self.row_uuids.insert(index, vec![request_id.clone()]);
+            self.request_ids.insert(index, request_id);
             self.push_message(*inner);
             return;
         }
@@ -521,6 +515,11 @@ impl Transcript {
     /// scrollback; full-screen mode has no native scrollback and therefore
     /// redraws the committed cells plus active tail from this immutable view.
     #[must_use]
+    pub fn message_line_offset(&self, uuid: &str, width: u16, theme: &Theme, hyperlinks: bool, cwd: Option<&Path>) -> Option<usize> {
+        let index = self.row_uuids.iter().filter(|(_, ids)| ids.iter().any(|id| id == uuid)).map(|(index, _)| *index).min()?;
+        Some(self.committed.iter().take(index).map(|cell| wrap_to_width(cell.scrollback_lines(width.max(1), theme, self.render_mode, hyperlinks, cwd), width.max(1)).len()).sum())
+    }
+
     pub fn visible_fullscreen_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
         self.visible_fullscreen_lines_with_hyperlinks(width, theme, false, None)
     }
@@ -608,6 +607,14 @@ impl Transcript {
         hyperlinks_enabled: bool,
         hyperlink_cwd: Option<&Path>,
     ) -> Option<&str> {
+        self.request_id_for_fullscreen_rows_at(start_row, end_row, viewport_height, width, theme, hyperlinks_enabled, hyperlink_cwd, None)
+    }
+
+    pub fn request_id_for_fullscreen_rows_at(
+        &self, start_row: usize, end_row: usize, viewport_height: usize,
+        width: u16, theme: &Theme, hyperlinks_enabled: bool, hyperlink_cwd: Option<&Path>,
+        viewport_start: Option<usize>,
+    ) -> Option<&str> {
         if start_row > end_row || end_row >= viewport_height {
             return None;
         }
@@ -633,7 +640,7 @@ impl Transcript {
             wrap_to_width(lines, width).len()
         });
         let total = heights.iter().sum::<usize>() + active_height;
-        let skip = total.saturating_sub(viewport_height);
+        let skip = viewport_start.unwrap_or_else(|| total.saturating_sub(viewport_height));
         let absolute_start = skip + start_row;
         let absolute_end = skip + end_row;
         let mut first = 0;
@@ -842,6 +849,159 @@ mod tests {
 
     fn assistant_cell(body: &str) -> Box<dyn HistoryCell> {
         Box::new(AssistantTextCell::new(body.to_string()))
+    }
+
+    #[test]
+    fn deeplink_uuid_anchor_survives_repeated_unicode_resize_and_new_tail() {
+        let mut transcript = Transcript::new();
+        let theme = Theme::dark();
+        let repeated = "相同文本 👩🏽‍💻 e\u{301} 重复内容 ".repeat(8);
+        for uuid in ["earlier-row", "target-row", "later-row"] {
+            transcript.push_message(RenderedMessage::IdentifiedTranscriptRow {
+                message: Box::new(RenderedMessage::UserText {
+                    body: repeated.clone(),
+                    timestamp: 0,
+                }),
+                request_id: uuid.into(),
+            });
+        }
+        for width in [80, 17, 43, 1, 80] {
+            let offset = transcript
+                .message_line_offset("target-row", width, &theme, false, None)
+                .unwrap();
+            let first_height = wrap_to_width(
+                transcript.committed_cells()[0].display_lines(
+                    width,
+                    &theme,
+                    transcript.render_mode(),
+                ),
+                width,
+            )
+            .len();
+            assert_eq!(offset, first_height, "width {width}");
+            assert_eq!(
+                transcript.request_id_for_fullscreen_rows_at(
+                    0,
+                    0,
+                    5,
+                    width,
+                    &theme,
+                    false,
+                    None,
+                    Some(offset)
+                ),
+                Some("target-row")
+            );
+            transcript.set_active(assistant_cell(&format!("new output at width {width}")));
+            assert_eq!(
+                transcript.message_line_offset("target-row", width, &theme, false, None),
+                Some(offset)
+            );
+            transcript.flush_active();
+            assert_eq!(
+                transcript.request_id_for_fullscreen_rows_at(
+                    0,
+                    0,
+                    5,
+                    width,
+                    &theme,
+                    false,
+                    None,
+                    Some(offset)
+                ),
+                Some("target-row"),
+                "new output must not switch selection to the tail"
+            );
+        }
+        assert_eq!(
+            transcript.message_line_offset("missing-row", 80, &theme, false, None),
+            None
+        );
+        assert_eq!(
+            transcript.remove_transcript_rows(&["earlier-row".into()]),
+            1
+        );
+        assert_eq!(
+            transcript.message_line_offset("target-row", 80, &theme, false, None),
+            Some(0)
+        );
+        assert_eq!(
+            transcript.request_id_for_fullscreen_rows_at(0, 0, 5, 80, &theme, false, None, Some(0)),
+            Some("target-row"),
+            "removing earlier history must preserve the target identity"
+        );
+    }
+
+    #[test]
+    fn deeplink_tool_uuid_anchor_preserves_tool_request_and_cell_boundaries() {
+        let mut transcript = Transcript::new();
+        let theme = Theme::dark();
+        transcript.push_message(RenderedMessage::IdentifiedTranscriptRow {
+            message: Box::new(system("header 跨行 ".repeat(20).as_str())),
+            request_id: "header-row".into(),
+        });
+        transcript.push_message(RenderedMessage::IdentifiedTranscriptRow {
+            message: Box::new(RenderedMessage::AssistantToolUse {
+                id: lingxi_core::types::ToolUseId::from("toolu_original"),
+                tool: "Read".into(),
+                input: serde_json::json!({"file_path":"/tmp/重复文件"}),
+            }),
+            request_id: "persisted-tool-row".into(),
+        });
+        transcript.push_message(RenderedMessage::IdentifiedTranscriptRow {
+            message: Box::new(system("following row")),
+            request_id: "following-row".into(),
+        });
+        for width in [80, 19] {
+            let start = transcript
+                .message_line_offset("persisted-tool-row", width, &theme, false, None)
+                .unwrap();
+            let next = transcript
+                .message_line_offset("following-row", width, &theme, false, None)
+                .unwrap();
+            let height = next - start;
+            assert!(height > 0);
+            assert_eq!(
+                transcript.request_id_for_fullscreen_rows_at(
+                    0,
+                    height - 1,
+                    height + 1,
+                    width,
+                    &theme,
+                    false,
+                    None,
+                    Some(start)
+                ),
+                Some("toolu_original")
+            );
+            assert_eq!(
+                transcript.request_id_for_fullscreen_rows_at(
+                    0,
+                    height,
+                    height + 1,
+                    width,
+                    &theme,
+                    false,
+                    None,
+                    Some(start)
+                ),
+                None,
+                "selection spanning cells must not target either row"
+            );
+            assert_eq!(
+                transcript.request_id_for_fullscreen_rows_at(
+                    height,
+                    height,
+                    height + 1,
+                    width,
+                    &theme,
+                    false,
+                    None,
+                    Some(start)
+                ),
+                Some("following-row")
+            );
+        }
     }
 
     #[test]

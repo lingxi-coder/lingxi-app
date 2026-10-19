@@ -12,6 +12,7 @@ enum SettingsPage: Hashable {
     case skills, skillDetail(String)
     case pluginDetail(String), pluginsAdvanced
     case mcpList, mcpEdit(String)
+    case linkedMcp(String, scope: String?), linkedSkill(String, scope: String?), linkedProvider(String, scope: String?)
     case dream
 }
 
@@ -268,7 +269,7 @@ struct SettingsHost: View {
 
     private func showsEngineApplyAction(_ page: SettingsPage) -> Bool {
         switch page {
-        case .customProviders, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
+        case .customProviders, .linkedProvider, .permissions, .toolsAgent, .skills, .mcpList, .hooks, .plugins, .pluginDetail,
              .pluginsAdvanced, .diagnostics, .projectsTrust:
             true
         case .providerList(let kind): kind.kind == .llm
@@ -432,6 +433,9 @@ struct SettingsHost: View {
         case .skills: return String(localized: "settings_title_skills")
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"
         case .mcpList: return String(localized: "settings_mcp_servers")
+        case .linkedProvider(let id, _): return id
+        case .linkedMcp(let id, _): return id
+        case .linkedSkill(let id, _): return id
         case .mcpEdit(let id): return store.mcpServers.first(where: { $0.id == id })?.name ?? "MCP"
         case .dream: return String(localized: "settings_dream_mode")
         }

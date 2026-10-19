@@ -19,6 +19,7 @@
 
 use clap::Subcommand;
 
+pub mod deep_links;
 pub mod agents;
 pub mod attach;
 pub mod auth;
@@ -54,6 +55,10 @@ pub mod update;
 /// (`plugin|plugins`, `update|upgrade`).
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
+    /// Open a LingXi link in the desktop application
+    Open(deep_links::Open),
+    /// Generate a LingXi link without performing an action
+    Link(deep_links::Link),
     /// Configure and manage MCP servers
     Mcp(mcp::Cli),
     /// Manage authentication
@@ -149,6 +154,8 @@ impl Commands {
     #[must_use]
     pub fn top_level_name(&self) -> &'static str {
         match self {
+            Commands::Open(_) => "open",
+            Commands::Link(_) => "link",
             Commands::Mcp(_) => "mcp",
             Commands::Auth(_) => "auth",
             Commands::AutoMode(_) => "auto-mode",
@@ -180,6 +187,8 @@ impl Commands {
     /// Execute the chosen subcommand, returning the process exit code.
     pub async fn run(&self) -> i32 {
         match self {
+            Commands::Open(c) => deep_links::open(c),
+            Commands::Link(c) => deep_links::link(c),
             Commands::Mcp(c) => mcp::run(c).await,
             Commands::Auth(c) => auth::run(c).await,
             Commands::AutoMode(c) => auto_mode::run(c).await,

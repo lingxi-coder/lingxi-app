@@ -1,3 +1,4 @@
+import { installDeepLinks } from './deepLinks.js';
 import { AccountService } from './account.js';
 import { accountSessionStore } from './account-storage.js';
 import { brokerAccountSessionStore } from './account-broker-storage.js';
@@ -64,6 +65,15 @@ let terminals: TerminalManager | null = null;
 let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
+let deepLinkProjects: () => string[] = () => [];
+let resolveDeepLinkReady: () => void;
+const deepLinkReady = new Promise<void>(resolve => { resolveDeepLinkReady = resolve; });
+const deepLinks = installDeepLinks(() => deepLinkProjects(), () => {
+  let window = BrowserWindow.getAllWindows()[0];
+  if (!window && host) { createWindow(); window = BrowserWindow.getAllWindows()[0]; }
+  if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
+}, () => deepLinkReady);
+
 
 /**
  * Whether the main window currently has OS focus. Net-new state: nothing in
@@ -213,6 +223,7 @@ if (!hasSingleInstanceLock) app.quit();
 
 if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(process.platform, (action) => {
+    if (action === 'open-link') { deepLinks.openClipboard(); return; }
     const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? createWindow();
     const send = () => {
       if (window.isDestroyed()) return;
@@ -465,6 +476,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } catch (error) {
     diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
   }
+  deepLinkProjects = () => settings.getPublic().projects;
+  deepLinks.register();
   createWindow();
 
   const publicSettings = settings.getPublic();
@@ -486,6 +499,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   };
   const scheduledFallback = setTimeout(startScheduled, 10_000);
   void foregroundRestore.then(() => {
+    resolveDeepLinkReady();
     clearTimeout(scheduledFallback);
     startScheduled();
   });

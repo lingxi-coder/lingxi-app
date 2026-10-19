@@ -152,6 +152,8 @@ struct RootView: View {
     @State private var confirmedSession: String
     @State private var pendingSessionRestoreID: String?
     @State private var draft: String
+    @State private var hasUnsavedConversationMedia = false
+    @State private var hasUnsavedTerminalInput = false
     @State private var voiceInteraction: VoiceInteractionController
     @State private var conversationBackgroundExecution =
         ConversationBackgroundExecutionController.live()
@@ -167,6 +169,16 @@ struct RootView: View {
     /// dropped its own action every time. Park refused actions here and retry
     /// them the moment the gate opens.
     @State private var deferredAppActions: [LingxiAppAction] = []
+    @State private var externalEngineReady = false
+    @State private var externalActionApproval: LingxiAppAction?
+    @State private var approvedExternalActions: [LingxiAppAction] = []
+    @State private var externalImport: CanonicalDeepLink?
+    @State private var externalLinkError: String?
+    @State private var externalAsyncRouteID = UUID()
+    @State private var lastExternalURLAction: (action: LingxiAppAction, receivedAt: Date)?
+    @State private var pendingLinkedSessionID: String?
+    @State private var pendingMessageLink: (sessionID: String, uuid: UUID)?
+
     /// A stuck gate plus a notification storm must not grow this without
     /// bound; only the newest few taps are worth replaying.
     private static let maxDeferredAppActions = 8
@@ -525,6 +537,15 @@ struct RootView: View {
                 settingsStore.llmProviders = providerRepository.legacyProviders()
             }
         let presentationLifecycle = stateLifecycle
+            .onChange(of: externalEngineReady) { _, ready in if ready { retryDeferredAppActions() } }
+            .onChange(of: app.setupDone) { _, ready in if ready { retryDeferredAppActions() } }
+            .onChange(of: source.model.sessionTransitionPending) { _, pending in
+                if !pending { retryDeferredAppActions(); resolvePendingMessageLink() }
+            }
+            .onChange(of: source.model.items) { _, _ in resolvePendingMessageLink() }
+            .onChange(of: source.model.engineSessionsLoaded) { _, loaded in if loaded { retryDeferredAppActions() } }
+            .onChange(of: source.model.engineSessions) { _, _ in retryDeferredAppActions() }
+
         let notificationLifecycle = presentationLifecycle
             .onReceive(NotificationCenter.default.publisher(for: .lingxiCronNotificationOpened)) { note in
                 cronRepository.handleNotificationUserInfo(note.userInfo ?? [:])
@@ -557,10 +578,16 @@ struct RootView: View {
             .onChange(of: projectSwitching) { _, switching in
                 guard !switching else { return }
                 applyPendingConversationSelectionRestoreIfPossible()
+                retryDeferredAppActions()
+                resolvePendingMessageLink()
             }
             .onOpenURL(perform: handleIncomingURL)
+            .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+                if let url = activity.webpageURL { handleIncomingURL(url) }
+            }
         let bootstrapLifecycle = notificationLifecycle
             .task(id: sourceGeneration) {
+                externalEngineReady = false
                 let generation = sourceGeneration
                 let sessionToRestore = pendingSessionRestoreID ?? activeSession
                 // `providerCatalogBootstrapped` flips true exactly once, on
@@ -601,6 +628,8 @@ struct RootView: View {
                             using: current
                         )
                     }
+                    externalEngineReady = true
+                    retryDeferredAppActions()
                     await providerRepository.refreshCredentialStatus()
                     #if canImport(harness_runtimeFFI)
                         // 只登记灵犀的插件市场，不安装任何插件；用户在设置 → 插件里自己装。
@@ -627,6 +656,29 @@ struct RootView: View {
 
     private func withPresentations(_ content: some View) -> some View {
         content
+            .sheet(item: $externalImport, onDismiss: retryDeferredAppActions) { target in
+                DeepLinkImportPreview(target: target)
+            }
+            .alert("Open linked destination?", isPresented: Binding(
+                get: { externalActionApproval != nil },
+                set: { if !$0 { externalActionApproval = nil } }
+            ), presenting: externalActionApproval) { action in
+                Button("Continue") {
+                    externalActionApproval = nil
+                    if !approvedExternalActions.contains(action) { approvedExternalActions.append(action) }
+                    cronRepository.discardDraft()
+                    parkRefusedAppAction(action, applied: applyAppAction(action, approvedDraftChange: true))
+                    retryDeferredAppActions()
+                }
+                Button("Keep editing", role: .cancel) { externalActionApproval = nil; retryDeferredAppActions() }
+            } message: { _ in
+                Text("Your conversation text is saved in its workspace. Opening a new conversation can replace its draft and attachments. Unsaved terminal input and scheduled-task edits will be discarded.")
+            }
+            .alert("Unable to open link", isPresented: Binding(
+                get: { externalLinkError != nil }, set: { if !$0 { externalLinkError = nil } }
+            )) { Button("OK", role: .cancel) { externalLinkError = nil } }
+            message: { Text(externalLinkError ?? "") }
+
             .fullScreenCover(
                 item: Binding(
                     get: { navigation.runningAppID.map(RunningApp.init) },
@@ -764,6 +816,8 @@ struct RootView: View {
                 projectName: projectStore.activeProject?.record.name,
                 sessionMode: activeMode,
                 workspaceName: currentWorkspaceName,
+                workspaceKey: activeScope.workspaceKey,
+                onDraftMediaChanged: { hasUnsavedConversationMedia = $0 },
                 isPinned: !activeSession.isEmpty && sessionPinnedAt[activeSession] != nil,
                 canArchive: !activeSession.isEmpty && activeScope != .scheduled,
                 onSelectNewChatMode: { startNewChat(in: activeScope, mode: $0) },
@@ -935,6 +989,7 @@ struct RootView: View {
     }
 
     private func handleSettingsDismissed() {
+        defer { retryDeferredAppActions() }
         Task { @MainActor in
             await VoicePreviewPlayback.shared.stop()
             guard !navigation.settingsOpen,
@@ -947,19 +1002,21 @@ struct RootView: View {
     @ViewBuilder
     private func destination(_ route: AppRoute) -> some View {
         switch route {
-        case .terminal(_, let initialCommand, let projectID, let requestedCwd):
+        case .terminal(let sessionID, let initialCommand, let projectID, let requestedCwd):
             let project = terminalProject(for: projectID)
             let descriptor = TerminalRuntimeDescriptor.make(
                 appSandboxRoot: appSandboxRoot,
                 project: project,
                 linuxRuntime: settingsStore.linuxRuntime,
                 initialCommand: initialCommand,
-                requestedCwd: requestedCwd
+                requestedCwd: requestedCwd,
+                requestedSessionID: sessionID != "interactive" && requestedCwd == nil ? sessionID : nil
             )
             TerminalView(
                 descriptor: descriptor,
                 onDismiss: { popRoute() },
-                onOpenRuntimeSettings: { popRoute(); navigation.showSettings(.linuxRuntime) }
+                onOpenRuntimeSettings: { popRoute(); navigation.showSettings(.linuxRuntime) },
+                onDraftChanged: { hasUnsavedTerminalInput = $0 }
             )
         case .cron(let scopeID, let taskID):
             let route = scopeID.map { CronRoute.task(scopeID: $0, taskID: taskID) }
@@ -1539,6 +1596,10 @@ struct RootView: View {
             confirmedSession = ""
         }
         pendingSessionRestoreID = nil
+        if pendingLinkedSessionID == sessionID {
+            pendingLinkedSessionID = nil; pendingMessageLink = nil
+            externalLinkError = "This conversation is not stored in the requested local workspace."
+        }
         activeSession = confirmedSession
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
         if let pending = pendingSessionFork,
@@ -1560,6 +1621,10 @@ struct RootView: View {
         }
         pendingSessionRestoreID = nil
         activeSession = rollbackSelection
+        if pendingLinkedSessionID == sessionID {
+            pendingLinkedSessionID = nil; pendingMessageLink = nil
+            externalLinkError = "The local conversation could not be opened."
+        }
         scopedPreferences.setActiveSessionID(confirmedSession, scope: activeScope, mode: activeMode)
         if let pending = pendingSessionFork,
            pending.sourceSessionID == sessionID {
@@ -1860,8 +1925,8 @@ struct RootView: View {
 
     /// Park an action the session-mutation gate refused instead of losing it.
     private func parkRefusedAppAction(_ action: LingxiAppAction, applied: Bool) {
-        guard !applied else { return }
-        deferredAppActions.append(action)
+        guard !applied else { approvedExternalActions.removeAll { $0 == action }; return }
+        if !deferredAppActions.contains(action) { deferredAppActions.append(action) }
         if deferredAppActions.count > Self.maxDeferredAppActions {
             deferredAppActions.removeFirst(
                 deferredAppActions.count - Self.maxDeferredAppActions
@@ -1875,11 +1940,6 @@ struct RootView: View {
     /// turn resolves rather than being silently discarded.
     private func retryDeferredAppActions() {
         guard !deferredAppActions.isEmpty else { return }
-        guard ConversationSessionMutationPolicy.allowsCallerMutation(
-            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
-            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
-            isCancelling: source.model.isCancelling
-        ) else { return }
         let pending = deferredAppActions
         deferredAppActions = []
         for action in pending {
@@ -1891,12 +1951,22 @@ struct RootView: View {
     /// the caller can retry it later. `true` means the action was consumed
     /// (including the cases that never touch session selection).
     @discardableResult
-    private func applyAppAction(_ action: LingxiAppAction) -> Bool {
+    private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
+        guard app.setupDone, externalEngineReady, !projectSwitching, !source.model.sessionTransitionPending,
+              !navigation.settingsOpen, externalImport == nil, externalActionApproval == nil else { return false }
+        if !approvedDraftChange && !approvedExternalActions.contains(action) && (!draft.isEmpty || hasUnsavedConversationMedia || (hasUnsavedTerminalInput && navigation.path.contains(where: { if case .terminal = $0 { return true }; return false })) || cronRepository.hasUnsavedChanges) {
+            externalActionApproval = action
+            return true
+        }
+
+        externalAsyncRouteID = UUID()
         navigation.closeSidebar()
         navigation.closeSettings()
         navigation.path.removeAll()
 
         switch action {
+        case let .canonical(target):
+            return applyCanonicalLink(target)
         case .openApp:
             return true
         case .newConversation:
@@ -1904,9 +1974,8 @@ struct RootView: View {
         case let .ask(question):
             let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
             return beginAppIntegratedConversation(draftText: trimmed)
-        // `turnID` is deliberately unused because the iOS transcript has no
-        // navigate-to-turn API. Workspace and mode are still load-bearing:
-        // the session must be resumed under the source that posted the alert.
+        // Older notification turn counters are process-local. Canonical message
+        // links resolve persisted UUIDs after the exact local session resumes.
         case let .openConversation(sessionID, _, workspaceKey, mode):
             let targetScope: ConversationScope
             if let workspaceKey {
@@ -1952,6 +2021,124 @@ struct RootView: View {
         }
     }
 
+    private func applyCanonicalLink(_ target: CanonicalDeepLink) -> Bool {
+        let parts = target.parts
+        let id = parts.last ?? ""
+        var requestedScope = activeScope
+        if let workspace = target.params["workspace"] {
+            guard let scope = ConversationScope(workspaceKey: workspace) else { return missingLinkedResource("workspace") }
+            if case let .project(projectID) = scope, !projectStore.projects.contains(where: { $0.record.id == projectID }) { return missingLinkedResource("workspace") }
+            requestedScope = scope
+        }
+        if target.needsContextRebind(workspace: activeScope.workspaceKey, mode: activeMode.rawValue) {
+            guard switchScope(to: requestedScope, mode: target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? activeMode) else { return false }
+            return false
+        }
+        switch parts[0] {
+        case "session":
+            let mode = target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? .code
+            if target.params["workspace"] == nil || target.params["workspace"] == activeScope.workspaceKey {
+                guard source.model.engineSessionsLoaded else { return false }
+                guard source.model.engineSessions.contains(where: { $0.id == id }) || source.model.activeSessionId == id else {
+                    externalLinkError = "This conversation is not stored in the selected local workspace."; return true
+                }
+            }
+            let applied = applyAppAction(.openConversation(sessionID: id, turnID: nil, workspaceKey: target.params["workspace"], mode: mode), approvedDraftChange: true)
+            if applied { pendingLinkedSessionID = id }
+            if applied, let raw = target.params["message"], let uuid = UUID(uuidString: raw) {
+                pendingMessageLink = (id, uuid)
+                resolvePendingMessageLink()
+            }
+            return applied
+        case "new":
+            let text = target.payload["prompt"] as? String ?? ""
+            if let workspace = target.params["workspace"], let scope = ConversationScope(workspaceKey: workspace), scope != activeScope {
+                pendingBeginActionDraft = text
+                return switchScope(to: scope, mode: target.params["mode"].flatMap(SessionMode.init(rawValue:)) ?? activeMode, startNew: true)
+            }
+            if let mode = target.params["mode"].flatMap(SessionMode.init(rawValue:)), mode != activeMode {
+                pendingBeginActionDraft = text
+                return switchScope(to: activeScope, mode: mode, startNew: true)
+            }
+            return beginAppIntegratedConversation(draftText: text)
+        case "project":
+            guard projectStore.projects.contains(where: { $0.record.id == id }) else { return missingLinkedResource("project") }
+            navigation.openProject(id)
+        case "settings":
+            guard let entry = DesktopSettingsEntry.all.first(where: { $0.id == id }) else { return missingLinkedResource("settings page") }
+            navigation.showSettings(entry.page)
+        case "provider":
+            if target.params["scope"] == nil, let profile = providerRepository.profiles.first(where: { $0.id == id }) {
+                navigation.showSettings(.providerEdit(.init(.llm), profile.id))
+            } else { navigation.showSettings(.linkedProvider(id, scope: target.params["scope"])) }
+        case "extensions":
+            if parts[1] == "plugin" {
+                navigation.showSettings(.pluginDetail(id))
+            } else if parts[1] == "mcp" {
+                navigation.showSettings(.linkedMcp(id, scope: target.params["scope"]))
+            } else { navigation.showSettings(.linkedSkill(id, scope: target.params["scope"])) }
+        case "cron":
+            if parts[1] == "run" { navigation.openCronRun(id) }
+            else { navigation.openCron(scopeID: target.params["scope"] ?? activeScope.projectID ?? globalCronScopeID, taskID: id) }
+        case "terminal":
+            navigation.openTerminal(sessionID: id, initialCommand: target.payload["command"] as? String, projectID: activeScope.projectID)
+        case "apps":
+            let requestID = externalAsyncRouteID
+            Task { @MainActor in
+                await LocalApps.initializeOnce()
+                let chatID = AppsModel.chatAppID(of: id) ?? id
+                let chatExists = await LocalApps.chat.exists(chatID) == true
+                guard requestID == externalAsyncRouteID else { return }
+                let marketExists = LocalApps.market?.installed.contains(where: { $0.appId == id && !$0.removing }) == true
+                if AppsModel.chatAppID(of: id) != nil, chatExists { navigation.runApp(id) }
+                else if chatExists && marketExists { externalLinkError = "Several local apps match this ID. Open a link with its app source." }
+                else if chatExists { navigation.runApp(AppsModel.chatAppKey(chatID)) }
+                else if marketExists { navigation.runApp(id) }
+                else { _ = missingLinkedResource("installed app") }
+            }
+        case "market": navigation.openMarketApp(id)
+        case "import":
+            guard target.payloadJSON != nil else { externalLinkError = "This import link has no configuration to review."; return true }
+            externalImport = target
+        case "runtime":
+            if parts[1] == "agent" {
+                guard source.model.agentSummaries.contains(where: { $0.id == id }) else { return missingLinkedResource("agent") }
+                source.selectAgent(id)
+            } else {
+                source.model.deepLinkRuntimeTarget = target
+            }
+        default: return missingLinkedResource("destination")
+        }
+        return true
+    }
+
+    private func missingLinkedResource(_ kind: String) -> Bool {
+        externalLinkError = "The linked \(kind) is not available in local data on this device."
+        return true
+    }
+
+    private func resolvePendingMessageLink() {
+        if pendingLinkedSessionID == source.model.activeSessionId, !source.model.sessionTransitionPending { pendingLinkedSessionID = nil }
+        guard let pending = pendingMessageLink,
+              source.model.activeSessionId == pending.sessionID,
+              !source.model.sessionTransitionPending else { return }
+        if let message = source.model.messages.first(where: { $0.transcriptUUID == pending.uuid }) {
+            source.model.deepLinkScrollRowID = "message:\(message.id.uuidString)"
+            source.model.deepLinkScrollRevision &+= 1
+            pendingMessageLink = nil
+        } else if let toolID = source.model.transcriptUUIDToolIDs[pending.uuid],
+                  let group = ConversationRenderLayout.timelineGroups(source.model.items).first(where: { group in
+                      group.rows.contains { if case let .tool(_, tool) = $0 { return tool.id == toolID }; return false }
+                  }), let firstToolID = group.rows.compactMap({ row -> String? in if case let .tool(_, tool) = row { return tool.id }; return nil }).first {
+            source.model.deepLinkScrollRowID = ConversationTimelineView.toolSegmentID(firstToolID: firstToolID)
+            source.model.deepLinkScrollRevision &+= 1
+            pendingMessageLink = nil
+        } else if !projectSwitching && pendingSessionRestoreID == nil {
+            pendingMessageLink = nil
+            externalLinkError = "This message is not present in the locally stored conversation."
+        }
+    }
+
     private func handleIncomingURL(_ url: URL) {
         #if canImport(harness_runtimeFFI)
             if url.scheme?.lowercased() == "lingxi",
@@ -1961,7 +2148,16 @@ struct RootView: View {
                 return
             }
         #endif
-        guard let action = LingxiDeepLink.action(from: url) else { return }
+        guard let action = LingxiDeepLink.action(from: url) else {
+            // Account sign-in callbacks belong to the app delegate's SDK handlers.
+            if url.scheme?.lowercased() == "lingxi" || (url.scheme == "https" && url.host == "lingxios.net") {
+                externalLinkError = "This link is invalid or names an unsupported destination."
+            }
+            return
+        }
+        let now = Date()
+        if let previous = lastExternalURLAction, previous.action == action, now.timeIntervalSince(previous.receivedAt) < 2 { return }
+        lastExternalURLAction = (action, now)
         parkRefusedAppAction(action, applied: applyAppAction(action))
     }
 

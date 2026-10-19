@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useSettingsDraftGuard } from '../useSettingsDraftGuard';
 import { Card, isEditableLayer, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -120,7 +121,7 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
  * cross-layer merge) was the wrong source for a page that writes one layer
  * WHOLESALE.
  */
-export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer, onLayerLockChange }: PageContentProps) {
+export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer, onLayerLockChange, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
   const primaryButtonStyle = { ...ghostButtonStyle(t), background: `color-mix(in srgb, ${t.accent} 85%, #000)`, borderColor: t.accent, color: '#fff', fontWeight: 600 };
   const providers = providersFromLayer(snapshot, editingLayer);
@@ -174,6 +175,18 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
     return () => { generation.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingLayer, bridge.activeSession?.sessionId]);
+  const appliedLink = useRef<string>();
+  useEffect(() => {
+    if (linkRequest?.kind !== 'provider' || !linkRequest.payload || appliedLink.current === linkRequest.requestId) return;
+    appliedLink.current = linkRequest.requestId;
+    const text = JSON.stringify(linkRequest.payload, null, 2);
+    setImportOpen(true); setImportText(text);
+    const result = parseProviderImport(text, providers);
+    setEntries(result.diagnostics.some(entry => entry.severity === 'error') ? null : result.entries);
+    setImportError(result.diagnostics.filter(entry => entry.severity === 'error').map(entry => entry.message).join('\n') || null);
+    setImportWarning(result.diagnostics.filter(entry => entry.severity === 'warning').map(entry => entry.message).join('\n') || null);
+  }, [linkRequest]);
+  const closePrompt = useSettingsDraftGuard({ onClose, onNavigate, onRegisterCloseRequest, onRegisterNavigationRequest }, Boolean(importOpen && importText.trim()) || editorOpen, true);
   const loadForEdit = (name: string, value: CustomProviderDraft) => {
     setProfileName(name); setOriginalName(name); setDraft(editableProviderDraft(value)); setApiKey('');
     setFormError(null); setEditorOpen(true); setImportOpen(false);
@@ -299,6 +312,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
 
   return (
     <>
+      {closePrompt}
       {!editorOpen && !importOpen && <ProviderRegion bridge={bridge} snapshot={snapshot} editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} onLayerLockChange={onLayerLockChange} />}
       {(editorOpen || importOpen) && <button disabled={busy} style={{ ...ghostButtonStyle(t), marginBottom: 16 }} onClick={() => { resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setImportError(null); }}>← 返回 Provider 列表</button>}
       {!editorOpen && !importOpen && <Card title="自定义 Provider">

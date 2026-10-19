@@ -188,6 +188,27 @@ final class TerminalSessionModel {
 
         do {
             tasks = try await client.listTasks(config: descriptor.config)
+            if let requested = descriptor.requestedSessionID {
+                var cursor: UInt64?
+                var linkedEvent: TerminalStreamEvent?
+                for _ in 0..<32 {
+                    let events = try await client.readEvents(config: descriptor.config, afterSequence: cursor, limit: descriptor.eventBatchLimit)
+                    linkedEvent = events.last(where: { $0.source == .pty && ($0.streamId == requested || $0.taskId == requested) })
+                    if linkedEvent != nil || events.isEmpty { break }
+                    guard let next = events.map(\.sequence).max(), next != cursor else { break }
+                    cursor = next
+                }
+                guard let linkedEvent, tasks.contains(where: { ($0.id == requested || $0.id == linkedEvent.taskId || $0.id == linkedEvent.streamId) && $0.state == .running }) else {
+                    availability = .invalidRequest("The linked terminal session is not running locally on this device.")
+                    return
+                }
+                guard !isTornDown else { availability = .closed; return }
+                activeSessionID = linkedEvent.streamId
+                availability = .ready
+                startPollingLoop()
+                if let command = descriptor.initialCommand, inputText.isEmpty { inputText = command }
+                return
+            }
             let session = try await client.openPty(
                 config: descriptor.config,
                 request: TerminalPtyOpenRequest(
@@ -221,10 +242,8 @@ final class TerminalSessionModel {
             startPollingLoop()
             if let initialCommand = descriptor.initialCommand, !initialCommandSent {
                 initialCommandSent = true
-                appendToHistory(initialCommand)
-                Task { [weak self] in
-                    await self?.sendInput(initialCommand + "\n")
-                }
+                // An incoming command is a local draft. Only submitInput writes it.
+                if inputText.isEmpty { inputText = initialCommand }
             }
         } catch {
             // A teardown that raced the THROWING openPty must win, same as it

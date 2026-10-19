@@ -209,6 +209,7 @@ export function useBridge(): UseBridge {
   // that disposes and rebuilds the voice-flow controller.
   const runtimeStatesRef = useRef(runtimeStates);
   runtimeStatesRef.current = runtimeStates;
+  const [linkDraft, setLinkDraft] = useState<{ sessionId: string; text: string; requestId: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [visualizationOffer, setVisualizationOffer] = useState<(VisualizationFollowup & { readonly sessionId: string }) | null>(null);
   const clearError = useCallback(() => setError(null), []);
@@ -1083,7 +1084,7 @@ export function useBridge(): UseBridge {
     const submittedSession = submittedSessionFor(sessionId, trimmed);
     let promptItem: ConversationState['items'][number] | undefined;
     updateRuntime(sessionId, (state) => {
-      let conversation = appendPendingUserPrompt(state.conversation, trimmed, images);
+      let conversation = appendPendingUserPrompt(state.conversation, trimmed, images, Date.now(), token.turnId === undefined ? undefined : `client-turn:${token.turnId}`);
       promptItem = conversation.items.at(-1);
       // A widget follow-up shows its chip from the first frame, exactly as
       // the replayed `visualization_context` will.
@@ -1588,10 +1589,12 @@ export function useBridge(): UseBridge {
         setPendingSession(null);
         applyBootstrap(snapshot);
         setError(null);
+        return true;
       }
+      return false;
     }
     catch (cause) {
-      if (!isCurrentNavigationOperation(operationId)) return;
+      if (!isCurrentNavigationOperation(operationId)) return false;
       pendingSessionRef.current = null;
       setSessionReady(false);
       sessionLoadingRef.current = false;
@@ -1608,6 +1611,7 @@ export function useBridge(): UseBridge {
         // refresh failure cannot make the stale local selection authoritative.
       }
       if (isCurrentNavigationOperation(operationId)) capture(cause);
+      return false;
     }
   }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
 
@@ -1878,6 +1882,7 @@ export function useBridge(): UseBridge {
         sessionLoadingRef.current = false;
         setPendingSession(null);
         applyBootstrap(snapshot);
+        return snapshot.settings.activeSession;
       }
     }
     catch (cause) {
@@ -2226,6 +2231,7 @@ export function useBridge(): UseBridge {
   } : null, [bootstrap, runtimeStates]);
 
   return {
+    linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),
     scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     manageCron,
     uiSurfaceClientId: stableUiSurfaceClientId,

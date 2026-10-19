@@ -48,13 +48,62 @@ import SwiftUI
             return root.path
         }
 
+        func testPersistedMessageUUIDSurvivesHistoryReloadAndRepeatedText() {
+            let first = "4a16a316-e6fe-4d5a-9a5d-a42e390990da"
+            let second = "a4f56aa2-644e-4c1b-9182-e285bfa21828"
+            let source = makeSource()
+            let history = [MessageDto(transcriptUuid: first, role: "user", blocks: [.text(text: "same".clientTextDto)]),
+                           MessageDto(transcriptUuid: second, role: "user", blocks: [.text(text: "same".clientTextDto)])]
+            source.expectSessionResumeForTesting("persisted")
+            source.applyForTesting(.sessionResumed(sessionId: "persisted", mode: .code, messages: history))
+            let ids = source.model.messages.map(\.id)
+            XCTAssertEqual(source.model.messages.map(\.transcriptUUID), [UUID(uuidString: first), UUID(uuidString: second)])
+            source.expectSessionResumeForTesting("persisted")
+            source.applyForTesting(.sessionResumed(sessionId: "persisted", mode: .code, messages: history))
+            XCTAssertEqual(source.model.messages.map(\.id), ids)
+        }
+
+        func testAssistantBlockIdentityBindsPersistedUUIDWithoutChangingVisibleRow() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 901)
+            source.applyForTesting(.turnStarted(turnId: 901))
+            source.applyForTesting(.assistantBlockStart(blockKey: 17))
+            source.applyForTesting(.textDelta(text: "hello".clientTextDto))
+            let row = source.model.messages.last!.id
+            let uuid = "4a16a316-e6fe-4d5a-9a5d-a42e390990da"
+            source.applyForTesting(.assistantBlockIdentity(blockKey: 17, messageUuid: uuid))
+            source.applyForTesting(.textDelta(text: " world".clientTextDto))
+            XCTAssertEqual(source.model.messages.last?.id, row)
+            XCTAssertEqual(source.model.messages.last?.transcriptUUID, UUID(uuidString: uuid))
+        }
+
+        func testUserPersistenceIdentityCorrelatesExactQueuedTurnTokens() async throws {
+            let source = makeSource()
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { commands.append($0) }
+            let first = try XCTUnwrap(source.send("same"))
+            XCTAssertNotNil(source.send("same"))
+            for _ in 0..<10 { await Task.yield() }
+            let turnIDs = commands.compactMap { command -> UInt64? in
+                if case let .sendPrompt(_, _, _, turnID, _) = command { return turnID }
+                return nil
+            }
+            XCTAssertEqual(turnIDs.count, 2)
+            let queued = try XCTUnwrap(turnIDs.first(where: { $0 != first.clientTurnId }))
+            let uuid = "4a16a316-e6fe-4d5a-9a5d-a42e390990da"
+            source.applyForTesting(.userTranscriptRowIdentity(rowToken: "client-turn:\(first.clientTurnId),\(queued)", uuid: uuid))
+            XCTAssertEqual(source.model.messages.filter { $0.role == .user }.map(\.transcriptUUID), [UUID(uuidString: uuid), UUID(uuidString: uuid)])
+            source.applyForTesting(.userTranscriptRowIdentity(rowToken: "client-turn:unrelated", uuid: UUID().uuidString))
+            XCTAssertTrue(source.model.messages.filter { $0.role == .user }.allSatisfy { $0.transcriptUUID == UUID(uuidString: uuid) })
+        }
+
         func testRestoredLoopWakeupFoldsQuietTranscript() {
             let source = makeSource()
             source.expectSessionResumeForTesting("loop-restored")
             source.applyForTesting(.sessionResumed(sessionId: "loop-restored", mode: .code, messages: [
-                MessageDto(role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "first", companion: nil, streak: 0, sinceMs: 0)),
-                MessageDto(role: "assistant", blocks: [.text(text: "quiet".clientTextDto)]),
-                MessageDto(role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "second", companion: "healthy", streak: 1, sinceMs: 1)),
+                MessageDto(transcriptUuid: nil, role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "first", companion: nil, streak: 0, sinceMs: 0)),
+                MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "quiet".clientTextDto)]),
+                MessageDto(transcriptUuid: nil, role: "system", blocks: [], loopWakeup: LoopWakeupDto(message: "second", companion: "healthy", streak: 1, sinceMs: 1)),
             ]))
             let visible = source.model.selectedAgentItems.compactMap { item -> String? in
                 if case let .message(message) = item { return message.text }
@@ -96,14 +145,14 @@ import SwiftUI
             source.applyForTesting(.thinkingDelta(thinking: "failed reasoning", signature: nil))
             source.applyForTesting(.textDelta(text: "failed".clientTextDto))
             source.applyForTesting(.messageIdentity(messageId: "failed-id"))
-            source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(
+            source.applyForTesting(.messageComplete(stopReason: "max_tokens", message: MessageDto(transcriptUuid: nil,
                 role: "assistant", blocks: [.text(text: "failed".clientTextDto)]
             )))
             source.applyForTesting(.systemNotice(message: "unrelated notice".clientTextDto, isError: false))
             source.applyForTesting(.thinkingDelta(thinking: "retained reasoning", signature: nil))
             source.applyForTesting(.textDelta(text: "retained".clientTextDto))
             source.applyForTesting(.messageIdentity(messageId: "retained-id"))
-            source.applyForTesting(.messageComplete(stopReason: "end_turn", message: MessageDto(
+            source.applyForTesting(.messageComplete(stopReason: "end_turn", message: MessageDto(transcriptUuid: nil,
                 role: "assistant", blocks: [.text(text: "retained".clientTextDto)]
             )))
             source.applyForTesting(.messageRetracted(messageId: "unknown"))
@@ -490,7 +539,7 @@ import SwiftUI
             source.applyForTesting(.textDelta(text: "B".clientTextDto))
             source.applyForTesting(.messageComplete(
                 stopReason: "tool_use",
-                message: MessageDto(role: "assistant", blocks: [
+                message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                     .text(text: "A".clientTextDto),
                     .toolUse(id: "tool-a", tool: "Read", inputJson: #"{"path":"a"}"#, header: currentToolHeader()),
                     .text(text: "B".clientTextDto),
@@ -536,7 +585,7 @@ import SwiftUI
             source.applyForTesting(.turnStarted(turnId: 33))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [.text(text: "完成".clientTextDto)])
+                message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "完成".clientTextDto)])
             ))
             source.applyForTesting(.taskStatusChanged(
                 taskId: "late-task", status: .completed, originSessionId: nil, error: nil))
@@ -566,7 +615,7 @@ import SwiftUI
             source.applyForTesting(.coordinatorStatus(activeWorkers: 1, team: "review"))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [.text(text: "Delegated".clientTextDto)])
+                message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "Delegated".clientTextDto)])
             ))
             source.applyForTesting(
                 .turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
@@ -666,7 +715,7 @@ import SwiftUI
             source.applyForTesting(.textDelta(text: "正文".clientTextDto))
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [
+                message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                     .thinking(thinking: "推理", signature: nil),
                     .toolUse(id: "t1", tool: "Read", inputJson: #"{"path":"/tmp/a"}"#, header: currentToolHeader()),
                     .text(text: "正文".clientTextDto),
@@ -717,7 +766,7 @@ import SwiftUI
 
             source.applyForTesting(.messageComplete(
                 stopReason: "end_turn",
-                message: MessageDto(role: "assistant", blocks: [.text(text: "Hello!".clientTextDto)])
+                message: MessageDto(transcriptUuid: nil, role: "assistant", blocks: [.text(text: "Hello!".clientTextDto)])
             ))
 
             XCTAssertEqual(source.model.messages[0].id, initialMessageID)
@@ -1152,12 +1201,12 @@ import SwiftUI
                 sessionId: "session-a",
                 mode: .code,
                 messages: [
-                    MessageDto(role: "user", blocks: [.text(text: "run".clientTextDto)]),
-                    MessageDto(role: "assistant", blocks: [
+                    MessageDto(transcriptUuid: nil, role: "user", blocks: [.text(text: "run".clientTextDto)]),
+                    MessageDto(transcriptUuid: nil, role: "assistant", blocks: [
                         .text(text: "terminal answer".clientTextDto),
                         .toolUse(id: "tool-702", tool: "Read", inputJson: "{}", header: currentToolHeader()),
                     ]),
-                    MessageDto(role: "user", blocks: [
+                    MessageDto(transcriptUuid: nil, role: "user", blocks: [
                         .toolResult(
                             id: "tool-702",
                             tool: "Read",

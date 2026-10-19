@@ -246,6 +246,8 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: Tests
+      - path: ../../../packages/deep-links/fixtures.json
+        buildPhase: resources
     preBuildScripts:
       - name: Stage pinned Harness protocol fixtures
         basedOnDependencyAnalysis: false

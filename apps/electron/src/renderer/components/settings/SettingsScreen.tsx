@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type ReactNode } from 'react';
 
+import type { SettingsLinkRequest } from '../../deepLinkRoutes';
 import { dialogFocusTarget } from '../../bridge/bridgeRuntimeState.js';
 import type { SettingsSnapshotEvent, UseBridge } from '../../bridge/bridgeTypes.js';
 import { useT } from '../../theme/ThemeContext';
@@ -62,10 +63,11 @@ export interface SettingsScreenProps {
   onClose(): void;
   initialPageId?: string;
   initialProviderId?: string;
+  linkRequest?: SettingsLinkRequest;
   pendingModelReference?: string;
 }
 
-/** Only `provider-credentials` has a documented deep link today; this stays a plain equality check rather than a lookup table so a future second deep-link target is an explicit decision, not a silent fallthrough. */
+/** Validate a requested settings page before choosing its initial navigation entry. */
 export function resolveInitialPage(initialPageId?: string, initialProviderId?: string): string {
   if (initialPageId && SETTINGS_NAV.some((page) => page.id === initialPageId)) return initialPageId;
   if (initialProviderId) return 'provider-credentials';
@@ -208,6 +210,7 @@ export interface PageContentProps {
   onRegisterCloseRequest?(handler: (() => void) | null): void;
   initialPluginId?: string;
   initialProviderId?: string;
+  linkRequest?: SettingsLinkRequest;
   pendingModelReference?: string;
   /**
    * Closes the WHOLE settings surface, not just this page. `ProviderCredentials`
@@ -506,12 +509,14 @@ function NavIcon({ name, pageId }: { name: string; pageId: string }) {
 }
 
 export function SettingsScreen({
-  bridge, theme, onTheme, onClose, initialPageId, initialProviderId, pendingModelReference,
+  bridge, theme, onTheme, onClose, initialPageId, initialProviderId, pendingModelReference, linkRequest,
 }: SettingsScreenProps) {
   const t = useT();
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
+  const [pageLinkRequest, setPageLinkRequest] = useState(linkRequest);
   const [initialPluginId, setInitialPluginId] = useState<string>();
   const navigatePage = useCallback((pageId: string, pluginId?: string) => {
+    setPageLinkRequest(undefined);
     setInitialPluginId(pluginId);
     setPage(pageId);
   }, []);
@@ -527,7 +532,7 @@ export function SettingsScreen({
     else navigatePage(pageId, pluginId);
   };
   const [query, setQuery] = useState('');
-  const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
+  const [editingLayer, setEditingLayer] = useState<EditableLayer>(linkRequest?.scope === 'project' || linkRequest?.scope === 'local' ? linkRequest.scope : 'user');
   const [layerLockCount, setLayerLockCount] = useState(0);
   const [snapshotRequestError, setSnapshotRequestError] = useState<{ sessionId: string | undefined; message: string } | null>(null);
   const snapshotRequestGeneration = useRef(0);
@@ -676,6 +681,7 @@ export function SettingsScreen({
           onNavigate={navigatePage}
           onRegisterNavigationRequest={registerNavigationRequest}
           onRegisterCloseRequest={registerCloseRequest}
+          linkRequest={pageLinkRequest}
           initialPluginId={initialPluginId}
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}

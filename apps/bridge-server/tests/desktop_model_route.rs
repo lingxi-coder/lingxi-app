@@ -32,7 +32,7 @@ fn config(model: &str, duplicate: bool, origin: &str) -> (tempfile::TempDir, Des
             serde_json::json!({
                 "type": "openai",
                 "baseUrl": format!("{origin}/{profile}"),
-                "models": [{"id": "deepseek-flash"}]
+                "models": [{"id": "deepseek-flash", "metadata": {"contextWindowTokens": 1000000, "maxInputTokens": 1000000, "maxOutputTokens": 8192}}]
             }),
         );
     }
@@ -175,4 +175,157 @@ async fn desktop_boot_still_rejects_an_ambiguous_unqualified_model() {
             && error.contains("deepseek-search"),
         "unexpected build error: {error}"
     );
+}
+
+#[tokio::test]
+async fn weather_usage_is_refreshed_after_turn_resume_and_clear() {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection as Json;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (tmp, cfg) = config("deepseek/deepseek-flash", false, &origin);
+    let rt = build(
+        cfg,
+        Arc::new(MockOutputStream::new()),
+        Arc::new(UnusedPermissionSink),
+    )
+    .await
+    .unwrap();
+    let module = tmp.path().join("weather-probe.mjs");
+    std::fs::write(&module, r#"
+      let readings = [];
+      export function register(on) {
+        on('session.start', async ($, e, next) => { const result = await next(e); readings = [await $.session.usage()]; return result; });
+        on('turn.complete', async ($, e, next) => { const result = await next(e); if (!e.agentId) { const usage = await $.session.usage(); readings.push(usage); } return result; });
+        on('tool.call', () => ({ result: { readings: readings.slice() } }));
+      }
+    "#).unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "weather-probe",
+        tmp.path(),
+        &module,
+        Json::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
+    rt.hook_registry.write().await.set_mod_host(host.clone());
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        rt.orchestrator.fire_session_start("startup"),
+    )
+    .await
+    .expect("session.start probe timed out");
+    rt.credentials
+        .set_provider_key_ephemeral("deepseek", "fixture-only-key")
+        .await;
+    let request = tokio::spawn(receive_request(listener));
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        rt.orchestrator
+            .run_turn("Reply MODEL_ROUTE_OK without using tools."),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("model request did not reach fixture")
+        .unwrap();
+    let direct = hooks::mods::ModSessionContext::usage(rt.orchestrator.as_ref(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&direct.to_json_string().unwrap()).unwrap()
+            ["context"]["tokens"],
+        1
+    );
+    let observations = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result = host
+                .dispatch_with_log_at_session(
+                    "tool.call",
+                    Json::parse(r#"{"tool":"WeatherProbe"}"#).unwrap(),
+                    rt.orchestrator.as_ref(),
+                    |_| async { panic!("probe handles call") },
+                    |_, _| async {},
+                )
+                .await
+                .unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&result.to_json_string().unwrap()).unwrap();
+            if value["result"]["readings"]
+                .as_array()
+                .is_some_and(|rows| rows.len() >= 2)
+            {
+                break value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("turn.complete must refresh the reading");
+    assert_eq!(
+        observations["result"]["readings"][1]["context"]["tokens"], 1,
+        "{observations}"
+    );
+    rt.orchestrator
+        .resume_session(
+            lingxi_core::types::SessionId::new(),
+            vec![],
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
+                    input_tokens: 800,
+                    cache_read_input_tokens: 23200,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let resumed = host
+        .dispatch_with_log_at_session(
+            "tool.call",
+            Json::parse(r#"{"tool":"WeatherProbe"}"#).unwrap(),
+            rt.orchestrator.as_ref(),
+            |_| async { panic!("probe handles call") },
+            |_, _| async {},
+        )
+        .await
+        .unwrap();
+    let resumed: serde_json::Value =
+        serde_json::from_str(&resumed.to_json_string().unwrap()).unwrap();
+    assert_eq!(
+        resumed["result"]["readings"].as_array().unwrap().len(),
+        1,
+        "resume must reset the Mod reading history via session.start"
+    );
+    assert_eq!(
+        resumed["result"]["readings"][0]["context"]["tokens"], 24000,
+        "session.start must see restored provider usage including cached tokens"
+    );
+    rt.orchestrator.clear_session().await.unwrap();
+    let cleared = host
+        .dispatch_with_log_at_session(
+            "tool.call",
+            Json::parse(r#"{"tool":"WeatherProbe"}"#).unwrap(),
+            rt.orchestrator.as_ref(),
+            |_| async { panic!("probe handles call") },
+            |_, _| async {},
+        )
+        .await
+        .unwrap();
+    let cleared: serde_json::Value =
+        serde_json::from_str(&cleared.to_json_string().unwrap()).unwrap();
+    assert_eq!(cleared["result"]["readings"].as_array().unwrap().len(), 1);
+    assert!(
+        cleared["result"]["readings"][0]["context"]
+            .get("tokens")
+            .is_none(),
+        "clear must not retain the resumed token reading"
+    );
+    let report = rt.session_lifecycle.shutdown_and_drain().await;
+    assert!(report.complete, "shutdown: {:?}", report.errors);
 }

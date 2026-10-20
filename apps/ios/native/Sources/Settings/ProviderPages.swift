@@ -27,9 +27,20 @@ struct ModelsSettingsPage: View {
             }
             defaultModelSection
             providersSection
-            routingSection
-            fallbackSection
-            servicesSection
+            Section {
+                NavigationLink {
+                    Form {
+                        routingSection
+                        fallbackSection
+                        servicesSection
+                    }
+                    .navigationTitle(String(localized: "settings_section_advanced"))
+                    .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    Text("settings_section_advanced")
+                }
+                .accessibilityIdentifier("provider.advanced")
+            }
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
@@ -70,26 +81,16 @@ struct ModelsSettingsPage: View {
     private var defaultModelSection: some View {
         let summary = repository.settingsSummary
         return Section {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "sparkles")
-                    .font(.title2).foregroundStyle(t.accent)
-                    .frame(width: 36, height: 36)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(summary.defaultProfile?.name ?? String(localized: "settings_provider_unconfigured"))
-                        .font(.headline).foregroundStyle(Color.primary)
-                    Text(summary.defaultModelID.flatMap { $0.isEmpty ? nil : $0 } ?? "—")
-                        .font(.subheadline).foregroundStyle(Color.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            LabeledContent {
+                Text(summary.defaultModelID.flatMap { $0.isEmpty ? nil : $0 }
+                     ?? String(localized: "settings_provider_unconfigured"))
+                    .foregroundStyle(Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } label: {
+                Text("settings_provider_default_model")
             }
-            .padding(.vertical, 6)
-        } header: {
-            Text(String(localized: "settings_provider_default_model"))
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "settings_providers_enabled_count \(summary.enabledCount)"))
                 if let active = summary.runtime.activeModelID, !summary.runtimeMatchesDefault, !active.isEmpty {
                     Text(String(localized: "settings_provider_runtime_active \(active)"))
                 }
@@ -131,8 +132,6 @@ struct ModelsSettingsPage: View {
             .accessibilityIdentifier("provider.add")
         } header: {
             Text(String(localized: "settings_provider_section_added_count \(repository.settingsSummary.totalCount)"))
-        } footer: {
-            Text(String(localized: "provider_llm_blurb"))
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
@@ -148,14 +147,11 @@ struct ModelsSettingsPage: View {
                     Text(state.profile.modelID.isEmpty ? "—" : state.profile.modelID)
                         .font(.subheadline).foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(state.profile.enabled ? state.statusLabel : String(localized: "settings_badge_disabled"))
-                        .font(.caption).foregroundStyle(Color.secondary)
-                    if state.oauthState?.signedIn == true {
-                        Label(String(localized: "settings_provider_status_oauth"), systemImage: "person.crop.circle.badge.checkmark")
-                            .font(.caption).foregroundStyle(Color.secondary)
-                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: state.oauthState?.signedIn == true ? "person.crop.circle" : "circle.fill")
+                    .font(.caption2).foregroundStyle(state.legacyStatus.dot(t))
+                    .accessibilityLabel(state.profile.enabled ? state.statusLabel : String(localized: "settings_badge_disabled"))
                 if state.profile.isDefault {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(t.accent)
                         .accessibilityLabel(String(localized: "settings_badge_default"))
@@ -191,13 +187,7 @@ struct ModelsSettingsPage: View {
                 get: { repository.visionDelegationEnabled },
                 set: { repository.setVisionDelegationEnabled($0) }
             )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(localized: "settings_provider_vision_delegation"))
-                        .foregroundStyle(Color.primary)
-                    Text(String(localized: "settings_provider_vision_delegation_hint"))
-                        .font(.footnote)
-                        .foregroundStyle(Color.secondary)
-                }
+                Text("settings_provider_vision_delegation")
             }
             .tint(t.accent)
             numberRow(String(localized: "settings_provider_max_retries"), text: $retryMaxAttemptsText)
@@ -234,9 +224,7 @@ struct ModelsSettingsPage: View {
         let candidates = repository.fallbackCandidates()
         return Section {
             if candidates.isEmpty {
-                Text(String(localized: "settings_provider_fallback_hint"))
-                    .font(.footnote)
-                    .foregroundStyle(Color.secondary)
+                Text("provider_no_providers_added").foregroundStyle(Color.secondary)
             } else {
                 ForEach(candidates) { candidate in
                     Button { repository.toggleFallbackProfile(candidate.profileID) } label: {
@@ -406,7 +394,6 @@ struct ProviderAddSheet: View {
                                 ProviderTile(preset: preset, name: preset.name)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(preset.name).foregroundStyle(Color.primary)
-                                    Text(preset.sub).font(.footnote).foregroundStyle(Color.secondary)
                                 }
                                 Spacer(minLength: 8)
                                 Image(systemName: "chevron.right")
@@ -418,8 +405,6 @@ struct ProviderAddSheet: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("provider.preset.\(preset.id)")
                     }
-                } footer: {
-                    Text(String(localized: "settings_provider_picker_intro"))
                 }
                 .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             }
@@ -516,7 +501,16 @@ struct ProviderEditorForm: View {
             oauthSection
             modelSection
             stateSection
-            connectionsSection
+            Section {
+                NavigationLink {
+                    Form { connectionsSection }
+                        .navigationTitle(String(localized: "settings_provider_connections"))
+                        .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    Text("settings_provider_connections")
+                }
+                .accessibilityIdentifier("provider.connections")
+            }
             removeSection
         }
         .formStyle(.grouped)
@@ -551,14 +545,16 @@ struct ProviderEditorForm: View {
 
     private var statusSection: some View {
         Section {
-            HStack(spacing: 10) {
-                Circle().fill(statusColor).frame(width: 8, height: 8)
-                Text(statusLabel).foregroundStyle(Color.primary)
-                Spacer(minLength: 8)
-                if draft.connectionState == .testing { ProgressView() }
-            }
             Button(action: testConnection) {
-                Label(String(localized: "settings_provider_test_connection"), systemImage: "network")
+                HStack {
+                    Text("settings_provider_test_connection")
+                    Spacer(minLength: 8)
+                    if draft.connectionState == .testing {
+                        ProgressView()
+                    } else {
+                        Text(statusLabel).font(.subheadline).foregroundStyle(statusColor)
+                    }
+                }
             }
             .accessibilityIdentifier("provider.test")
             .disabled(draft.operationInFlight)
@@ -596,12 +592,6 @@ struct ProviderEditorForm: View {
                     text: textBinding(\.baseURL),
                     placeholder: repository.preset(for: draft.profile.presetID).defaultUrl
                 )
-            }
-        } footer: {
-            if repository.isOfficialEndpoint(for: draft.profile) {
-                Text(String(localized: "settings_provider_official_url_hint \(draft.profile.baseURL)"))
-            } else {
-                Text(String(localized: "settings_provider_custom_url_hint"))
             }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
@@ -796,9 +786,9 @@ struct ProviderEditorForm: View {
         } header: {
             Text(String(localized: "settings_provider_connections"))
         } footer: {
-            Text(draft.profile.connections.isEmpty
-                ? String(localized: "settings_provider_connections_single")
-                : String(localized: "settings_provider_connections_hint"))
+            if !draft.profile.connections.isEmpty {
+                Text("settings_provider_connections_hint")
+            }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         // Identified by position: ids start empty and stay editable, so an
@@ -1086,12 +1076,6 @@ private struct ProviderModelsPage: View {
                                     .font(.footnote.monospaced())
                                     .foregroundStyle(Color.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
-                                if let details, !details.summaryItems.isEmpty {
-                                    Text(details.summaryItems.joined(separator: " · "))
-                                        .font(.caption)
-                                        .foregroundStyle(Color.secondary)
-                                        .lineLimit(2)
-                                }
                             }
                             Spacer(minLength: 8)
                             if draft.profile.modelID == model {

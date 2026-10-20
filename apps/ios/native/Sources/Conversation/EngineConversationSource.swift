@@ -5076,7 +5076,7 @@ final class EngineConversationSource: ConversationSource {
             if let uuid = dto.transcriptUuid.flatMap(UUID.init(uuidString:)), let toolID = dto.blocks.compactMap({ block -> String? in
                 switch block {
                 case let .toolUse(id, _, _, _): return id
-                case let .toolResult(toolUseId, _, _, _, _, _, _, _): return toolUseId
+                case let .toolResult(toolUseId, _, _, _, _): return toolUseId
                 default: return nil
                 }
             }).first { out.transcriptUUIDToolIDs[uuid] = toolID }

@@ -39051,31 +39051,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "提供商、路由、搜索与抓取"
+            "value": "提供商与模型"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "提供商、路由、搜尋與擷取"
+            "value": "供應商與模型"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Providers, routing, search, fetch"
+            "value": "Providers and models"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プロバイダ、ルーティング、検索、取得"
+            "value": "プロバイダーとモデル"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "공급자, 라우팅, 검색, 가져오기"
+            "value": "제공업체 및 모델"
           }
         }
       }

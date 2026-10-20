@@ -63,6 +63,31 @@ import SwiftUI
             XCTAssertEqual(source.model.messages.map(\.id), ids)
         }
 
+        func testRestoredToolTranscriptUUIDsMapToCurrentToolIdentity() {
+            let source = makeSource()
+            let useUUID = UUID()
+            let resultUUID = UUID()
+            let textUUID = UUID()
+            let history = [
+                MessageDto(transcriptUuid: useUUID.uuidString, role: "assistant", blocks: [
+                    .toolUse(id: "restored-read", tool: "Read", inputJson: "{}", header: currentToolHeader()),
+                ]),
+                MessageDto(transcriptUuid: resultUUID.uuidString, role: "user", blocks: [
+                    .toolResult(id: "restored-read", tool: "Read", resultJson: #"{"result":"ok"}"#, isError: false, display: currentToolDisplay()),
+                ]),
+                MessageDto(transcriptUuid: textUUID.uuidString, role: "assistant", blocks: [
+                    .text(text: "Done".clientTextDto),
+                ]),
+            ]
+            for _ in 0..<2 {
+                source.expectSessionResumeForTesting("restored-tools")
+                source.applyForTesting(.sessionResumed(sessionId: "restored-tools", mode: .code, messages: history))
+                XCTAssertEqual(source.model.transcriptUUIDToolIDs[useUUID], "restored-read")
+                XCTAssertEqual(source.model.transcriptUUIDToolIDs[resultUUID], "restored-read")
+                XCTAssertNil(source.model.transcriptUUIDToolIDs[textUUID])
+            }
+        }
+
         func testAssistantBlockIdentityBindsPersistedUUIDWithoutChangingVisibleRow() {
             let source = makeSource()
             source.beginTurnForTesting(turnId: 901)

@@ -810,10 +810,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(modelsGroup.waitForExistence(timeout: 5))
         modelsGroup.tap()
         // The models page is the provider list: no intermediate credentials page.
-        let providerBlurb = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "密钥仅本机加密")
-        ).firstMatch
-        XCTAssertTrue(providerBlurb.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["provider.add"].waitForExistence(timeout: 5), app.debugDescription)
         let hubShot = XCTAttachment(screenshot: app.screenshot())
         hubShot.name = "模型设置-首页"
         hubShot.lifetime = .keepAlways

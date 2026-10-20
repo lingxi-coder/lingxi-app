@@ -59,6 +59,10 @@ final class DesktopSettingsUITests: XCTestCase {
             XCTAssertTrue(addProvider.waitForExistence(timeout: 8), app.debugDescription)
             XCTAssertFalse(app.buttons["settings.page.web-search"].exists)
             XCTAssertFalse(app.buttons["settings.page.web-fetch"].exists)
+            XCTAssertFalse(app.staticTexts["路由与重试"].exists)
+            XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "密钥仅本机加密")).firstMatch.exists)
+            let advanced = app.buttons["provider.advanced"]
+            XCTAssertTrue(advanced.exists)
             attach("Models-\(theme)-\(largeText ? "large" : "standard")")
             if !addProvider.isHittable { app.collectionViews.firstMatch.swipeUp() }
             addProvider.tap()
@@ -106,6 +110,18 @@ final class DesktopSettingsUITests: XCTestCase {
             XCTAssertTrue(custom.exists)
             app.terminate()
         }
+    }
+
+    func testModelRoutingIsInAdvancedSettings() {
+        let app = launch()
+        app.buttons["settings.group.models"].tap()
+        let advanced = app.buttons["provider.advanced"]
+        XCTAssertTrue(advanced.waitForExistence(timeout: 8))
+        advanced.tap()
+        XCTAssertTrue(app.staticTexts["路由与重试"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.textFields.count >= 2)
+        attach("Models-advanced")
+        app.terminate()
     }
 
     func testRemovedWebProviderSettingsAreNotSearchable() {

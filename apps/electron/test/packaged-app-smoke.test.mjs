@@ -101,10 +101,14 @@ test('packaged Codex metadata accepts account email while rejecting OAuth secret
   assert.equal(isSafeProviderCredentialSnapshot([{ ...metadata, codexAccountEmail: 'secret' }]), false);
 });
 
-test('packaged renderer accepts both expected pre-ready credential states', () => {
+test('packaged renderer accepts bootstrap progress and verifies an already-ready composer', () => {
   assert.equal(isExpectedBootstrapPromptPlaceholder('Connect a provider in Settings to start coding…'), true);
   assert.equal(isExpectedBootstrapPromptPlaceholder('Waiting for the local engine…'), true);
   assert.equal(isExpectedBootstrapPromptPlaceholder('Ready'), false);
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Do anything'), false);
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Do anything', { connection: { status: 'connecting' }, workspace: { trusted: true } }), false);
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Do anything', { connection: { status: 'connected' }, workspace: { trusted: false } }), false);
+  assert.equal(isExpectedBootstrapPromptPlaceholder('Do anything', { connection: { status: 'connected' }, workspace: { trusted: true } }), true);
 });
 
 test('packaged settings preseed a trusted active project without secrets', () => {

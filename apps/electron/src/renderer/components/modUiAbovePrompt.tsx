@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { modUiRenderPropsWithinBounds } from '../../shared/modUiPlainData';
 import {
   createContext,
   memo,
@@ -357,7 +358,11 @@ export const ModUiParentSite = memo(function ModUiParentSite({
 }: ModUiParentSiteProps) {
   const clientId = useContext(ModUiSurfaceClientIdContext);
   const resolvedHost = host ?? (typeof window === 'undefined' ? undefined : window.lingxi?.modUi);
-  if (!enabled || !sessionId || !resolvedHost) return <>{children}</>;
+  const canRender = useMemo(() => enabled && !!sessionId && !!resolvedHost && modUiRenderPropsWithinBounds(props),
+    [enabled, props, resolvedHost, sessionId]);
+  // Host refuses this entire site rather than accepting a truncated payload.
+  // Avoid IPC/retry churn and unmount any previous draw using its exact revision.
+  if (!canRender || !resolvedHost) return <>{children}</>;
   return React.createElement(ModUiParentSiteRuntime, {
     key: `${sessionId}\u0000${surface}\u0000${component}\u0000${instanceId}`,
     host: resolvedHost,

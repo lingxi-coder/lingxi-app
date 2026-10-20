@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { validateModUiPlainData as validateParentData } from '../../shared/modUiPlainData';
 import {
   createContext,
   memo,
@@ -71,8 +72,6 @@ const PARENT_COLORS = /^[#a-zA-Z0-9_().,% -]{1,40}$/;
 const MAX_PARENT_TREE_DEPTH = 32;
 const MAX_PARENT_TREE_NODES = 20_000;
 const MAX_PARENT_TREE_UTF16 = 100_000;
-const MAX_PARENT_DATA_VALUES = 20_000;
-const MAX_PARENT_DATA_UTF16 = 100_000;
 const MAX_PARENT_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 
 interface ParentHoverContextValue {
@@ -103,40 +102,6 @@ function requiredString(value: unknown, name: string): string {
 
 function utf16Length(value: string): number {
   return value.length;
-}
-
-function validateParentData(value: unknown, name: string): void {
-  let count = 0;
-  const visit = (current: unknown, depth: number): void => {
-    count += 1;
-    if (count > MAX_PARENT_DATA_VALUES || depth > MAX_PARENT_TREE_DEPTH) {
-      throw new TypeError(`${name} exceeds the Native plain-data bounds`);
-    }
-    if (current === null || typeof current === 'string' || typeof current === 'boolean') return;
-    if (typeof current === 'number') {
-      if (!Number.isFinite(current)) throw new TypeError(`${name} contains a number that is not finite`);
-      return;
-    }
-    if (Array.isArray(current)) {
-      for (let index = 0; index < current.length; index += 1) {
-        if (!(index in current)) throw new TypeError(`${name} cannot contain sparse arrays`);
-        visit(current[index], depth + 1);
-      }
-      return;
-    }
-    if (!isRecord(current)) throw new TypeError(`${name} must be plain JSON data`);
-    for (const child of Object.values(current)) visit(child, depth + 1);
-  };
-  visit(value, 0);
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    throw new TypeError(`${name} must be serializable JSON data`);
-  }
-  if (serialized === undefined || utf16Length(serialized) > MAX_PARENT_DATA_UTF16) {
-    throw new TypeError(`${name} exceeds the Native serialized-data limit`);
-  }
 }
 
 function nonEmptyString(value: unknown, name: string): string {

@@ -236,7 +236,12 @@ export function isSafeProviderCredentialSnapshot(providerCredentials) {
     });
 }
 
-export function isExpectedBootstrapPromptPlaceholder(placeholder) {
+export function isExpectedBootstrapPromptPlaceholder(placeholder, bootstrap) {
+  // Hydration may complete before the first renderer snapshot. Accept the idle
+  // composer only when the actual bridge and trusted workspace are ready.
+  if (placeholder === 'Do anything') {
+    return bootstrap?.connection?.status === 'connected' && bootstrap?.workspace?.trusted === true;
+  }
   return SAFE_BOOTSTRAP_PROMPT_PLACEHOLDERS.has(placeholder);
 }
 
@@ -585,9 +590,10 @@ async function assertRendererContract(page, leakPatterns) {
   assert.match(details.bodyText, /Projects/);
   assert.match(details.bodyText, /workspace/);
   assert.equal(
-    isExpectedBootstrapPromptPlaceholder(details.promptPlaceholder),
+    isExpectedBootstrapPromptPlaceholder(details.promptPlaceholder,
+      details.promptPlaceholder === 'Do anything' ? await evaluate(page, 'window.lingxi.bootstrap()') : undefined),
     true,
-    `unexpected pre-ready prompt placeholder: ${details.promptPlaceholder}`,
+    `unexpected bootstrap prompt placeholder: ${details.promptPlaceholder}`,
   );
   assert.doesNotMatch(details.bodyText, /MLPlatform|Dispatching Task 1|Placeholder for the desktop mock/);
   const leaks = collectLeakMatches(details.bodyText, leakPatterns);
@@ -927,8 +933,10 @@ async function prepareCustomProvider(page, probe, restore = false) {
   }
   await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, {type:'refresh_listings',which:[{type:'settings'}]})`);
   await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'settings_snapshot' && JSON.parse(e.effective_json).providers?.[${JSON.stringify(probe.providerId)}])`), { label: 'custom provider settings snapshot' });
+  log('custom provider settings confirmed');
   if (!restore) {
     const saved = await evaluate(page, `window.lingxi.setProviderCredential(${JSON.stringify(probe.providerId)}, ${JSON.stringify(probe.key)})`);
+    log('custom provider credential stored');
     assert.equal(saved.credential.configured, true);
     assert.equal(saved.credential.encryptionAvailable, true);
   }

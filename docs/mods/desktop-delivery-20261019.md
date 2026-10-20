@@ -100,3 +100,9 @@ Follow-up signed ZIP SHA-256: `71fff7ce4425174c10bed36a71fe8a181da207f4e71e72887
 Large existing transcript Mod UI sites produced serialized-character-limit
 rejections during observation; this receipt does not claim those oversized sites
 passed or raise their Host limits. Normal transcript fallback remained visible.
+
+The oversized transcript-site follow-up is now closed by
+[the input-bounds repair](mod-ui-input-bounds-20261019.md): bounded preflight skips
+Host-ineligible Mod rendering while retaining native content. The new signed
+package passed static/smoke checks and the original long-session GUI check with
+Weather visible and no new serialized-limit failures during observation.

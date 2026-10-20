@@ -1669,8 +1669,10 @@ impl CommandRouter for EngineCommandRouter {
                         .await;
                     }
                     Err(message) => {
-                        // Automatic metadata probes must not reject text sessions.
-                        // Explicit audio operations still validate their own route.
+                        // Desktop probes this optional metadata on every connection
+                        // and model change. An unavailable binding leaves native
+                        // audio unconfigured; it must not reject the text session.
+                        // Actual audio operations still validate their own route.
                         tracing::debug!(%message, "audio session context unavailable");
                     }
                 }

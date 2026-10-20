@@ -1,0 +1,10 @@
+Replay Theater and Token Weather
+Copyright 2026 Anthropic PBC
+Derived from anthropics/claude-code-playground at
+569c5283d9a0a7ee7938df85bb32e4f48cbb8c86, claude-code/mods/.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Modified by LingXi on 2026-10-19: composable AbovePrompt middleware,
+empty initial draw registration, unavailable Pane API fallback, and current
+session usage handling. This is a LingXi-maintained distribution, not an
+Anthropic release. Original copyright and license headers are retained.

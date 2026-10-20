@@ -1,0 +1,23 @@
+{
+  "name": "lingxi-desktop-mods",
+  "owner": {
+    "name": "LingXi"
+  },
+  "metadata": {
+    "description": "Maintained Desktop Mods with composable AbovePrompt UI."
+  },
+  "plugins": [
+    {
+      "name": "lingxi-replay-theater",
+      "source": "./replay-theater",
+      "version": "0.1.1",
+      "description": "Review file edits from the latest editing turn without hiding other Mods."
+    },
+    {
+      "name": "lingxi-token-weather",
+      "source": "./token-weather",
+      "version": "0.1.1",
+      "description": "Track current session context usage alongside other Mods."
+    }
+  ]
+}

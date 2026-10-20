@@ -1,0 +1,9 @@
+{
+  "upstream_repository": "https://github.com/anthropics/claude-code-playground",
+  "upstream_commit": "569c5283d9a0a7ee7938df85bb32e4f48cbb8c86",
+  "gui_accepted_module_sha256": {
+    "replay-theater": "f99ca68786885d61f0c0daf98a8c3580b51839505984302b648710efd0b3cc5a",
+    "token-weather": "4895ebf01f4729ab4dcf6f84e7600bdca1c400cffd1386cd432b3101e2f9e0f6"
+  },
+  "maintenance_notice_lines": 1
+}

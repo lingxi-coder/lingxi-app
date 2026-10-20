@@ -313,7 +313,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const manifest = selectedPlugin
     ? (catalog.installed ?? []).find((entry) => (entry.id || entry.name) === selectedPlugin) ?? null
     : null;
-  const configSchema = useMemo(() => parseEventEnvelope<{ fields?: Record<string, PluginConfigField> }>(manifest?.config_schema_json, {}), [manifest?.config_schema_json]);
+  const configSchema = useMemo(() => parseEventEnvelope<{ fields?: Record<string, PluginConfigField> } | null>(manifest?.config_schema_json, {}) ?? {}, [manifest?.config_schema_json]);
   const selectedConfig = selectedPlugin ? asRecord(draftConfigs[selectedPlugin]) : {};
   const selectedOptions = asRecord(selectedConfig.options);
   const updateOption = (key: string, value: unknown) => {

@@ -1,0 +1,10 @@
+{
+  "name": "lingxi-replay-theater",
+  "version": "0.1.1",
+  "description": "Replay file edits while preserving other Mod UI.",
+  "author": {
+    "name": "Claude Code DevRel"
+  },
+  "license": "Apache-2.0",
+  "displayName": "Replay Theater (LingXi)"
+}

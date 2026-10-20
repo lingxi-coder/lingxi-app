@@ -1,0 +1,9 @@
+{
+  "name": "@lingxi/desktop-mods",
+  "private": true,
+  "version": "0.1.1",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

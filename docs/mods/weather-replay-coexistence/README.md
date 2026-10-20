@@ -1,5 +1,7 @@
 # Weather and Replay AbovePrompt composition
 
+For maintained installations use [Desktop Mods 0.1.1](../../../plugins/desktop-mods/README.md). The patch below preserves the original installed-cache repair and its exact baseline.
+
 Both third-party Mods replaced the AbovePrompt tree, so opening Replay hid Weather.
 The patch awaits downstream middleware and composes its tree with the Mod's own
 content. The empty desktop engine marker is not inserted as a child. Empty draws

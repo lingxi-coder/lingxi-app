@@ -1,0 +1,10 @@
+{
+  "name": "lingxi-token-weather",
+  "version": "0.1.1",
+  "description": "Current session context usage and trend while preserving other Mod UI.",
+  "author": {
+    "name": "Claude Code DevRel"
+  },
+  "license": "Apache-2.0",
+  "displayName": "Token Weather (LingXi)"
+}

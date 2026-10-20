@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>55470483519-lpv35qh1vufvtpi63eg024osucdofeml.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.55470483519-lpv35qh1vufvtpi63eg024osucdofeml</string>
+	<key>API_KEY</key>
+	<string>AIzaSyB6xJhzJbtdsxUsHZDT3YPoYfd6AaQgqg4</string>
+	<key>GCM_SENDER_ID</key>
+	<string>55470483519</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.lingxi.code</string>
+	<key>PROJECT_ID</key>
+	<string>lingxi-5e4b2</string>
+	<key>STORAGE_BUCKET</key>
+	<string>lingxi-5e4b2.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:55470483519:ios:dd3320da548259cd57708a</string>
+</dict>
+</plist>

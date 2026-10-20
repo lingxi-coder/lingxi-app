@@ -1,4 +1,5 @@
 import { installDeepLinks } from './deepLinks.js';
+import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
 import { accountSessionStore } from './account-storage.js';
 import { brokerAccountSessionStore } from './account-broker-storage.js';
@@ -46,6 +47,8 @@ import {
 
 ignoreBrokenPipe(process.stdout);
 ignoreBrokenPipe(process.stderr);
+
+installCrashReporting();
 
 // Inline visualization guests load `lingxi-viz://visualization/...` only. The
 // scheme must be privileged before `app.ready` so its pages get a real origin

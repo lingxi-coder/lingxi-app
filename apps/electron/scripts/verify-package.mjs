@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { extractAll } from '@electron/asar';
+import { verifyCrashlytics } from './desktop-crashlytics.mjs';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -128,6 +129,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'index.cjs'), 'utf8'));
   const manifest = readJson(join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'));
   const identifiers = brokerIdentifiers(manifest.channel);
+  verifyCrashlytics(resources, identifiers.desktopBundleId);
   const audioIdentifiers = audioHelperIdentifiers(manifest.channel);
 
   assertArm64Executable(join(contents, 'MacOS', APP_NAME), `${APP_NAME} executable`);

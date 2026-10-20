@@ -219,7 +219,7 @@ private class MessageBuild(
                             id = block.id,
                             tool = block.tool,
                             planMarkdown = toolPlanMarkdown(block.tool, block.inputJson),
-                            header = block.header.toUi(),
+                            header = block.header?.toUi(),
                             status = AgentToolStatus.Running,
                         ),
                     ),
@@ -228,7 +228,7 @@ private class MessageBuild(
             is MessageBlockDto.ToolResult -> {
                 val status =
                     if (block.isError) AgentToolStatus.Failed else AgentToolStatus.Completed
-                val display = block.display.toUi()
+                val display = block.display?.toUi()
                 val ref = index.remove(block.id)
                 if (ref != null) {
                     val existing = ref.build.blocks[ref.blockIndex] as MessageContent.Tool

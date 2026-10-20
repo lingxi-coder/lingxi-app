@@ -36,6 +36,44 @@ import org.junit.Test
  */
 class ClientEventMapperTest {
 
+
+    @Test
+    fun missingToolPresentation_keepsLiveToolLifecycle() {
+        val started = clientEventToReply(ClientEvent.ToolUseStarted(
+            id = "read-null", tool = "Read", inputJson = "{}", header = null,
+        )) as ReplyEvent.ToolActivity
+        val finished = clientEventToReply(ClientEvent.ToolUseResult(
+            id = "read-null", tool = "Read", resultJson = "{}", isError = true, display = null,
+        )) as ReplyEvent.ToolActivity
+
+        assertNull(started.header)
+        assertEquals(AgentToolStatus.Running, started.status)
+        assertEquals(started.id, finished.id)
+        assertNull(finished.display)
+        assertEquals(AgentToolStatus.Failed, finished.status)
+    }
+
+    @Test
+    fun missingToolPresentation_restoresPairedTranscriptTool() {
+        val messages = transcriptFromDtos(listOf(
+            MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(
+                MessageBlockDto.ToolUse(id = "read-null", tool = "Read", inputJson = "{}", header = null),
+            )),
+            MessageDto(transcriptUuid = null, role = "user", blocks = listOf(
+                MessageBlockDto.ToolResult(
+                    id = "read-null", tool = "Read", resultJson = "{}", isError = false,
+                    oldString = null, newString = null, filePath = null, display = null,
+                ),
+            )),
+        ))
+
+        val tool = messages.single().blocks.filterIsInstance<MessageContent.Tool>().single().call
+        assertEquals("read-null", tool.id)
+        assertNull(tool.header)
+        assertNull(tool.display)
+        assertEquals(AgentToolStatus.Completed, tool.status)
+    }
+
     private val cost = CostDto(
         totalUsd = 0.0,
         inputTokens = 0u,
@@ -558,6 +596,7 @@ class ClientEventMapperTest {
                             tool = "Edit",
                             resultJson = """"ok"""",
                             isError = false,
+                            oldString = null, newString = null, filePath = null,
                             display = ToolResultDisplayDto(
                                 headline = "Added 2 lines",
                                 headlineKind = HeadlineKindDto.ADDED,
@@ -604,6 +643,7 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "r1", tool = "Read", resultJson = """"boom"""", isError = true,
+                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),
@@ -626,6 +666,7 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
+                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),
@@ -652,6 +693,7 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
+                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),
@@ -691,6 +733,7 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
+                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),

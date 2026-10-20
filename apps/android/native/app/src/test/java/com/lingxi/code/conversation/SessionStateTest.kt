@@ -343,6 +343,7 @@ class SessionStateTest {
                 MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}", header = currentToolHeaderFixture("Bash")),
                 MessageBlockDto.ToolResult(
                     id = "t1", tool = "bash", resultJson = "ok", isError = false,
+                    oldString = null, newString = null, filePath = null,
                     display = currentToolDisplayFixture(),
                 ),
                 MessageBlockDto.RedactedThinking(data = "opaque"),

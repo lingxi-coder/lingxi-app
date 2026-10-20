@@ -9,11 +9,11 @@ val mobileLinuxContract = JsonSlurper().parse(rootProject.file("../../../docs/mo
 val mobileLinuxSdkVersion = mobileLinuxContract["sdk_version"] as String
 
 plugins {
-    id("com.google.gms.google-services")
-    id("com.android.application")
-    id("com.google.firebase.crashlytics")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
+    alias(libs.plugins.google.services)
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.firebase.crashlytics)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
 }
 
 kotlin {
@@ -39,11 +39,11 @@ require(targetAbis.isNotEmpty() && targetAbis.all { it in setOf("arm64-v8a", "x8
 
 android {
     namespace = "com.lingxi.code"
-    compileSdk = 37
+    compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
         applicationId = "com.lingxi.code"
-        minSdk = 26
+        minSdk = libs.versions.minSdk.get().toInt()
         // Explicit targetSdk (documented intent; AGP's unset-default is ambiguous
         // across versions). Required so the Android 13/14 foreground-service-type,
         // exact-alarm, and runtime-notification semantics the cron subsystem relies
@@ -219,72 +219,72 @@ listOf("play", "direct").forEach { distribution ->
 }
 
 dependencies {
-    implementation(platform("com.google.firebase:firebase-bom:35.0.0"))
-    implementation("com.google.firebase:firebase-auth")
-    implementation("com.google.firebase:firebase-messaging")
-    implementation("com.google.firebase:firebase-installations")
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
+    implementation(libs.firebase.messaging)
+    implementation(libs.firebase.installations)
     // Includes JVM/ANR reporting and the native signal handler for Rust/JNI.
-    implementation("com.google.firebase:firebase-crashlytics-ndk")
-    implementation("androidx.credentials:credentials:1.5.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
-    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
+    implementation(libs.firebase.crashlytics.ndk)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services.auth)
+    implementation(libs.googleid)
+    implementation(libs.kotlinx.coroutines.play.services)
     // Installer + native helpers only: libandroid_aar.so already owns Rust FFI.
     implementation("io.github.lingxi-coder:mobile-linux-installer:$mobileLinuxSdkVersion")
     implementation("io.github.lingxi-coder:mobile-linux-native-support:$mobileLinuxSdkVersion")
-    val composeBom = platform("androidx.compose:compose-bom:2026.05.00")
+    val composeBom = platform(libs.androidx.compose.bom)
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
     // Coroutines — required by the extracted device-audio layer
     // (STT/TTS providers use suspendCancellableCoroutine + Flow) and by the
     // generated UniFFI bindings (async callback interfaces).
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation(libs.kotlinx.coroutines.android)
 
     // UniFFI Kotlin runtime — the generated bindings in
     // com/lingxi/code/bindings/android_aar.kt (one merged file for all four
     // crates) load the Rust cdylib (jniLibs/<abi>/libandroid_aar.so) through
     // JNA. The @aar classifier pulls JNA's bundled native libs so Native.load
     // resolves on-device.
-    implementation("net.java.dev.jna:jna:5.19.0@aar")
+    implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
     // Core / lifecycle
-    implementation("androidx.core:core-ktx:1.19.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     // SavedStateHandle + createSavedStateHandle() — the transcript / draft /
     // active session survive process death (low-memory kill while backgrounded).
-    implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.10.0")
+    implementation(libs.androidx.lifecycle.viewmodel.savedstate)
 
     // Inline-visualization WebView security boundary: document-start bridge
     // injection and origin-scoped, main-frame-only WebMessageListener delivery.
-    implementation("androidx.webkit:webkit:1.17.1")
+    implementation(libs.androidx.webkit)
 
     // Activity + Compose
-    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation(libs.androidx.activity.compose)
 
     // Compose UI
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.material.icons.extended)
 
     // Navigation
-    implementation("androidx.navigation:navigation-compose:2.9.8")
+    implementation(libs.androidx.navigation.compose)
 
     // DataStore (preferences) for persisted theme / accent
-    implementation("androidx.datastore:datastore-preferences:1.2.1")
+    implementation(libs.androidx.datastore.preferences)
 
     // Persistent Android cron execution. AlarmManager only provides the precise
     // wake-up signal; WorkManager owns network constraints, retries, process
     // recovery, and the serialized execution queue.
-    implementation("androidx.work:work-runtime-ktx:2.11.2")
+    implementation(libs.androidx.workmanager.ktx)
 
     // Offline voice models: tar.bz2 extraction for the sherpa-onnx packs the
     // setup wizard downloads (pure-Java bzip2 + tar; no native dependency).
-    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation(libs.commons.compress)
 
     // sherpa-onnx offline voice runtime (vendored AAR in app/libs/, via the
     // flatDir repo in settings.gradle.kts). Carries the com.k2fsa.sherpa.onnx
@@ -295,27 +295,27 @@ dependencies {
     // via EncryptedSharedPreferences (AES-256 GCM, key wrapped by the Android
     // Keystore). SHIP-BLOCKER #1: a shipped app has no process env, so the key
     // must live in an encrypted on-device store, never plain DataStore/prefs.
-    implementation("androidx.security:security-crypto:1.1.0")
+    implementation(libs.androidx.security.crypto)
 
     // Unit tests
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
     // Coroutine/Flow test harness — runTest + UnconfinedTestDispatcher drive the
     // engine reply-stream ordering tests (subscribe-before-submit, terminal
     // completion) on the plain JVM with virtual time.
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation(libs.kotlinx.coroutines.test)
     // Real org.json for JVM unit tests: `isReturnDefaultValues = true` makes the
     // android.jar JSONObject stub return null everywhere, so the per-scope
     // conversation-state store (ScopeStateStore) could not be exercised at all.
     // The real artifact shadows the stub on the unit-test classpath only.
-    testImplementation("org.json:json:20240303")
+    testImplementation(libs.json)
 
     // Instrumented + Compose UI tests
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    androidTestImplementation("androidx.work:work-testing:2.11.2")
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.workmanager.testing)
 
     // Debug tooling
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

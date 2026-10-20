@@ -187,7 +187,7 @@ fun clientEventToReply(
                 tool = event.tool,
                 status = AgentToolStatus.Running,
                 planMarkdown = toolPlanMarkdown(event.tool, event.inputJson),
-                header = event.header.toUi(),
+                header = event.header?.toUi(),
             )
         }
     is ClientEvent.ToolHeartbeat ->
@@ -221,7 +221,7 @@ fun clientEventToReply(
                 id = event.id,
                 tool = event.tool,
                 status = if (event.isError) AgentToolStatus.Failed else AgentToolStatus.Completed,
-                display = event.display.toUi(),
+                display = event.display?.toUi(),
                 planMarkdown = if (!event.isError) toolPlanMarkdown(event.tool, event.resultJson) else null,
                 questionAnswers = if (!event.isError) parseQuestionAnswers(event.tool, event.resultJson) else null,
                 localApp = if (!event.isError) parseLocalAppResult(event.tool, event.resultJson) else null,

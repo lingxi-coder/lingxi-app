@@ -477,7 +477,7 @@ class ChatViewModel(
             is ClientEvent.PromptSuggestion -> _state.update { state ->
                 if (state.session.id == event.sessionId
                     && !state.sessionTransitioning && state.pendingQuestions.isEmpty())
-                    state.copy(promptSuggestion = event.suggestion, promptSuggestionUuid = event.uuid) else state
+                    state.copy(promptSuggestion = event.suggestion.toClientTextDto(), promptSuggestionUuid = event.uuid) else state
             }
             is ClientEvent.ScheduledTaskFire -> _state.update { current ->
                 // Session notice arrives before TurnStarted and is not a loop-fold marker.

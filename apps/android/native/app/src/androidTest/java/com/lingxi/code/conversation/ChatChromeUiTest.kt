@@ -41,7 +41,7 @@ class ChatChromeUiTest {
         val draft = mutableStateOf("")
         rule.setContent {
             LingXiTheme(darkTheme = false) {
-                Surface { ChatScreen(state(), onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = false, draft = draft.value, onDraftChange = { draft.value = it },
+                Surface { ChatScreen(state = state(), onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = false, draft = draft.value, onDraftChange = { draft.value = it },
                     onCameraClick = { camera++ }, onOpenPermissionSettings = { permission++ }, modelSetupRequired = true) }
             }
         }
@@ -65,7 +65,7 @@ class ChatChromeUiTest {
             display = ToolResultDisplayUi(headline = "README result", body = "Tool body from engine", bodyLines = 1))
         val data = state().copy(messages = listOf(Message(Role.Ai, "", blocks = listOf(MessageContent.Tool(call)))),
             planTasks = listOf(PlanTaskUi(subject = "Review the real project", state = PlanTaskStateUi.InProgress)))
-        rule.setContent { LingXiTheme(false) { Surface { ChatScreen(data, onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = false) } } }
+        rule.setContent { LingXiTheme(false) { Surface { ChatScreen(state = data, onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = false) } } }
         for (category in ConversationSummaryCategory.entries) {
             rule.onNodeWithTag("conversation.more").performClick()
             rule.onNodeWithTag("conversation.summary.${category.name}").performClick()
@@ -85,7 +85,7 @@ class ChatChromeUiTest {
         val dark = mutableStateOf(false); var settings = 0; var computer = 0; var dismiss = 0
         rule.setContent {
             LingXiTheme(dark.value) {
-                Surface { ChatScreen(state(), onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = dark.value, modelSetupRequired = true,
+                Surface { ChatScreen(state = state(), onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = dark.value, modelSetupRequired = true,
                     computerUseSetup = ComputerUseSetupStatus(false, false, false), audioGuidance = AudioSetupGuidance.Configuration,
                     onOpenModelSettings = { settings++ }, onOpenComputerUseSettings = { computer++ },
                     onDismissComputerUseSetup = { dismiss++ }) }

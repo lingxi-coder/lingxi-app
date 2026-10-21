@@ -1,0 +1,16 @@
+[package]
+name = "native-bindgen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+camino = "1"
+uniffi_bindgen = "=0.32.2"

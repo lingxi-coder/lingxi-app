@@ -159,7 +159,7 @@ class DesktopConversationParityUiTest {
             LingXiTheme(darkTheme = false) {
                 val keyboardBottom = WindowInsets.ime.getBottom(LocalDensity.current)
                 SideEffect { imeVisible.set(keyboardBottom > 0) }
-                ChatScreen(state.value, onSend = { sent += it }, onNewChat = {}, onSelectModel = {},
+                ChatScreen(state = state.value, onSend = { sent += it }, onNewChat = {}, onSelectModel = {},
                     isDark = false, draft = draft.value, modifier = Modifier.safeDrawingPadding().imePadding(),
                     onDraftChange = { draft.value = it })
             }
@@ -189,7 +189,7 @@ class DesktopConversationParityUiTest {
         ))
         rule.setContent {
             LingXiTheme(darkTheme = false) {
-                ChatScreen(state.value, onSend = {}, onNewChat = {}, onSelectModel = {},
+                ChatScreen(state = state.value, onSend = {}, onNewChat = {}, onSelectModel = {},
                     isDark = false, draft = "", modifier = Modifier.safeDrawingPadding(),
                     onDraftChange = {})
             }

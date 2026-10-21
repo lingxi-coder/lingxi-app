@@ -321,10 +321,10 @@ done
 # Cargo target directory may be rebuilt by another checkout while bindgen runs.
 INTROSPECT_LIB="${JNILIBS_DIR}/arm64-v8a/${SONAME}"
 
-# The bindgen bin's `--library` metadata extractor expects to find a cdylib name
-# it can compute; build the bin first (cli feature), then run it.
-log "Building offline uniffi-bindgen bin (ios-framework --features cli)…"
-cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli --bin uniffi-bindgen
+# Build the standalone metadata extractor before generating bindings from the
+# matching staged cdylib; this does not compile a second platform's runtime.
+log "Building standalone native bindings generator…"
+cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen
 
 # Generate into this invocation's staging tree. The existing Kotlin package
 # remains usable even if bindgen writes partial files and then fails.
@@ -333,7 +333,7 @@ GEN_PKG_DIR="${KOTLIN_OUT}/${PKG_REL_PATH}"
 mkdir -p "${BINDINGS_STAGE}"
 
 log "Generating Kotlin bindings → ${GEN_PKG_DIR} (package com.lingxi.code.bindings)…"
-cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli \
+cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen \
   --bin uniffi-bindgen -- \
   generate \
   --library "${INTROSPECT_LIB}" \

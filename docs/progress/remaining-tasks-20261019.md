@@ -43,3 +43,15 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - 当前 main 的来源检查确认 canonical Git Harness `b054a3bf`、无开发路径覆盖；719 项客户端来源和 3 份协议镜像检查通过。Android JNI / Kotlin / APK 完整门禁仍在进行，不能借用旧产物的结论。
 - 版本化目录尚未接入。源码入口已确定：后台 `apps/firebase/src/catalog.mjs` / `scripts/generate-seed.py`；SDK `configuration/merge.rs::Definitions::get`；Harness `llm-runtime/src/catalog/upstream.rs`、`provider-config/src/assemble.rs`、desktop `credentials.rs` 和 mobile `host/assembly.rs`。后台四个布尔能力与价格投影不包含完整 SDK wire 定义，不能直接替换协议、凭据、推理控制或定价时段。后续必须闭合官方定义快照与启动缓存，再由同次配置装配刷新执行目录与 UI；保留用户覆盖，不能只接选择器。
 - WebRTC 产品与 Remote 保留开放状态，但不再以本轮广播测试为其他独立任务的前置条件。系统确认、设备验收和生产凭据等环境边界继续分别记录。
+
+## 2026-10-20：Android Play JNI / APK 阶段通过
+
+- 固定 Harness `b054a3bfe094d8a588d76706ca90212d62381111`、SDK `e986d0841e5cc6b5151bdaeabca1c6dd156771df`，重新完成 ARM64、x86_64 release JNI 和来自同一库的三套 Kotlin 绑定；没有借用旧版本 JNI。
+- 将原来的 UniFFI 生成器等价移动到独立 `native-bindgen` 工具，删除 iOS crate 的旧 CLI feature/入口。Android 生成绑定不再额外编译 iOS 运行时。两端脚本使用同一固定 UniFFI 0.32.2；保留 Kotlin 错误属性、音频 buffer 修复和 JNI/绑定/符号的事务发布。2 项生成器测试、1 项实际依赖闭包/版本边界测试、16 项 JNI 发布回归通过。Swift 生成 smoke 通过，不代表 iOS App 已重新编译。
+- 修复当前 Android 调用方：提示建议直接保留 `ClientTextDto`；slash 命令完整传递已有图片列表、原始 UTF-16 及 turn ID。同步当前必填工具展示 DTO 的测试样例，删除已不存在的旧字段；Compose 测试改用具名 `state` 参数。
+- `assemblePlayDebug`、全部 **977 项 JVM 测试**（0 失败/跳过）及 `assemblePlayDebugAndroidTest` 通过。最终 APK 原生支持/rootfs/ABI 校验通过；APK v2 签名验证、独立模拟器安装通过。
+- Android 37 ARM64、**16 KiB 页**独立模拟器执行真实 JNI 初始化、原生 MCP/Skill/Plugin/Hook 命令往返、Side Chat 原生/Compose 测试，**3 项通过**。Launcher 启动成功，停在系统首次权限界面；测试后 crash buffer 为空。未使用实体手机或真实 provider 凭据。
+- canonical Git 来源检查仍无路径覆盖；719 项客户端来源、3 份协议镜像检查通过。证据与 APK 哈希索引：`.buildcache/remaining-task-takeover-20261019/android-play-acceptance-20261020.json`；APK 位于本任务 Product 工作树的 `apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk`。
+- 本阶段验证 **Play debug**；Direct 的 CU 原生变体、实体设备、Play App Signing/发行和在线模型推理未因此通过。WebRTC 按用户要求跳过。原 Product checkout 的 `gradle/libs.versions.toml` 未提交修改保持原样，不纳入本批。
+
+下一阶段继续版本化模型目录四端启动刷新；当前 Firebase 目录还不能替代完整 SDK 执行定义，不能将选择器刷新单独记为完成。

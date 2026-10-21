@@ -65,7 +65,7 @@ class ComposerLoadingUiTest {
         val sent = mutableListOf<String>()
         rule.setContent {
             LingXiTheme(darkTheme = false) {
-                ChatScreen(state.value, onSend = { sent += it }, onNewChat = {},
+                ChatScreen(state = state.value, onSend = { sent += it }, onNewChat = {},
                     onSelectModel = {}, isDark = false,
                     draft = draft.value, onDraftChange = { draft.value = it })
             }

@@ -38,39 +38,39 @@ class ClientEventMapperTest {
 
 
     @Test
-    fun missingToolPresentation_keepsLiveToolLifecycle() {
+    fun minimalToolPresentation_keepsLiveToolLifecycle() {
         val started = clientEventToReply(ClientEvent.ToolUseStarted(
-            id = "read-null", tool = "Read", inputJson = "{}", header = null,
+            id = "read-null", tool = "Read", inputJson = "{}", header = currentToolHeaderFixture(),
         )) as ReplyEvent.ToolActivity
         val finished = clientEventToReply(ClientEvent.ToolUseResult(
-            id = "read-null", tool = "Read", resultJson = "{}", isError = true, display = null,
+            id = "read-null", tool = "Read", resultJson = "{}", isError = true, display = currentToolDisplayFixture(),
         )) as ReplyEvent.ToolActivity
 
-        assertNull(started.header)
+        assertEquals(ToolHeaderUi(ToolVerbUi.Read, "Read", title = "Read"), started.header)
         assertEquals(AgentToolStatus.Running, started.status)
         assertEquals(started.id, finished.id)
-        assertNull(finished.display)
+        assertEquals(ToolResultDisplayUi(), finished.display)
         assertEquals(AgentToolStatus.Failed, finished.status)
     }
 
     @Test
-    fun missingToolPresentation_restoresPairedTranscriptTool() {
+    fun minimalToolPresentation_restoresPairedTranscriptTool() {
         val messages = transcriptFromDtos(listOf(
             MessageDto(transcriptUuid = null, role = "assistant", blocks = listOf(
-                MessageBlockDto.ToolUse(id = "read-null", tool = "Read", inputJson = "{}", header = null),
+                MessageBlockDto.ToolUse(id = "read-null", tool = "Read", inputJson = "{}", header = currentToolHeaderFixture()),
             )),
             MessageDto(transcriptUuid = null, role = "user", blocks = listOf(
                 MessageBlockDto.ToolResult(
                     id = "read-null", tool = "Read", resultJson = "{}", isError = false,
-                    oldString = null, newString = null, filePath = null, display = null,
+                    display = currentToolDisplayFixture(),
                 ),
             )),
         ))
 
         val tool = messages.single().blocks.filterIsInstance<MessageContent.Tool>().single().call
         assertEquals("read-null", tool.id)
-        assertNull(tool.header)
-        assertNull(tool.display)
+        assertEquals(ToolHeaderUi(ToolVerbUi.Read, "Read", title = "Read"), tool.header)
+        assertEquals(ToolResultDisplayUi(), tool.display)
         assertEquals(AgentToolStatus.Completed, tool.status)
     }
 
@@ -596,7 +596,6 @@ class ClientEventMapperTest {
                             tool = "Edit",
                             resultJson = """"ok"""",
                             isError = false,
-                            oldString = null, newString = null, filePath = null,
                             display = ToolResultDisplayDto(
                                 headline = "Added 2 lines",
                                 headlineKind = HeadlineKindDto.ADDED,
@@ -643,7 +642,6 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "r1", tool = "Read", resultJson = """"boom"""", isError = true,
-                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),
@@ -666,7 +664,6 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
-                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),
@@ -693,7 +690,6 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
-                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),
@@ -733,7 +729,6 @@ class ClientEventMapperTest {
                     blocks = listOf(
                         MessageBlockDto.ToolResult(
                             id = "gone", tool = "Grep", resultJson = """"x"""", isError = false,
-                            oldString = null, newString = null, filePath = null,
                             display = currentToolDisplayFixture(),
                         ),
                     ),

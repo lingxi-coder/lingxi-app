@@ -3,7 +3,6 @@
 //! Swift keeps one module scope; Kotlin uses each component's configured package.
 //! Cross-component errors and Rust buffers use UniFFI's native converters.
 
-#[cfg(feature = "cli")]
 fn main() {
     if let Err(error) = cli::run() {
         eprintln!("uniffi-bindgen error: {error:?}");
@@ -11,13 +10,6 @@ fn main() {
     }
 }
 
-#[cfg(not(feature = "cli"))]
-fn main() {
-    eprintln!("uniffi-bindgen requires --features cli");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "cli")]
 mod cli {
     use anyhow::{bail, Context, Result};
     use camino::Utf8PathBuf;

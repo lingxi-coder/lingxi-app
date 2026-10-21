@@ -397,16 +397,16 @@ class ChatViewModelReducerTest {
     private fun newVm() = ChatViewModel(StubSource())
 
     @Test
-    fun promptSuggestionConvertsWireStringForEditableDraft() {
+    fun promptSuggestionPreservesWireUtf16ForEditableDraft() {
         val vm = newVm()
-        val suggestion = "继续检查 \uD83D\uDD0Dx"
+        val suggestion = "继续检查 \uD83D\uDD0Dx\uD800".toClientTextDto()
 
         vm.reduceClientEvent(ClientEvent.PromptSuggestion(suggestion, "suggestion-1", "new"))
 
         val retained = vm.state.value.promptSuggestion
-        assertEquals(suggestion.toClientTextDto().codeUnits, retained?.codeUnits)
-        assertEquals(suggestion, retained?.displayText())
-        assertEquals(suggestion, retained?.sourceText())
+        assertEquals(suggestion.codeUnits, retained?.codeUnits)
+        assertEquals(suggestion.displayText(), retained?.displayText())
+        assertEquals(suggestion.sourceText(), retained?.sourceText())
     }
 
     @Test
@@ -559,11 +559,13 @@ class ChatViewModelReducerTest {
     }
 
     @Test
-    fun runSlashCommandClientCommand_preservesUtf16AndTurnIdentity() {
+    fun runSlashCommandClientCommand_preservesUtf16ImagesAndTurnIdentity() {
         val raw = "/custom arg \uD800".toClientTextDto()
-        val command = runSlashCommandClientCommand(raw, 73L)
+        val images = listOf(ImageRefDto("image/png", "AQID"), ImageRefDto("image/jpeg", "BAUG"))
+        val command = runSlashCommandClientCommand(raw, images, 73L)
 
         assertEquals(raw.codeUnits, command.raw.codeUnits)
+        assertEquals(images, command.images)
         assertEquals(73uL, command.turnId)
     }
 

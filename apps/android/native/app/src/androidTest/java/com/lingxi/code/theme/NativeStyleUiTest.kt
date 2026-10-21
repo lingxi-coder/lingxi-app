@@ -99,7 +99,7 @@ class NativeStyleUiTest {
             LingXiTheme(darkTheme = dark.value) {
                 Surface(Modifier.fillMaxSize()) {
                     if (onboarding.value) SetupWizardOverlay(true, "Lingxi", "", false, "", "", { _, _, _, _, _ -> })
-                    else ChatScreen(ChatState(session = SessionRef("native-audit", "Conversation"), messages = listOf(
+                    else ChatScreen(state = ChatState(session = SessionRef("native-audit", "Conversation"), messages = listOf(
                             com.lingxi.code.model.Message(com.lingxi.code.model.Role.User, "Help me review the project and plan the next steps."),
                             com.lingxi.code.model.Message(com.lingxi.code.model.Role.Ai,
                                 "## Project review\nI’ll check the current implementation, verify the important flows, and summarize the next steps.\n\n- Review the main screens\n- Check light and dark appearance\n- Verify accessibility and keyboard behavior")),
@@ -149,7 +149,7 @@ class NativeStyleUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = false) {
                 Surface(Modifier.fillMaxWidth().height(460.dp)) {
-                    ChatScreen(ChatState(session = SessionRef("new", "New conversation"), isNew = true, messages = emptyList(),
+                    ChatScreen(state = ChatState(session = SessionRef("new", "New conversation"), isNew = true, messages = emptyList(),
                         model = EngineModelCatalog.pending), onSend = {}, onNewChat = {}, onSelectModel = {},
                         isDark = false, draft = draft.value, onDraftChange = { draft.value = it })
                 }

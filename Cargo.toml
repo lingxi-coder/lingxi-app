@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "packages/deep-links-rs",
     "tools/ios-use",
+    "tools/native-bindgen",
     "packages/config-requirements",
     "apps/ios/ffi",
     "apps/android/ffi",

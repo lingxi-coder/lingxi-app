@@ -171,11 +171,11 @@ if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   done
   log "Reusing validated Swift bindings in ${GEN_DIR} …"
 else
-  # Build the library and generator with one feature graph before replacing
-  # any existing bindings. A stale lockfile or generator build failure must
-  # leave the last matching generated sources available.
-  log "Building host cdylib and bindings generator…"
-  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli
+  # Build both targets before replacing existing bindings. The generator has
+  # no runtime dependency and shares only the pinned UniFFI format.
+  log "Building host cdylib and standalone bindings generator…"
+  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}"
+  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen
 
   HOST_DYLIB_PATH="${CARGO_TARGET_DIR}/debug/${HOST_DYLIB}"
   [[ -f "${HOST_DYLIB_PATH}" ]] || { echo "ERROR: host dylib not produced: ${HOST_DYLIB_PATH}" >&2; exit 1; }
@@ -183,7 +183,7 @@ else
   log "Generating Swift bindings into ${GEN_DIR} …"
   rm -rf "${GEN_DIR}"
   mkdir -p "${GEN_DIR}"
-  # The preceding build produces this exact generator with the host library.
+  # The preceding builds produce the host library and matching generator.
   # Invoke it directly so generation does not queue a second Cargo build.
   BINDGEN_PATH="${CARGO_TARGET_DIR}/debug/uniffi-bindgen"
   [[ -x "${BINDGEN_PATH}" ]] || { echo "ERROR: bindings generator not produced: ${BINDGEN_PATH}" >&2; exit 1; }

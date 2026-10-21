@@ -46,7 +46,7 @@ class SideChatSheetUiTest {
                 LingXiTheme(darkTheme = false) {
                     if (visible.value) {
                         val state by vm.state.collectAsState()
-                        ChatScreen(state, onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = false,
+                        ChatScreen(state = state, onSend = {}, onNewChat = {}, onSelectModel = {}, isDark = false,
                             draft = parentDraft.value, onDraftChange = { parentDraft.value = it },
                             onOpenSideChats = vm::openSideChats)
                         SideChatSheet(vm.sideChats, false, onCreate = vm::createSideChat)

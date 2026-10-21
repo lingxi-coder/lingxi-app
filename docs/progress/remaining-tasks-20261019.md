@@ -15,7 +15,7 @@
 
 | 工作 | 当前证据与缺口 | 下一步 |
 | --- | --- | --- |
-| WebRTC iOS 系统广播 | 提前帧的无符号时间差下溢已修复，回归先失败后通过；当前优化静态库、Flare 签名 probe/extension、严格签名检查及真机安装/启动通过 | 等待手机系统选择器确认，然后验证实际跨 App 帧、停止与恢复 |
+| WebRTC iOS 系统广播 | 提前帧下溢回归、Flare 签名及安装通过；CUA 点击路由不稳定，尚无当前广播回执。2026-10-20 用户明确要求先跳过此项测试 | 保留未验证状态、源码与证据，不阻塞其他工作；不以 Ready 或构建成功代替跨 App 帧、停止与恢复验收 |
 | WebRTC 产品接入与 Remote | 独立 transport/media/FFI 与 localhost TURN 已验证；生产产品没有接入 | 在媒体边界验证后接入现有 host/control-plane；认证、设备与权限仍归项目自有服务，不另造执行所有者 |
 | WebRTC 其他媒体边界 | 限制性 NAT、TCP/TLS、手机互通、长期刷新、热状态与能耗尚无完整证据 | 逐项实施和验证，区分共享测试与真实设备结果 |
 | 版本化模型目录四端刷新 | Firebase API、已发布目录及 Web 管理页已存在；当前文档明确尚未接入四端启动同步 | 闭合 SDK 官方目录定义、Harness 校验/缓存/刷新、Desktop/CLI/mobile 启动和当前选择器消费者；保留用户模型、连接和凭据 |
@@ -34,3 +34,12 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 源码与最小可复现优先，采集仅用于剩余语义疑点和关键路径。一次只运行必要的重量构建，避免磁盘再次耗尽。每批验证通过后合并推送 main；只清理已交付且无占用的本任务分支、工作树与可重建缓存，保留仍作为 Mods 注册源的目录。
 
 接手证据在工作区 `.buildcache/remaining-task-takeover-20261019/`：`task-inventory.json` 包含原 session 标题、报告及已核实的 main 祖先；每项新验证保留独立日志。该清单是继续推进的入口，不是“所有遗留任务已完成”的声明。
+
+## 2026-10-20：跳过广播测试后的推进
+
+- Product 已快进整合 main 到 `ff2797e03`，包含 Android Gradle 升级和 FFI 调用方修复；Harness main 仍为 `b054a3bf`。未重置原 checkout，保留本任务尚未提交的 WebRTC 修复。
+- 当前 Android 验收从这组固定来源重新准备 Release 原生支持和 rootfs，校验已完成部分的哈希与来源；JNI/绑定从当前提交重新生成。旧 `98130b21` JNI 的 Harness 源码与当前 `b054a3bf` 不同，不能复制旧库冒充当前组合通过。
+- JNI 构建脚本的 Play / Direct 交叉编译补齐 `--locked`。新增依赖漂移回归先失败后通过：锁文件需要更新时立即失败，不改锁文件，不发布 JNI、绑定或符号。16 项现有/新增发布边界测试通过，随后补跑两个变体的依赖漂移用例均通过；shell 语法与 diff 检查通过。这些脚本验证不代表 APK 或真机验收通过。
+- 当前 main 的来源检查确认 canonical Git Harness `b054a3bf`、无开发路径覆盖；719 项客户端来源和 3 份协议镜像检查通过。Android JNI / Kotlin / APK 完整门禁仍在进行，不能借用旧产物的结论。
+- 版本化目录尚未接入。源码入口已确定：后台 `apps/firebase/src/catalog.mjs` / `scripts/generate-seed.py`；SDK `configuration/merge.rs::Definitions::get`；Harness `llm-runtime/src/catalog/upstream.rs`、`provider-config/src/assemble.rs`、desktop `credentials.rs` 和 mobile `host/assembly.rs`。后台四个布尔能力与价格投影不包含完整 SDK wire 定义，不能直接替换协议、凭据、推理控制或定价时段。后续必须闭合官方定义快照与启动缓存，再由同次配置装配刷新执行目录与 UI；保留用户覆盖，不能只接选择器。
+- WebRTC 产品与 Remote 保留开放状态，但不再以本轮广播测试为其他独立任务的前置条件。系统确认、设备验收和生产凭据等环境边界继续分别记录。

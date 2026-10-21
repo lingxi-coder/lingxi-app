@@ -291,11 +291,11 @@ done
 # "could not find Cargo.toml" when invoked from elsewhere (e.g. the repo root).
 if [[ "${VARIANT}" == "direct" ]]; then
   ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
-      build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
+      build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
       --features android-computer-use --"${PROFILE}" )
 else
   ( cd "${CARGO_DIR}" && CARGO_PROFILE_RELEASE_DEBUG=1 cargo ndk "${NDK_ABI_ARGS[@]}" -o "${JNILIBS_DIR}" \
-      build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
+      build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" \
       --"${PROFILE}" )
 fi
 

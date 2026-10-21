@@ -30,6 +30,11 @@ if tool == "rustup":
         print("aarch64-linux-android\nx86_64-linux-android")
 elif tool == "cargo":
     if args[0] == "ndk":
+        if os.environ.get("JNI_FIXTURE_LOCKFILE_DRIFT") == "1":
+            if "--locked" in args:
+                print("fixture lock file needs updating but --locked was passed", file=sys.stderr)
+                sys.exit(101)
+            Path("Cargo.lock").write_text("unexpected dependency resolution")
         output = Path(args[args.index("-o") + 1])
         for abi in ("arm64-v8a", "x86_64"):
             target = output / abi / "libandroid_aar.so"
@@ -161,8 +166,8 @@ class AndroidJniPromotionTests(unittest.TestCase):
         old.parent.mkdir(parents=True)
         old.write_text("old bindings")
 
-    def run_script(self, **settings):
-        result = subprocess.run(["bash", str(self.script), "--variant", "play"], cwd=self.root,
+    def run_script(self, variant="play", **settings):
+        result = subprocess.run(["bash", str(self.script), "--variant", variant], cwd=self.root,
                                 env={**self.env, **settings}, text=True, capture_output=True, timeout=15)
         return result
 
@@ -316,6 +321,18 @@ class AndroidJniPromotionTests(unittest.TestCase):
         self.assertEqual(self.aar.read_bytes(), before)
         self.assertFalse(self.download_count.exists())
         self.assert_download_cleanup()
+
+    def test_dependency_drift_cannot_rewrite_lock_or_publish_artifacts(self):
+        lock = self.repo / "Cargo.lock"
+        lock.write_text("fixed dependency graph")
+        before = (files(self.jni), files(self.kotlin), files(self.symbols))
+        for variant in ("play", "direct"):
+            with self.subTest(variant=variant):
+                result = self.run_script(variant=variant, JNI_FIXTURE_LOCKFILE_DRIFT="1")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("lock file needs updating", result.stderr)
+                self.assertEqual(lock.read_text(), "fixed dependency graph")
+                self.assert_preserved(before)
 
 
 if __name__ == "__main__":

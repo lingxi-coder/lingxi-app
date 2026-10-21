@@ -1842,7 +1842,8 @@ final class EngineConversationSource: ConversationSource {
                 let thread = Thread {
                     autoreleasepool {
                         continuation.resume(with: Result {
-                            try handleBuilder(launchConfig, listener, audio, permissionSink)
+                            try SandboxSessionCatalog.prepare(appRoot: launchConfig.appSandboxRoot)
+                            return try handleBuilder(launchConfig, listener, audio, permissionSink)
                         })
                     }
                 }

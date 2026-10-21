@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import Darwin
 
 /// An iOS update can move the data container without changing any session data.
 /// Rebind its current-format catalogs before starting an engine rooted at the
@@ -25,15 +26,22 @@ enum SandboxSessionCatalog {
     static func prepare(appRoot: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        let root = URL(fileURLWithPath: appRoot).resolvingSymlinksInPath()
-        guard containerPrefix(root.path) != nil else { return }
+        // Foundation can prefer /var even after resolving symlinks. Rust's
+        // canonicalize uses realpath; its exact spelling is the catalog key.
+        guard let resolved = appRoot.withCString({ realpath($0, nil) }) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { free(resolved) }
+        let canonicalPath = String(cString: resolved)
+        let root = URL(fileURLWithPath: canonicalPath)
+        guard containerPrefix(canonicalPath) != nil else { return }
         let home = root.appendingPathComponent(".lingxi", isDirectory: true)
         guard try kind(home) != nil else { return }
         try requireDirectory(home)
         let marker = home.appendingPathComponent("session-catalog-container")
         if let type = try kind(marker) {
             guard type == .typeRegular else { throw RebindError.unsafeEntry(marker.path) }
-            if try Data(contentsOf: marker) == Data(root.path.utf8) { return }
+            if try Data(contentsOf: marker) == Data(canonicalPath.utf8) { return }
         }
         var suffixes = ["", "/scheduled/workspace"]
         for folder in ["Projects", "projects"] {
@@ -48,9 +56,9 @@ enum SandboxSessionCatalog {
         }
         let catalogs = home.appendingPathComponent("projects", isDirectory: true)
         if try kind(catalogs) != nil {
-            try rebind(projects: catalogs, currentAppRoot: root.path, workspaceSuffixes: suffixes)
+            try rebind(projects: catalogs, currentAppRoot: canonicalPath, workspaceSuffixes: suffixes)
         }
-        try Data(root.path.utf8).write(to: marker, options: .atomic)
+        try Data(canonicalPath.utf8).write(to: marker, options: .atomic)
     }
 
     /// The caller supplies only the global, scheduled, and managed workspaces

@@ -106,4 +106,21 @@ final class SandboxSessionCatalogTests: XCTestCase {
         XCTAssertThrowsError(try SandboxSessionCatalog.rebind(projects: temporary, currentAppRoot: newRoot, workspaceSuffixes: [""]))
         XCTAssertEqual(try Data(contentsOf: outside), Data("preserve".utf8))
     }
+
+    func testPrepareKeepsTheRuntimePrivateVarIdentity() throws {
+        let root = temporary.appendingPathComponent("Containers/Data/Application/22222222-2222-2222-2222-222222222222/Library/Application Support/LingxiCode")
+        XCTAssertTrue(root.path.hasPrefix("/var/") || root.path.hasPrefix("/private/var/"))
+        let canonical = root.path.hasPrefix("/private/") ? root.path : "/private" + root.path
+        let old = canonical.replacingOccurrences(of: "22222222-2222-2222-2222-222222222222", with: "11111111-1111-1111-1111-111111111111")
+        let projects = root.appendingPathComponent(".lingxi/projects")
+        let previous = projects.appendingPathComponent(SandboxSessionCatalog.directoryName(old))
+        try FileManager.default.createDirectory(at: previous, withIntermediateDirectories: true)
+        let raw = Data("original history\n".utf8)
+        try raw.write(to: previous.appendingPathComponent(session + ".jsonl"))
+        try SandboxSessionCatalog.prepare(appRoot: root.path)
+        let current = projects.appendingPathComponent(SandboxSessionCatalog.directoryName(canonical)).appendingPathComponent(session + ".jsonl")
+        XCTAssertTrue(try Data(contentsOf: current).starts(with: raw))
+        let marker = root.appendingPathComponent(".lingxi/session-catalog-container")
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), canonical)
+    }
 }

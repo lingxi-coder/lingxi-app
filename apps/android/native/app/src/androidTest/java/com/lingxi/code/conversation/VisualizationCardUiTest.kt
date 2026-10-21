@@ -1,5 +1,12 @@
 package com.lingxi.code.conversation
 
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
@@ -10,6 +17,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.lingxi.code.R
 import com.lingxi.code.bindings.runtime.NoHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
@@ -24,8 +33,10 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,34 +45,89 @@ import org.junit.runner.RunWith
 class VisualizationCardUiTest {
     @get:Rule val rule = createComposeRule()
 
-    @Test fun expansionKeepsOneMountAndTheWidgetsJavaScriptState() {
+    @Test fun focusedWidgetExpandsInLazyColumnWithoutDetachingItsInlineHost() {
         val host = ShellHost()
         val followups = mutableListOf<String>()
+        val previewLimits = mutableListOf<Int>()
         rule.setContent {
             LingXiTheme(darkTheme = false) {
                 CompositionLocalProvider(
                     LocalVisualizationContext provides VisualizationScreenContext(host, "session", false, {
-                        followups += it.text
+                        if (it.text.startsWith("max-height:")) previewLimits += it.text.substringAfter(':').toInt()
+                        else followups += it.text
                     }),
                 ) {
-                    VisualizationCard(VisualizationSlotStatus.Ready, VisualizationRef("chart", 1u))
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        item { VisualizationCard(VisualizationSlotStatus.Ready, VisualizationRef("chart", 1u)) }
+                        items(20) { Text("Transcript row $it") }
+                    }
                 }
             }
         }
         rule.waitUntil(10_000) { host.mounts.get() == 1 }
         val loading = InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.visualization_loading)
         rule.waitUntil(10_000) { rule.onAllNodesWithText(loading).fetchSemanticsNodes().isEmpty() }
-        rule.onNodeWithTag("conversation.visualization.expand").performClick()
-        rule.onNodeWithTag("conversation.visualization.close").assertIsDisplayed()
-        rule.waitUntil(10_000) { followups.size == 1 }
-        rule.onNodeWithTag("conversation.visualization.close").performClick()
-        rule.onNodeWithTag("conversation.visualization.expand").assertIsDisplayed()
-        rule.waitUntil(10_000) { followups.size == 2 }
+        lateinit var webView: WebView
+        lateinit var inlineContainer: ViewGroup
+        var inlineHeight = 0
         rule.runOnIdle {
-            assertEquals(listOf("expanded:1", "expanded:2"), followups)
-            assertEquals(1, host.mounts.get())
-            assertEquals(0, host.releases.get())
+            val activity = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED).single()
+            webView = requireNotNull(findWebView(activity.window.decorView))
+            inlineContainer = webView.parent as ViewGroup
+            assertTrue(inlineContainer.isAttachedToWindow)
+            inlineHeight = inlineContainer.height
+            assertTrue(inlineHeight > 0)
         }
+        repeat(3) { cycle ->
+            rule.runOnIdle {
+                assertTrue(webView.requestFocus())
+                assertTrue(webView.hasFocus())
+            }
+            rule.onNodeWithTag("conversation.visualization.expand").performClick()
+            rule.onNodeWithTag("conversation.visualization.expanded").assertIsDisplayed()
+            rule.waitUntil(10_000) { followups.size == cycle * 2 + 1 }
+            rule.runOnIdle {
+                // The old host must remain owned by the LazyColumn even while
+                // the same focused WebView is displayed in another window.
+                assertTrue(inlineContainer.isAttachedToWindow)
+                assertEquals(0, inlineContainer.childCount)
+                assertEquals(inlineHeight, inlineContainer.height)
+                assertTrue(webView.isAttachedToWindow)
+                assertTrue(webView.requestFocus())
+                assertTrue(webView.hasFocus())
+            }
+            rule.onNodeWithTag("conversation.visualization.close").performClick()
+            rule.onNodeWithTag("conversation.visualization.expand").assertIsDisplayed()
+            rule.waitUntil(10_000) { followups.size == (cycle + 1) * 2 }
+            rule.runOnIdle {
+                assertSame(inlineContainer, webView.parent)
+                assertTrue(inlineContainer.isAttachedToWindow)
+                assertEquals(inlineHeight, inlineContainer.height)
+                assertEquals(List(cycle + 1) { 160 }, previewLimits)
+                assertEquals(1, host.mounts.get())
+                assertEquals(0, host.releases.get())
+            }
+        }
+        rule.runOnIdle {
+            assertEquals((1..6).map { "expanded:$it" }, followups)
+            // A collapsed preview still shrinks when the content gets shorter.
+            webView.evaluateJavascript("emitResize(96, true)", null)
+        }
+        rule.waitUntil(10_000) { followups.lastOrNull() == "resized:96" }
+        rule.runOnIdle {
+            assertEquals((96 * webView.resources.displayMetrics.density).roundToInt(), inlineContainer.height)
+            assertTrue(inlineContainer.height < inlineHeight)
+        }
+    }
+
+    private fun findWebView(view: View): WebView? {
+        if (view is WebView) return view
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                findWebView(view.getChildAt(index))?.let { return it }
+            }
+        }
+        return null
     }
 
     @Test fun failedMountCanBeRetriedFromTheCard() {
@@ -271,11 +337,26 @@ class VisualizationCardUiTest {
                 <!doctype html><script>
                 const bridge = window.lingxiVisualization;
                 let expansionCount = 0;
+                let generation;
+                function emitResize(height, announce = false) {
+                  bridge.postMessage(JSON.stringify({type:'resize', generation, height, contentHeight:height, clamped:false}));
+                  if (announce) bridge.postMessage(JSON.stringify({type:'followup.draft', generation, text:'resized:' + height}));
+                }
                 bridge.onmessage = event => {
                   const message = JSON.parse(event.data);
                   if (message.type === 'mount') {
+                    generation = message.generation;
                     bridge.postMessage(JSON.stringify({type:'ready', generation:message.generation}));
+                    emitResize(160);
+                  } else if (message.type === 'max-height') {
+                    // A fullscreen measurement may already be in flight when
+                    // the native host requests the original preview height.
+                    emitResize(1200);
+                    bridge.postMessage(JSON.stringify({type:'followup.draft', generation, text:'max-height:' + message.maxHeight}));
                   } else if (message.type === 'expanded') {
+                    // Cover fullscreen reports and the shell's stale replay
+                    // immediately after expanded=false, before remeasurement.
+                    emitResize(1200);
                     bridge.postMessage(JSON.stringify({type:'followup.draft', generation:message.generation, text:'expanded:' + (++expansionCount)}));
                   }
                 };

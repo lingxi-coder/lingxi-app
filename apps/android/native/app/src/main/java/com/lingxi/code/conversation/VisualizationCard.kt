@@ -155,10 +155,39 @@ private class WidgetSession(
     val reference: VisualizationRef,
 ) {
     var webView: WebView? = null
+    var inlineContainer: FrameLayout? = null
     var reply: JavaScriptReplyProxy? = null
     var mount: VisualizationMountDto? = null
     var lifecycle: Long = 0
         private set
+
+    /** Move focus while both native and Compose trees are still attached. */
+    fun clearWidgetFocus() {
+        val view = webView ?: return
+        if (!view.hasFocus()) return
+        (view.parent as? FrameLayout)?.let { container ->
+            val policy = container.descendantFocusability
+            container.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            container.requestFocus()
+            container.descendantFocusability = policy
+        }
+        view.clearFocus()
+    }
+
+    fun attachTo(container: FrameLayout) {
+        val view = webView ?: return
+        if (view.parent === container) return
+        clearWidgetFocus()
+        val previous = view.parent as? ViewGroup
+        previous?.removeView(view)
+        // Do not leave the dialog's native host focused when Compose removes it.
+        // This transfer runs before dismissal, or after an opening applyChanges.
+        previous?.clearFocus()
+        container.addView(view, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+    }
 
     fun post(message: JSONObject) {
         reply?.postMessage(message.toString())
@@ -196,6 +225,7 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
     val session = remember { WidgetSession(context.host!!, context.sessionId, reference) }
     var phase by remember { mutableStateOf(WidgetPhase.Loading) }
     var heightDp by remember { mutableIntStateOf(160) }
+    var inlineMaxHeightDp by remember { mutableIntStateOf(MAX_INLINE_HEIGHT_DP) }
     var title by remember { mutableStateOf("") }
     // Callbacks read this shared state cell, including after an async mount.
     var expanded by remember { mutableStateOf(false) }
@@ -207,6 +237,21 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
     val locale = remember { Locale.getDefault().toLanguageTag() }
 
     fun setExpanded(next: Boolean) {
+        // Removing a focused AndroidView during Compose applyChanges can
+        // synchronously re-enter LazyColumn layout through native focus search.
+        // Clear focus first, and return the widget before removing its dialog.
+        session.clearWidgetFocus()
+        if (!next) {
+            // Keep the preview at its pre-expansion size for this mount. The
+            // shell immediately replays its last (fullscreen) content height
+            // on collapse, before the iframe can measure its inline layout.
+            inlineMaxHeightDp = heightDp
+            session.mount?.let { mount ->
+                session.post(JSONObject().put("type", "max-height")
+                    .put("generation", mount.generation.toLong()).put("maxHeight", inlineMaxHeightDp))
+            }
+            session.inlineContainer?.let(session::attachTo)
+        }
         expanded = next
         session.mount?.let { mount ->
             session.post(JSONObject().put("type", "expanded")
@@ -216,6 +261,7 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
 
     fun mountWidget() {
         session.retire()
+        inlineMaxHeightDp = MAX_INLINE_HEIGHT_DP
         val lifecycle = session.lifecycle
         phase = WidgetPhase.Loading
         scope.launch {
@@ -248,7 +294,7 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
                         .put("generation", ticket.generation.toLong())
                         .put("docUrl", ticket.docUrl)
                         .put("title", ticket.title)
-                        .put("maxHeight", MAX_INLINE_HEIGHT_DP)
+                        .put("maxHeight", inlineMaxHeightDp)
                         .put("expanded", expanded),
                 )
             } finally {
@@ -307,9 +353,11 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
         if ((body.opt("generation") as? Number)?.toLong() != mount.generation.toLong()) return
         when (type) {
             "ready" -> phase = WidgetPhase.Ready
-            "resize" -> (body.opt("height") as? Number)?.toDouble()
-                ?.takeIf { it.isFinite() }
-                ?.let { heightDp = kotlin.math.ceil(it).toInt().coerceIn(MIN_HEIGHT_DP, MAX_INLINE_HEIGHT_DP) }
+            "resize" -> if (!expanded) {
+                (body.opt("height") as? Number)?.toDouble()
+                    ?.takeIf { it.isFinite() }
+                    ?.let { heightDp = kotlin.math.ceil(it).toInt().coerceIn(MIN_HEIGHT_DP, inlineMaxHeightDp) }
+            }
             "expand.request" -> setExpanded(true)
             "state.save" -> saveState(body, mount)
             "followup.draft" -> body.optString("text").takeIf { it.isNotBlank() }?.let { text ->
@@ -342,11 +390,13 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
         session.retire()
         session.webView?.loadUrl(session.host.shellUrl())
     }
-    val widgetSurface: @Composable (Modifier) -> Unit = { surfaceModifier ->
+    val widgetSurface: @Composable (Modifier, Boolean) -> Unit = { surfaceModifier, inDialog ->
         Box(modifier = surfaceModifier.semantics { contentDescription = label }) {
             key(generation) {
                 AndroidView(
-                    modifier = Modifier.fillMaxSize().testTag("conversation.visualization"),
+                    modifier = Modifier.fillMaxSize().testTag(
+                        if (inDialog) "conversation.visualization.expanded" else "conversation.visualization",
+                    ),
                     factory = { viewContext ->
                         val webView = session.webView ?: WebView(viewContext).apply view@{
                             session.webView = this
@@ -458,14 +508,16 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
                             }
                             loadUrl(session.host.shellUrl())
                         }
-                        // Expansion changes only the native container. The same
-                        // WebView, mount and private widget state stay alive.
+                        // Each AndroidView keeps its own native container. Only
+                        // the nested WebView moves, after this composition pass.
                         FrameLayout(viewContext).apply {
-                            (webView.parent as? ViewGroup)?.removeView(webView)
-                            addView(webView, FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                            ))
+                            isFocusableInTouchMode = true
+                            if (!inDialog) session.inlineContainer = this
+                            post {
+                                if (isAttachedToWindow && session.webView === webView && expanded == inDialog) {
+                                    session.attachTo(this)
+                                }
+                            }
                         }
                     },
                 )
@@ -490,9 +542,16 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
             }
         }
     }
+    // Keep this exact inline subtree attached while the dialog is visible.
+    // Replacing it with a placeholder detaches AndroidViewHolder during the
+    // LazyColumn's applyChanges pass and can trigger reentrant focus layout.
+    val shape = RoundedCornerShape(12.dp)
+    Column(Modifier.fillMaxWidth().clip(shape).background(t.surface).border(0.5.dp, t.border, shape)) {
+        VisualizationToolbar(label, expanded = false, onToggleExpanded = { setExpanded(true) })
+        HorizontalDivider(color = t.border, thickness = 0.5.dp)
+        widgetSurface(Modifier.fillMaxWidth().height(heightDp.dp), false)
+    }
     if (expanded) {
-        // Keep the transcript row's place while its only runtime is in the dialog.
-        Box(Modifier.fillMaxWidth().height((heightDp + 48).dp))
         Dialog(
             onDismissRequest = { setExpanded(false) },
             properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -500,15 +559,8 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
             Column(Modifier.fillMaxSize().background(t.surface)) {
                 VisualizationToolbar(label, expanded = true, onToggleExpanded = { setExpanded(false) })
                 HorizontalDivider(color = t.border, thickness = 0.5.dp)
-                widgetSurface(Modifier.fillMaxWidth().weight(1f))
+                widgetSurface(Modifier.fillMaxWidth().weight(1f), true)
             }
-        }
-    } else {
-        val shape = RoundedCornerShape(12.dp)
-        Column(Modifier.fillMaxWidth().clip(shape).background(t.surface).border(0.5.dp, t.border, shape)) {
-            VisualizationToolbar(label, expanded = false, onToggleExpanded = { setExpanded(true) })
-            HorizontalDivider(color = t.border, thickness = 0.5.dp)
-            widgetSurface(Modifier.fillMaxWidth().height(heightDp.dp))
         }
     }
 

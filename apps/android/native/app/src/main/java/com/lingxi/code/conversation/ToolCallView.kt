@@ -93,6 +93,8 @@ internal fun ToolCallView(
     val openDetail = { if (detailHost != null) detailHost("tool:${call.id}") else onToggleExpanded() }
     val display = call.display
     val title = toolCallTitle(call)
+    val isSkill = call.header?.verb == ToolVerbUi.Skill || call.tool.equals("Skill", ignoreCase = true)
+    val headline = display?.let { resultHeadline(it) }
     val statusLabel = toolCallStatusLabel(call.status)
     // Desktop parity: every result starts collapsed; the engine still owns
     // body/diff truncation and the client owns disclosure presentation.
@@ -106,16 +108,17 @@ internal fun ToolCallView(
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         Row(
-            // The status is a colored DOT, which is invisible to a screen reader —
-            // so the row announces the status word alongside the title.
+            // Announce the status alongside the title, independently of its icon.
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 44.dp)
                 .then(if (collapsible) Modifier.clickable(onClick = openDetail) else Modifier)
+                .then(if (isSkill && collapsible) Modifier.testTag(UiTags.TOOL_CALL_TOGGLE) else Modifier)
                 .semantics(mergeDescendants = true) {
                     contentDescription = "$statusLabel $title"
+                    if (collapsible) role = Role.Button
                 },
-            verticalAlignment = Alignment.Top,
+            verticalAlignment = if (isSkill) Alignment.CenterVertically else Alignment.Top,
         ) {
             if (call.status == AgentToolStatus.Running) {
                 androidx.compose.material3.CircularProgressIndicator(
@@ -129,12 +132,16 @@ internal fun ToolCallView(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    color = t.text,
-                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
-                    fontWeight = FontWeight.Medium,
+                    color = if (isSkill) t.text2 else t.text,
+                    fontSize = if (isSkill) 13.sp else androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
+                    fontWeight = if (isSkill) FontWeight.Normal else FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (isSkill && headline != null) {
+                    Text(headline, color = if (call.status == AgentToolStatus.Failed) t.danger else t.text3,
+                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 call.header?.subLine?.let { sub ->
                     Text(
                         text = "${sub.prefix} ${sub.text}",
@@ -158,6 +165,13 @@ internal fun ToolCallView(
                     }
                 }
             }
+            if (isSkill && collapsible) {
+                com.lingxi.code.components.LXIcon(
+                    com.lingxi.code.components.LXIconName.ChevronR,
+                    size = 16.dp, color = t.text3,
+                    contentDescription = null,
+                )
+            }
             trailing?.let {
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -168,8 +182,7 @@ internal fun ToolCallView(
             }
         }
 
-        val headline = display?.let { resultHeadline(it) }
-        if (headline != null) {
+        if (headline != null && !isSkill) {
             Row(verticalAlignment = Alignment.Top) {
                 Text(
                     text = "⎿",
@@ -210,7 +223,7 @@ internal fun ToolCallView(
             }
         }
 
-        if (collapsible) {
+        if (collapsible && !isSkill) {
             // `bodyLines` is the count BEFORE clamping, so the affordance can say
             // how much is hidden without this side measuring anything.
             val hiddenLines = when {

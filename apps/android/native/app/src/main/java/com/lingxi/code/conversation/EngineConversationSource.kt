@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -232,8 +233,8 @@ class EngineConversationSource private constructor(
 
     /**
      * The engine's most recent active-session transition, driven OUT-OF-BAND by
-     * the listener folding `SessionStarted` / `SessionResumed` through
-     * [sessionActivationFrom] (see [create]). The ViewModel observes this to
+     * the listener folding the initial agent listing and New/Resume events
+     * through [reduceActivatedSession] (see [create]). The ViewModel observes this to
      * adopt the real session id and, on resume, replace the transcript with the
      * rehydrated conversation. Sibling of [sessionState] (the catalog); both
      * ride the same listener, neither the per-turn stream.
@@ -559,9 +560,9 @@ class EngineConversationSource private constructor(
             // by real history out-of-band from the per-turn stream.
             val sessions = MutableStateFlow(EngineSessionState.loading())
             // The engine's most recent active-session transition (sibling of
-            // `sessions`). The listener below folds both `SessionStarted` and
-            // `SessionResumed` into this StateFlow so the ViewModel adopts the
-            // real session id and any restored transcript.
+            // `sessions`). The first agent listing binds the cold engine's
+            // owner; explicit New/Resume events subsequently replace it with
+            // the confirmed session id and any restored transcript.
             val activeSession = MutableStateFlow<ActivatedSession?>(null)
             // The engine's REAL MCP listing (sibling of `models`). The listener
             // folds every inbound `McpServers` into this StateFlow; empty until a
@@ -596,7 +597,9 @@ class EngineConversationSource private constructor(
                     // stream; the ViewModel acts on them there).
                     models.value = reduceModelEvent(models.value, event)
                     sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
-                    sessionActivationFrom(event, strings)?.let { activeSession.value = it }
+                    activeSession.update { current ->
+                        reduceActivatedSession(current, event, sessionMode, strings)
+                    }
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
                     if (event is ClientEvent.SettingsSnapshot) {
@@ -664,6 +667,13 @@ class EngineConversationSource private constructor(
             // failed ListModels leaves the catalog explicitly empty; it never
             // blocks building the source.
             CoroutineScope(Dispatchers.Default).launch {
+                // The listing carries the cold engine's authoritative session
+                // owner. Bind it independently of optional catalog refreshes.
+                try {
+                    handle.submit(ClientCommand.ListSessionAgents)
+                } catch (_: Throwable) {
+                    // A later foreground execution refresh retries this query.
+                }
                 try {
                     handle.submit(ClientCommand.ListModels)
                     handle.submit(ClientCommand.GetConversationControls)
@@ -690,7 +700,6 @@ class EngineConversationSource private constructor(
                 // independent listing replies and may arrive in either order.
                 try {
                     handle.submit(ClientCommand.TaskList(statusFilter = null, requestId = null))
-                    handle.submit(ClientCommand.ListSessionAgents)
                 } catch (_: Throwable) {
                     // Status is best-effort; a later foreground refresh retries.
                 }

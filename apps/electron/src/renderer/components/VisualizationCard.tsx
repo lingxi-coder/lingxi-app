@@ -16,6 +16,7 @@ import type { WebviewTag } from 'electron';
 import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
 import type { Tokens } from '../theme/tokens';
+import { Icon } from './Icon';
 import {
   MAX_ACTIVE_VISUALIZATIONS,
   MAX_GUEST_MESSAGE_CHARS,
@@ -55,14 +56,14 @@ export function visualizationTheme(t: Tokens): VisualizationTheme {
  * Least-recently-visible eviction across every card: at most
  * {@link MAX_ACTIVE_VISUALIZATIONS} webviews run at once.
  */
-const activeCards = new Map<symbol, { lastVisible: number; release: () => void }>();
+const activeCards = new Map<symbol, { lastVisible: number; expanded: boolean; release: () => void }>();
 
-function claimSlot(key: symbol, release: () => void): void {
-  activeCards.set(key, { lastVisible: Date.now(), release });
+function claimSlot(key: symbol, release: () => void, expanded: boolean): void {
+  activeCards.set(key, { lastVisible: Date.now(), expanded, release });
   while (activeCards.size > MAX_ACTIVE_VISUALIZATIONS) {
-    let oldest: [symbol, { lastVisible: number; release: () => void }] | undefined;
+    let oldest: [symbol, { lastVisible: number; expanded: boolean; release: () => void }] | undefined;
     for (const entry of activeCards) {
-      if (entry[0] !== key && (!oldest || entry[1].lastVisible < oldest[1].lastVisible)) oldest = entry;
+      if (entry[0] !== key && !entry[1].expanded && (!oldest || entry[1].lastVisible < oldest[1].lastVisible)) oldest = entry;
     }
     if (!oldest) break;
     activeCards.delete(oldest[0]);
@@ -102,6 +103,8 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
   const t = useT();
   const theme = useMemo(() => visualizationTheme(t), [t]);
   const container = useRef<HTMLDivElement | null>(null);
+  const panel = useRef<HTMLDialogElement | null>(null);
+  const expandButton = useRef<HTMLButtonElement | null>(null);
   const webview = useRef<WebviewTag | null>(null);
   const mount = useRef<VisualizationMount | null>(null);
   const slot = useMemo(() => Symbol('visualization'), []);
@@ -150,18 +153,21 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
 
   useEffect(() => {
     if (!active) return;
+    let evictionTimer: number | undefined;
     claimSlot(slot, () => {
       post({ type: 'suspend', generation: mount.current?.generation ?? 0 });
-      window.setTimeout(() => {
+      evictionTimer = window.setTimeout(() => {
+        if (expandedRef.current) return;
         retire();
         setActive(false);
         setPhase('idle');
       }, 1_600);
-    });
+    }, expanded);
     return () => {
+      window.clearTimeout(evictionTimer);
       activeCards.delete(slot);
     };
-  }, [active, slot, post, retire]);
+  }, [active, expanded, slot, post, retire]);
 
   useEffect(() => {
     if (visible) touchSlot(slot);
@@ -173,10 +179,32 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
   }, [theme, post]);
 
   const setExpandedState = useCallback((next: boolean) => {
+    if (next) setActive(true);
     setExpanded(next);
     if (mount.current) post({ type: 'expanded', generation: mount.current.generation, expanded: next });
     if (!next) onClose?.();
   }, [post, onClose]);
+
+  // The same panel enters the top layer: no second widget, lost state or
+  // transcript stacking context. Native dialogs also contain keyboard focus.
+  useEffect(() => {
+    const dialog = panel.current;
+    if (!dialog) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialog.close();
+    if (expanded) {
+      dialog.showModal();
+      expandButton.current?.focus();
+    } else {
+      // show() runs dialog focusing steps even when non-modal. An inline
+      // result arriving while the user types must not steal composer focus.
+      dialog.setAttribute('open', '');
+    }
+    return () => {
+      dialog.close();
+      if (expanded && previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, [expanded]);
 
   const handleShellMessage = useCallback(async (message: ShellMessage) => {
     const current = mount.current;
@@ -266,6 +294,9 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
     view.addEventListener('ipc-message', onMessage);
     view.addEventListener('dom-ready', onDomReady);
     view.addEventListener('did-fail-load', onFail);
+    // Prop callbacks can change while the same guest remains mounted; that
+    // guest will not emit dom-ready again just because listeners reattach.
+    onDomReady();
     const unsubscribe = window.lingxi?.visualization.onGuestEvent((event) => {
       if (guestId === null || event.webContentsId !== guestId) return;
       if (event.reason === 'crashed') setPhase('crashed');
@@ -292,50 +323,59 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
     retire();
   }, [post, retire]);
 
-  const frameStyle: CSSProperties = expanded
-    ? { position: 'fixed', inset: '48px 32px 32px', zIndex: 60, height: 'auto', borderRadius: 14, boxShadow: t.windowShadow, background: t.transcriptBg }
-    : { height, width: '100%', borderRadius: 12 };
-
-  if (phase === 'unavailable') {
-    return (
-      <div className="visualization-card visualization-unavailable" role="note"
-        style={{ border: `1px solid ${t.border}`, borderRadius: 12, padding: '10px 12px', color: t.text3, fontSize: 13 }}>
-        Visualization unavailable in this conversation.
-      </div>
-    );
-  }
+  const unavailable = phase === 'unavailable';
+  const pending = phase !== 'ready';
+  const label = title || 'Visualization';
+  const variables = {
+    '--viz-background': t.transcriptBg,
+    '--viz-muted-background': t.surfaceHover,
+    '--viz-border': t.border,
+    '--viz-text': t.text,
+    '--viz-muted': t.text3,
+    '--viz-focus': t.accent,
+    '--viz-shadow': t.windowShadow,
+  } as CSSProperties;
 
   return (
     <div ref={container} className="visualization-card" data-visualization-id={reference.id}
-      aria-label={title ? `Visualization: ${title}` : 'Visualization'} role="group"
-      style={{ position: 'relative', width: '100%', minHeight: VISUALIZATION_MIN_HEIGHT }}>
-      {expanded && <div className="visualization-backdrop" onClick={() => setExpandedState(false)}
-        style={{ position: 'fixed', inset: 0, zIndex: 59, background: t.dark ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.25)' }} />}
-      {active ? (
-        <webview
-          key={attempt}
-          ref={(node: WebviewTag | null) => { webview.current = node; }}
-          src={VISUALIZATION_SHELL_URL}
-          partition={VISUALIZATION_PARTITION}
-          style={{ display: 'flex', border: 0, overflow: 'hidden', ...frameStyle }}
-        />
-      ) : (
-        <div style={{ height, borderRadius: 12, background: t.surface }} aria-hidden="true" />
-      )}
-      {phase !== 'ready' && active && (
-        <div aria-live="polite" style={{ position: 'absolute', left: 12, top: 10, color: t.text3, fontSize: 12 }}>
-          {phase === 'crashed' ? 'Reloading visualization…' : 'Loading visualization…'}
+      style={{ ...variables, minHeight: expanded ? height + 45 : undefined }}>
+      <dialog ref={panel} className="visualization-panel" data-expanded={expanded} data-clamped={clamped}
+        role={expanded ? 'dialog' : 'group'} aria-modal={expanded || undefined} aria-label={label}
+        onCancel={(event) => { event.preventDefault(); setExpandedState(false); }}
+        onClick={(event) => {
+          if (!expanded || event.target !== event.currentTarget) return;
+          const bounds = event.currentTarget.getBoundingClientRect();
+          if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) setExpandedState(false);
+        }}>
+        <header className="visualization-toolbar">
+          <span className="visualization-glyph" aria-hidden="true"><Icon name="visualization" size={16} /></span>
+          <span className="visualization-title" title={label}>{label}</span>
+          <button ref={expandButton} type="button" className="visualization-action"
+            onClick={() => setExpandedState(!expanded)}
+            aria-label={expanded ? 'Close expanded visualization' : 'Expand visualization'}
+            title={expanded ? 'Close' : 'Expand'}>
+            <Icon name={expanded ? 'x' : 'expand'} size={16} />
+          </button>
+        </header>
+        <div className="visualization-content" aria-busy={pending && !unavailable}
+          style={{ height: expanded ? undefined : pending ? Math.max(128, height) : height }}>
+          {active && <webview
+            key={attempt}
+            ref={(node: WebviewTag | null) => { webview.current = node; }}
+            src={VISUALIZATION_SHELL_URL}
+            partition={VISUALIZATION_PARTITION}
+            style={{ display: 'flex', width: '100%', height: '100%', border: 0, visibility: pending ? 'hidden' : 'visible' }}
+          />}
+          {(pending || !active) && <div className="visualization-state" role="status">
+            <Icon name={unavailable ? 'info' : 'visualization'} size={20} />
+            <span>{unavailable ? 'Visualization unavailable in this conversation.'
+              : phase === 'crashed' ? 'Reloading visualization…' : 'Loading visualization…'}</span>
+            {unavailable && <button type="button" className="visualization-retry" onClick={() => {
+              retire(); setPhase('loading'); setActive(true); setAttempt((value) => value + 1);
+            }}>Try again</button>}
+          </div>}
         </div>
-      )}
-      {(clamped || expanded) && phase === 'ready' && (
-        <button type="button" className="visualization-expand"
-          onClick={() => setExpandedState(!expanded)}
-          aria-label={expanded ? 'Close expanded visualization' : 'Expand visualization'}
-          style={{ position: expanded ? 'fixed' : 'absolute', right: expanded ? 40 : 8, top: expanded ? 56 : 8, zIndex: 61,
-            border: `1px solid ${t.border}`, borderRadius: 8, background: t.surface, color: t.text2, fontSize: 12, padding: '3px 8px', cursor: 'pointer' }}>
-          {expanded ? 'Close' : 'Expand'}
-        </button>
-      )}
+      </dialog>
     </div>
   );
 });
@@ -345,8 +385,9 @@ export function VisualizationPlaceholder() {
   const t = useT();
   return (
     <div className="visualization-card visualization-pending" aria-busy="true"
-      style={{ height: 96, borderRadius: 12, background: t.surface, color: t.text3, fontSize: 12, padding: '10px 12px' }}>
-      Preparing visualization…
+      style={{ borderColor: t.border, color: t.text3 }}>
+      <Icon name="visualization" size={18} />
+      <span>Preparing visualization…</span>
     </div>
   );
 }
@@ -356,8 +397,9 @@ export function VisualizationUnavailable() {
   const t = useT();
   return (
     <div className="visualization-card visualization-unavailable" role="note"
-      style={{ borderRadius: 12, border: `1px dashed ${t.border}`, color: t.text3, fontSize: 12, padding: '10px 12px' }}>
-      This visualization is no longer available.
+      style={{ borderColor: t.border, color: t.text3 }}>
+      <Icon name="info" size={18} />
+      <span>This visualization is no longer available.</span>
     </div>
   );
 }

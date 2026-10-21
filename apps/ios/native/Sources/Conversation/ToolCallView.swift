@@ -30,6 +30,13 @@ struct ToolCallView: View {
     var compact: Bool = false
     var onToggle: () -> Void = {}
 
+    private var isSkill: Bool {
+        trace.header?.verb == .skill || trace.tool.caseInsensitiveCompare("Skill") == .orderedSame
+    }
+
+    /// Skill instructions are supporting detail, including in the execution card.
+    private var compactPresentation: Bool { compact || isSkill }
+
     var body: some View {
         if let rows = trace.questionAnswers, trace.status == .completed {
             AnsweredQuestionsView(rows: rows, isExpanded: !isExpanded, onToggle: onToggle)
@@ -45,23 +52,24 @@ struct ToolCallView: View {
 
     private var toolContent: some View {
         VStack(alignment: .leading, spacing: 5) {
-            if compact {
+            if compactPresentation {
                 if isCollapsible {
                     Button(action: onToggle) { compactHeader }
                         .buttonStyle(.plain)
                         .focused($isFocused)
-                        .accessibilityLabel(ConversationDesktopTimeline.summary([trace]))
+                        .accessibilityLabel(compactSummary)
                         .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                        .accessibilityIdentifier("conversation.tool-call.\(trace.id).toggle")
                 } else {
                     compactHeader
                 }
             } else {
                 headerRow
             }
-            if !compact, let sub = trace.header?.subLine, !sub.text.isEmpty {
+            if !compactPresentation, let sub = trace.header?.subLine, !sub.text.isEmpty {
                 subLineRow(sub)
             }
-            if !compact || isExpanded {
+            if !compactPresentation || isExpanded {
                 resultBlock
                 syntheticShellDetails
             }
@@ -69,18 +77,18 @@ struct ToolCallView: View {
         // Desktop tool rows are borderless and use a 40pt disclosure target;
         // keep the compact transcript on that rhythm while the legacy card
         // retains its padded surface treatment.
-        .padding(.horizontal, compact ? 0 : 10)
-        .padding(.vertical, compact ? 2 : 8)
+        .padding(.horizontal, compactPresentation ? 0 : 10)
+        .padding(.vertical, compactPresentation ? 2 : 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(compact ? Color.clear : t.surface)
-        .clipShape(RoundedRectangle(cornerRadius: compact ? 0 : 10))
+        .background(compactPresentation ? Color.clear : t.surface)
+        .clipShape(RoundedRectangle(cornerRadius: compactPresentation ? 0 : 10))
         .overlay {
-            if !compact {
+            if !compactPresentation {
                 RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5)
             }
         }
         .overlay(alignment: .bottom) {
-            if compact {
+            if compact && !isSkill {
                 Rectangle()
                     .fill(t.border.opacity(0.45))
                     .frame(height: 0.5)
@@ -119,7 +127,9 @@ struct ToolCallView: View {
         .padding(.horizontal, 6)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(t.accent.opacity(isFocused || isExpanded ? 0.10 : 0))
+                .fill(isSkill
+                    ? t.surface.opacity(isFocused || isExpanded ? 1 : 0)
+                    : t.accent.opacity(isFocused || isExpanded ? 0.10 : 0))
         }
         .contentShape(.rect)
     }
@@ -255,7 +265,7 @@ struct ToolCallView: View {
                                 .foregroundColor(t.text4)
                         }
                     }
-                    if isCollapsible && !compact { disclosure(display) }
+                    if isCollapsible && !compactPresentation { disclosure(display) }
                 }
                 Spacer(minLength: 0)
             }

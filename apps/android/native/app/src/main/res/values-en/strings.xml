@@ -1777,6 +1777,7 @@
     <string name="visualization_loading">Loading visualization…</string>
     <string name="visualization_unavailable">This visualization is no longer available.</string>
     <string name="visualization_label">Visualization</string>
+    <string name="visualization_expand">Expand visualization</string>
     <string name="visualization_remove_context">Remove visualization context</string>
     <string name="common_submit">Submit</string>
     <string name="cron_run_section_overview">Overview</string>

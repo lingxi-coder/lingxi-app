@@ -21,7 +21,7 @@ import {
 interface MarkdownContentProps {
   text: string;
   trustedHtml?: boolean;
-  variant?: 'plan';
+  variant?: 'plan' | 'compact';
 }
 
 type MarkdownComponentProps = {
@@ -148,6 +148,17 @@ const planComponents: Components = {
   h3: ({ children }) => <h3 style={{ margin: '16px 0 0', fontSize: 15, lineHeight: 1.45, fontWeight: 600 }}>{children}</h3>,
 };
 
+const compactHeadingStyle: CSSProperties = { margin: '4px 0 0', fontSize: 13, lineHeight: 1.5, fontWeight: 600 };
+const compactComponents: Components = {
+  ...components,
+  h1: ({ children }) => <h1 style={compactHeadingStyle}>{children}</h1>,
+  h2: ({ children }) => <h2 style={compactHeadingStyle}>{children}</h2>,
+  h3: ({ children }) => <h3 style={compactHeadingStyle}>{children}</h3>,
+  h4: ({ children }) => <h4 style={compactHeadingStyle}>{children}</h4>,
+  h5: ({ children }) => <h5 style={compactHeadingStyle}>{children}</h5>,
+  h6: ({ children }) => <h6 style={compactHeadingStyle}>{children}</h6>,
+};
+
 export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant }: MarkdownContentProps) {
   const t = useT();
   const instanceId = useId();
@@ -161,13 +172,13 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
       children={parsed.source}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      components={variant === 'plan' ? planComponents : components}
+      components={variant === 'compact' ? compactComponents : variant === 'plan' ? planComponents : components}
       urlTransform={(url) => parseContextMentionHref(url) ? url : defaultUrlTransform(url)}
     />
   ), [parsed.source, rehypePlugins, variant]);
   const variables = {
     display: 'grid', gap: 10, minWidth: 0,
-    '--text': t.text,
+    '--text': variant === 'compact' ? t.text2 : t.text,
     '--text3': t.text3,
     '--surface': t.surface,
     '--surface-hover': t.surfaceHover,

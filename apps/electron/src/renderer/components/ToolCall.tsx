@@ -37,6 +37,7 @@ import { CodeBlock } from './CodeBlock';
 import { DiffView } from './DiffView';
 import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
+import { MarkdownContent } from './MarkdownContent';
 import { ToolActivityIcon } from './ToolActivityIcon';
 import { ModUiParentSite } from './modUiAbovePrompt';
 
@@ -135,6 +136,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   const { result } = item;
   const view = toolDisplayHeader(item);
   const permissionRequest = /permission/i.test(`${item.tool} ${view.label} ${view.title}`);
+  const skillInstructions = item.view.verb.toLowerCase() === 'skill';
   const expandable = toolHasBody(item);
   const isOpen = open ?? false;
 
@@ -219,6 +221,12 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     {body !== undefined && (
       permissionRequest && jsonBody === undefined ? (
         <div className="permission-tool-message">{body}</div>
+      ) : skillInstructions && jsonBody === undefined ? (
+        <div className="tool-skill-instructions" tabIndex={0} role="region" aria-label="Skill instructions"
+          style={{ margin: '4px 0 8px', padding: '4px 0 4px 14px', maxHeight: 320, overflow: 'auto',
+            borderLeft: `1px solid ${t.borderStrong}`, fontSize: 13, lineHeight: 1.6 }}>
+          <MarkdownContent text={body} variant="compact" />
+        </div>
       ) : jsonBody !== undefined ? (
         <div style={{ marginTop: 6 }}>
           <CodeBlock code={jsonBody} language="json" variant="tool" />

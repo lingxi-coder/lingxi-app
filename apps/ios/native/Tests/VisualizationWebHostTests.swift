@@ -5,6 +5,88 @@ import XCTest
 
 @MainActor
 final class VisualizationWebHostTests: XCTestCase {
+    func testConcurrentWebViewRequestsShareOneDocument() async {
+        VisualizationWebHost.shared.attach(ShellHost())
+        defer { VisualizationWebHost.shared.attach(nil) }
+        let controller = VisualizationWidgetController(sessionId: "session", id: "chart", revision: 1, dark: false)
+        defer { controller.suspend() }
+        let created = expectation(description: "both presenters receive a web view")
+        created.expectedFulfillmentCount = 2
+        let ready = expectation(description: "shared document ready")
+        let observation = controller.$phase.filter { $0 == .ready }.prefix(1).sink { _ in ready.fulfill() }
+        var views: [WKWebView] = []
+        for _ in 0..<2 {
+            controller.makeWebView { view in
+                if let view { views.append(view) }
+                created.fulfill()
+            }
+        }
+        await fulfillment(of: [created, ready], timeout: 10)
+        observation.cancel()
+        XCTAssertEqual(views.count, 2)
+        if views.count == 2 { XCTAssertTrue(views[0] === views[1]) }
+    }
+
+    func testExpansionMovesTheSameWebViewWithoutRemounting() async {
+        let host = ShellHost()
+        VisualizationWebHost.shared.attach(host)
+        defer { VisualizationWebHost.shared.attach(nil) }
+        let controller = VisualizationWidgetController(sessionId: "session", id: "chart", revision: 1, dark: false)
+        defer { controller.suspend() }
+        let inline = UIView()
+        let expanded = UIView()
+        let ready = expectation(description: "inline widget ready")
+        let observation = controller.$phase.filter { $0 == .ready }.prefix(1).sink { _ in ready.fulfill() }
+        controller.attachWebView(to: inline, expanded: false)
+        await fulfillment(of: [ready], timeout: 10)
+        observation.cancel()
+        let original = controller.webView
+        XCTAssertNotNil(original)
+        XCTAssertTrue(original?.superview === inline)
+
+        controller.setExpanded(true)
+        controller.attachWebView(to: expanded, expanded: true)
+        XCTAssertTrue(controller.isExpanded)
+        XCTAssertTrue(controller.webView === original)
+        XCTAssertTrue(original?.superview === expanded)
+        XCTAssertEqual(controller.phase, .ready)
+        let expandedState = try? await original?.evaluateJavaScript("window.expanded")
+        XCTAssertEqual(expandedState as? Bool, true)
+
+        controller.detachWebView(from: expanded, expanded: true)
+        XCTAssertFalse(controller.isExpanded)
+        XCTAssertTrue(controller.webView === original)
+        XCTAssertTrue(original?.superview === inline)
+        XCTAssertEqual(controller.phase, .ready)
+        let inlineState = try? await original?.evaluateJavaScript("window.expanded")
+        XCTAssertEqual(inlineState as? Bool, false)
+
+        let mountCount = try? await original?.evaluateJavaScript("window.mountCount")
+        XCTAssertEqual((mountCount as? NSNumber)?.intValue, 1)
+        controller.detachWebView(from: inline, expanded: false)
+        XCTAssertNil(controller.webView)
+    }
+
+    func testRetryAfterHostBecomesAvailableReusesTheInlineContainer() async {
+        VisualizationWebHost.shared.attach(nil)
+        defer { VisualizationWebHost.shared.attach(nil) }
+        let controller = VisualizationWidgetController(sessionId: "session", id: "chart", revision: 1, dark: false)
+        defer { controller.suspend() }
+        let inline = UIView()
+        controller.attachWebView(to: inline, expanded: false)
+        XCTAssertEqual(controller.phase, .unavailable)
+        XCTAssertNil(controller.webView)
+
+        VisualizationWebHost.shared.attach(ShellHost())
+        let ready = expectation(description: "retried widget ready")
+        let observation = controller.$phase.filter { $0 == .ready }.prefix(1).sink { _ in ready.fulfill() }
+        controller.retry()
+        await fulfillment(of: [ready], timeout: 10)
+        observation.cancel()
+        XCTAssertTrue(controller.webView?.superview === inline)
+        XCTAssertEqual(controller.phase, .ready)
+    }
+
     func testSuspendedWidgetCanLoadAgain() async {
         let host = ShellHost()
         VisualizationWebHost.shared.attach(host)
@@ -74,11 +156,15 @@ private final class ShellHost: VisualizationHost, @unchecked Sendable {
         let html = """
         <!doctype html><script>
         const bridge = window.webkit.messageHandlers.lingxiVisualization;
+        window.mountCount = 0;
         window.__lingxiVisualizationDeliver = raw => {
           const message = JSON.parse(raw);
           if (message.type === 'mount') {
+            window.mountCount += 1;
+            window.expanded = message.expanded;
             bridge.postMessage(JSON.stringify({type:'ready', generation:message.generation}));
           }
+          if (message.type === 'expanded') window.expanded = message.expanded;
         };
         bridge.postMessage(JSON.stringify({type:'shell.ready'}));
         </script>

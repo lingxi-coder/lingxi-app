@@ -672,6 +672,7 @@ final class EngineConversationSource: ConversationSource {
             tag: message.tag,
             text: message.text
         )
+        stableMessage.sentAtMs = message.sentAtMs ?? oldMessage.sentAtMs
         stableMessage.transcriptUUID = message.transcriptUUID ?? oldMessage.transcriptUUID
         model.withIndexRebuildSuppressed {
             model.messages[streamingIndex] = stableMessage
@@ -699,6 +700,7 @@ final class EngineConversationSource: ConversationSource {
             return
         }
         var stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
+        stableMessage.sentAtMs = message.sentAtMs ?? model.messages[messageIndex].sentAtMs
         stableMessage.transcriptUUID = message.transcriptUUID ?? model.messages[messageIndex].transcriptUUID
         stableMessage.visualization = message.visualization
         stableMessage.visualizationContext = message.visualizationContext
@@ -1315,6 +1317,7 @@ final class EngineConversationSource: ConversationSource {
             model.notice = nil
             let chip = takeVisualizationChip()
             var queued = Message(role: .user, text: text, images: uiImages(from: images))
+            queued.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
             queued.visualizationContext = chip
             appendMessage(queued)
             let queuedTurnID = nextTurnId
@@ -1341,6 +1344,7 @@ final class EngineConversationSource: ConversationSource {
         model.notice = nil
         let chip = exactSlashCommand == nil ? takeVisualizationChip() : nil
         var prompt = Message(role: .user, text: text, images: uiImages(from: images))
+        prompt.sentAtMs = Int64(Date().timeIntervalSince1970 * 1_000)
         prompt.visualizationContext = chip
         appendMessage(prompt)
 
@@ -4666,6 +4670,7 @@ final class EngineConversationSource: ConversationSource {
                 text: text(from: narrative),
                 images: attachedImages ? [] : uiMessageImages(from: dto.images)
             )
+            message.sentAtMs = dto.sentAtMs
             message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
             if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
             segments.append(RenderedMessage(message: message, detail: detail))
@@ -4691,6 +4696,7 @@ final class EngineConversationSource: ConversationSource {
         flush()
         if !dto.images.isEmpty && !attachedImages {
             var imageMessage = Message(role: role, text: "", images: uiMessageImages(from: dto.images))
+            imageMessage.sentAtMs = dto.sentAtMs
             imageMessage.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
             segments.append(RenderedMessage(message: imageMessage, detail: nil))
         }
@@ -5112,6 +5118,7 @@ final class EngineConversationSource: ConversationSource {
                     text: text(from: narrative),
                     images: attachedImages ? [] : dtoImages
                 )
+                message.sentAtMs = dto.sentAtMs
                 message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
                 attachedImages = true
@@ -5245,6 +5252,7 @@ final class EngineConversationSource: ConversationSource {
                     text: "",
                     images: dtoImages
                 )
+                message.sentAtMs = dto.sentAtMs
                 message.transcriptUUID = dto.transcriptUuid.flatMap(UUID.init(uuidString:))
                 out.messages.append(message)
                 out.items.append(.message(message))

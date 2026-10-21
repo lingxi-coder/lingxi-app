@@ -135,17 +135,13 @@ struct MessageBubble: View, Equatable {
                         // still scales the transcript as one readable unit.
                         .font(.scaledSystem(14, relativeTo: .body))
                         .lineSpacing(14 * 0.65)
-                        // `lineLimit`, not the assistant branch's
-                        // `frame(maxHeight:)`: this bubble is one `Text` inside
-                        // a `BubbleShape`, so a height clip would square off the
-                        // rounded bottom corners. `lineLimit` also gives a
-                        // trailing ellipsis for free.
-                        .frame(maxHeight: userIsCollapsed ? 260 : nil, alignment: .top)
+                        // Match Desktop's 13.6em narration reveal at 14pt.
+                        .frame(maxHeight: userIsCollapsed ? 190.4 : nil, alignment: .top)
                         .clipped()
                         .foregroundColor(t.text)
-                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .padding(.horizontal, 18).padding(.vertical, 12)
                         .background(t.surfaceHover)
-                        .clipShape(.rect(cornerRadius: 18))
+                        .clipShape(.rect(cornerRadius: 16))
                         .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -178,6 +174,7 @@ struct MessageBubble: View, Equatable {
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("conversation.message.user.toggle")
                 }
+                UserMessageActions(message: message)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
             .accessibilityElement(children: .contain)
@@ -190,7 +187,7 @@ struct MessageBubble: View, Equatable {
                     assistantContent
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(
-                            maxHeight: assistantIsCollapsed ? 360 : nil,
+                            maxHeight: assistantIsCollapsed ? 190.4 : nil,
                             alignment: .top
                         )
                         .clipped()
@@ -233,7 +230,7 @@ struct MessageBubble: View, Equatable {
         if message.text.contains("\n") {
             AIText(markdown: message.text)
         } else {
-            Text(AIText.parseInline(message.text, size: 15.5))
+            Text(AIText.parseInline(message.text, size: 14))
                 .textSelection(.enabled)
         }
     }
@@ -253,7 +250,7 @@ struct MessageBubble: View, Equatable {
     }
 
     private var userIsCollapsible: Bool {
-        AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+        AssistantMessageCollapsePolicy.shouldCollapse(message.text, isUser: true)
     }
 
     private var userIsCollapsed: Bool {
@@ -274,16 +271,14 @@ struct MessageBubble: View, Equatable {
 /// each other: CJK prose can be visually tall without newline delimiters, while
 /// logs and generated code often contain many short lines.
 enum AssistantMessageCollapsePolicy {
-    private static let characterLimit = 640
-    private static let lineLimit = 20
-
-    /// Lines revealed when a USER bubble is collapsed. 15 lines at 15.5pt with
-    /// 0.5 line spacing is ~349pt, which lands next to the assistant branch's
-    /// 360pt reveal so both sides fold to about the same height.
-    static let collapsedLineLimit = 15
-
-    static func shouldCollapse(_ text: String) -> Bool {
-        text.count >= characterLimit || text.lazy.filter { $0 == "\n" }.prefix(lineLimit).count >= lineLimit
+    static func shouldCollapse(_ text: String, isUser: Bool = false) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard !normalized.isEmpty else { return false }
+        let characters = normalized.unicodeScalars.count
+        let lines = normalized.filter { $0 == "\n" }.count + 1
+        return characters > (isUser ? 640 : 8_000) || lines > (isUser ? 8 : 80)
     }
 }
 
@@ -1119,5 +1114,53 @@ struct AIText: View, Equatable {
             }
         }
         return result
+    }
+}
+
+
+private struct UserMessageActions: View {
+    @Environment(\.theme) private var t
+    let message: Message
+    @State private var copyRevision = 0
+    @State private var copied = false
+
+    private var clock: String? {
+        guard let milliseconds = message.sentAtMs else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "h:mm a"
+        return formatter.string(from: Date(timeIntervalSince1970: Double(milliseconds) / 1_000))
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let clock {
+                Text(clock)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("conversation.message.user.time")
+            }
+            Button {
+                UIPasteboard.general.string = message.text
+                copied = true
+                copyRevision += 1
+            } label: {
+                HStack(spacing: 4) {
+                    LXIcon(name: copied ? .check : .copy, size: 13, color: t.text3)
+                    Text(String(localized: copied ? "chat_message_copied" : "chat_message_copy"))
+                }
+                .frame(minHeight: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("chat_message_copy")
+            .accessibilityIdentifier("conversation.message.user.copy")
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(t.text3)
+        .task(id: copyRevision) {
+            guard copyRevision > 0 else { return }
+            do { try await Task.sleep(for: .milliseconds(1_500)) } catch { return }
+            copied = false
+        }
     }
 }

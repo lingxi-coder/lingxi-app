@@ -51,15 +51,25 @@ final class AssistantMessageCollapsePolicyTests: XCTestCase {
         XCTAssertFalse(AssistantMessageCollapsePolicy.shouldCollapse("A concise reply."))
     }
 
-    func testLongUnbrokenReplyCanCollapse() {
-        XCTAssertTrue(
+    func testOrdinaryAssistantReplyStaysExpanded() {
+        XCTAssertFalse(
             AssistantMessageCollapsePolicy.shouldCollapse(String(repeating: "长", count: 700))
         )
     }
 
-    func testManyShortLinesCanCollapse() {
+    func testOrdinaryAssistantLinesStayExpanded() {
         let reply = Array(repeating: "step", count: 22).joined(separator: "\n")
-        XCTAssertTrue(AssistantMessageCollapsePolicy.shouldCollapse(reply))
+        XCTAssertFalse(AssistantMessageCollapsePolicy.shouldCollapse(reply))
+    }
+
+    func testDesktopCollapseBoundaries() {
+        XCTAssertFalse(AssistantMessageCollapsePolicy.shouldCollapse(String(repeating: "😀", count: 640), isUser: true))
+        XCTAssertTrue(AssistantMessageCollapsePolicy.shouldCollapse(String(repeating: "😀", count: 641), isUser: true))
+        XCTAssertFalse(AssistantMessageCollapsePolicy.shouldCollapse(String(repeating: "x", count: 8_000)))
+        XCTAssertTrue(AssistantMessageCollapsePolicy.shouldCollapse(String(repeating: "x", count: 8_001)))
+        XCTAssertFalse(AssistantMessageCollapsePolicy.shouldCollapse(Array(repeating: "x", count: 8).joined(separator: "\r\n"), isUser: true))
+        XCTAssertTrue(AssistantMessageCollapsePolicy.shouldCollapse(Array(repeating: "x", count: 9).joined(separator: "\r"), isUser: true))
+        XCTAssertFalse(AssistantMessageCollapsePolicy.shouldCollapse(String(repeating: " \r\n", count: 1_000), isUser: true))
     }
 
     func testMarkdownSupportsNestedEmphasisAndNativeLinks() {

@@ -1997,4 +1997,6 @@
     <string name="account_sign_out">로그아웃</string>
     <string name="account_title">LingXi 계정</string>
     <string name="drawer_open_sidebar_a11y">사이드바 열기</string>
+    <string name="chat_message_copy">복사</string>
+    <string name="chat_message_copied">복사됨</string>
 </resources>

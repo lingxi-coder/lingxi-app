@@ -1997,4 +1997,6 @@
     <string name="account_sign_out">サインアウト</string>
     <string name="account_title">LingXi アカウント</string>
     <string name="drawer_open_sidebar_a11y">サイドバーを開く</string>
+    <string name="chat_message_copy">コピー</string>
+    <string name="chat_message_copied">コピーしました</string>
 </resources>

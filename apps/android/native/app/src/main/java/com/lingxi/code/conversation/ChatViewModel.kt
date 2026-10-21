@@ -2114,7 +2114,7 @@ class ChatViewModel(
                     isNew = false,
                     statusLine = null,
                     error = null,
-                    messages = it.messages + Message(role = Role.User, text = trimmed),
+                    messages = it.messages + Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed),
                     compaction = CompactionProgressUi(
                         status = CompactionProgressStatus.Running,
                     ),
@@ -2142,7 +2142,7 @@ class ChatViewModel(
 
         if (_state.value.streaming) {
             val queuedTurnId = DurableConversationTurnIds.next()
-            val queuedUserMessage = Message(role = Role.User, text = trimmed, images = images, visualizationContext = visualizationChip)
+            val queuedUserMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed, images = images, visualizationContext = visualizationChip)
             optimisticRowsByToken["client-turn:$queuedTurnId"] = queuedUserMessage.id
             savedState?.set(KEY_DRAFT, "")
             _state.update {
@@ -2184,7 +2184,7 @@ class ChatViewModel(
         turnToken++
         val token = turnToken
         val submittedTurnId = DurableConversationTurnIds.next()
-        val userMessage = Message(role = Role.User, text = trimmed, images = images, visualizationContext = visualizationChip)
+        val userMessage = Message(role = Role.User, sentAtMs = System.currentTimeMillis(), text = trimmed, images = images, visualizationContext = visualizationChip)
         optimisticRowsByToken["client-turn:$submittedTurnId"] = userMessage.id
         durableTurnId = submittedTurnId
         recoveredTurnToken = null

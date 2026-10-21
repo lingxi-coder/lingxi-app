@@ -29,7 +29,7 @@ fun messageDtoToMessage(
     dto: MessageDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): Message {
-    val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid)
+    val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid, dto.sentAtMs)
     val index = mutableMapOf<String, ToolBlockRef>()
     dto.blocks.forEach { block ->
         // One DTO in isolation has no preceding turn to hand an orphan result
@@ -60,7 +60,7 @@ fun transcriptFromDtos(
     val builds = mutableListOf<MessageBuild>()
     val index = mutableMapOf<String, ToolBlockRef>()
     dtos.forEach { dto ->
-        val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid)
+        val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid, dto.sentAtMs)
         builds.add(build)
         dto.blocks.forEach { block ->
             build.fold(block, strings, index) { orphanHostFor(builds, build) }
@@ -141,6 +141,7 @@ private class MessageBuild(
     val loopWakeup: com.lingxi.code.bindings.client.LoopWakeupDto? = null,
     val visualizationContext: com.lingxi.code.bindings.client.VisualizationContextDto? = null,
     val transcriptUuid: String? = null,
+    val sentAtMs: Long? = null,
 ) {
     val role: Role = if (wireRole.equals("user", ignoreCase = true)) Role.User else Role.Ai
     val textParts = mutableListOf<String>().apply { loopWakeup?.let { add(it.message) } }
@@ -165,6 +166,7 @@ private class MessageBuild(
 
     fun toMessage(): Message = Message(
         transcriptUuid = transcriptUuid,
+        sentAtMs = sentAtMs,
         role = role,
         text = textParts.filter { it.isNotBlank() }.joinToString("\n\n"),
         images = images,

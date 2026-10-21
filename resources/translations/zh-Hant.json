@@ -1,4 +1,6 @@
 {
+  "chat_message_copy": "複製",
+  "chat_message_copied": "已複製",
   "__info_plist__": {
     "CFBundleDisplayName": "靈犀",
     "NSCameraUsageDescription": "靈犀使用相機拍攝照片供模型分析。",

@@ -133,7 +133,7 @@ internal fun ToolCallView(
                 Text(
                     text = title,
                     color = if (isSkill) t.text2 else t.text,
-                    fontSize = if (isSkill) 13.sp else androidx.compose.material3.MaterialTheme.typography.bodyMedium.fontSize,
+                    fontSize = 13.sp,
                     fontWeight = if (isSkill) FontWeight.Normal else FontWeight.Medium,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,

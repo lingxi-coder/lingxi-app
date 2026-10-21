@@ -1997,4 +1997,6 @@
     <string name="account_sign_out">登出</string>
     <string name="account_title">LingXi 帳戶</string>
     <string name="drawer_open_sidebar_a11y">開啟側欄</string>
+    <string name="chat_message_copy">複製</string>
+    <string name="chat_message_copied">已複製</string>
 </resources>

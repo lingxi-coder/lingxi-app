@@ -891,8 +891,9 @@ struct ChatView: View {
         .padding(.horizontal, 24)
     }
 
-    /// A single-line runtime footer for the main agent. Durable completion is
-    /// intentionally silent; only work that still needs user attention remains
+    /// A runtime footer for the main agent. Error details wrap and support
+    /// copying so the underlying failure is available for diagnosis. Durable
+    /// completion is intentionally silent; only work needing attention remains
     /// visible below the transcript.
     @ViewBuilder
     private var runtimeFooter: some View {
@@ -980,7 +981,8 @@ struct ChatView: View {
                         Text(detail)
                             .font(.system(size: 10.5))
                             .foregroundStyle(t.text4)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
                     }
                 }
                 Spacer(minLength: 0)

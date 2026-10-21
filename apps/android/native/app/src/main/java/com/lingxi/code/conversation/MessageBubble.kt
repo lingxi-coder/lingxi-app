@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
@@ -89,11 +90,11 @@ fun MessageBubble(
         // child transcript and runs to thousands of characters. Same policy and
         // the same two strings as the assistant branch below.
         val isCollapsible = remember(message.text) {
-            AssistantMessageCollapsePolicy.shouldCollapse(message.text)
+            AssistantMessageCollapsePolicy.shouldCollapse(message.text, isUser = true)
         }
         var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Column(
-            modifier = modifier.padding(bottom = 22.dp),
+            modifier = modifier.padding(bottom = 18.dp),
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -103,30 +104,23 @@ fun MessageBubble(
             message.visualizationContext?.let { VisualizationContextChipView(chip = it) }
             Row(horizontalArrangement = Arrangement.End) {
                 Spacer(Modifier.weight(1f))
-                val shape = RoundedCornerShape(18.dp)
+                val shape = RoundedCornerShape(16.dp)
                 if (message.text.isNotBlank()) {
-                    Text(
-                        text = message.text,
-                        color = t.text,
-                        fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
-                        lineHeight = (15.5f * 1.5f).sp,
-                        // `maxLines`, not the assistant branch's `heightIn`: this
-                        // bubble is one Text clipped to a BubbleShape, so a height
-                        // clip would square off the rounded bottom corners.
-                        // `maxLines` also gives a trailing ellipsis for free.
-                        maxLines = if (isCollapsible && !expanded) {
-                            AssistantMessageCollapsePolicy.COLLAPSED_LINE_LIMIT
-                        } else {
-                            Int.MAX_VALUE
-                        },
-                        overflow = TextOverflow.Ellipsis,
+                    Box(
                         modifier = Modifier
-                            .widthIn(max = 300.dp)
+                            .widthIn(max = 700.dp)
                             .clip(shape)
-                            .background(t.surface)
-                            .border(0.5.dp, t.border, shape)
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                    )
+                            .background(t.surfaceHover)
+                            .padding(horizontal = 18.dp, vertical = 12.dp),
+                    ) {
+                        AIText(
+                            markdown = message.text,
+                            onOpenLink = onOpenLink,
+                            modifier = if (isCollapsible && !expanded) {
+                                Modifier.heightIn(max = 190.4.dp).clipToBounds()
+                            } else Modifier,
+                        )
+                    }
                 }
             }
             if (isCollapsible) {
@@ -144,6 +138,7 @@ fun MessageBubble(
                 ) {
                     LXIcon(
                         name = LXIconName.Chevron,
+                        modifier = Modifier.rotate(if (expanded) 180f else 0f),
                         size = 11.dp,
                         color = t.accent,
                         stroke = 2f,
@@ -157,6 +152,7 @@ fun MessageBubble(
                     )
                 }
             }
+            UserMessageActions(message)
         }
     } else {
         val isCollapsible = remember(message.text) {
@@ -165,7 +161,7 @@ fun MessageBubble(
         var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Row(
             modifier = modifier
-                .padding(bottom = 26.dp)
+                .padding(bottom = 18.dp)
                 .graphicsLayer { alpha = if (dimmed) 0.4f else 1f },
             horizontalArrangement = Arrangement.spacedBy(11.dp),
             verticalAlignment = Alignment.Top,
@@ -181,7 +177,7 @@ fun MessageBubble(
                 // still streaming) has no blocks and renders its text as before.
                 Column(
                     modifier = if (isCollapsible && !expanded) {
-                        Modifier.heightIn(max = 360.dp).clipToBounds()
+                        Modifier.heightIn(max = 190.4.dp).clipToBounds()
                     } else {
                         Modifier
                     },
@@ -224,6 +220,7 @@ fun MessageBubble(
                         ) {
                             LXIcon(
                                 name = LXIconName.Chevron,
+                        modifier = Modifier.rotate(if (expanded) 180f else 0f),
                                 size = 11.dp,
                                 color = t.accent,
                                 stroke = 2f,
@@ -354,8 +351,8 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
                 text = text,
                 style = androidx.compose.ui.text.TextStyle(
                     color = t.text,
-                    fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
-                    lineHeight = (15.5f * 1.6f).sp,
+                    fontSize = 14.sp,
+                    lineHeight = 23.1.sp,
                 ),
                 onClick = { offset ->
                     text.getStringAnnotations("url", offset, offset)
@@ -375,7 +372,7 @@ private fun MdBlockView(block: MdBlock, onOpenLink: (String) -> Unit) {
         is MdBlock.Quote -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.size(width = 3.dp, height = 24.dp).background(t.border))
             Text(inlineSpans(block.spans, t.surfaceHover, t.text2, t.accent),
-                color = t.text3, fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize, lineHeight = 23.sp)
+                color = t.text3, fontSize = 14.sp, lineHeight = 23.sp)
         }
         is MdBlock.CodeBlock -> CodeBlockView(block)
 
@@ -405,8 +402,8 @@ private fun ListRow(
         Text(
             text = marker,
             color = t.text3,
-            fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
-            lineHeight = (15.5f * 1.6f).sp,
+            fontSize = 14.sp,
+            lineHeight = 23.1.sp,
             modifier = Modifier.widthIn(min = 18.dp),
         )
         val text = inlineSpans(spans, t.surfaceHover, t.text2, t.accent)
@@ -414,8 +411,8 @@ private fun ListRow(
             text = text,
             style = androidx.compose.ui.text.TextStyle(
                 color = t.text,
-                fontSize = androidx.compose.material3.MaterialTheme.typography.bodyLarge.fontSize,
-                lineHeight = (15.5f * 1.6f).sp,
+                fontSize = 14.sp,
+                lineHeight = 23.1.sp,
             ),
             modifier = Modifier.weight(1f),
             onClick = { offset ->
@@ -540,6 +537,46 @@ private fun MarkdownTable(table: MdBlock.Table, onOpenLink: (String) -> Unit) {
                     )
                 }
             }
+        }
+    }
+}
+
+
+@Composable
+private fun UserMessageActions(message: Message) {
+    val t = LingXiTheme.palette
+    val clipboard = LocalClipboardManager.current
+    var copyRevision by remember(message.id) { mutableStateOf(0) }
+    var copied by remember(message.id) { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(copyRevision) {
+        if (copyRevision > 0) {
+            kotlinx.coroutines.delay(1_500)
+            copied = false
+        }
+    }
+    val clock = message.sentAtMs?.let {
+        java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date(it))
+    }
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (clock != null) {
+            Text(clock, color = t.text3, fontSize = 11.sp,
+                modifier = Modifier.testTag("conversation.message.user.time"))
+        }
+        androidx.compose.material3.TextButton(
+            onClick = {
+                clipboard.setText(AnnotatedString(message.text))
+                copied = true
+                copyRevision++
+            },
+            modifier = Modifier.testTag("conversation.message.user.copy"),
+        ) {
+            LXIcon(if (copied) LXIconName.Check else LXIconName.Copy,
+                size = 13.dp, color = t.text3, contentDescription = null)
+            Text(stringResource(if (copied) R.string.chat_message_copied else R.string.chat_message_copy),
+                color = t.text3, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp))
         }
     }
 }

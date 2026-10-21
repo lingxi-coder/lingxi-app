@@ -1997,4 +1997,6 @@
     <string name="account_sign_out">Sign Out</string>
     <string name="account_title">LingXi Account</string>
     <string name="drawer_open_sidebar_a11y">Open sidebar</string>
+    <string name="chat_message_copy">Copy</string>
+    <string name="chat_message_copied">Copied</string>
 </resources>

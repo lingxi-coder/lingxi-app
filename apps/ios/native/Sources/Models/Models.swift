@@ -485,6 +485,7 @@ struct Message: Identifiable, Equatable {
     let id: UUID
     /// Persisted transcript record identity, shared by all its projected rows.
     var transcriptUUID: UUID? = nil
+    var sentAtMs: Int64? = nil
     let role: Role
     var tag: String? = nil
     let text: String

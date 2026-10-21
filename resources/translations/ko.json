@@ -1,4 +1,6 @@
 {
+  "chat_message_copy": "복사",
+  "chat_message_copied": "복사됨",
   "__info_plist__": {
     "CFBundleDisplayName": "灵犀",
     "NSCameraUsageDescription": "灵犀가 모델 분석을 위해 카메라로 사진을 촬영합니다.",

@@ -923,14 +923,14 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text(
-                text = error.message,
-                color = t.text2,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                lineHeight = (12.5f * 1.4f).sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(
+                    text = error.message,
+                    color = t.text2,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    lineHeight = (12.5f * 1.4f).sp,
+                )
+            }
         }
         Box(
             modifier = Modifier

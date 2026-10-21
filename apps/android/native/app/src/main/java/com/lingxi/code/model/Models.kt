@@ -457,6 +457,7 @@ data class Message(
     val id: String = UUID.randomUUID().toString(),
     /** Persisted transcript identity; UI row IDs are never used in external links. */
     val transcriptUuid: String? = null,
+    val sentAtMs: Long? = null,
     val transcriptAliases: Set<String> = emptySet(),
     /** Images attached to this user turn, kept in the same order as SendPrompt. */
     val images: List<ImageRefDto> = emptyList(),

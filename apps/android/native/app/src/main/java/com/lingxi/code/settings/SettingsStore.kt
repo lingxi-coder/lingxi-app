@@ -771,7 +771,8 @@ internal fun providerLaunchConfigurationChanged(
 ): Boolean =
     before.url.trim() != after.url.trim() ||
         before.model.trim() != after.model.trim() ||
-        before.enabled != after.enabled
+        before.enabled != after.enabled ||
+        before.credentialConfigured != after.credentialConfigured
 
 internal fun mergeProviderStatuses(
     current: List<GenericProvider>,

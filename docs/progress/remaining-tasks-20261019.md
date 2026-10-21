@@ -18,7 +18,7 @@
 | WebRTC iOS 系统广播 | 提前帧下溢回归、Flare 签名及安装通过；CUA 点击路由不稳定，尚无当前广播回执。2026-10-20 用户明确要求先跳过此项测试 | 保留未验证状态、源码与证据，不阻塞其他工作；不以 Ready 或构建成功代替跨 App 帧、停止与恢复验收 |
 | WebRTC 产品接入与 Remote | 独立 transport/media/FFI 与 localhost TURN 已验证；生产产品没有接入 | 在媒体边界验证后接入现有 host/control-plane；认证、设备与权限仍归项目自有服务，不另造执行所有者 |
 | WebRTC 其他媒体边界 | 限制性 NAT、TCP/TLS、手机互通、长期刷新、热状态与能耗尚无完整证据 | 逐项实施和验证，区分共享测试与真实设备结果 |
-| 版本化模型目录四端刷新 | SDK 解析、Harness 后台获取/校验/原子缓存、Desktop/CLI/Android/iOS 启动版本及运行时目录接线已实现；共享门禁、公共 GET 和原生调用方编译见本页最新记录 | 保留独立的新版签名包／设备运行验收边界，不把编译与 HTTP 查询标为四端设备运行通过 |
+| 版本化模型目录四端刷新 | 四端实现与启动缓存验收完成；本页最新记录补齐 Android 实体手机和 Flare 签名 iPhone 的首次获取、重启及配置保留验证 | 保留发行渠道、逐模型推理及其他平台验收边界，不把目录刷新通过扩大为全部运行时通过 |
 | iOS 真机界面与 Side Chat | 源码与模拟器回归已存在，旧 session 的真机检查因镜像/锁屏未完成 | 用匹配绑定和库的当前签名 App 验证键盘、独立草稿、隐藏重开与模型设置 |
 | 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
 | 移动 Crashlytics | Android JVM 测试云端入库已有记录；iOS 真机上报及 NDK 云端符号化未完成 | 准备匹配产物和隔离测试；云端上传遵守既有授权范围，不对正在使用的会话故意触发崩溃 |
@@ -98,3 +98,20 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - iOS native-support 使用已验证、与固定 `mobile-linux-runtime` `6b033d41` 匹配的原生支持产物；Rust core 未复用旧版本。Swift 6.4 下支持库构建脚本的独立语言模式修复已在该 SDK main 的 `9eb37cf4` 发布并通过两种 simulator 架构构建；本次未把 Product/Harness 升级到包含其他 SDK 改动的新版本。
 - 最终来源检查通过：77 个 Harness 包固定到 `1edfd6e2`，5 个 mobile-linux 包固定到 `6b033d41`，未使用路径覆盖。四端均取得同一发布的有效缓存；完整执行目录增量在 Desktop 实际 `list_models` 路径验证，移动端补充了真实 App 启动、缓存及配置保留证据。没有把移动端截图当作逐模型推理验证。
 - 边界：Android 是 ARM64 Play Debug 模拟器验收，未覆盖 x86_64、物理设备或 Play 发布包；iOS 是 ARM64 simulator App，`CODE_SIGNING_ALLOWED=NO`，不代表签名真机、TestFlight 或 App Store 验收。隔离目录测试无真实 provider 凭据，未执行云端真实模型推理。WebRTC 继续跳过，Chat 与 Computer Use 不接手；canonical Product 的 Gradle WIP 及 Harness 的 WebRTC WIP 保持未提交。
+
+## 2026-10-21：移动端竖屏、首个凭据路由修复与签名真机目录验收
+
+受测 Product 来源为 `3ec6ae04b1ec4cf095796ba1889a34eee0c7011b` 加本批五个移动端文件；原始源码补丁 `catalog-device-acceptance-3ec6ae04b/mobile-source.patch` 的 SHA-256 为 `a1d0cb9efb04fece0e93253684867bb43d0d3f7cb87e5c605622ebffbd4ef022`。Harness `1edfd6e2365618052a2bb7096ae1b1dc0430a775`、SDK `ff71b2ec1139bc67cc8719d78b1735aca967bbe8` 与 mobile-linux-runtime `6b033d41a2b6b736fda1e8f996f55a4b20bd885d` 的固定来源未变。以下证据相对 `.buildcache/remaining-task-takeover-20261019/`。
+
+- **竖屏**：Android 主 Activity 固定 `portrait`，覆盖共享 Manifest 的 Play / Direct；最终 APK 的 Manifest 已核实。iOS 共享 Info.plist 的 iPhone、iPad 方向数组均仅保留 Portrait，启用 `UIRequiresFullScreen`，Store / Full 共用这份配置。实体 Android 请求系统横向旋转后 App 截图仍为 1080×2400，测试结束恢复原系统旋转设置；iPhone 实际界面保持竖屏。iPad、Android Direct 与平板窗口模式未做设备实测。
+- **Android 配置 DeepSeek 后仍无模型**：源码确认首次凭据保存会改变 profile 的可路由性，但此前未将 `credentialConfigured` 变化纳入引擎重建判断；异步 Save and apply 回调还读取了保存前的 Compose 状态。现在按保存后的 Store 状态重建引擎，并在凭据可用性变化时标记配置待应用。新增回归先红（14 项中该项失败）后绿，最终设置相关 **133 项 JVM 测试全部通过**，`assemblePlayDebug` 通过。原生 JNI / 绑定沿用上一节实际固定提交的匹配产物，没有用旧 JNI 代替当前版本。
+
+| 真机 | 实际产物与启动 | 目录、配置及界面结果 |
+| --- | --- | --- |
+| Xiaomi 24117RK2CC / Android 16 / API 36 / ARM64 / 4 KiB 页 | 当前 Play Debug 更新安装，App 0.1.0；完成首次网络获取及随后重启 | 两次均校验 1327 个模型；DeepSeek 已在聊天选择器可用，未再出现 No model 提示。用户 provider、模型、URL、连接保持完整，既有加密凭据文件逐字节哈希不变 |
+| iPhone 11 / iOS 18.6.2 / ARM64 | 从当前固定 Rust core 构建 device-only XCFramework，生成的 Swift metadata 与当前绑定逐字节一致；StoreDebug 2.4.1 / 8721 通过 Flare `AZ4AX7J833` 签名和设备授权检查，保留数据更新安装 | 切换至可访问目录的网络后，首次获取及重启均取得 1327 模型；实际进程正常存活。整个 provider-settings JSON 与更新前一致，未改写或导出 Keychain 凭据；界面显示 Flash |
+
+- 两端实际缓存同一公开发布 `e65c83d9-2d38-4244-ad45-535d730f5f43`，body SHA-256 `ae2b83c151099484784637577930a51ce9c159ba02ef49dbe19fb967304fa8f1`。Android / iOS 回执分别位于 `catalog-device-acceptance-3ec6ae04b/android/receipt.json` 与 `ios-physical-receipt.json`；旋转回执为 `android/portrait-rotation-receipt.json`。首次网络超时和 Safari 无法加载的证据保留；用户恢复网络后才通过，没有预置目录数据或绕过校验。回执耗时属于端到端操作，不是启动等待网络的时间。
+- 最终 APK：`catalog-device-acceptance-3ec6ae04b/android/app-play-debug-portrait-credential.apk`，SHA-256 `91b1e4f75170196e1023128429814a6666e7fa811d7132526fa3589d5501534e`。签名 iPhone App：`catalog-ios-xcode/Build/Products/StoreDebug-iphoneos/LingxiCode.app`；匹配 dSYM、完整 App 文件哈希、来源及签名回执保留在本批产物索引中。没有上传新符号或报告。
+- **单独记录的旧会话边界**：最终 iPhone 截图显示既有会话的 `reporting admission rejected`，并非目录获取失败。只读核查确认该会话的 handback sidecar 是 v1、pending/admitted 均为空；当前源码只接受 v2。手机另有当前启动创建的 v2 sidecar。按用户不兼容旧版本的要求，本批不加入格式迁移、不删除旧会话或其数据，也不把该会话的推理标为通过。后续读取完整错误事件时 CoreDevice 隧道断开，原始失败保留；不影响此前已取得的冷／热目录回执。
+- 本节关闭的是物理设备上的目录首次获取／重启读取、用户模型及配置保留和受测手机竖屏。它不代表所有真实 provider 推理、旧会话恢复、Play 发行、TestFlight / App Store 或物理 iPad 已通过。WebRTC 继续按用户要求跳过；Chat、Computer Use 与其他 session 的源文件不纳入。canonical Product 的 Android / Electron / iOS UI 及 Gradle 未提交修改、Harness WebRTC WIP 均保留。

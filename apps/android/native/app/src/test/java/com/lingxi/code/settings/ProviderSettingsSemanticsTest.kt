@@ -165,6 +165,17 @@ class ProviderSettingsSemanticsTest {
     }
 
     @Test
+    fun firstCredentialChangesRoutingAndRequiresEngineReconnect() {
+        val unconfigured = provider().copy(credentialConfigured = false)
+        val configured = unconfigured.copy(credentialConfigured = true)
+
+        assertTrue(ProviderSettingsRepository.buildEngineLaunchConfig(listOf(unconfigured)).defaultModel.isEmpty())
+        assertFalse(ProviderSettingsRepository.buildEngineLaunchConfig(listOf(configured)).defaultModel.isEmpty())
+        assertTrue(providerLaunchConfigurationChanged(unconfigured, configured))
+        assertTrue(providerLaunchConfigurationChanged(configured, unconfigured))
+    }
+
+    @Test
     fun editingTestedConfiguration_returnsStatusToCredentialBaseline() {
         val store = SettingsStore()
         val id = store.addProvider(ProviderKind.Llm, "deepseek")

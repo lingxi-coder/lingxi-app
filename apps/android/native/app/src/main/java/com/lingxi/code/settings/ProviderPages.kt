@@ -739,9 +739,9 @@ fun ProviderEditPage(
                                         } else {
                                             keyDraft = ""
                                             credentialMessage = resources.getString(R.string.settings_provider_saved_applied)
-                                            // The engine reads provider keys per request, so a saved key is
-                                            // already live; only a pending launch-config change needs a rebuild.
-                                            if (state.pendingLlmProviderChanges.isNotEmpty()) {
+                                            // A first credential also makes this profile routable. Read
+                                            // the state after the asynchronous save updated eligibility.
+                                            if (store.state.value.pendingLlmProviderChanges.isNotEmpty()) {
                                                 onReconnectEngine()
                                                 store.markLlmConfigurationApplied()
                                             }

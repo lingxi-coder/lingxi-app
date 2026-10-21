@@ -1068,6 +1068,7 @@ mod tests {
             provider_label: "Anthropic".into(),
             provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
             is_current: true,
+            catalog_offered: false,
             supports_reasoning: true,
             supports_multimodal: false,
             details: Vec::new(),

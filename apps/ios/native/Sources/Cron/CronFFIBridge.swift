@@ -192,6 +192,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             routingJson: snapshot.routingJSON
         )
         let config = IosEngineLaunchConfigFfi(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
             apiKey: Keychain.get(.apiKey) ?? "",
             model: task?.configuration.model ?? snapshot.defaultModelID ?? Keychain.get(.model) ?? "",

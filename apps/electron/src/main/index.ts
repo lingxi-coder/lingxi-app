@@ -316,6 +316,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
+    appVersion: app.getVersion(),
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
     getSavedFastMode: () => settings.getLastFastMode(),

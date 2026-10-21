@@ -17,7 +17,7 @@ use super::callbacks::{
 use super::configuration::AndroidEngineLaunchConfigFfi;
 #[cfg(feature = "uniffi")]
 use super::configuration::{
-    android_project_cwd, AndroidGitConfigFfi, AndroidMobileLinuxConfigFfi, AndroidShellConfigFfi,
+    AndroidGitConfigFfi, AndroidMobileLinuxConfigFfi, AndroidShellConfigFfi, android_project_cwd,
 };
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 use super::linux_runtime::prepared_android_mobile_linux_runtime;
@@ -249,6 +249,7 @@ pub fn build_android_engine(
     device_control: Option<Box<dyn AndroidDeviceControl>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let AndroidEngineLaunchConfigFfi {
+        app_version,
         api_base,
         api_key,
         model,
@@ -271,6 +272,7 @@ pub fn build_android_engine(
     // — which no gate on this machine compiles — then fails to find it.
     #[cfg(not(target_os = "android"))]
     let _ = (
+        app_version,
         project_cwd,
         device_control,
         session_mode,
@@ -301,6 +303,13 @@ pub fn build_android_engine(
         let app_files_root_str = app_files_root.clone();
         let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
+            startup_catalog: app_version.as_ref().map(|version| {
+                harness_runtime::StartupCatalog::new(
+                    harness_runtime::CatalogPlatform::Android,
+                    version,
+                    &std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
+                )
+            }),
             build_info: harness_runtime::mobile::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),

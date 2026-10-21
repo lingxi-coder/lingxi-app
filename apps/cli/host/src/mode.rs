@@ -5504,6 +5504,7 @@ async fn build_session_info(
                 } else {
                     lingxi_core::host::ModelProvenance::ProviderCatalogTier
                 },
+                catalog_offered: m.metadata.catalog_offered,
                 supports_reasoning: m.supports_reasoning,
                 supports_multimodal,
                 fusion_analyst_capable: m.fusion_analyst_capable,

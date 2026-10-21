@@ -66,6 +66,8 @@ pub struct IosProviderConfigFfi {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
 pub struct IosEngineLaunchConfigFfi {
+    /// Actual native app version; None disables catalog networking for embedders.
+    pub app_version: Option<String>,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -242,6 +244,13 @@ pub(super) fn ios_mobile_config_from_launch_config(
 ) -> Result<MobileConfig, MobileEngineError> {
     let cwd = ios_project_cwd(&config.app_sandbox_root, config.project_cwd.as_deref())?;
     let mut cfg = MobileConfig {
+        startup_catalog: config.app_version.as_ref().map(|version| {
+            harness_runtime::StartupCatalog::new(
+                harness_runtime::CatalogPlatform::Ios,
+                version,
+                &std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
+            )
+        }),
         build_info: harness_runtime::mobile::BuildInfo::new(
             env!("CARGO_PKG_VERSION"),
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),

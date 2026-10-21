@@ -128,6 +128,9 @@ impl AudioProviderHost {
         };
         let assembled = provider_config::assemble_for_region(
             provider_config::AssembleInputs {
+                // Standalone audio has no engine owner; session audio reuses
+                // the running owner through from_provider_services instead.
+                official_catalog: None,
                 anthropic_api_base: "https://api.anthropic.com".into(),
                 anthropic_models: vec![],
                 anthropic_has_api_key: false,

@@ -271,6 +271,7 @@ fun buildVoiceEngine(
     return try {
         buildAndroidEngine(
             config = AndroidEngineLaunchConfigFfi(
+                appVersion = com.lingxi.code.BuildConfig.VERSION_NAME,
                 apiBase = apiBase,
                 apiKey = apiKey,
                 model = model,

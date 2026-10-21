@@ -9,13 +9,13 @@ use super::callbacks::{
     IosLocationBridge, IosNotificationBridge, IosPermissionSinkBridge, IosSecureStorageBridge,
     IosShareBridge,
 };
+#[cfg(feature = "uniffi")]
+use super::configuration::{IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi, ios_project_cwd};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::configuration::{
     default_workspace_host_path, ios_mobile_config_from_launch_config,
     validate_mobile_linux_workspace_config,
 };
-#[cfg(feature = "uniffi")]
-use super::configuration::{ios_project_cwd, IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::linux_runtime::ios_mobile_linux_runtime;
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
@@ -334,6 +334,7 @@ pub fn build_ios_engine(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     build_ios_engine_with_config(
         IosEngineLaunchConfigFfi {
+            app_version: None,
             api_base,
             api_key,
             model,

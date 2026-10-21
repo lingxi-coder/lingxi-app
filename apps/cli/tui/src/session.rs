@@ -50,6 +50,8 @@ pub struct ModelRow {
     /// Kept OUT of [`Self::display`] so the statusline / welcome identity — which
     /// read `display` — stay untagged; the suffix is drawn only in the picker.
     pub supports_reasoning: bool,
+    /// Explicitly published or user-defined model, independent of the embedded shortlist.
+    pub catalog_offered: bool,
     /// Whether the model natively accepts image or document input.
     pub supports_multimodal: bool,
     /// Whether this route could serve as the Fusion analyst — the model claims
@@ -162,7 +164,8 @@ pub fn connected_model_rows_restricted(
                 || current_provider.as_deref() == Some(profile);
             eligible
                 && !m.is_deprecated()
-                && (lingxi_core::host::is_curated_model(profile, &m.request_model)
+                && (m.catalog_offered
+                    || lingxi_core::host::is_curated_model(profile, &m.request_model)
                     || !lingxi_core::host::provider_has_curated_list(profile))
                 // Managed allowlist gate: a barred model is not selectable.
                 && llm_runtime::model::allowlist::is_model_allowed(
@@ -328,11 +331,30 @@ mod tests {
             provider_label: provider.to_string(),
             provenance: lingxi_core::host::ModelProvenance::default(),
             is_current: current,
+            catalog_offered: false,
             supports_reasoning: true,
             supports_multimodal: false,
             fusion_analyst_capable: false,
             details: Vec::new(),
         }
+    }
+
+    #[test]
+    fn explicitly_offered_models_bypass_only_the_embedded_shortlist() {
+        let mut published = row("Published", "new-official-model", "anthropic", false);
+        published.catalog_offered = true;
+        let hidden = row("Hidden", "not-offered", "anthropic", false);
+        let availability = std::collections::BTreeMap::from([("anthropic".into(), true)]);
+        assert_eq!(
+            connected_model_rows(&[published.clone(), hidden], &availability),
+            vec![published.clone()]
+        );
+        assert!(
+            connected_model_rows(&[published.clone()], &std::collections::BTreeMap::new())
+                .is_empty()
+        );
+        published.details.push("Status: deprecated".into());
+        assert!(connected_model_rows(&[published], &availability).is_empty());
     }
 
     #[test]

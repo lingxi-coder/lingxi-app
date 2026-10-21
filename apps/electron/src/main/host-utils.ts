@@ -631,6 +631,7 @@ export function resolveModBunExecutable(options: {
 }
 
 export function buildBridgeArguments(config: {
+  appVersion?: string;
   workspace: string;
   bridgeDir: string;
   sessionId?: string;
@@ -650,6 +651,7 @@ export function buildBridgeArguments(config: {
     return ['--cwd', config.workspace, '--list-sessions-json', ...(config.sessionId ? ['--session-id', config.sessionId] : [])];
   }
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
+  if (config.appVersion) args.push('--app-version', config.appVersion);
   if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.model) args.push('--model', config.model);
   if (config.hasCredentialStdin) args.push('--credential-stdin');

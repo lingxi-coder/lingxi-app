@@ -176,6 +176,9 @@ impl From<AndroidHostEnvironmentFfi>
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AndroidEngineLaunchConfigFfi {
+    /// Actual native app version enables official startup catalog delivery.
+    /// None is a deterministic embedder with no catalog networking.
+    pub app_version: Option<String>,
     pub api_base: String,
     pub api_key: String,
     pub model: String,

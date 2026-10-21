@@ -18,7 +18,7 @@
 | WebRTC iOS 系统广播 | 提前帧下溢回归、Flare 签名及安装通过；CUA 点击路由不稳定，尚无当前广播回执。2026-10-20 用户明确要求先跳过此项测试 | 保留未验证状态、源码与证据，不阻塞其他工作；不以 Ready 或构建成功代替跨 App 帧、停止与恢复验收 |
 | WebRTC 产品接入与 Remote | 独立 transport/media/FFI 与 localhost TURN 已验证；生产产品没有接入 | 在媒体边界验证后接入现有 host/control-plane；认证、设备与权限仍归项目自有服务，不另造执行所有者 |
 | WebRTC 其他媒体边界 | 限制性 NAT、TCP/TLS、手机互通、长期刷新、热状态与能耗尚无完整证据 | 逐项实施和验证，区分共享测试与真实设备结果 |
-| 版本化模型目录四端刷新 | Firebase API、已发布目录及 Web 管理页已存在；当前文档明确尚未接入四端启动同步 | 闭合 SDK 官方目录定义、Harness 校验/缓存/刷新、Desktop/CLI/mobile 启动和当前选择器消费者；保留用户模型、连接和凭据 |
+| 版本化模型目录四端刷新 | SDK 解析、Harness 后台获取/校验/原子缓存、Desktop/CLI/Android/iOS 启动版本及运行时目录接线已实现；共享门禁、公共 GET 和原生调用方编译见本页最新记录 | 保留独立的新版签名包／设备运行验收边界，不把编译与 HTTP 查询标为四端设备运行通过 |
 | iOS 真机界面与 Side Chat | 源码与模拟器回归已存在，旧 session 的真机检查因镜像/锁屏未完成 | 用匹配绑定和库的当前签名 App 验证键盘、独立草稿、隐藏重开与模型设置 |
 | 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
 | 移动 Crashlytics | Android JVM 测试云端入库已有记录；iOS 真机上报及 NDK 云端符号化未完成 | 准备匹配产物和隔离测试；云端上传遵守既有授权范围，不对正在使用的会话故意触发崩溃 |
@@ -63,3 +63,18 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - Firebase 严格 DTO、草稿校验、平台筛选、公开 JSON 及 Web 导入导出类型保留该定义；哈希不符会拒绝。没有把四个展示能力布尔值当成完整推理/鉴权/协议/媒体/分时定价配置。此处的校验是格式和内容哈希校验，**不是 SDK 对 TOML 执行语义的校验**。
 - 13 项 Firebase 本地测试通过，2 项 Firestore 模拟器用例未运行；39 项 Web 测试、Web 类型检查和生产构建通过。默认系统 Python 3.9 导致的文档测试失败在使用仓库要求的 Python 3.13 后全部通过，无需修改文档测试。seed `--check` 与原始 SDK 文件一致，Unicode/CRLF 往返及篡改拒绝回归通过。
 - **四端启动刷新仍未完成**：下一批须在 SDK 入口解析完整定义，按当前 App 版本/平台做有界 GET、ETag/304 和原子缓存；同一启动快照进入 Harness 的 Anthropic/preset 装配、执行路由、价格及客户端列表，并由 settings 刷新继续持有。必须验证自定义模型/连接/凭据不被覆盖，超时/损坏快照回退到有效缓存或内置定义，不以 UI 刷新替代执行链验收。未进行云端部署或覆写现有发布/草稿。
+
+
+## 2026-10-20：四端模型目录启动与运行时接线
+
+- SDK 固定 `ff71b2ec1139bc67cc8719d78b1735aca967bbe8`，Harness 固定 `1edfd6e2365618052a2bb7096ae1b1dc0430a775`。Product manifest、锁文件和 Cargo metadata 保留 canonical Git URL、完整 SHA，无路径覆盖；由同一组装目录提供实际执行路由、价格、设置目录和选择器列表。Claude Code 目标仍为 2.1.295。
+- Desktop 传入 Electron `app.getVersion()`；CLI 使用实际 CLI 包版本；Android 使用 `BuildConfig.VERSION_NAME`；iOS 使用 `CFBundleShortVersionString`。各端分别按平台、精确 App 版本、schema 和 endpoint 隔离缓存。确定性嵌入与测试不配置网络来源；CLI `--bare` 不开启目录请求。
+- **先本地、后台刷新**：有效缓存优先，无缓存使用 SDK 内置定义；两种启动均不等待网络。后台 GET 最长 8 秒，验证整个响应、版本范围、源定义 SHA、完整缓存校验和、SDK 解析及执行注册表后，使用非阻塞锁、私有临时文件和 rename 更新缓存。当前运行时及 settings 重载继续持有原快照；下次运行时装配采用新缓存，不中途切换请求。
+- 新提供商／模型必须具有完整可执行 SDK 定义；已知定义可显式引用固定 SDK。保留鉴权、协议、endpoint controls、音频服务、分时价格等信息。用户自定义模型、连接、路由别名、端点覆盖、环境密钥名和稳定凭据 ID 在官方快照之后合并；目录代码不写 settings 或凭据。ChatGPT 登录连接保持 Host 所有权。
+- 修复新发布模型和用户模型被二进制内置白名单再次隐藏的问题。CLI 的独立行结构保留明确发布标记；连接、弃用及管理员限制继续生效。Desktop 的设置目录组装也改为复用同一个启动快照，避免刷新时回退到内置目录。会话音频复用真实运行时服务；独立音频 Host 继续使用其明确的独立配置入口。
+- SDK default 库测试 **622 项通过**；最终 Harness provider-config **87 单元 + 1 集成测试通过**，包括真实 localhost 条件 GET/304、损坏／503 回退、发布回退保护、自定义配置、协议格式退出后的凭据 ID、后台快照隔离，以及服务器不响应时首次启动仍及时使用本地目录。provider-config / llm-runtime 全 targets Clippy（拒绝 warnings）通过。
+- 最终只读公共查询四端均接纳 **1274 个模型、47 个提供商**（含 Host 登录连接）；测试版本 Desktop 0.1.0、CLI 0.12.0、Android 0.1.0、iOS 2.4.1。请求无账号、workspace 或 provider 凭据；未改动云端草稿或发布。HTTP 耗时属于显式预热验证，不是本地启动等待时间。
+- Product 定向验证：Electron 41 项 Host 测试、Node/Web 类型检查和生产构建通过；CLI 模型列表 11 项、CLI safe/bare 启动配置 1 项、Desktop 参数 10 项、iOS launch config 1 项通过；719 项客户端源码和 3 份协议镜像检查通过。原生生成器依赖隔离测试通过。
+- Android / iOS host 原生库已构建并生成匹配的新 Kotlin / Swift 绑定；Android Play Debug 生产及 instrumentation Kotlin 编译通过，Swift 三个绑定模块与带 `appVersion` 的启动配置类型检查通过。这组绑定验证使用 Harness `94675ef8`；后续 `1edfd6e2` 仅调整 provider-config 的网络等待策略、测试、诊断示例和文档，**无 UniFFI 接口或客户端调用变化**。最终固定提交的 Desktop bridge、CLI、Android FFI、iOS FFI 四个生产根 locked 编译检查均已通过；不将旧 JNI 或 XCFramework 改标为新版本。
+- 本阶段未重打或安装新版 APK、签名 iOS App、macOS 包，未执行设备／GUI 或真实 provider 推理验收；这些边界与共享契约和调用方编译分开记录。WebRTC 测试继续跳过；其 WIP 不纳入目录提交。chat 与 Computer Use 不接手。
+- 所有日志及缓存清理清单位于 `.buildcache/remaining-task-takeover-20261019/catalog-*`。为避免磁盘耗尽，仅退休本任务已完成且无占用的旧构建缓存、测试二进制和临时验收模拟器可重建磁盘；保留源码、用户数据、APK、实际 JNI、符号和验收证据。原 Product checkout 的其他 session Gradle 修改未纳入。

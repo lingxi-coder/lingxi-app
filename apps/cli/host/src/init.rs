@@ -1396,6 +1396,13 @@ pub(crate) fn resolve_desktop_config_at(
         // client, and this host has none. The `voice`/`speech` tools are
         // therefore not registered here at all.
         __desktop_config.audio = None;
+        if !__desktop_config.customization_gates.bare {
+            __desktop_config.startup_catalog = Some(harness_runtime::StartupCatalog::new(
+                harness_runtime::CatalogPlatform::Cli,
+                build_info.version,
+                &__desktop_config.lingxi_home,
+            ));
+        }
         __desktop_config
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
@@ -1569,6 +1576,8 @@ fn bind_tui_permission_gate(gate: &tui::permission_gate::TuiPermissionGate, runt
 fn isolate_test_runtime_config(
     cfg: &mut DesktopConfig,
 ) -> Result<Option<tempfile::TempDir>, InitError> {
+    // Unit fixtures must not query the public service or write the real-home cache.
+    cfg.startup_catalog = None;
     if cfg.isolated_credential_storage {
         return Ok(None);
     }
@@ -2901,6 +2910,7 @@ mod tests {
         let cfg = resolve_desktop_config(&base, permission::PermissionMode::Default);
         assert!(!cfg.customization_gates.safe_mode);
         assert!(!cfg.customization_gates.bare);
+        assert!(cfg.startup_catalog.is_some());
         assert!(cfg.memory_provider.is_some());
         assert!(cfg.mcp_paths.iter().any(|p| p.ends_with(".mcp.json")));
 
@@ -2933,6 +2943,7 @@ mod tests {
         let bare = Argv::from_iter(["lingxi-cli", "--bare", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&bare, permission::PermissionMode::Default);
         assert!(cfg.customization_gates.bare);
+        assert!(cfg.startup_catalog.is_none());
         assert!(
             cfg.memory_provider.is_none(),
             "bare skips CLAUDE.md auto-discovery"

@@ -1312,6 +1312,7 @@ export class SessionRuntime {
   private spawnServer(launch: BridgeLaunchConfig, bridgeDir: string): ChildProcess {
     const bin = resolveServerBin(this.opts);
     const args = buildBridgeArguments({
+      appVersion: this.opts.appVersion,
       workspace: launch.workspace,
       sessionId: this.sessionId,
       bridgeDir,

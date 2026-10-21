@@ -61,6 +61,8 @@ export interface BridgeRuntimeVersions {
 }
 
 export interface BridgeManagerOptions {
+  /** Actual desktop package version; absent in deterministic test hosts. */
+  appVersion?: string;
   /** Development-only binary override. Ignored in packaged builds. */
   serverBin?: string;
   /** Parent for owner-only, per-launch discovery directories. */

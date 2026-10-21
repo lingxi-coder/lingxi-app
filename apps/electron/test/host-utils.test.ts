@@ -366,6 +366,12 @@ test('bridge arguments carry trust and stdin intent but never credential materia
   assert.equal(buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', hasApiKey: false, trusted: false }).includes('--trusted-workspace'), false);
 });
 
+test('bridge arguments carry the actual desktop version for catalog filtering', () => {
+  const args = buildBridgeArguments({ workspace: '/w', bridgeDir: '/b', hasApiKey: false, trusted: false, appVersion: '0.1.0+desktop.7' });
+  assert.equal(args[args.indexOf('--app-version') + 1], '0.1.0+desktop.7');
+  assert.equal(args.includes('--api-key-stdin'), false);
+});
+
 test('private bridge arguments carry explicit local Insights policy without a user CLI switch', () => {
   const allowed = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: true });
   const denied = buildBridgeArguments({ workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true, allowInsights: false });

@@ -67,6 +67,8 @@ pub(crate) const CODEX_PROVIDER_ID: &str = "openai-chatgpt";
 /// `apps/bridge-server` deliberately avoids a clap dependency).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeArgs {
+    /// Actual Electron application version for the public model catalog.
+    pub app_version: Option<String>,
     /// `--cwd <dir>`: working directory to root the engine at. The process
     /// `chdir`s into this before resolving the rest of the config so the
     /// settings / hook / `.mcp.json` loaders read the same dir.
@@ -120,6 +122,14 @@ impl BridgeArgs {
         while let Some(arg) = it.next() {
             match arg.as_ref() {
                 "--help" | "-h" => out.help = true,
+                "--app-version" => {
+                    out.app_version = Some(
+                        it.next()
+                            .ok_or("--app-version requires a version")?
+                            .as_ref()
+                            .to_owned(),
+                    );
+                }
                 "--list-sessions-json" => out.list_sessions_json = true,
                 "--cwd" => {
                     let v = it
@@ -462,12 +472,16 @@ pub fn resolve_api_base() -> String {
     std::env::var(API_BASE_ENV).unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
-fn desktop_provider_catalog_listings(
+async fn desktop_provider_catalog_listings(
     cfg: &DesktopConfig,
     region: llm_runtime::Region,
 ) -> Vec<lingxi_core::host::ModelListing> {
     let assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
+            official_catalog: match &cfg.startup_catalog {
+                Some(source) => Some((*source.load().await).clone()),
+                None => None,
+            },
             anthropic_api_base: cfg.api_base.clone(),
             anthropic_models: desktop_provider_catalog_anthropic_models(
                 &cfg.default_model,
@@ -734,6 +748,13 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         __desktop_config.diskless = false;
         __desktop_config.trusted_network_directories = Vec::new();
         __desktop_config.lingxi_home = lingxi_home;
+        __desktop_config.startup_catalog = args.app_version.as_ref().map(|version| {
+            harness_runtime::StartupCatalog::new(
+                harness_runtime::CatalogPlatform::Desktop,
+                version,
+                &__desktop_config.lingxi_home,
+            )
+        });
         __desktop_config.default_model = default_model;
         // Only a `--model` arg is an explicit per-session choice; the built-in
         // default stays eligible for the engine's connected-provider fallback.
@@ -1607,7 +1628,8 @@ pub async fn assemble_with_credentials(
         &cfg,
         harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
             .map_err(|error| settings_error_message(&error))?,
-    );
+    )
+    .await;
 
     let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
@@ -2480,9 +2502,21 @@ mod tests {
 
     #[test]
     fn parse_missing_value_is_error() {
+        assert!(BridgeArgs::parse(["--app-version"]).is_err());
         assert!(BridgeArgs::parse(["--cwd"]).is_err());
         assert!(BridgeArgs::parse(["--model"]).is_err());
         assert!(BridgeArgs::parse(["--bridge-dir"]).is_err());
+    }
+
+    #[test]
+    fn parse_desktop_app_version_without_using_the_bridge_package_version() {
+        assert_eq!(
+            BridgeArgs::parse(["--app-version", "0.1.0+desktop.7"])
+                .unwrap()
+                .app_version
+                .as_deref(),
+            Some("0.1.0+desktop.7")
+        );
     }
 
     #[test]
@@ -2969,8 +3003,8 @@ mod tests {
 /// Shared stalling-storage fixtures; each test owns its credential scope.
 #[cfg(test)]
 pub(crate) mod fusion_refresh_test_support {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A credential backend whose READS never answer — the contended macOS
     /// keychain broker whose 5s stall the boot availability probe already wraps

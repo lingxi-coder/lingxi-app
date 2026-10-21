@@ -534,6 +534,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+        app_version: Some("2.4.1".into()),
         api_base: "https://example.invalid".to_string(),
         api_key: "sk-test".to_string(),
         model: "claude-test".to_string(),
@@ -560,6 +561,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     assert_eq!(cfg.api_base, "https://example.invalid");
     assert_eq!(cfg.api_key, "sk-test");
     assert_eq!(cfg.default_model, "claude-test");
+    assert!(cfg.startup_catalog.is_some());
     assert!(!cfg.vision_delegation_enabled);
     assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
     let host = cfg.host_environment.as_ref().expect("mobile host fallback");
@@ -597,6 +599,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
 fn ios_host_environment_maps_stable_native_facts_without_model_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+        app_version: None,
         api_base: String::new(),
         api_key: String::new(),
         model: String::new(),

@@ -50,6 +50,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
         let listener = SettingsRoundtripListener()
         let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
+            appVersion: nil,
             apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),

@@ -78,3 +78,23 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - Android / iOS host 原生库已构建并生成匹配的新 Kotlin / Swift 绑定；Android Play Debug 生产及 instrumentation Kotlin 编译通过，Swift 三个绑定模块与带 `appVersion` 的启动配置类型检查通过。这组绑定验证使用 Harness `94675ef8`；后续 `1edfd6e2` 仅调整 provider-config 的网络等待策略、测试、诊断示例和文档，**无 UniFFI 接口或客户端调用变化**。最终固定提交的 Desktop bridge、CLI、Android FFI、iOS FFI 四个生产根 locked 编译检查均已通过；不将旧 JNI 或 XCFramework 改标为新版本。
 - 本阶段未重打或安装新版 APK、签名 iOS App、macOS 包，未执行设备／GUI 或真实 provider 推理验收；这些边界与共享契约和调用方编译分开记录。WebRTC 测试继续跳过；其 WIP 不纳入目录提交。chat 与 Computer Use 不接手。
 - 所有日志及缓存清理清单位于 `.buildcache/remaining-task-takeover-20261019/catalog-*`。为避免磁盘耗尽，仅退休本任务已完成且无占用的旧构建缓存、测试二进制和临时验收模拟器可重建磁盘；保留源码、用户数据、APK、实际 JNI、符号和验收证据。原 Product checkout 的其他 session Gradle 修改未纳入。
+
+## 2026-10-21：固定提交的 App 构建与目录启动验收
+
+受测代码：Product `617dbc8501087f2c7218dc266b265bc2615cb7fc`、Harness `1edfd6e2365618052a2bb7096ae1b1dc0430a775`、SDK `ff71b2ec1139bc67cc8719d78b1735aca967bbe8`。三仓重新 fetch 后均与各自远端 main 一致；本轮没有修改产品运行时源码。下述路径均以 `.buildcache/remaining-task-takeover-20261019/` 为基准。
+
+| 平台 | 实际构建与运行结果 | 目录与配置证据 |
+| --- | --- | --- |
+| macOS ARM64 | Flare 签名包静态及运行 smoke 通过；实际包完成 Keychain 凭据重启回读、localhost 请求、renderer 启动。已启动正常用户桌面 App | 隔离冷启动使用 77 个运行时模型，后台缓存 1327 个公开模型；重启后运行时模型 440 个，其中 432 项与公开目录上下文信息一致。自定义 profile/model 保留 |
+| Android ARM64 | 当前 JNI 与匹配 Kotlin 绑定重新构建；Play Debug APK 与 instrumentation APK 构建通过；API 37、16 KiB 页模拟器运行正常；真实 JNI 设置持久化及引擎重建测试 1 项通过 | App 实际写入 1327 模型缓存，重启仍有效，平台 android / App 0.1.0；自定义模型及两条连接保持完整。首次未落盘和测试权限对话框干扰保留原始日志，没有预置目录缓存或删除产品校验 |
+| iOS ARM64 simulator | 当前 Rust core、匹配 Swift 绑定、合并 XCFramework 与 StoreDebug App 构建通过；iOS 26.3 独立模拟器实际启动、重启及正常界面截图通过 | 首次无缓存启动后取得 1327 模型，重启使用现有缓存；平台 ios / App 2.4.1；自定义模型与两条连接保持完整，截图显示自定义模型 |
+| CLI | 当前实际入口 dev 构建通过；以 Flare 身份签名，复用已验证包中的签名 Broker；两次启动均通过真实 streaming 请求返回 `CATALOG_RUNTIME_OK` | 隔离 HOME 的冷启动写入 1327 模型缓存，热启动已有有效缓存；平台 cli / App 0.12.0；实际请求均保持 `catalog-local` 的自定义 `catalog-model` 路由 |
+
+- 四端公共目录的受测发布为 `e65c83d9-2d38-4244-ad45-535d730f5f43`，响应 SHA-256 `ae2b83c151099484784637577930a51ce9c159ba02ef49dbe19fb967304fa8f1`；逐端回执保留实际 App 版本及缓存校验和。与上一阶段 1274 模型的查询相比，公开发布已更新，未修改云端目录。
+- 产物索引：`catalog-app-acceptance-617dbc850/app-acceptance-index.json`。macOS ZIP：`catalog-app-acceptance-617dbc850/macos/LingXi-Code-0.1.0-mac-arm64.zip`，SHA-256 `6823a8d121e5a4506c3deb40df7c69204b310ca446a29e6ed3b56992d3d45f41`。Android APK 位于本工作树 `apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk`，SHA-256 `627c9121da225e3cf961f693c24792d80a6cffe6c84b01a93578a580e0906f12`。iOS App：`catalog-ios-xcode/Build/Products/StoreDebug-iphonesimulator/LingxiCode.app`，完整内容哈希清单为 `catalog-app-acceptance-617dbc850/ios-app-files.json`。
+- 原始回执及截图分别在 `catalog-app-acceptance-617dbc850/desktop-cold-warm-r2/`、`android-cold-warm/`、`ios-cold-warm/`。macOS 官方包验证日志 `catalog-macos-package-verification.log`；Android 构建与 JNI 运行日志 `catalog-android-apk-build.log` / `catalog-android-native-roundtrip.log`；iOS 最终编译日志 `catalog-ios-app-build-arm64.log`。
+- CLI 回执及原始请求记录在 `catalog-app-acceptance-617dbc850/cli-cold-warm-r3/`，保留二进制在 `catalog-app-acceptance-617dbc850/cli-runtime/lingxi-cli`。这属于实际 dev 入口运行验收，不是 CLI release 包验收。首次未携带 Broker 的开发入口按安全策略拒绝启动；补齐签名及真实 Broker 后才执行测试，没有改用伪凭据存储。另一次后台目录响应体读取失败时，推理仍成功且未生成错误缓存；错误日志在 `cli-cold-warm-r2/cold.stderr` 原样保留。独立 GET 与后续完整冷、热启动通过，不把该失败改写为首次成功。夹具主动延迟 localhost 响应 12 秒，回执的 22.42 / 19.60 秒是端到端测试耗时，不是目录阻塞启动时间。
+- macOS bridge dSYM 与包内二进制 UUID 匹配，完整符号已无损归档；dsymutil 对部分临时 LTO 对象发出警告，第三方源码行信息完整性不作保证。Android 未裁剪符号独立无损归档并验证原始 SHA，保留运行 payload 与绑定。仅清理已完成、本任务独占的可重建中间缓存和隔离 Android 测试磁盘，逐项清单保留；其他 session 的源文件、构建和模拟器不动。
+- iOS native-support 使用已验证、与固定 `mobile-linux-runtime` `6b033d41` 匹配的原生支持产物；Rust core 未复用旧版本。Swift 6.4 下支持库构建脚本的独立语言模式修复已在该 SDK main 的 `9eb37cf4` 发布并通过两种 simulator 架构构建；本次未把 Product/Harness 升级到包含其他 SDK 改动的新版本。
+- 最终来源检查通过：77 个 Harness 包固定到 `1edfd6e2`，5 个 mobile-linux 包固定到 `6b033d41`，未使用路径覆盖。四端均取得同一发布的有效缓存；完整执行目录增量在 Desktop 实际 `list_models` 路径验证，移动端补充了真实 App 启动、缓存及配置保留证据。没有把移动端截图当作逐模型推理验证。
+- 边界：Android 是 ARM64 Play Debug 模拟器验收，未覆盖 x86_64、物理设备或 Play 发布包；iOS 是 ARM64 simulator App，`CODE_SIGNING_ALLOWED=NO`，不代表签名真机、TestFlight 或 App Store 验收。隔离目录测试无真实 provider 凭据，未执行云端真实模型推理。WebRTC 继续跳过，Chat 与 Computer Use 不接手；canonical Product 的 Gradle WIP 及 Harness 的 WebRTC WIP 保持未提交。

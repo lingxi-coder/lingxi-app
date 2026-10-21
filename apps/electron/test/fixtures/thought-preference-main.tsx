@@ -15,9 +15,11 @@ function Fixture() {
   const [running, setRunning] = useState(true);
   const [toolsDone, setToolsDone] = useState(false);
   const [done, setDone] = useState(false);
+  const [reasoningText, setReasoningText] = useState('Streaming reasoning');
   const [sessionKey, setSessionKey] = useState('a');
   Object.assign(window, { thoughtFixture: {
     setDark(value: boolean) { flushSync(() => setDark(value)); },
+    stream(text: string) { flushSync(() => setReasoningText(text)); },
     finishTools() { flushSync(() => setToolsDone(true)); },
     finish() { flushSync(() => { setDone(true); setRunning(false); }); },
     waitWithoutReasoning() { flushSync(() => { setDone(true); setRunning(true); }); },
@@ -40,7 +42,7 @@ function Fixture() {
       ]} running={running} sessionKey={sessionKey} collapseThoughtsByDefault={preference} liveItems={[
         { id: 'before', type: 'narration', role: 'assistant', text: 'Checking the project.' },
         { id: 'read', type: 'tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', primary: 'Stage.tsx', title: 'Read Stage.tsx' } },
-        { id: 'thought', type: 'thinking', streamed: true, done, text: done ? 'Finished reasoning' : 'Streaming reasoning' },
+        { id: 'thought', type: 'thinking', streamed: true, done, text: done ? 'Finished reasoning' : reasoningText },
         { id: 'shell', type: 'tool', tool: 'Bash', status: toolsDone ? 'done' : 'running', view: { verb: 'run', label: 'Shell', primary: 'npm run typecheck', title: 'Check TypeScript' } },
         { id: 'after', type: 'narration', role: 'assistant', text: 'Following message.' },
       ]} />

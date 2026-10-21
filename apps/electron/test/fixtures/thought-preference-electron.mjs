@@ -48,12 +48,17 @@ async function main() {
     assert.equal(live.legacyToggle, false);
     assert.equal(live.thinking, true);
     assert.equal(live.animated, true);
-    assert.doesNotMatch(live.text, /Streaming reasoning/);
-    assert.ok(live.text.indexOf('Checking the project.') < live.text.indexOf('Thinking'));
-    assert.ok(live.text.indexOf('Thinking') < live.text.indexOf('Following message.'));
+    assert.match(live.text, /Streaming reasoning/);
+    assert.doesNotMatch(live.text, /Thinking…/);
+    assert.ok(live.text.indexOf('Checking the project.') < live.text.indexOf('Streaming reasoning'));
+    assert.ok(live.text.indexOf('Streaming reasoning') < live.text.indexOf('Following message.'));
     await evaluate('window.thoughtFixture.changeLegacyPreference()'); await wait();
     assert.equal((await state()).thinking, true);
+    assert.match((await state()).text, /Streaming reasoning/);
+    await evaluate('window.thoughtFixture.stream("Checking the transcript spacing")'); await wait();
+    assert.match((await state()).text, /Checking the transcript spacing/);
     assert.doesNotMatch((await state()).text, /Streaming reasoning/);
+    assert.equal(await evaluate('document.querySelector(".transcript-thinking-label").title'), 'Checking the transcript spacing');
     await evaluate('window.thoughtFixture.finishTools()'); await wait();
     assert.match((await state()).text, /npm run typecheck/);
     assert.doesNotMatch((await state()).text, /Used 2 tools/);
@@ -76,6 +81,8 @@ async function main() {
     await evaluate('window.thoughtFixture.waitWithoutReasoning()'); await wait();
     assert.equal((await state()).thinking, true, 'waiting indicator works without reasoning deltas');
     assert.doesNotMatch((await state()).text, /Finished reasoning/);
+    assert.match((await state()).text, /Thinking…/);
+    await evaluate('window.thoughtFixture.restart()'); await wait();
     const screenshotBase = process.env.LINGXI_THOUGHT_SCREENSHOT;
     const capture = async (suffix) => {
       if (!screenshotBase) return;
@@ -92,7 +99,18 @@ async function main() {
     await assertAgentRows();
     await capture('dark');
     win.setSize(440, 650); await wait();
+    await evaluate('window.thoughtFixture.stream("核对 thinking 与工具调用的间距。\\n".repeat(40))'); await wait();
     await assertAgentRows();
+    const narrowThinking = await evaluate(`(() => {
+      const row = document.querySelector('[data-run-type="thinking"]');
+      const label = row.querySelector('.transcript-thinking-label');
+      return { height: row.getBoundingClientRect().height, overflow: label.scrollWidth > label.clientWidth,
+        ellipsis: getComputedStyle(label).textOverflow, title: label.title, text: label.textContent };
+    })()`);
+    assert.equal(narrowThinking.height, 40, 'long streamed content must not grow the activity row');
+    assert.equal(narrowThinking.overflow, true);
+    assert.equal(narrowThinking.ellipsis, 'ellipsis');
+    assert.equal(narrowThinking.title, narrowThinking.text, 'the full content remains available on hover');
     await capture('narrow');
     process.stdout.write(JSON.stringify({ passed: true }) + '\n');
   } finally { win.destroy(); app.quit(); }

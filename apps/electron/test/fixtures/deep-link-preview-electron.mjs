@@ -1,3 +1,4 @@
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import assert from 'node:assert/strict';
 const url = process.argv.find(arg => arg.startsWith('http://'));
@@ -9,6 +10,7 @@ async function main() {
   window.webContents.on('console-message', event => { if (event.message.includes('Error')) process.stderr.write(event.message + '\n'); });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = script => window.webContents.executeJavaScript(script);
     const wait = async expression => { for (let i = 0; i < 300; i++) { if (await run(expression)) return; await delay(20); } throw new Error(`Timeout: ${expression}\n${await run('document.body.innerText')}`); };
     const exists = selector => wait(`Boolean(document.querySelector(${JSON.stringify(selector)}))`);
@@ -101,7 +103,7 @@ async function main() {
     await exists('[data-message-uuid="reasoning-message"]');
     assert.ok(await run('document.body.innerText.includes("Persisted reasoning-only target")'));
     assert.deepEqual((await state()).located, [true, true, true]);
-    process.stdout.write(JSON.stringify({ passed: true }) + '\n');
-  } finally { window.destroy(); app.quit(); }
+    await new Promise(resolve => process.stdout.write(JSON.stringify({ passed: true }) + '\n', resolve));
+  } finally { window.destroy(); }
 }
-main().catch(error => { process.stderr.write(`${error.stack ?? error}\n`); app.exit(1); });
+main().then(() => app.exit(0), error => { process.stderr.write(`${error.stack ?? error}\n`); app.exit(1); });

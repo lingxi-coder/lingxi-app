@@ -317,8 +317,8 @@ test('explicit agent activity suppresses only synthetic thinking, retaining live
     pendingActivity: '3 tool uses · 1200 tokens',
     liveItems: [{ type: 'thinking', id: 'reasoning-1', text: 'private reasoning', streamed: true }],
   }));
-  assert.ok(thinking.includes('Thinking'));
-  assert.ok(!thinking.includes('private reasoning'));
+  assert.ok(thinking.includes('private reasoning'));
+  assert.ok(!thinking.includes('Thinking…'));
   const tool = render(React.createElement(Stage, {
     running: true,
     pendingActivity: '3 tool uses · 1200 tokens',

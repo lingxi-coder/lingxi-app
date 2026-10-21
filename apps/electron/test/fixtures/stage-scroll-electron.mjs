@@ -53,6 +53,23 @@ async function main() {
         return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop, slotHeight: slot.getBoundingClientRect().height };
       })()`));
     }
+    result.activityLayouts = [];
+    for (const phase of ['running', 'empty-result', 'result', 'reasoning', 'next-tool', 'group-result', 'long-reasoning']) {
+      await run(`window.stageScrollFixture.activity(${JSON.stringify(phase)})`);
+      await settle();
+      result.activityLayouts.push(await run(`(() => {
+        const stage = document.querySelector('.desktop-stage');
+        const slot = document.querySelector('[data-thinking-slot]');
+        const tool = document.querySelector('[data-run-type="tool"]');
+        const previous = [...document.querySelectorAll('[data-run-type="narration"]')].at(-1);
+        return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop,
+          slotHeight: slot.getBoundingClientRect().height, toolHeight: tool.getBoundingClientRect().height,
+          toolGap: tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom,
+          thinkingGap: slot.getBoundingClientRect().top - tool.getBoundingClientRect().bottom };
+      })()`));
+    }
+    await run('window.stageScrollFixture.longList()');
+    await settle();
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
     await run(`document.querySelector('.transcript-thinking').style.height = '150px'`);
     await waitForFixture(window.webContents, `${metrics}.gap <= 1`);

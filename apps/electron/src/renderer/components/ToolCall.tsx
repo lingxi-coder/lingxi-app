@@ -275,7 +275,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       style={{
         maxWidth: 760,
         display: 'flex', flexDirection: 'column', gap: 4,
-        padding: '2px 0', position: 'relative',
+        padding: permissionRequest ? '2px 0' : 0, position: 'relative',
         '--tool-label-color': item.status === 'error' || permissionRequest ? t.text2 : t.text3,
         '--tool-hover-background': t.surfaceHover,
         '--tool-hover-color': t.text,
@@ -319,7 +319,8 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           </ModUiParentSite>
         </Disclosure>
       ) : (
-        <>
+        <div>
+          {/* An empty ToolResult site must not create a flex gap below the call. */}
           <div className="tool-call-line" style={{ minHeight: 40, padding: '2px 0' }}>
             {summary}
           </div>
@@ -333,7 +334,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
               engineFallback={null}
             />
           )}
-        </>
+        </div>
       )}
     </div>
   );

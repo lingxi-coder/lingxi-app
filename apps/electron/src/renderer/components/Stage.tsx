@@ -38,6 +38,15 @@ import {
 } from './nativeUiSiteProps';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
+function ThinkingLabel({ text }: { text: string }) {
+  const t = useT();
+  const content = text.trim();
+  return <span className="transcript-thinking-label running-sweep" title={content || undefined}
+    style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>
+    {content || 'Thinking…'}
+  </span>;
+}
+
 const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   item: Extract<RunItem, { type: 'narration' }>;
   open: boolean;
@@ -439,7 +448,8 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
   const liveItemById = useMemo(() => new Map(liveItems.map(item => [item.id, item])), [liveItems]);
   const firstAssistantById = useMemo(() => assistantFirstOfReplyByItem(liveItems), [liveItems]);
 
-  const tailThinking = rows.at(-1)?.type === 'thinking' ? rows.at(-1) : undefined;
+  const lastRow = rows.at(-1);
+  const tailThinking = lastRow?.type === 'thinking' ? lastRow : undefined;
 
   const newestPromptId = useMemo(() => {
     // `liveItems`, NOT the fold-filtered `items`: a closed `/loop` fold hides
@@ -714,6 +724,9 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           inserted, which is exactly what a streaming transcript does.
         */}
         {rows.map((item) => {
+          // The persistent slot renders the tail. An empty wrapper here would
+          // break the sibling spacing when that status appears or disappears.
+          if (item === tailThinking) return null;
           const content = (() => {
           if (activityView && item.type === 'tool-group' && !item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
@@ -771,7 +784,6 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
               </div>
             );
           }
-          if (item === tailThinking) return null;
           if (item.type === 'thinking') {
             // A backoff owns the waiting indicator while it lasts: "Thinking…"
             // during a multi-minute retry is what made a rate-limited turn look
@@ -779,7 +791,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             if (apiRetry) return <ApiRetryNotice key={item.id} retry={apiRetry} />;
             return (
               <div className="transcript-run-item transcript-thinking" data-run-type="thinking" key={item.id} role="status">
-                <span className="running-sweep" style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>Thinking…</span>
+                <ThinkingLabel text={item.text} />
               </div>
             );
           }
@@ -843,28 +855,24 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           }
           return null;
           })();
+          if (!content) return null;
           const sourceIds = item.type === 'tool-group' ? item.tools.map(tool => tool.id) : [item.id];
           const uuids = [...new Set(sourceIds.flatMap(id => {
             const source = liveItemById.get(id);
             return source ? transcriptRowUuids(source) : [];
           }))];
           const uuid = messageTarget && uuids.includes(messageTarget) ? messageTarget : uuids[0];
-          return <div key={item.id} data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined} style={uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : undefined}>{content}</div>;
+          return <div className="transcript-row" data-row-type={item.type} key={item.id} data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined} style={uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : undefined}>{content}</div>;
         })}
 
         {/* Keep the tail slot mounted even when thinking yields to another activity. */}
         {(rows.length > 0 || running) && (
-          <div className="transcript-run-item transcript-thinking" data-thinking-slot="true"
+          <div className="transcript-row transcript-run-item transcript-thinking" data-thinking-slot="true" data-row-type="thinking"
             data-run-type={tailThinking ? 'thinking' : undefined}
             aria-hidden={!tailThinking}
             role={tailThinking ? 'status' : undefined}
             style={{ visibility: tailThinking ? 'visible' : 'hidden' }}>
-            {tailThinking && apiRetry ? <ApiRetryNotice retry={apiRetry} /> : (
-              <span className={tailThinking ? 'running-sweep' : undefined}
-                style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>
-                {tailThinking ? 'Thinking…' : '\u00a0'}
-              </span>
-            )}
+            {tailThinking ? apiRetry ? <ApiRetryNotice retry={apiRetry} /> : <ThinkingLabel text={tailThinking.text} /> : null}
           </div>
         )}
 

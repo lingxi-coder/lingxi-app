@@ -192,7 +192,6 @@ fun ChatScreen(
     linkedDetailKey: String? = null,
     onLinkedDetailHandled: () -> Unit = {},
     linkedMessageUuid: String? = null,
-    linkWorkspace: String? = null,
     onMessageLinkHandled: (Boolean) -> Unit = {},
 ) {
     val suggestionLifecycle = LocalLifecycleOwner.current.lifecycle
@@ -339,7 +338,6 @@ fun ChatScreen(
                         items = renderItems,
                         listState = listState,
                         onShare = onShare,
-                        linkWorkspace = linkWorkspace,
                         linkedRowHighlight = linkedRowHighlight,
                         onOpenTerminal = onOpenTerminal,
                         onToggleToolCall = onToggleToolCall,
@@ -575,7 +573,6 @@ private fun MessageList(
     items: List<ChatRenderItem>,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onShare: (String) -> Unit = {},
-    linkWorkspace: String? = null,
     linkedRowHighlight: String? = null,
     onOpenTerminal: (sessionId: String, initCommand: String) -> Unit = { _, _ -> },
     onToggleToolCall: (String) -> Unit = {},
@@ -629,14 +626,6 @@ private fun MessageList(
                 }
                 is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                     ToolGroupView(TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall)
-                    val toolIds = item.calls.map { it.id }.toSet()
-                    val linkedMessages = state.messages.filter { message -> message.transcriptUuid != null && message.blocks.filterIsInstance<MessageContent.Tool>().any { it.call.id in toolIds } }
-                        .distinctBy { it.transcriptUuid }
-                    linkedMessages.forEach { message ->
-                        val label = if (linkedMessages.size == 1) "Copy message link" else "Copy link: " + message.blocks.filterIsInstance<MessageContent.Tool>()
-                            .filter { it.call.id in toolIds }.joinToString(", ") { it.call.header?.title ?: it.call.tool }.take(80)
-                        CopyMessageLink(state.session.id, checkNotNull(message.transcriptUuid), linkWorkspace, label)
-                    }
                 }
                 is ChatRenderItem.Message -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                     MessageBubble(
@@ -646,7 +635,6 @@ private fun MessageList(
                         expandedToolCalls = state.expandedToolCalls,
                         onToggleToolCall = stableOnToggleToolCall,
                     )
-                    item.message.transcriptUuid?.let { uuid -> CopyMessageLink(state.session.id, uuid, linkWorkspace) }
                 }
                 is ChatRenderItem.Streaming -> MessageBubble(
                     message = item.message,
@@ -998,13 +986,4 @@ internal fun sendComposerIfAdmitted(
     clearDraft()
     removeAttachment()
     followTail()
-}
-
-@Composable
-private fun CopyMessageLink(sessionId: String, uuid: String, workspace: String?, label: String = "Copy message link") {
-    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
-    androidx.compose.material3.TextButton(onClick = {
-        val params = buildMap { put("message", uuid); workspace?.let { put("workspace", it) } }
-        clipboard.setText(androidx.compose.ui.text.AnnotatedString(com.lingxi.code.navigation.DeepLink.build("session/${sessionId.removePrefix("sess:")}", params)))
-    }) { Text(label) }
 }

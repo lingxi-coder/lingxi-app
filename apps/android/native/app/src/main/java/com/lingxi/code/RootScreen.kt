@@ -2013,7 +2013,6 @@ fun RootScreen(
                     linkedDetailKey = linkedDetailKey,
                     onLinkedDetailHandled = { linkedDetailKey = null },
                     linkedMessageUuid = requestedMessageUuid,
-                    linkWorkspace = sourceScope.persistenceKey(),
                     onMessageLinkHandled = messageHandled@ { found ->
                         if (requestedMessageUuid == null || linkedMessageUuid != requestedMessageUuid || messageRequest != linkedMessageRequest || linkedSessionId != latestSessionId || linkedScopeModeKey != latestScopeModeKey || linkedMessageSource !== chatViewModel.engineSource.value) return@messageHandled
                         if (!found) {

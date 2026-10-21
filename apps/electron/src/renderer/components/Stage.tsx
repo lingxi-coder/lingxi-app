@@ -289,7 +289,6 @@ import { foldOwners, visibleRows } from './loopFold';
 // ─── STAGE (the agent run scrollback) ────────────────────────
 interface StageProps {
   messageTarget?: string | null;
-  onCopyMessage?(uuid: string): void;
   onMessageLocated?(found: boolean): void;
   activityView?: boolean;
   onReviewFiles?(id: string, files: readonly TurnFileChange[], path?: string): void;

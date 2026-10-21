@@ -572,13 +572,6 @@ struct ChatView: View {
 
     private var summaryMenu: some View {
         Menu {
-            if let url = ConversationDeepLink.makeURL(sessionID: convo.activeSessionId, turnID: nil, workspaceKey: workspaceKey, sessionMode: sessionMode.rawValue) {
-                Button("Copy conversation link", systemImage: "link") { UIPasteboard.general.url = url }
-            }
-            if convo.selectedAgentID != ConversationModel.mainAgentID,
-               let url = ConversationDeepLink.makeURL(route: ["runtime", "agent", convo.selectedAgentID], parameters: ["workspace": workspaceKey, "mode": sessionMode.rawValue]) {
-                Button("Copy agent link", systemImage: "link") { UIPasteboard.general.url = url }
-            }
             ForEach(summaryCategories) { category in
                 Button {
                     summaryDetent = .medium
@@ -693,11 +686,7 @@ struct ChatView: View {
                     showThinking: canShowTranscriptThinking,
                     // An agent's widgets live in its origin session's store.
                     visualizationSessionId: convo.activeSessionId,
-                    linkWorkspaceKey: workspaceKey,
-                    linkSessionMode: sessionMode.rawValue,
                     highlightedRowID: convo.deepLinkScrollRowID,
-                    transcriptUUIDToolIDs: convo.transcriptUUIDToolIDs,
-                    allowsMessageLinks: !showsSelectedAgent,
                     onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             } else if convo.isAgentTranscriptLoading {
@@ -718,11 +707,7 @@ struct ChatView: View {
                     showThinking: canShowTranscriptThinking,
                     // An agent's widgets live in its origin session's store.
                     visualizationSessionId: convo.activeSessionId,
-                    linkWorkspaceKey: workspaceKey,
-                    linkSessionMode: sessionMode.rawValue,
                     highlightedRowID: convo.deepLinkScrollRowID,
-                    transcriptUUIDToolIDs: convo.transcriptUUIDToolIDs,
-                    allowsMessageLinks: !showsSelectedAgent,
                     onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             }

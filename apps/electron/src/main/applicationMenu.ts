@@ -18,7 +18,6 @@ export function applicationMenuTemplate(
     ] }] : [{ label: 'File', submenu: [settings, { type: 'separator' as const }, { role: 'quit' as const }] }]),
     { role: 'editMenu' },
     { label: 'Links', submenu: [
-      { label: 'Copy Session Link', click: () => dispatch('copy-session-link') },
       { label: 'Open Link from Clipboard', click: () => dispatch('open-link') },
     ] },
     { label: 'View', submenu: [

@@ -127,10 +127,7 @@ export function App() {
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
   }, []);
   useEffect(() => window.lingxi?.onApplicationMenu?.((action) => {
-    if (action === 'copy-session-link') {
-      const active = bridge.activeSession;
-      if (active) void window.lingxi?.deepLinks.copySessionLink(active.projectPath, active.sessionId).catch(() => undefined);
-    } else if (action === 'settings') {
+    if (action === 'settings') {
       // Preserve the original focus restoration target when already open.
       if (!settingsRoute) openSettings();
     } else if (action === 'activity' && !settingsRoute) {
@@ -138,7 +135,7 @@ export function App() {
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
     }
-  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen, bridge.activeSession]);
+  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
@@ -298,10 +295,6 @@ export function App() {
                 <Stage
                   messageTarget={!bridge.sessionLoading && (!messageRequest || bridge.conversation.sessionKey === messageRequest.sessionId) ? messageTarget : null}
                   onMessageLocated={onMessageLocated}
-                  onCopyMessage={(uuid) => {
-                    const active = bridge.activeSession;
-                    if (active) void window.lingxi?.deepLinks.copySessionLink(active.projectPath, active.sessionId, uuid).catch(() => undefined);
-                  }}
                   activityView={activityView}
                   onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
                   submittedPlans={bridge.sessionLoading ? [] : planCalls}

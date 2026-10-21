@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -15,6 +17,7 @@ import com.lingxi.code.bindings.runtime.VisualizationMountDto
 import com.lingxi.code.bindings.runtime.VisualizationResponseDto
 import com.lingxi.code.bindings.runtime.VisualizationThemeDto
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.voice.buildVoiceEngine
 import java.io.File
 import java.util.UUID
@@ -30,6 +33,76 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class VisualizationCardUiTest {
     @get:Rule val rule = createComposeRule()
+
+    @Test fun expansionKeepsOneMountAndTheWidgetsJavaScriptState() {
+        val host = ShellHost()
+        val followups = mutableListOf<String>()
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                CompositionLocalProvider(
+                    LocalVisualizationContext provides VisualizationScreenContext(host, "session", false, {
+                        followups += it.text
+                    }),
+                ) {
+                    VisualizationCard(VisualizationSlotStatus.Ready, VisualizationRef("chart", 1u))
+                }
+            }
+        }
+        rule.waitUntil(10_000) { host.mounts.get() == 1 }
+        val loading = InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.visualization_loading)
+        rule.waitUntil(10_000) { rule.onAllNodesWithText(loading).fetchSemanticsNodes().isEmpty() }
+        rule.onNodeWithTag("conversation.visualization.expand").performClick()
+        rule.onNodeWithTag("conversation.visualization.close").assertIsDisplayed()
+        rule.waitUntil(10_000) { followups.size == 1 }
+        rule.onNodeWithTag("conversation.visualization.close").performClick()
+        rule.onNodeWithTag("conversation.visualization.expand").assertIsDisplayed()
+        rule.waitUntil(10_000) { followups.size == 2 }
+        rule.runOnIdle {
+            assertEquals(listOf("expanded:1", "expanded:2"), followups)
+            assertEquals(1, host.mounts.get())
+            assertEquals(0, host.releases.get())
+        }
+    }
+
+    @Test fun failedMountCanBeRetriedFromTheCard() {
+        val host = ShellHost(failFirstMount = true)
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                CompositionLocalProvider(
+                    LocalVisualizationContext provides VisualizationScreenContext(host, "session", false, {}),
+                ) {
+                    VisualizationCard(VisualizationSlotStatus.Ready, VisualizationRef("chart", 1u))
+                }
+            }
+        }
+        rule.waitUntil(10_000) {
+            rule.onAllNodesWithText(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.common_retry))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNodeWithTag("conversation.visualization.retry").performClick()
+        val loading = InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.visualization_loading)
+        rule.waitUntil(10_000) { host.mounts.get() == 2 && rule.onAllNodesWithText(loading).fetchSemanticsNodes().isEmpty() }
+        rule.onNodeWithTag("conversation.visualization").assertIsDisplayed()
+    }
+
+    @Test fun skillInstructionsStayCollapsedUntilOpened() {
+        val expanded = mutableStateOf(false)
+        val body = "Publish a small, self-contained HTML widget with the Visualization tool."
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                ToolCallView(
+                    call = ToolCallUi(id = "skill", tool = "Skill", status = AgentToolStatus.Completed,
+                        header = ToolHeaderUi(ToolVerbUi.Skill, "Skill", primary = "visualize", title = "Skill(visualize)"),
+                        display = ToolResultDisplayUi(headline = "Launching skill: visualize", body = body, bodyLines = 100)),
+                    expanded = expanded.value,
+                    onToggleExpanded = { expanded.value = !expanded.value },
+                )
+            }
+        }
+        rule.onNodeWithText(body).assertDoesNotExist()
+        rule.onNodeWithTag(UiTags.TOOL_CALL_TOGGLE).performClick()
+        rule.onNodeWithText(body, substring = true).assertIsDisplayed()
+    }
 
     @Test fun firstSessionWaitsForItsOwnerBeforeMounting() {
         val host = ShellHost()
@@ -171,7 +244,7 @@ class VisualizationCardUiTest {
         assertTrue(host.releases.get() == host.mounts.get())
     }
 
-    private class ShellHost(private val gate: CountDownLatch? = null) : VisualizationHost(NoHandle) {
+    private class ShellHost(private val gate: CountDownLatch? = null, private val failFirstMount: Boolean = false) : VisualizationHost(NoHandle) {
         val mounts = AtomicInteger()
         val releases = AtomicInteger()
 
@@ -185,7 +258,8 @@ class VisualizationCardUiTest {
             locale: String,
             expanded: Boolean,
         ): VisualizationMountDto {
-            mounts.incrementAndGet()
+            val attempt = mounts.incrementAndGet()
+            if (failFirstMount && attempt == 1) error("Mount unavailable")
             gate?.await(10, TimeUnit.SECONDS)
             return VisualizationMountDto("ticket", 1uL, "$VISUALIZATION_ORIGIN/doc/test", "Chart")
         }
@@ -196,10 +270,13 @@ class VisualizationCardUiTest {
             val html = """
                 <!doctype html><script>
                 const bridge = window.lingxiVisualization;
+                let expansionCount = 0;
                 bridge.onmessage = event => {
                   const message = JSON.parse(event.data);
                   if (message.type === 'mount') {
                     bridge.postMessage(JSON.stringify({type:'ready', generation:message.generation}));
+                  } else if (message.type === 'expanded') {
+                    bridge.postMessage(JSON.stringify({type:'followup.draft', generation:message.generation, text:'expanded:' + (++expansionCount)}));
                   }
                 };
                 bridge.postMessage(JSON.stringify({type:'shell.ready'}));

@@ -1777,6 +1777,7 @@
     <string name="visualization_loading">正在加载可视化…</string>
     <string name="visualization_unavailable">此可视化已不可用。</string>
     <string name="visualization_label">可视化</string>
+    <string name="visualization_expand">展开可视化</string>
     <string name="visualization_remove_context">移除可视化上下文</string>
     <string name="common_submit">提交</string>
     <string name="cron_run_section_overview">概览</string>

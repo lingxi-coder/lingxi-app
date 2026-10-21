@@ -1777,6 +1777,7 @@
     <string name="visualization_loading">ビジュアライゼーションを読み込み中…</string>
     <string name="visualization_unavailable">このビジュアライゼーションは利用できなくなりました。</string>
     <string name="visualization_label">ビジュアライゼーション</string>
+    <string name="visualization_expand">ビジュアライゼーションを拡大</string>
     <string name="visualization_remove_context">ビジュアライゼーションのコンテキストを削除</string>
     <string name="common_submit">送信</string>
     <string name="cron_run_section_overview">概要</string>

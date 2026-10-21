@@ -1668,7 +1668,12 @@ class ChatViewModel(
                 pendingNewSession && restored.kind == SessionActivationKind.Started
             if (!matchesPendingResume && !matchesPendingNew) return
         }
-        if (restored.kind == SessionActivationKind.Started && !current.sessionTransitioning) {
+        // A startup listing only binds an unowned conversation. In particular,
+        // it cannot confirm a pending NewSession/Resume or replace an owner.
+        if (restored.kind == SessionActivationKind.Bootstrap && current.session.id != "new") return
+        if ((restored.kind == SessionActivationKind.Started || restored.kind == SessionActivationKind.Bootstrap)
+            && !current.sessionTransitioning
+        ) {
             // The first prompt can already be streaming when engine bootstrap
             // announces its owner. Bind that identity without abandoning the
             // collector or clearing the optimistic prompt and widget slots.

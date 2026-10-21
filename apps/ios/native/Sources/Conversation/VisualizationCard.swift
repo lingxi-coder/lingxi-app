@@ -139,6 +139,7 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
     @Published private(set) var phase: Phase = .loading
     @Published private(set) var height: CGFloat = 160
     @Published private(set) var title: String = ""
+    @Published private(set) var isExpanded = false
 
     let sessionId: String
     let id: String
@@ -146,6 +147,10 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
     var dark: Bool
     var onFollowup: ((VisualizationFollowup) -> Void)?
     private(set) var webView: WKWebView?
+    private weak var inlineContainer: UIView?
+    private weak var expandedContainer: UIView?
+    private var preparingWebView = false
+    private var webViewWaiters: [(WKWebView?) -> Void] = []
     /// Keep serving, mounting and state writes on the same engine instance.
     private var host: VisualizationHost?
     private var mount: VisualizationMountDto?
@@ -162,19 +167,21 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
 
     func makeWebView(_ completion: @escaping (WKWebView?) -> Void) {
         if let webView { return completion(webView) }
+        webViewWaiters.append(completion)
+        guard !preparingWebView else { return }
+        preparingWebView = true
         let lifecycle = self.lifecycle
         guard let host = VisualizationWebHost.shared.host else {
             VisualizationWebHost.log.error("Cannot create widget: visualization host is not attached")
             phase = .unavailable
-            return completion(nil)
+            return finishWebViewCreation(nil)
         }
         VisualizationWebHost.shared.withRuleList { [weak self] rules in
-            guard let self else { return completion(nil) }
-            guard self.lifecycle == lifecycle else { return completion(nil) }
+            guard let self, self.lifecycle == lifecycle else { return }
             // Without the network block the widget does not load at all.
             guard let rules else {
                 self.phase = .unavailable
-                return completion(nil)
+                return self.finishWebViewCreation(nil)
             }
             self.host = host
             let configuration = WKWebViewConfiguration()
@@ -204,7 +211,68 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
             #endif
             self.webView = view
             view.load(URLRequest(url: VisualizationWebHost.shellURL))
-            completion(view)
+            self.finishWebViewCreation(view)
+        }
+    }
+
+    private func finishWebViewCreation(_ view: WKWebView?) {
+        preparingWebView = false
+        let waiters = webViewWaiters
+        webViewWaiters = []
+        waiters.forEach { $0(view) }
+    }
+
+    /// Move the existing view between its inline slot and the full-screen sheet.
+    /// The document, mount token and in-memory widget state survive presentation.
+    func attachWebView(to container: UIView, expanded: Bool) {
+        if expanded { expandedContainer = container } else { inlineContainer = container }
+        makeWebView { [weak self] _ in self?.placeWebView() }
+    }
+
+    func detachWebView(from container: UIView, expanded: Bool) {
+        if expanded {
+            guard expandedContainer === container else { return }
+            expandedContainer = nil
+            setExpanded(false)
+        } else {
+            guard inlineContainer === container else { return }
+            inlineContainer = nil
+        }
+        if inlineContainer == nil && expandedContainer == nil {
+            suspend()
+        } else {
+            placeWebView()
+        }
+    }
+
+    private func placeWebView() {
+        guard let view = webView, let container = expandedContainer ?? inlineContainer,
+              view.superview !== container else { return }
+        view.removeFromSuperview()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+    }
+
+    func setExpanded(_ expanded: Bool) {
+        guard expanded != isExpanded else { return }
+        isExpanded = expanded
+        if let mount {
+            post(["type": "expanded", "generation": mount.generation, "expanded": expanded])
+        }
+    }
+
+    func retry() {
+        phase = .loading
+        if webView != nil {
+            remount()
+        } else {
+            makeWebView { [weak self] _ in self?.placeWebView() }
         }
     }
 
@@ -220,6 +288,8 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
         webView = nil
         host = nil
         phase = .loading
+        isExpanded = false
+        finishWebViewCreation(nil)
     }
 
     private func retire() {
@@ -276,6 +346,8 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
                     chip: VisualizationContextChip(id: id, revision: revision, title: mount.title)
                 ))
             }
+        case "expand.request":
+            setExpanded(true)
         case "crashed":
             phase = .crashed
             remount()
@@ -291,7 +363,7 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
             phase = .unavailable
             return
         }
-        let (sessionId, id, revision, dark) = (self.sessionId, self.id, self.revision, self.dark)
+        let (sessionId, id, revision, dark, expanded) = (self.sessionId, self.id, self.revision, self.dark, isExpanded)
         let lifecycle = self.lifecycle
         let locale = Locale.preferredLanguages.first ?? "en"
         VisualizationWebHost.shared.queue.async {
@@ -301,7 +373,7 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
                 revision: revision,
                 themeDto: VisualizationThemeDto(dark: dark, tokens: [:]),
                 locale: locale,
-                expanded: false
+                expanded: expanded
             )
             if ticket == nil {
                 let stored = host.list(sessionId: sessionId).count
@@ -326,7 +398,7 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
                     "docUrl": ticket.docUrl,
                     "title": ticket.title,
                     "maxHeight": Double(VisualizationWebHost.maxInlineHeight),
-                    "expanded": false,
+                    "expanded": self.isExpanded,
                 ])
             }
         }
@@ -407,31 +479,31 @@ final class VisualizationWidgetController: NSObject, ObservableObject, WKScriptM
 /// Hosts the controller's web view inside SwiftUI.
 private struct VisualizationWebViewRepresentable: UIViewRepresentable {
     let controller: VisualizationWidgetController
+    var expanded = false
 
-    func makeCoordinator() -> VisualizationWidgetController { controller }
+    final class Coordinator {
+        let controller: VisualizationWidgetController
+        let expanded: Bool
+
+        init(controller: VisualizationWidgetController, expanded: Bool) {
+            self.controller = controller
+            self.expanded = expanded
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(controller: controller, expanded: expanded) }
 
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
         container.backgroundColor = .clear
-        controller.makeWebView { view in
-            guard let view else { return }
-            view.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(view)
-            NSLayoutConstraint.activate([
-                view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                view.topAnchor.constraint(equalTo: container.topAnchor),
-                view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            ])
-        }
+        controller.attachWebView(to: container, expanded: expanded)
         return container
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {}
 
-    static func dismantleUIView(_ uiView: UIView, coordinator: VisualizationWidgetController) {
-        coordinator.suspend()
-        uiView.subviews.forEach { $0.removeFromSuperview() }
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.controller.detachWebView(from: uiView, expanded: coordinator.expanded)
     }
 }
 
@@ -459,6 +531,7 @@ struct VisualizationCardView: View {
 }
 
 private struct VisualizationLiveCard: View {
+    @Environment(\.theme) private var t
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var controller: VisualizationWidgetController
     let onFollowup: (VisualizationFollowup) -> Void
@@ -471,43 +544,154 @@ private struct VisualizationLiveCard: View {
     }
 
     var body: some View {
-        ZStack {
-            if controller.phase == .unavailable {
-                VisualizationNoteView(text: String(localized: "visualization_unavailable"), busy: false)
-            } else {
+        VStack(spacing: 0) {
+            VisualizationToolbar(controller: controller)
+            Rectangle().fill(t.border.opacity(0.65)).frame(height: 0.5)
+            ZStack {
                 VisualizationWebViewRepresentable(controller: controller)
-                    .frame(height: controller.height)
+                    .frame(height: controller.phase == .ready ? controller.height : max(160, controller.height))
                     .accessibilityLabel(controller.title.isEmpty
                         ? String(localized: "visualization_label")
                         : controller.title)
-                if controller.phase != .ready {
-                    VisualizationNoteView(text: String(localized: "visualization_loading"), busy: true)
+                if controller.phase != .ready || controller.isExpanded {
+                    VisualizationStatusView(controller: controller)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(t.windowBg)
                 }
             }
         }
+        .background(t.windowBg)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(t.border.opacity(0.7), lineWidth: 0.5))
         .onAppear {
             controller.dark = colorScheme == .dark
             controller.onFollowup = onFollowup
         }
         .onChange(of: colorScheme) { _, scheme in controller.setDark(scheme == .dark) }
+        .fullScreenCover(isPresented: Binding(get: { controller.isExpanded }, set: controller.setExpanded)) {
+            VisualizationExpandedView(controller: controller)
+                .environment(\.theme, t)
+        }
+    }
+}
+
+private struct VisualizationToolbar: View {
+    @Environment(\.theme) private var t
+    @ObservedObject var controller: VisualizationWidgetController
+    var expanded = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.footnote)
+                .foregroundStyle(t.text3)
+            Text(controller.title.isEmpty ? String(localized: "visualization_label") : controller.title)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(t.text2)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button { controller.setExpanded(!expanded) } label: {
+                Label(expanded ? String(localized: "visualization_close") : String(localized: "visualization_expand"),
+                      systemImage: expanded ? "xmark" : "arrow.up.left.and.arrow.down.right")
+                    .labelStyle(.iconOnly)
+                    .font(.footnote)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(t.text3)
+            .accessibilityIdentifier(expanded ? "visualization.close" : "visualization.expand")
+        }
+        .frame(minHeight: 44)
+        .padding(.leading, 14)
+        .padding(.trailing, 4)
+    }
+}
+
+private struct VisualizationExpandedView: View {
+    @Environment(\.theme) private var t
+    @ObservedObject var controller: VisualizationWidgetController
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VisualizationToolbar(controller: controller, expanded: true)
+            Rectangle().fill(t.border.opacity(0.65)).frame(height: 0.5)
+            ZStack {
+                VisualizationWebViewRepresentable(controller: controller, expanded: true)
+                if controller.phase != .ready {
+                    VisualizationStatusView(controller: controller)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(t.windowBg)
+                }
+            }
+        }
+        .background(t.windowBg)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("visualization.expanded")
+    }
+}
+
+private struct VisualizationStatusView: View {
+    @Environment(\.theme) private var t
+    @ObservedObject var controller: VisualizationWidgetController
+
+    private var isUnavailable: Bool { controller.phase == .unavailable || controller.phase == .crashed }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if isUnavailable {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.title3)
+                    .foregroundStyle(t.text4)
+                Text("visualization_unavailable")
+                    .font(.footnote)
+                    .foregroundStyle(t.text3)
+                    .multilineTextAlignment(.center)
+                Button(action: controller.retry) {
+                    Label("visualization_retry", systemImage: "arrow.clockwise")
+                        .font(.footnote.weight(.medium))
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 44)
+                        .background(t.surface, in: .rect(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(t.text2)
+                .accessibilityIdentifier("visualization.retry")
+            } else if controller.isExpanded && controller.phase == .ready {
+                Text("visualization_expanded")
+                    .font(.footnote)
+                    .foregroundStyle(t.text3)
+            } else {
+                ProgressView().controlSize(.small).tint(t.text3)
+                Text("visualization_loading")
+                    .font(.footnote)
+                    .foregroundStyle(t.text3)
+            }
+        }
+        .padding(20)
     }
 }
 
 private struct VisualizationNoteView: View {
+    @Environment(\.theme) private var t
     let text: String
     let busy: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            if busy { ProgressView().controlSize(.small) }
-            Text(text).font(.footnote).foregroundStyle(.secondary)
+            if busy {
+                ProgressView().controlSize(.small).tint(t.text3)
+            } else {
+                Image(systemName: "chart.bar.xaxis").font(.footnote).foregroundStyle(t.text3)
+            }
+            Text(text).font(.footnote).foregroundStyle(t.text3)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, minHeight: busy ? 96 : nil, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(.secondarySystemBackground)))
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .background(t.windowBg, in: .rect(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border.opacity(0.7), lineWidth: 0.5))
     }
 }
 

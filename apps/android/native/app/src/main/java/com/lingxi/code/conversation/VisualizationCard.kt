@@ -3,6 +3,7 @@ package com.lingxi.code.conversation
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
@@ -18,6 +19,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,7 +29,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -47,9 +57,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -183,12 +197,22 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
     var phase by remember { mutableStateOf(WidgetPhase.Loading) }
     var heightDp by remember { mutableIntStateOf(160) }
     var title by remember { mutableStateOf("") }
+    // Callbacks read this shared state cell, including after an async mount.
+    var expanded by remember { mutableStateOf(false) }
     // Bumped when the renderer dies: the old WebView is unusable and is rebuilt.
     var generation by remember { mutableIntStateOf(0) }
     val onFollowup by rememberUpdatedState(context.onFollowup)
     val dark by rememberUpdatedState(context.dark)
     var mountedDark by remember { mutableStateOf(context.dark) }
     val locale = remember { Locale.getDefault().toLanguageTag() }
+
+    fun setExpanded(next: Boolean) {
+        expanded = next
+        session.mount?.let { mount ->
+            session.post(JSONObject().put("type", "expanded")
+                .put("generation", mount.generation.toLong()).put("expanded", next))
+        }
+    }
 
     fun mountWidget() {
         session.retire()
@@ -205,7 +229,7 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
                             revision = reference.revision,
                             themeDto = VisualizationThemeDto(dark = dark, tokens = emptyMap()),
                             locale = locale,
-                            expanded = false,
+                            expanded = expanded,
                         )
                     }.getOrNull()
                 }
@@ -225,7 +249,7 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
                         .put("docUrl", ticket.docUrl)
                         .put("title", ticket.title)
                         .put("maxHeight", MAX_INLINE_HEIGHT_DP)
-                        .put("expanded", false),
+                        .put("expanded", expanded),
                 )
             } finally {
                 // withContext can discard its result on cancellation after the
@@ -286,6 +310,7 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
             "resize" -> (body.opt("height") as? Number)?.toDouble()
                 ?.takeIf { it.isFinite() }
                 ?.let { heightDp = kotlin.math.ceil(it).toInt().coerceIn(MIN_HEIGHT_DP, MAX_INLINE_HEIGHT_DP) }
+            "expand.request" -> setExpanded(true)
             "state.save" -> saveState(body, mount)
             "followup.draft" -> body.optString("text").takeIf { it.isNotBlank() }?.let { text ->
                 onFollowup(
@@ -310,21 +335,20 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
         session.webView?.loadUrl(session.host.shellUrl())
     }
 
+    val t = LingXiTheme.palette
     val label = title.ifEmpty { stringResource(R.string.visualization_label) }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .semantics { contentDescription = label },
-    ) {
-        if (phase == WidgetPhase.Unavailable) {
-            VisualizationNote(stringResource(R.string.visualization_unavailable), busy = false)
-        } else {
+    fun retry() {
+        phase = WidgetPhase.Loading
+        session.retire()
+        session.webView?.loadUrl(session.host.shellUrl())
+    }
+    val widgetSurface: @Composable (Modifier) -> Unit = { surfaceModifier ->
+        Box(modifier = surfaceModifier.semantics { contentDescription = label }) {
             key(generation) {
                 AndroidView(
-                    modifier = Modifier.fillMaxWidth().height(heightDp.dp).testTag("conversation.visualization"),
+                    modifier = Modifier.fillMaxSize().testTag("conversation.visualization"),
                     factory = { viewContext ->
-                        WebView(viewContext).apply view@{
+                        val webView = session.webView ?: WebView(viewContext).apply view@{
                             session.webView = this
                             WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
                             setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -434,17 +458,86 @@ private fun VisualizationLiveCard(context: VisualizationScreenContext, reference
                             }
                             loadUrl(session.host.shellUrl())
                         }
+                        // Expansion changes only the native container. The same
+                        // WebView, mount and private widget state stay alive.
+                        FrameLayout(viewContext).apply {
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            addView(webView, FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            ))
+                        }
                     },
                 )
             }
             if (phase != WidgetPhase.Ready) {
-                VisualizationNote(stringResource(R.string.visualization_loading), busy = true)
+                Column(
+                    modifier = Modifier.fillMaxSize().background(t.surface),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    VisualizationNote(
+                        stringResource(if (phase == WidgetPhase.Unavailable) R.string.visualization_unavailable
+                            else R.string.visualization_loading),
+                        busy = phase == WidgetPhase.Loading,
+                    )
+                    if (phase == WidgetPhase.Unavailable) {
+                        TextButton(onClick = ::retry, modifier = Modifier.testTag("conversation.visualization.retry")) {
+                            Text(stringResource(R.string.common_retry), color = t.text)
+                        }
+                    }
+                }
             }
+        }
+    }
+    if (expanded) {
+        // Keep the transcript row's place while its only runtime is in the dialog.
+        Box(Modifier.fillMaxWidth().height((heightDp + 48).dp))
+        Dialog(
+            onDismissRequest = { setExpanded(false) },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Column(Modifier.fillMaxSize().background(t.surface)) {
+                VisualizationToolbar(label, expanded = true, onToggleExpanded = { setExpanded(false) })
+                HorizontalDivider(color = t.border, thickness = 0.5.dp)
+                widgetSurface(Modifier.fillMaxWidth().weight(1f))
+            }
+        }
+    } else {
+        val shape = RoundedCornerShape(12.dp)
+        Column(Modifier.fillMaxWidth().clip(shape).background(t.surface).border(0.5.dp, t.border, shape)) {
+            VisualizationToolbar(label, expanded = false, onToggleExpanded = { setExpanded(true) })
+            HorizontalDivider(color = t.border, thickness = 0.5.dp)
+            widgetSurface(Modifier.fillMaxWidth().height(heightDp.dp))
         }
     }
 
     DisposableEffect(Unit) {
         onDispose { session.destroy() }
+    }
+}
+
+@Composable
+private fun VisualizationToolbar(title: String, expanded: Boolean, onToggleExpanded: () -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 14.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Icon(Icons.Outlined.BarChart, contentDescription = null, tint = t.text3, modifier = Modifier.size(17.dp))
+        Text(title, modifier = Modifier.weight(1f), color = t.text2, fontSize = 13.sp,
+            fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        IconButton(onClick = onToggleExpanded,
+            modifier = Modifier.testTag(if (expanded) "conversation.visualization.close" else "conversation.visualization.expand")) {
+            if (expanded) {
+                LXIcon(LXIconName.X, size = 18.dp, color = t.text3,
+                    contentDescription = stringResource(R.string.common_close))
+            } else {
+                Icon(Icons.Outlined.OpenInFull, contentDescription = stringResource(R.string.visualization_expand),
+                    tint = t.text3, modifier = Modifier.size(17.dp))
+            }
+        }
     }
 }
 
@@ -455,12 +548,12 @@ private fun VisualizationNote(text: String, busy: Boolean) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = if (busy) 96.dp else 0.dp)
+            .heightIn(min = 48.dp)
             .clip(shape)
             .background(t.surface)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.Top,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         if (busy) CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = t.text3)
         Text(text = text, color = t.text3, fontSize = 13.sp)

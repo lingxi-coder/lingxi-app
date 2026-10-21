@@ -1777,6 +1777,7 @@
     <string name="visualization_loading">시각화 불러오는 중…</string>
     <string name="visualization_unavailable">이 시각화는 더 이상 사용할 수 없습니다.</string>
     <string name="visualization_label">시각화</string>
+    <string name="visualization_expand">시각화 확대</string>
     <string name="visualization_remove_context">시각화 컨텍스트 제거</string>
     <string name="common_submit">제출</string>
     <string name="cron_run_section_overview">개요</string>

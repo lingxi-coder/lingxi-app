@@ -21,6 +21,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     style,
   };
   switch (name) {
+    case 'visualization': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="4" /><path d="M7 16v-4m5 4V8m5 8v-6" /></svg>;
     // Codex avatar from app-primary and node-to-node-path-light-16 from
     // open-sources-side-panel-tab-65eeed587bdb.js (2026-09-07).
     case 'subagent': return <img src={new URL('../assets/codex-subagent.svg', import.meta.url).href} width={size} height={size} alt="" style={style} />;

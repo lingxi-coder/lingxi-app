@@ -130,9 +130,7 @@ internal fun ExecutionStatusPanel(
                 SectionLabel(stringResource(R.string.chat_execution_tasks))
                 val workflowByTask = workflows.associateBy { it.taskId }
                 tasks.sortedWith(compareBy<BackgroundTaskUi> { it.status.isTerminal() }.thenByDescending { it.startedAtMs ?: 0u })
-                    // Keep every active/paused row visible so a Resume action
-                    // cannot disappear behind the completed-task cap.
-                    .take(3 + tasks.count { !it.status.isTerminal() })
+                    // The summary sheet scrolls: retain completed tasks and their details too.
                     .forEach { task ->
                         TaskSummaryRow(
                             task = task,

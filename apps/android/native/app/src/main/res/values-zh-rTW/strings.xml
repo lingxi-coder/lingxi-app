@@ -157,7 +157,7 @@
     <string name="chat_model_not_configured_detail">新增 LLM Provider 並選擇模型後即可開始對話</string>
     <string name="chat_model_not_configured_title">尚未設定模型</string>
     <string name="chat_new_chat">新建對話</string>
-    <string name="chat_new_chat_hint">隨便說點什麼，或輕點輸入框旁的波形按鈕開啟心流模式。</string>
+    <string name="chat_new_chat_hint">描述你想讓 LingXi 完成的事情</string>
     <string name="chat_new_conversation">新對話</string>
     <string name="chat_new_session_failed">新建會話失敗</string>
     <string name="chat_notice_cancelled">已取消本輪。</string>

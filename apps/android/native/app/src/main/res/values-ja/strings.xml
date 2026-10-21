@@ -157,7 +157,7 @@
     <string name="chat_model_not_configured_detail">LLM Provider を追加してモデルを選択すると、会話を始められます</string>
     <string name="chat_model_not_configured_title">モデルが未設定です</string>
     <string name="chat_new_chat">新しい会話を作成</string>
-    <string name="chat_new_chat_hint">何でも話しかけてみてください。入力欄の横にある波形ボタンをタップすると心流モードが始まります。</string>
+    <string name="chat_new_chat_hint">LingXi に達成してほしいことを説明してください</string>
     <string name="chat_new_conversation">新しい会話</string>
     <string name="chat_new_session_failed">新しい会話の作成に失敗しました</string>
     <string name="chat_notice_cancelled">このターンをキャンセルしました。</string>

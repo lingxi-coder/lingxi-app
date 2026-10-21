@@ -36,7 +36,11 @@ internal fun summaryToolCalls(state: ChatState): List<ToolCallUi> = buildList {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ConversationSummaryMenu(state: ChatState) {
+internal fun ConversationSummaryMenu(
+    state: ChatState,
+    onResumeWorkflow: (String) -> Unit = {},
+    onToggleToolCall: (String) -> Unit = {},
+) {
     var expanded by remember { mutableStateOf(false) }
     var selected by rememberSaveable(state.session.id) { mutableStateOf<ConversationSummaryCategory?>(null) }
     val detail = LocalConversationDetail.current
@@ -94,16 +98,31 @@ internal fun ConversationSummaryMenu(state: ChatState) {
                         }
                     }
                     ConversationSummaryCategory.Agents -> {
-                        if (state.sessionAgents.isEmpty() && state.backgroundTasks.isEmpty()) item { SummaryEmpty(category) }
-                        items(state.sessionAgents, key = { it.agentId }) { agent ->
-                            ListItem(headlineContent = { Text(agent.name.ifBlank { agent.agentId }) },
-                                supportingContent = { Text(listOfNotNull(agent.status, agent.latestActivity).joinToString(" · ")) },
-                                modifier = Modifier.clickable { selected = null; detail?.invoke("agent:${agent.agentId}") })
-                        }
-                        items(state.backgroundTasks.values.toList(), key = { it.taskId }) { task ->
-                            ListItem(headlineContent = { Text(task.description.ifBlank { task.taskId }) },
-                                supportingContent = { Text(taskStatusText(task.status)) },
-                                modifier = Modifier.clickable { selected = null; detail?.invoke("task:${task.taskId}") })
+                        val agentRun = agentRunForBottomPanel(state)
+                        if (state.sessionAgents.isEmpty() && state.backgroundTasks.isEmpty() &&
+                            state.workflowRuns.isEmpty() && agentRun == null) {
+                            item { SummaryEmpty(category) }
+                        } else {
+                            item {
+                                CompositionLocalProvider(LocalConversationDetail provides { key ->
+                                    selected = null
+                                    detail?.invoke(key)
+                                }) {
+                                    ExecutionStatusPanel(
+                                        tasks = state.backgroundTasks.values.toList(),
+                                        workflows = state.workflowRuns.values.toList(),
+                                        agents = state.sessionAgents,
+                                        planTasks = emptyList(),
+                                        planExpanded = false,
+                                        onTogglePlan = {},
+                                        onResumeWorkflow = onResumeWorkflow,
+                                        resumeState = state.workflowResumeState,
+                                        agentRun = agentRun,
+                                        expandedToolCalls = state.expandedToolCalls,
+                                        onToggleToolCall = onToggleToolCall,
+                                    )
+                                }
+                            }
                         }
                     }
                     ConversationSummaryCategory.Resources -> {

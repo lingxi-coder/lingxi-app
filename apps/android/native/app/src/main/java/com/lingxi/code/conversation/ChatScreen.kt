@@ -74,7 +74,6 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.modeColor
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.components.UiTags
-import com.lingxi.code.components.tint
 import com.lingxi.code.connectivity.OfflineBanner
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
@@ -102,11 +101,6 @@ import kotlinx.coroutines.delay
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
-    linkedDetailKey: String? = null,
-    onLinkedDetailHandled: () -> Unit = {},
-    linkedMessageUuid: String? = null,
-    linkWorkspace: String? = null,
-    onMessageLinkHandled: (Boolean) -> Unit = {},
     state: ChatState,
     onSend: (String) -> Unit,
     onSendWithAttachment: (String, ComposerAttachment?) -> Unit = { text, _ -> onSend(text) },
@@ -195,6 +189,11 @@ fun ChatScreen(
     /** The composer took the offered follow-up; its chip rides the next send. */
     onAcceptVisualizationFollowup: (VisualizationFollowup) -> Unit = {},
     onRemoveVisualizationChip: () -> Unit = {},
+    linkedDetailKey: String? = null,
+    onLinkedDetailHandled: () -> Unit = {},
+    linkedMessageUuid: String? = null,
+    linkWorkspace: String? = null,
+    onMessageLinkHandled: (Boolean) -> Unit = {},
 ) {
     val suggestionLifecycle = LocalLifecycleOwner.current.lifecycle
     val suggestionInputEmpty = draft.isEmpty() && attachment == null && state.visualizationChip == null
@@ -325,8 +324,11 @@ fun ChatScreen(
                     onNewChat = onNewChat,
                     onOpenSideChats = onOpenSideChats,
                     state = state,
+                    onResumeWorkflow = onResumeWorkflow,
+                    onToggleToolCall = onToggleToolCall,
                 )
             }
+            OfflineBanner(visible = showOfflineBanner, onDismiss = onDismissOffline, onRetry = onRetryOffline)
             Box(modifier = Modifier.weight(1f)) {
                 CompositionLocalProvider(
                     LocalVisualizationContext provides visualizationContext,
@@ -355,11 +357,6 @@ fun ChatScreen(
                     )
                 }
             }
-            OfflineBanner(
-                visible = showOfflineBanner,
-                onDismiss = onDismissOffline,
-                onRetry = onRetryOffline,
-            )
             computerUseSetup?.let {
                 ComputerUseSetupBanner(
                     status = it,
@@ -369,25 +366,17 @@ fun ChatScreen(
             }
             if (modelSetupRequired) {
                 ModelSetupBanner(onOpenModelSettings = onOpenModelSettings)
-            } else {
-                state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             }
+            // Match iOS: one runtime footer, with execution details in summary sheets.
             state.compaction?.let { CompactionProgressRow(it) }
-            state.statusLine?.let { StatusRow(text = it) }
-            ExecutionStatusPanel(
-                tasks = state.backgroundTasks.values.toList(),
-                workflows = state.workflowRuns.values.toList(),
-                agents = state.sessionAgents,
-                planTasks = state.planTasks,
-                planExpanded = state.planExpanded,
-                onTogglePlan = onTogglePlan,
-                onResumeWorkflow = onResumeWorkflow,
-                resumeState = state.workflowResumeState,
-                agentRun = agentRunForBottomPanel(state),
-                expandedToolCalls = state.expandedToolCalls,
-                onToggleToolCall = onToggleToolCall,
-            )
-            flowModePanel?.invoke()
+                ?: state.error?.takeUnless { modelSetupRequired }?.let {
+                    ErrorBanner(error = it, onDismiss = onDismissError)
+                }
+            if (audioGuidance != null) {
+                AudioSetupBanner(audioGuidance, onOpenVoiceSettings, onDismissAudioGuidance)
+            } else {
+                flowModePanel?.invoke()
+            }
             if (isNewChat && showNewChatControls) {
                 NewChatBar(
                     mode = sessionMode,
@@ -395,9 +384,6 @@ fun ChatScreen(
                     onSelectMode = onSelectNewChatMode,
                     onPickWorkspace = onPickWorkspace,
                 )
-            }
-            audioGuidance?.let { guidance ->
-                AudioSetupBanner(guidance, onOpenVoiceSettings, onDismissAudioGuidance)
             }
             Composer(
                 text = draft,
@@ -530,6 +516,8 @@ private fun TopBar(
     onOpenDrawer: () -> Unit, onTitleClick: (() -> Unit)?, onNewChat: () -> Unit,
     onOpenSideChats: (() -> Unit)?,
     state: ChatState,
+    onResumeWorkflow: (String) -> Unit,
+    onToggleToolCall: (String) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val sessionPanelLabel = stringResource(R.string.chat_session_panel_a11y)
@@ -556,8 +544,11 @@ private fun TopBar(
                     stringResource(R.string.side_chats_title), Modifier.testTag("conversation.side-chats"))
             }
             IconButton(LXIconName.Edit, t.text, 22.dp, onNewChat, stringResource(R.string.chat_new_chat))
-            ConversationSummaryMenu(state)
+            ConversationSummaryMenu(state, onResumeWorkflow, onToggleToolCall)
         },
+        colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
+            containerColor = t.windowBg, scrolledContainerColor = t.windowBg,
+        ),
         expandedHeight = maxOf(64.dp, (48 * androidx.compose.ui.platform.LocalDensity.current.fontScale).dp),
         windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
     )
@@ -633,7 +624,8 @@ private fun MessageList(
             when (item) {
                 ChatRenderItem.Empty -> BoxWithConstraints(Modifier.fillParentMaxHeight().fillMaxWidth()) {
                     val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
-                    EmptyState(compact = maxHeight < (200 * fontScale).dp, modifier = Modifier.fillMaxSize())
+                    EmptyState(compact = maxHeight < (200 * fontScale).dp,
+                        modifier = Modifier.fillMaxWidth().height(minOf(maxHeight, 360.dp)))
                 }
                 is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                     ToolGroupView(TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall)
@@ -723,35 +715,26 @@ private fun EmptyState(compact: Boolean, modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.Center,
     ) {
         if (!compact) {
-            Box(
-                modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(15.dp))
-                    .background(androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) {
-                LXIcon(name = LXIconName.Sparkle, size = 26.dp,
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimaryContainer)
-            }
-            Spacer(Modifier.size(18.dp))
+            LXIcon(name = LXIconName.Sparkle, size = 24.dp, color = t.accent)
+            Spacer(Modifier.size(10.dp))
         }
         Text(
             stringResource(R.string.chat_start_new_conversation),
             color = t.text,
-            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+            fontSize = 20.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
         )
         if (!compact) {
-            Spacer(Modifier.size(7.dp))
+            Spacer(Modifier.size(10.dp))
             Text(
                 stringResource(R.string.chat_new_chat_hint),
-                color = t.text4,
+                color = t.text3,
                 style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.widthIn(max = 260.dp),
+                modifier = Modifier.widthIn(max = 300.dp),
             )
         }
     }
@@ -812,7 +795,8 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
         horizontalArrangement = Arrangement.spacedBy(9.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .testTag("conversation.compaction-status")
+            .padding(horizontal = 14.dp, vertical = 6.dp)
             .semantics { contentDescription = "$title. $detail" },
     ) {
         LXIcon(
@@ -845,28 +829,6 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
             }
         }
     }
-}
-
-/**
- * A dim, single-line status row above the composer — surfaces engine tool
- * activity ("调用工具 …") and errors ("错误：…"). The Android analog of the iOS
- * `ConversationModel.statusLine`. Hidden when [ChatState.statusLine] is `null`.
- */
-@Composable
-private fun StatusRow(text: String) {
-    val t = LingXiTheme.palette
-    Text(
-        text = text,
-        color = t.text4,
-        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .testTag(UiTags.CHAT_STATUS)
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 4.dp),
-    )
 }
 
 /** An actionable configuration state, kept separate from runtime failures. */
@@ -943,12 +905,7 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
         modifier = Modifier
             .testTag(UiTags.CHAT_ERROR)
             .fillMaxWidth()
-            .padding(horizontal = 14.dp)
-            .padding(top = 4.dp, bottom = 4.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(t.danger.tint(0.12f))
-            .border(0.5.dp, t.danger.tint(0.4f), RoundedCornerShape(12.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 5.dp),
     ) {
         Box(
             modifier = Modifier
@@ -971,7 +928,7 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
                 color = t.text2,
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 lineHeight = (12.5f * 1.4f).sp,
-                maxLines = 4,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }

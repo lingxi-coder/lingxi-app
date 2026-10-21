@@ -179,7 +179,7 @@
   "chat_model_not_configured_detail": "添加 LLM Provider 并选择模型后即可开始对话",
   "chat_model_not_configured_title": "尚未设置模型",
   "chat_new_chat": "新建对话",
-  "chat_new_chat_hint": "随便说点什么，或轻点输入框旁的波形按钮开启心流模式。",
+  "chat_new_chat_hint": "描述你想让 LingXi 完成的事情",
   "chat_new_conversation": "新对话",
   "chat_new_session_failed": "新建会话失败",
   "chat_notice_cancelled": "已取消本轮。",

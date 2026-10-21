@@ -179,7 +179,7 @@
   "chat_model_not_configured_detail": "Add an LLM provider and choose a model to start chatting",
   "chat_model_not_configured_title": "No model set up yet",
   "chat_new_chat": "New Chat",
-  "chat_new_chat_hint": "Say anything, or tap the waveform button next to the input box to start Flow Mode.",
+  "chat_new_chat_hint": "Describe what you want LingXi to accomplish",
   "chat_new_conversation": "New Conversation",
   "chat_new_session_failed": "Failed to create new session",
   "chat_notice_cancelled": "This turn was cancelled.",

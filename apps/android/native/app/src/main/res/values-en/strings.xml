@@ -157,7 +157,7 @@
     <string name="chat_model_not_configured_detail">Add an LLM provider and choose a model to start chatting</string>
     <string name="chat_model_not_configured_title">No model set up yet</string>
     <string name="chat_new_chat">New Chat</string>
-    <string name="chat_new_chat_hint">Say anything, or tap the waveform button next to the input box to start Flow Mode.</string>
+    <string name="chat_new_chat_hint">Describe what you want LingXi to accomplish</string>
     <string name="chat_new_conversation">New Conversation</string>
     <string name="chat_new_session_failed">Failed to create new session</string>
     <string name="chat_notice_cancelled">This turn was cancelled.</string>

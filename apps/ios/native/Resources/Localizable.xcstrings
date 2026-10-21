@@ -9675,31 +9675,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "随便说点什么，或轻点输入框旁的波形按钮开启心流模式。"
+            "value": "描述你想让 LingXi 完成的事情"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "隨便說點什麼，或輕點輸入框旁的波形按鈕開啟心流模式。"
+            "value": "描述你想讓 LingXi 完成的事情"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Say anything, or tap the waveform button next to the input box to start Flow Mode."
+            "value": "Describe what you want LingXi to accomplish"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "何でも話しかけてみてください。入力欄の横にある波形ボタンをタップすると心流モードが始まります。"
+            "value": "LingXi に達成してほしいことを説明してください"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "편하게 무엇이든 말해보거나, 입력창 옆의 파형 버튼을 눌러 심리스 모드를 켜보세요."
+            "value": "LingXi가 수행할 작업을 설명하세요"
           }
         }
       }

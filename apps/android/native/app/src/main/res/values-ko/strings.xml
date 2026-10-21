@@ -157,7 +157,7 @@
     <string name="chat_model_not_configured_detail">LLM Provider를 추가하고 모델을 선택하면 대화를 시작할 수 있습니다</string>
     <string name="chat_model_not_configured_title">모델이 설정되지 않았습니다</string>
     <string name="chat_new_chat">새 대화 만들기</string>
-    <string name="chat_new_chat_hint">편하게 무엇이든 말해보거나, 입력창 옆의 파형 버튼을 눌러 심리스 모드를 켜보세요.</string>
+    <string name="chat_new_chat_hint">LingXi가 수행할 작업을 설명하세요</string>
     <string name="chat_new_conversation">새 대화</string>
     <string name="chat_new_session_failed">새 세션 생성 실패</string>
     <string name="chat_notice_cancelled">이번 turn을 취소했습니다.</string>

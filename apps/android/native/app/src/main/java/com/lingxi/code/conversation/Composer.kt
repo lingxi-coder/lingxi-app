@@ -309,9 +309,8 @@ fun Composer(
                     }
 
                     when {
-                        // Keep Stop and pending Send available together while the
-                        // agent is working.
-                        isStreaming -> Row(
+                        // Like iOS, a draft takes precedence so the toolbar keeps one turn action.
+                        isStreaming && !hasText -> Row(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -331,26 +330,6 @@ fun Composer(
                                         .background(androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
                                         .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
                                 )
-                            }
-                            if (hasText) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(CircleShape)
-                                        .background(t.accent)
-                                        .clickable(enabled = enabled) {
-                                            if (modelSetupRequired) onOpenModelSettings() else onSend()
-                                        }
-                                        .testTag(UiTags.COMPOSER_SEND),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    LXIcon(
-                                        name = LXIconName.ArrowUp,
-                                        size = 16.dp,
-                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
-                                        contentDescription = sendDescription,
-                                    )
-                                }
                             }
                         }
                         // A recovered WaitingForUser checkpoint has no local
@@ -427,37 +406,40 @@ fun Composer(
                         contentDescription = stringResource(R.string.composer_camera))
                 }
             }
-            val configuration: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
-                ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
-                ComposerContextWindow(contextUsage, model.details?.contextBudget?.effectiveInputBudget, model.details)
-                Box(Modifier.weight(1f)) {
-                    ModelChip(
-                        model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
-                        onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
-                        onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
-                        reasoning = reasoning, onReasoningChange = onReasoningChange,
-                    )
-                }
-            }
             BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val wrapControls = maxWidth < 300.dp ||
-                    (contextUsage != null && maxWidth < 348.dp) ||
-                    androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.3f
-                if (wrapControls) {
-                    Column {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { configuration() }
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            attachmentAction()
-                            Spacer(Modifier.weight(1f))
-                            turnActions()
-                        }
+                val actionWidth = (if (voiceInputSupported) 48.dp else 0.dp) + when {
+                    isStreaming || showDiscardRecovery || hasText || voiceConversationSupported -> 48.dp
+                    else -> 0.dp
+                }
+                val hasContext = ComposerContextUsage.from(
+                    contextUsage, model.details?.contextBudget?.effectiveInputBudget,
+                ) != null
+                val configurationWidth = 96.dp + if (hasContext) 48.dp else 0.dp
+                val modelWidth = (maxWidth - actionWidth - configurationWidth).coerceAtLeast(48.dp)
+                val modelLabel = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName
+                val labelStyle = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                val labelWidth = with(androidx.compose.ui.platform.LocalDensity.current) {
+                    textMeasurer.measure(modelLabel, labelStyle, maxLines = 1).size.width.toDp()
+                }
+                val compactModel = modelWidth < labelWidth + 58.dp
+                Row(
+                    Modifier.fillMaxWidth().testTag("composer.toolbar"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    attachmentAction()
+                    ComposerPermissionButton(effectivePermissionMode, onOpenPermissionSettings)
+                    Spacer(Modifier.weight(1f))
+                    ComposerContextWindow(contextUsage, model.details?.contextBudget?.effectiveInputBudget, model.details)
+                    Box(Modifier.width(if (compactModel) 48.dp else modelWidth.coerceAtMost(200.dp))) {
+                        ModelChip(
+                            model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
+                            onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                            onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
+                            reasoning = reasoning, onReasoningChange = onReasoningChange,
+                            compact = compactModel,
+                        )
                     }
-                } else {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        attachmentAction()
-                        configuration()
-                        turnActions()
-                    }
+                    turnActions()
                 }
             }
         }
@@ -555,6 +537,7 @@ private fun ModelChip(
     onModelChange: (ModelOption) -> Unit,
     reasoning: ReasoningControl?,
     onReasoningChange: (String) -> Unit,
+    compact: Boolean = false,
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
@@ -593,7 +576,7 @@ private fun ModelChip(
                 .clickable {
                     if (modelSetupRequired) {
                         onOpenModelSettings()
-                    } else if (models.isNotEmpty()) {
+                    } else {
                         open = true
                     }
                 }
@@ -601,26 +584,39 @@ private fun ModelChip(
                     if (modelSetupRequired) Modifier.testTag(UiTags.MODEL_SETUP_CHIP)
                     else Modifier.testTag(UiTags.MODEL_PICKER_CHIP),
                 )
-                .padding(horizontal = 9.dp, vertical = 5.dp),
+                .heightIn(min = 48.dp)
+                .semantics { contentDescription = "${model.name}, ${reasoning?.selection ?: "automatic"}" }
+                .padding(horizontal = if (compact) 14.dp else 9.dp, vertical = 5.dp),
         ) {
-            if (modelSetupRequired) {
-                LXIcon(name = LXIconName.Cog, size = 13.dp, color = t.accent, stroke = 1.9f)
+            if (compact) {
+                if (modelSetupRequired) {
+                    LXIcon(name = LXIconName.Cog, size = 20.dp, color = t.text3)
+                } else {
+                    androidx.compose.material3.Icon(
+                        painter = androidx.compose.ui.res.painterResource(R.drawable.ic_model_brain),
+                        contentDescription = null, tint = t.text3, modifier = Modifier.size(20.dp),
+                    )
+                }
             } else {
-                Dot(color = model.color, size = 6.dp)
+                if (modelSetupRequired) {
+                    LXIcon(name = LXIconName.Cog, size = 13.dp, color = t.accent, stroke = 1.9f)
+                } else {
+                    Dot(color = model.color, size = 6.dp)
+                }
+                Text(
+                    text = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName,
+                    color = if (modelSetupRequired) t.accent else t.text2,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                )
+                LXIcon(
+                    name = if (modelSetupRequired) LXIconName.ChevronR else LXIconName.Chevron,
+                    size = 11.dp,
+                    color = if (modelSetupRequired) t.accent else t.text4,
+                    stroke = 2f,
+                )
             }
-            Text(
-                text = if (modelSetupRequired) stringResource(R.string.composer_setup_model) else model.shortName,
-                color = if (modelSetupRequired) t.accent else t.text2,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
-            )
-            LXIcon(
-                name = if (modelSetupRequired) LXIconName.ChevronR else LXIconName.Chevron,
-                size = 11.dp,
-                color = if (modelSetupRequired) t.accent else t.text4,
-                stroke = 2f,
-            )
         }
 
         DropdownMenu(

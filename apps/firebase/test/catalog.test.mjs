@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { validateCatalog, selectCatalog, compareVersions, createHandler, ApiError } from '../src/catalog.mjs';
 
 const seed = JSON.parse(readFileSync(new URL('../src/seed.json', import.meta.url), 'utf8'));
@@ -10,6 +11,23 @@ const request = (path, init) => new Request(`https://api.test${path}`, init);
 
 test('SDK seed preserves all provider/model identities and fits bounded payload size', () => {
   const c = validateCatalog(seed); assert.equal(c.providers.length, 46); assert.equal(c.models.length, 1327);
+  for (const p of c.providers) {
+    assert.equal(p.executionDefinition.format, 'llm-client-preset-toml');
+    assert.equal(createHash('sha256').update(p.executionDefinition.source, 'utf8').digest('hex'), p.executionDefinition.sha256);
+  }
+});
+test('execution definitions survive filtering and public JSON without lossy projection', async () => {
+  const c = sample();
+  const source = '# 完整 SDK 定义 🧭\r\ninference = { reasoning = "thinking_type" }\r\n[pricing.peak]\r\nutc_windows = ["01:00-04:00"]\r\n';
+  c.providers[0].executionDefinition = { format: 'llm-client-preset-toml', source, sha256: createHash('sha256').update(source).digest('hex') };
+  const validated = validateCatalog(c);
+  assert.equal(selectCatalog(validated, 'android', '1.0.0').providers[0].executionDefinition.source, source);
+  const handle = createHandler({ current: async () => ({ id: 'release', createdAt: 1, catalog: validated }) }, admin, []);
+  const response = await handle(request('/v1/model-catalog?platform=android&appVersion=1.0.0&schemaVersion=1'));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).providers[0].executionDefinition.source, source);
+  validated.providers[0].executionDefinition.source += '# altered';
+  assert.throws(() => validateCatalog(validated), /EXECUTION_DEFINITION_HASH_MISMATCH/);
 });
 test('semver range comparison handles prereleases, numeric identifiers, and build metadata', () => {
   assert.ok(compareVersions('1.2.0', '1.1.99') > 0);

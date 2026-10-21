@@ -15,15 +15,19 @@ source = args.source.resolve()
 providers, models = [], []
 digest = hashlib.sha256()
 for path in sorted((source / 'data/providers').glob('*.toml')):
-    digest.update(path.name.encode() + b'\0' + path.read_bytes() + b'\0')
-    data = tomllib.loads(path.read_text())
+    raw = path.read_bytes()
+    source_text = raw.decode('utf-8')
+    digest.update(path.name.encode() + b'\0' + raw + b'\0')
+    data = tomllib.loads(source_text)
     url = data.get('base_url', '')
     if not url.startswith('https://'):
         continue
     identity = path.stem
     providers.append(dict(id=identity, name=data.get('display_name', identity).strip(),
         description=data.get('description', '')[:4000], baseUrl=url, protocol=data.get('protocol', 'open_ai_chat'),
-        enabled=True, order=len(providers), regions=data.get('regions', [])))
+        enabled=True, order=len(providers), regions=data.get('regions', []),
+        executionDefinition=dict(format='llm-client-preset-toml', source=source_text,
+            sha256=hashlib.sha256(raw).hexdigest())))
     for entry in data.get('model', []):
         original = entry.get('pricing', {})
         price = None

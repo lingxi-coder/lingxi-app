@@ -55,3 +55,11 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - 本阶段验证 **Play debug**；Direct 的 CU 原生变体、实体设备、Play App Signing/发行和在线模型推理未因此通过。WebRTC 按用户要求跳过。原 Product checkout 的 `gradle/libs.versions.toml` 未提交修改保持原样，不纳入本批。
 
 下一阶段继续版本化模型目录四端启动刷新；当前 Firebase 目录还不能替代完整 SDK 执行定义，不能将选择器刷新单独记为完成。
+
+## 2026-10-20：模型目录执行定义的准备阶段
+
+- Android 阶段提交 `2557ac7b1374dd11faf39d19169515a29828e60b` 已快进推送 Product main，远端一致、分歧 `0 0`。
+- 目录生成器为每个提供商保存可选 `executionDefinition`：固定格式 `llm-client-preset-toml`、原始 UTF-8 TOML 和 SHA-256。每个源文件只读取一次，展示投影、原始执行定义与哈希来自同一字节快照。按固定 SDK `e986d084` 重生成 seed，仍为 46 个提供商、1327 个模型；来源与完整 seed 哈希进入 provenance。
+- Firebase 严格 DTO、草稿校验、平台筛选、公开 JSON 及 Web 导入导出类型保留该定义；哈希不符会拒绝。没有把四个展示能力布尔值当成完整推理/鉴权/协议/媒体/分时定价配置。此处的校验是格式和内容哈希校验，**不是 SDK 对 TOML 执行语义的校验**。
+- 13 项 Firebase 本地测试通过，2 项 Firestore 模拟器用例未运行；39 项 Web 测试、Web 类型检查和生产构建通过。默认系统 Python 3.9 导致的文档测试失败在使用仓库要求的 Python 3.13 后全部通过，无需修改文档测试。seed `--check` 与原始 SDK 文件一致，Unicode/CRLF 往返及篡改拒绝回归通过。
+- **四端启动刷新仍未完成**：下一批须在 SDK 入口解析完整定义，按当前 App 版本/平台做有界 GET、ETag/304 和原子缓存；同一启动快照进入 Harness 的 Anthropic/preset 装配、执行路由、价格及客户端列表，并由 settings 刷新继续持有。必须验证自定义模型/连接/凭据不被覆盖，超时/损坏快照回退到有效缓存或内置定义，不以 UI 刷新替代执行链验收。未进行云端部署或覆写现有发布/草稿。

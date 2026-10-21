@@ -10,11 +10,19 @@ const price = z.object({
   currency: z.enum(['USD', 'CNY']), inputPerMillion: number, outputPerMillion: number,
   cacheReadPerMillion: number.optional(), cacheWritePerMillion: number.optional(),
 }).strict();
+// Keep execution facts in the SDK's own format. The four UI capability flags
+// cannot reconstruct endpoint controls, auth, media services or pricing windows.
+const executionDefinition = z.object({
+  format: z.literal('llm-client-preset-toml'),
+  source: z.string().min(1).max(2 * 1024 * 1024),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
 const provider = z.object({
   id: identifier, name: text(160), description: z.string().max(4000),
   baseUrl: z.url().refine((s) => s.startsWith('https://'), 'HTTPS required'),
   protocol: text(100), enabled: z.boolean(), order: z.number().int().min(0).max(100000),
   regions: z.array(text(80)).max(20),
+  executionDefinition: executionDefinition.optional(),
 }).strict();
 const model = z.object({
   providerId: identifier, id: identifier, name: text(240), description: z.string().max(8000),
@@ -63,6 +71,8 @@ export function validateCatalog(value) {
   const providers = new Set(), models = new Set();
   for (const p of catalog.providers) {
     if (providers.has(p.id)) throw new ApiError(400, 'DUPLICATE_PROVIDER');
+    if (p.executionDefinition && createHash('sha256').update(p.executionDefinition.source, 'utf8').digest('hex') !== p.executionDefinition.sha256)
+      throw new ApiError(400, 'EXECUTION_DEFINITION_HASH_MISMATCH');
     providers.add(p.id);
   }
   for (const m of catalog.models) {

@@ -5,6 +5,7 @@ export type Platform = 'desktop' | 'android' | 'ios' | 'cli';
 export interface Provider {
   id: string; name: string; description: string; baseUrl: string; protocol: string;
   enabled: boolean; order: number; regions: string[];
+  executionDefinition?: { format: 'llm-client-preset-toml'; source: string; sha256: string };
 }
 export interface Model {
   providerId: string; id: string; name: string; description: string; enabled: boolean; order: number;

@@ -73,7 +73,7 @@ test('running groups show only active calls, even when disclosure was open', () 
 test('settled groups collapse to one row, expose failures and expand summaries', () => {
   const tools = [tool('a'), tool('b', 'error')];
   const closed = renderGroup(tools);
-  assert.match(closed, /Read b · 1 failed · 2 tools/);
+  assert.match(closed, /Read files · 1 failed · 2 tools/);
   assert.doesNotMatch(closed, /Used 2 tools|Read a/);
   assert.match(closed, /aria-expanded="false"/);
   assert.doesNotMatch(closed, /Summary a|Summary b/);
@@ -91,7 +91,7 @@ test('a successful final tool keeps the group neutral while counting earlier fai
     const trigger = html.match(/<button\b[^>]*>/)?.[0];
     assert.ok(trigger);
     assert.ok(trigger.includes(`color:${tokens(true).text3}`));
-    assert.match(html, /Read recovered · 2 failed · 3 tools/);
+    assert.match(html, /Read files · 2 failed · 3 tools/);
     assert.ok(html.includes(`color:${tokens(true).danger}"> · 2 failed</span>`));
   }
 });
@@ -101,7 +101,7 @@ test('a failed final tool marks only the failure status in red', () => {
   const trigger = html.match(/<button\b[^>]*>/)?.[0];
   assert.ok(trigger?.includes(`color:${tokens(true).text3}`));
   assert.ok(html.includes(`color:${tokens(true).danger}`));
-  assert.match(html, /Read last · 1 failed · 2 tools/);
+  assert.match(html, /Read files · 1 failed · 2 tools/);
 });
 
 test('waiting turns show thinking even before any reasoning delta arrives', () => {
@@ -117,14 +117,12 @@ test('thinking resumes after tools settle without competing with active tools or
   assert.equal(transcriptRows([{ type: 'compaction', id: 'compact', status: 'running' }], true).filter((row) => row.type === 'thinking').length, 0);
 });
 
-test('summary uses the last tool icon and argument detail, not the first tool or generic count', () => {
-  const last = { ...tool('last'), view: { verb: 'exec', label: 'Run', title: 'Run tests', sub_line: { prefix: '$ ', text: 'npm test' } } };
+test('summary describes the whole group and uses its first activity icon', () => {
+  const last = { ...tool('last'), view: { verb: 'shell', label: 'Run', title: 'Run tests', sub_line: { prefix: '$ ', text: 'npm test' } } };
   const html = renderGroup([tool('first'), last]);
-  const single = renderGroup([last]);
-  assert.match(html, /Run tests · \$ npm test/);
-  assert.doesNotMatch(html, /Read first|Used 2 tools/);
-  assert.equal(html.match(/<svg.*?<\/svg>/s)?.[0], single.match(/<svg.*?<\/svg>/s)?.[0]);
-  assert.notEqual(html.match(/<svg.*?<\/svg>/s)?.[0], renderGroup([tool('read')]).match(/<svg.*?<\/svg>/s)?.[0]);
+  assert.match(html, /Read a file, ran a command/);
+  assert.doesNotMatch(html, /Read first|npm test|Used 2 tools/);
+  assert.equal(html.match(/<svg.*?<\/svg>/s)?.[0], renderGroup([tool('read')]).match(/<svg.*?<\/svg>/s)?.[0]);
   assert.equal(renderGroup([]), '');
 });
 

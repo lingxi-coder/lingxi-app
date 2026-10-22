@@ -1,5 +1,6 @@
 import { LocalAppCard } from './LocalApps';
 import { localAppReference } from '../model/localAppReference';
+import { toolRowPresentation } from './toolPresentation';
 /**
  * One tool call in the transcript.
  *
@@ -123,7 +124,6 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
       style={{
         width: 20, height: 20, flexShrink: 0,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        color: 'var(--tool-icon-color)',
       }}
     >
       {permissionRequest
@@ -144,7 +144,15 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
 
   // Compose from the parts so the argument can be truncated on its own; fall
   // back to the pre-composed English `title` when there is no primary.
-  const title = view.primary
+  const presentation = permissionRequest ? null : toolRowPresentation(item);
+  const title = presentation ? <>
+    <span className="tool-row-action">{presentation.action}</span>
+    <span className={presentation.file ? 'tool-row-argument tool-row-file' : 'tool-row-argument'}
+      title={presentation.argument} style={{ ...TITLE_STYLE, direction: presentation.file ? 'rtl' : 'ltr', fontWeight: 400 }}>
+      {presentation.file ? ltrAnchored(presentation.displayArgument) : presentation.displayArgument.replace(/\s+/g, ' ')}
+    </span>
+    {presentation.qualifier && <span className="tool-row-qualifier">{presentation.qualifier}</span>}
+  </> : view.primary
     ? (
       <>
         <span dir="ltr">{`${view.label}(`}</span>
@@ -189,27 +197,32 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       ? 'x'
       : 'info';
 
+  const showResponse = !(presentation && item.status === 'done' && body !== undefined);
+  const diffStats = item.status === 'done' && !permissionRequest && diff && ['update', 'create'].includes(view.verb) ? diff : undefined;
   const summary = (
     <span className="tool-call-summary">
       <ToolGlyph item={item} permissionRequest={permissionRequest} />
       <span
-        className={item.status === 'running' ? 'tool-row-title running-sweep' : 'tool-row-title'}
+        className="tool-row-title"
         style={{
           display: 'flex', alignItems: 'center', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
           fontSize: permissionRequest ? 14 : 13,
           lineHeight: permissionRequest ? 1.35 : 1.4,
-          fontWeight: permissionRequest ? 620 : 500,
+          fontWeight: permissionRequest ? 620 : 400,
         }}
       >
         {title}
-        {view.sub_line && (
+        {view.sub_line && !(presentation && view.verb === 'shell') && (
           <span className="tool-row-inline-detail mono-code">
             {' · '}{view.sub_line.prefix}{view.sub_line.text}
           </span>
         )}
       </span>
-      {summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}>{summaryResponse}</span>}
+      {diffStats && <span className="tool-row-diff-stats" aria-label={`${diffStats.additions} added, ${diffStats.removals} removed`}>+{diffStats.additions} −{diffStats.removals}</span>}
+      {(item.status === 'running' || (item.status === 'done' && diffStats && diffStats.additions + diffStats.removals > 0)) &&
+        <span className="tool-row-state-dot" role={item.status === 'running' ? 'status' : undefined} aria-label={item.status === 'running' ? 'Running' : 'File changed'} />}
+      {showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}>{summaryResponse}</span>}
     </span>
   );
 
@@ -284,6 +297,8 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         '--tool-hover-background': t.surfaceHover,
         '--tool-hover-color': t.text,
         '--tool-focus-color': t.text,
+        '--tool-argument-color': t.text4,
+        '--tool-state-color': t.accent,
         '--tool-icon-color': item.status === 'error' ? t.danger : permissionRequest ? t.accent : t.text3,
         '--permission-text': t.text2,
         '--permission-muted': t.text3,
@@ -304,9 +319,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           keepMounted={item.status !== 'running' && Boolean(modUiSessionId)}
           onToggle={() => onSetOpen(item.id, !isOpen)}
           summary={summary}
-          label={`${view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${summaryResponse ? ` · ${summaryResponse}` : ''}`}
+          label={`${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse ? ` · ${summaryResponse}` : ''}`}
           buttonClassName="tool-disclosure-trigger"
-          buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: 40, margin: 0, padding: '2px 0', borderRadius: 7 }}
+          buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest
             ? { marginLeft: 0, padding: '0 14px 14px 56px' }
             : { marginLeft: 29 }}
@@ -325,7 +340,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       ) : (
         <div>
           {/* An empty ToolResult site must not create a flex gap below the call. */}
-          <div className="tool-call-line" style={{ minHeight: 40, padding: '2px 0' }}>
+          <div className="tool-call-line" style={{ minHeight: permissionRequest ? 40 : 28, padding: '2px 0' }}>
             {summary}
           </div>
           {item.status !== 'running' && modUiSessionId && (

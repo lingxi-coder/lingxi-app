@@ -91,9 +91,9 @@ test('finished shell cards and groups do not announce that commands are still ru
       render(React.createElement(ToolCall, { item, onSetOpen: () => {} })),
       render(React.createElement(ToolGroup, { group: { type: 'tool-group', id: 'group', tools: [item] }, open: true, toolOpen: () => false, onSetOpen: () => {} })),
     ]) {
-      assert.equal(html.includes('Running 1 shell command'), status === 'running');
+      assert.ok(html.includes(status === 'running' ? '>Running<' : '>Ran<'));
       assert.ok(html.includes('echo done'));
-      if (status !== 'running') assert.ok(html.includes('Shell command'));
+      assert.doesNotMatch(html, /Running 1 shell command|Shell command/);
     }
   }
 });
@@ -380,7 +380,7 @@ test('tool rows use compact adjacency hooks and a system-font transcript type sc
 
   const tool = render(React.createElement(ToolCall, { item: READ, onSetOpen: () => {} }));
   assert.match(tool, /font-size:13px/);
-  assert.match(tool, /font-weight:500/);
+  assert.match(tool, /font-weight:400/);
 
   const narration = renderStage({ type: 'narration', id: 'n1', role: 'assistant', text: 'Readable body copy.' });
   assert.match(narration, /font-size:14px/);
@@ -608,11 +608,13 @@ test('a tool with no body or diff has no disclosure', () => {
   assert.doesNotMatch(html, /Show output|Show diff|Show \d+ lines?/);
 });
 
-test('running tools use direct text rows and the shared left-to-right sweep', () => {
+test('running tools use compact text rows with an explicit running indicator', () => {
   const running: ToolRunItem = { ...READ, status: 'running', elapsedMs: 12_000 };
   const html = render(React.createElement(ToolCall, { item: running, onSetOpen: () => {} }));
   assert.match(html, /class="transcript-tool-row"/);
-  assert.match(html, /class="tool-row-title running-sweep"/);
+  assert.match(html, /class="tool-row-title"/);
+  assert.match(html, /aria-label="Running"/);
+  assert.doesNotMatch(html, /running-sweep/);
   assert.doesNotMatch(html, /transcript-tool-card/);
 
   const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
@@ -647,8 +649,8 @@ test('a file header fences its path against the RTL base direction', () => {
   // it renders LAST: `Users/luo/…/host.rs/`. A strong L in front of it makes
   // rule N1 resolve it with the letters around it instead.
   assert.ok(primary.startsWith(LRM), `head-clipped text must open with U+200E, got ${JSON.stringify(primary)}`);
-  assert.ok(primary.includes('/Users/luo/'), 'the path itself must survive verbatim');
-  assert.equal(primary.replaceAll(LRM, ''), READ.view.primary);
+  assert.equal(primary.replaceAll(LRM, ''), 'host.rs');
+  assert.ok(html.includes(`title="${READ.view.primary}"`), 'the full path remains in the tooltip');
   // A trailing separator (a directory argument) is the mirror image of the
   // same rule, so the fence closes as well.
   assert.ok(primary.endsWith(LRM), 'head-clipped text must close with U+200E');

@@ -1,0 +1,41 @@
+/* Tool activity stays on the transcript surface. Interaction changes ink only. */
+.transcript-tool-row:not([data-kind='permission']) { background: transparent; transition: none; }
+.transcript-tool-row:not([data-kind='permission']):is(:hover, :focus-within) {
+  background: transparent;
+  --tool-label-color: var(--tool-focus-color);
+  --tool-icon-color: var(--tool-focus-color);
+}
+.transcript-tool-row .tool-call-summary { width: auto; flex: 1; overflow: hidden; }
+.transcript-tool-row .tool-row-title { flex: 0 1 auto !important; gap: 4px; }
+.transcript-tool-row .tool-row-icon { color: var(--tool-icon-color); }
+.transcript-tool-row .tool-row-action { flex-shrink: 0; }
+.transcript-tool-row .tool-row-argument { font-size: inherit !important; line-height: inherit; }
+.transcript-tool-row .tool-row-file { color: var(--tool-argument-color); text-decoration: underline dotted; text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
+.transcript-tool-row .tool-row-qualifier { color: var(--tool-argument-color); font-size: 12px; }
+.transcript-tool-row .tool-row-diff-stats { flex-shrink: 0; color: var(--tool-label-color); font-size: 12px; font-variant-numeric: tabular-nums; }
+.transcript-tool-row .tool-row-state-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--tool-state-color); }
+.transcript-tool-row .tool-row-response { margin-left: auto; }
+.transcript-tool-row :is(.tool-row-title, .tool-row-icon, .tool-row-diff-stats) { opacity: .82; transition: color 120ms ease, opacity 120ms ease; }
+.transcript-tool-row:is(:hover, :focus-within) :is(.tool-row-title, .tool-row-icon, .tool-row-file, .tool-row-qualifier, .tool-row-diff-stats, .tool-row-response) { color: var(--tool-focus-color); opacity: 1; }
+.transcript-tool-row .tool-disclosure-trigger,
+.transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus, :focus-visible, :active) {
+  background: transparent !important; scale: 1; outline: none; transition: color 120ms ease, opacity 120ms ease;
+}
+.transcript-tool-row .tool-disclosure-trigger .transcript-disclosure-chevron { color: var(--tool-label-color); opacity: .65; }
+.transcript-tool-row .tool-disclosure-trigger:is(:hover, :focus-visible) .transcript-disclosure-chevron { color: var(--tool-focus-color); opacity: 1; }
+.transcript-tool-group > .tool-group-trigger {
+  width: fit-content !important; background: transparent !important; opacity: .82; transition: color 120ms ease, opacity 120ms ease;
+}
+.transcript-tool-group > .tool-group-trigger:is(:hover, :focus, :focus-visible, :active) {
+  background: transparent !important; color: var(--tool-focus-color) !important; opacity: 1; outline: none; scale: 1;
+}
+.transcript-tool-group > .tool-group-trigger[aria-expanded] .transcript-disclosure-chevron { opacity: .8; }
+.transcript-tool-group .tool-group-summary-text { line-height: 1.5; }
+@media (prefers-reduced-motion: reduce) {
+  .transcript-tool-row :is(.tool-row-title, .tool-row-icon, .tool-row-diff-stats, .tool-disclosure-trigger),
+  .transcript-tool-group > .tool-group-trigger { transition: none; }
+}
+@media (prefers-contrast: more) {
+  .transcript-tool-row :is(.tool-row-title, .tool-row-icon),
+  .transcript-tool-group > .tool-group-trigger { opacity: 1; }
+}

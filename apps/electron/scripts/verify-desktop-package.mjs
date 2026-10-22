@@ -116,7 +116,9 @@ export function verifyDesktopPackage(root, platform, arch) {
       join(extracted, 'package.json'),
       join(extracted, 'out', 'main', 'index.js'),
       join(extracted, 'out', 'preload', 'index.cjs'),
+      join(extracted, 'out', 'preload', 'remoteRtc.cjs'),
       join(extracted, 'out', 'renderer', 'index.html'),
+      join(extracted, 'out', 'renderer', 'remote-rtc.html'),
       join(extracted, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
     ]) requirePath(path, 'runtime file');
     const runtimeMetadata = readJson(join(extracted, 'package.json'));

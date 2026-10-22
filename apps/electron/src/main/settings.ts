@@ -367,6 +367,24 @@ export class SettingsStore {
     }
   }
 
+  /** Whether Remote Control is switched on for this computer; off by default. */
+  getRemoteControlEnabled(): boolean {
+    return this.settings.remoteControlEnabled === true;
+  }
+
+  /** Switch Remote Control on or off. The caller learns of a save failure; the setting then stays as it was. */
+  setRemoteControlEnabled(enabled: boolean): void {
+    if (typeof enabled !== 'boolean') throw new Error('invalid remote control setting');
+    const previous = this.settings;
+    this.settings = { ...previous, remoteControlEnabled: enabled };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
+  }
+
   /** Whether the user has previously accepted Bypass Permissions mode. */
   getBypassPermissionsAccepted(): boolean {
     return this.settings.bypassPermissionsModeAccepted === true;

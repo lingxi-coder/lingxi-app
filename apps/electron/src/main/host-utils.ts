@@ -92,6 +92,8 @@ export interface PersistedSettings {
   lastPermissionMode?: PermissionModeId;
   /** Last user-selected fast-mode state on this device. */
   fastMode?: boolean;
+  /** Whether this computer accepts Remote Control connections. Off until the user turns it on. */
+  remoteControlEnabled?: boolean;
   apiBaseUrl?: string;
   activeProject?: string;
   activeSession?: SessionRef;
@@ -201,6 +203,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (typeof value['fastMode'] === 'boolean') {
     settings.fastMode = value['fastMode'];
+  }
+  if (typeof value['remoteControlEnabled'] === 'boolean') {
+    settings.remoteControlEnabled = value['remoteControlEnabled'];
   }
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {

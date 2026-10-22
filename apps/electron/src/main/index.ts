@@ -24,6 +24,9 @@ import {
   SessionLaunchCache,
 } from './credential-broker.js';
 import { CodexTokenManager } from './codex-tokens.js';
+import { createRemoteControl } from './remoteControl/electronBindings.js';
+import { UnavailableGateway } from './remoteControl/gateway.js';
+import type { RemoteControlService } from './remoteControl/RemoteControlService.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
@@ -75,6 +78,7 @@ let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
 let localApps: LocalAppHost | null = null;
+let remoteControl: RemoteControlService | null = null;
 const mainWindows = new Set<BrowserWindow>();
 function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }
 let deepLinkProjects: () => string[] = () => [];
@@ -140,6 +144,17 @@ function rendererTarget(): { url: string; load: (window: BrowserWindow) => Promi
   if (devUrl) return { url: devUrl, load: (window) => window.loadURL(devUrl) };
   const file = join(moduleDirectory, '../renderer/index.html');
   return { url: pathToFileURL(file).toString(), load: (window) => window.loadFile(file) };
+}
+
+/** The hidden page of Remote Control's WebRTC window: the dev server's in development, the built file otherwise. */
+function remoteRtcPage(): (window: BrowserWindow) => Promise<void> {
+  const devUrl = developmentRendererUrl();
+  if (devUrl) {
+    const url = new URL('remote-rtc.html', devUrl).toString();
+    return (window) => window.loadURL(url);
+  }
+  const file = join(moduleDirectory, '../renderer/remote-rtc.html');
+  return (window) => window.loadFile(file);
 }
 
 function isHttpsUrl(raw: string): boolean {
@@ -306,7 +321,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onError: (message) => diagnostics.add('warn', 'host', message),
   });
   codexTokens.start();
-  powerMonitor.on('resume', () => codexTokens.check());
+  powerMonitor.on('resume', () => {
+    codexTokens.check();
+    remoteControl?.reconnect();
+  });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
    * service and `HostNotifier` so both get the same click behaviour: restore
@@ -466,9 +484,26 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
-  host.attachAccount(new AccountService(firebaseConfig, credentialBroker
+  const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
-    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
+    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
+  host.attachAccount(account);
+  // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
+  // P3b replaces the unavailable gateway and the policy stub with the session
+  // gateway and the managed-policy check.
+  remoteControl = createRemoteControl({
+    account,
+    settings,
+    gateway: new UnavailableGateway(),
+    policyAllows: () => true,
+    credentialBroker,
+    userData,
+    preload: join(moduleDirectory, '../preload/remoteRtc.cjs'),
+    loadPage: remoteRtcPage(),
+    parentWindow: getMainWindow,
+    diagnostics: (level, message) => diagnostics.add(level, 'host', `remote control: ${message}`),
+  });
+  void remoteControl.start();
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
@@ -575,11 +610,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   nativeAudio = null;
   const currentBridge = bridge;
   bridge = null;
+  const currentRemote = remoteControl;
+  remoteControl = null;
   void Promise.all([
     currentLocalApps?.dispose() ?? Promise.resolve(),
     currentGit?.dispose() ?? Promise.resolve(),
     currentTerminals?.dispose() ?? Promise.resolve(),
     currentAudio?.dispose() ?? Promise.resolve(),
     currentBridge?.dispose() ?? Promise.resolve(),
+    currentRemote?.dispose() ?? Promise.resolve(),
   ]).finally(() => app.quit());
   });

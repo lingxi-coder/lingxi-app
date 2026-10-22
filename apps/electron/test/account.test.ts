@@ -45,6 +45,19 @@ test('restored sessions refresh once for concurrent requests and persist rotated
   assert.deepEqual(await Promise.all([service.getIdToken(), service.getIdToken()]), ['new-id', 'new-id']);
   assert.equal(requests, 1); assert.equal(JSON.parse(saved.value!).refreshToken, 'new-refresh');
 });
+test('forceRefresh skips the cached ID token, and concurrent forced calls share one request', async () => {
+  const saved = store(session()); let requests = 0;
+  const service = new AccountService(config, saved, async () => {}, mockFetch(async () => {
+    requests++;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    return Response.json({ id_token: `id-${requests}`, refresh_token: `refresh-${requests}`, user_id: 'u1', expires_in: '3600' });
+  }));
+  assert.equal(await service.getIdToken(), 'id-1');
+  assert.equal(await service.getIdToken(), 'id-1'); assert.equal(requests, 1);
+  assert.deepEqual(await Promise.all([service.getIdToken(true), service.getIdToken(true)]), ['id-2', 'id-2']);
+  assert.equal(requests, 2);
+  assert.equal(await service.getIdToken(), 'id-2');
+});
 test('revoked sessions clear local state; network failures retain recoverable sessions', async () => {
   for (const code of ['INVALID_REFRESH_TOKEN', 'NETWORK_ERROR']) {
     const saved = store(session());

@@ -60,6 +60,7 @@ import {
   isLatestOperation,
   isLatestProjectCatalogRequest,
   isRuntimeRemovedState,
+  isRuntimeReplacementState,
   nextOperationId,
   pendingAskQueueFromBootstrap,
   pendingCountAfterResponse,
@@ -964,7 +965,7 @@ export function useBridge(): UseBridge {
         completeTrackedSpeech(sessionId, 'stale');
       }
       if (activeSessionIdRef.current === sessionId && state.status === 'error') setError(state.message);
-      if (activeSessionIdRef.current === sessionId && state.status === 'disconnected' && state.reason) setError(state.reason);
+      if (activeSessionIdRef.current === sessionId && state.status === 'disconnected' && state.reason && !isRuntimeReplacementState(state)) setError(state.reason);
       if (state.status === 'connected') {
         void host.bootstrap().then((snapshot) => {
           // `newSession` publishes a synthetic target while the main process

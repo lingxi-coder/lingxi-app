@@ -399,6 +399,12 @@ export class BridgeClient extends EventEmitter {
     return validateSessionWorkspaceState(await this.request('workspace_state', {}));
   }
 
+  async restoreWorkspaceControls(snapshot: string): Promise<void> {
+    if (typeof snapshot !== 'string' || snapshot.length === 0 || snapshot.length > 16_384) throw new Error('invalid runtime controls snapshot');
+    const result = await this.request('restore_workspace_controls', { snapshot });
+    if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') throw new Error('invalid runtime controls restore response');
+  }
+
   async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, signal?: AbortSignal): Promise<void> {
     // The Desktop resume owner pauses its deadline for live tool interactions.
     // Its signal replaces the fixed request deadline only for that owner.

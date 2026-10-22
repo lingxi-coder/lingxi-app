@@ -4706,7 +4706,10 @@ impl FramePump for BridgeConnection {
                 }
                 if matches!(
                     method.as_str(),
-                    "set_cwd" | "add_directory" | "resume_selected_session"
+                    "set_cwd"
+                        | "add_directory"
+                        | "resume_selected_session"
+                        | "restore_workspace_controls"
                 ) {
                     // One authenticated client owns this control request. Hold
                     // the same admission lock as prompts and session changes
@@ -4728,6 +4731,11 @@ impl FramePump for BridgeConnection {
                             Some(router) if method == "set_cwd" => {
                                 router
                                     .set_working_directory(params, self.unscoped_event_sink())
+                                    .await
+                            }
+                            Some(router) if method == "restore_workspace_controls" => {
+                                router
+                                    .restore_workspace_controls(params, self.unscoped_event_sink())
                                     .await
                             }
                             Some(router) if method == "resume_selected_session" => {
@@ -8386,6 +8394,20 @@ mod workspace_control_tests {
             )
             .unwrap())
         }
+        async fn restore_workspace_controls(
+            &self,
+            _: Utf16JsonProjection,
+            sink: Arc<dyn ClientEventSink>,
+        ) -> Result<Utf16JsonProjection, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            sink.emit(ClientEvent::SlashCommandResult {
+                turn_id: None,
+                display: "restored controls".into(),
+                is_error: false,
+            })
+            .await;
+            Ok(Utf16JsonProjection::parse(r#"{"status":"ok"}"#).unwrap())
+        }
         async fn resume_selected_session(
             &self,
             _: Utf16JsonProjection,
@@ -8507,6 +8529,28 @@ mod workspace_control_tests {
         };
         assert_eq!(response.result.unwrap().string_at("/status"), Some("ok"));
         assert_eq!(router.0.load(Ordering::SeqCst), 3);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        connection
+            .on_frame(request(9, "restore_workspace_controls"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected idle refusal")
+        };
+        assert!(response.error.is_some());
+        assert_eq!(router.0.load(Ordering::SeqCst), 3);
+        connection.turn_running.store(false, Ordering::SeqCst);
+        connection
+            .on_frame(request(10, "restore_workspace_controls"), sink.clone())
+            .await;
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::SlashCommandResult { .. })
+        ));
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected controls completion")
+        };
+        assert_eq!(response.result.unwrap().string_at("/status"), Some("ok"));
+        assert_eq!(router.0.load(Ordering::SeqCst), 4);
         connection.close_connection(None).await;
         endpoint.shutdown().await;
     }

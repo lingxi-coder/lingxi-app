@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TerminalManager, terminalEnvironment } from '../src/main/terminal';
@@ -46,8 +46,20 @@ test('real Rust broker: cwd, UTF-8, control, resize, isolation, migration and cl
     await manager.input(a.id, "awk 'BEGIN { for(i=0;i<40000;i++) print \"0123456789012345678901234567890123456789012345678901234567890123\" }'; printf '__LX_%s__\\n' FLOOD_DONE\n");
     await until(() => output(a.id).includes('__LX_FLOOD_DONE__'), 'bounded high-volume output');
     assert.ok(output(a.id).length <= 1024 * 1024);
-    manager.migrateScope(scope, { ...scope, sessionId: 'persisted-session' });
+    const persisted = { ...scope, sessionId: 'persisted-session' };
+    manager.migrateScope(scope, persisted);
     assert.equal(manager.list(scope).length, 0); assert.equal(manager.get(a.id)?.scope.sessionId, 'persisted-session');
+    const destination = join(directory, 'moved workspace'); mkdirSync(destination);
+    const moved = { ...persisted, projectPath: destination };
+    manager.migrateScope(persisted, moved);
+    assert.equal(manager.list(persisted).length, 0); assert.equal(manager.list(moved)[0]?.id, a.id);
+    assert.deepEqual(manager.get(b.id)?.scope, { ...scope, sessionId: 'other-session' });
+    const fresh = await manager.create(moved);
+    await manager.input(a.id, "printf '__LX_PRESERVED_CWD__%s\\n' \"$PWD\"\n");
+    await manager.input(fresh.id, "printf '__LX_MOVED_CWD__%s\\n' \"$PWD\"\n");
+    await until(() => output(a.id).includes('__LX_PRESERVED_CWD__' + directory)
+      && output(fresh.id).includes('__LX_MOVED_CWD__' + destination), 'relocated owner keeps its shell while new terminals use the new directory');
+    await manager.close(fresh.id);
     await manager.input(a.id, "printf '__LX_%s__\\n' SLEEP; sleep 30\n");
     await until(() => output(a.id).includes('__LX_SLEEP__'), 'foreground process start');
     await manager.input(a.id, '\u0003'); await manager.input(a.id, "printf '__LX_%s__\\n' INTERRUPTED\n");

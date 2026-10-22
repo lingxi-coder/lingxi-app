@@ -17,6 +17,8 @@ export interface SessionWorkspaceState {
   transcript_path?: string;
   /** Whether the live engine has user or assistant history to resume. */
   has_conversation?: boolean;
+  /** Opaque host-only state; ephemeral and bound to this UUID. */
+  runtime_controls?: string;
   prompt_directories?: string[];
   /** Explicit session grants, excluding settings-derived directories. */
   additional_directories: string[];
@@ -61,6 +63,7 @@ export function validateSessionWorkspaceState(value: unknown): SessionWorkspaceS
     ...(input.initial_project_root === undefined ? {} : { initial_project_root: text(input.initial_project_root) }),
     ...(input.transcript_path === undefined ? {} : { transcript_path: text(input.transcript_path) }),
     ...(input.has_conversation === undefined ? {} : { has_conversation: input.has_conversation }),
+    ...(input.runtime_controls === undefined ? {} : { runtime_controls: text(input.runtime_controls) }),
     ...(input.prompt_directories === undefined ? {} : { prompt_directories: (input.prompt_directories as unknown[]).map(text) }),
   };
 }

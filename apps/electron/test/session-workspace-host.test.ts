@@ -10,6 +10,7 @@ import { DiagnosticBuffer } from '../src/main/host-utils';
 import type { SessionRef } from '../src/main/bridgeTypes';
 import type { ProjectSessionCatalogRow } from '../src/main/session-catalog';
 import { SettingsStore } from '../src/main/settings';
+import { TerminalManager } from '../src/main/terminal';
 import type { SessionCatalogScope, SessionOpenSelection } from '../src/shared/sessionWorkspace';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
@@ -23,6 +24,7 @@ class WorkspaceRuntime {
   promptDirectories: string[];
   directories: string[] = [];
   hasConversation: boolean | undefined = true;
+  runtimeControls: string | undefined;
   busy = false;
   leased = false;
   reads = 0;
@@ -47,7 +49,8 @@ class WorkspaceRuntime {
     this.reads++;
     return { cwd: this.cwd, initial_project_root: this.initialProjectRoot,
       transcript_path: this.transcriptPath, prompt_directories: [...this.promptDirectories], additional_directories: [...this.directories],
-      ...(this.hasConversation === undefined ? {} : { has_conversation: this.hasConversation }) };
+      ...(this.hasConversation === undefined ? {} : { has_conversation: this.hasConversation }),
+      ...(this.runtimeControls ? { runtime_controls: this.runtimeControls } : {}) };
   }
   async setWorkingDirectory(request: SetWorkingDirectoryRequest): Promise<SetWorkingDirectoryResult> {
     assert.equal(this.leased, true);
@@ -110,7 +113,7 @@ function hostFixture(t: TestContext) {
       assert.equal(runtimes.get(requested.sessionId)?.busy, false, 'busy runtimes must remain open');
       calls.close.push({ ...requested }); runtimes.delete(requested.sessionId);
     },
-    openSession: async (...args: [requested: SessionRef, empty?: boolean, model?: string, activate?: boolean, transcriptPath?: string]) => {
+    openSession: async (...args: [requested: SessionRef, empty?: boolean, model?: string, activate?: boolean, transcriptPath?: string, remountControls?: string]) => {
       const [requested, empty = false, model, , transcriptPath] = args;
       calls.open.push({ ref: { ...requested }, empty, model });
       calls.openArguments.push(args);
@@ -153,8 +156,14 @@ function hostFixture(t: TestContext) {
   // bootstrap services are replaced by their current persisted observations.
   (host as any).bootstrap = () => ({ settings: settings.getPublic(), activeSession: settings.getPublic().activeSession,
     projectCatalogs: Object.fromEntries((host as any).catalogs) });
-  (host as any).terminals = { migrateScope: (before: SessionRef, after: SessionRef) => { calls.terminals.push({ before, after }); } };
-  t.after(() => { host.dispose(); rmSync(root, { recursive: true, force: true }); });
+  const terminals = new TerminalManager();
+  const migrateScope = terminals.migrateScope.bind(terminals);
+  terminals.migrateScope = (before, after) => {
+    calls.terminals.push({ before, after });
+    migrateScope(before, after);
+  };
+  host.attachTerminals(terminals);
+  t.after(async () => { host.dispose(); await terminals.dispose(); rmSync(root, { recursive: true, force: true }); });
   return { root, source, target, userData, ref, settings, original, runtimes, grants, projectRoots, promptDirectories, calls, bridge, row, catalog, dialogs, host };
 }
 
@@ -240,13 +249,16 @@ test('/cd opens an unsent draft without resuming its computed but unwritten tran
   assert.equal(existsSync(f.original.transcriptPath), false);
   const snapshot = await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
   assert.equal(existsSync(f.row(f.target).path), false, 'a relocated writer path does not imply that a JSONL file exists');
-  assert.deepEqual(f.calls.openArguments, [[moved, true, undefined, true, undefined]]);
+  assert.deepEqual(f.calls.openArguments, [[moved, true, undefined, true, undefined, undefined]]);
   assert.deepEqual(f.calls.close, [f.ref]);
   assert.equal(f.projectRoots.get(sessionId), f.target);
   assert.equal(f.runtimes.get(sessionId)?.initialProjectRoot, f.target);
   assert.equal(f.runtimes.get(sessionId)?.hasConversation, false);
   assert.deepEqual(snapshot?.activeSession, moved);
   assert.deepEqual(snapshot?.projectCatalogs[f.target].sessions, []);
+  const restarted = new SettingsStore(f.userData);
+  assert.equal(restarted.getPublic().activeSession, undefined, 'cold start must not try to resume an unwritten draft UUID');
+  assert.equal(restarted.getPublic().activeProject, f.target);
 });
 
 test('/cd with history and no catalog row propagates a missing transcript failure instead of silently opening an empty draft', async (t) => {
@@ -266,7 +278,7 @@ test('/cd with history and no catalog row propagates a missing transcript failur
       return open(...args);
     };
     await assert.rejects(f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target }), { code: 'ENOENT', path: selectedPath });
-    assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, true, selectedPath]]);
+    assert.deepEqual(f.calls.openArguments, [[moved, false, undefined, true, selectedPath, undefined]]);
     assert.deepEqual(f.calls.close, [f.ref]);
     assert.equal(f.runtimes.get(sessionId), undefined);
     assert.equal(f.projectRoots.get(sessionId), f.source);
@@ -543,4 +555,13 @@ test('canceling trust for a selected copy leaves the currently open copy in plac
   assert.deepEqual(f.calls.close, []); assert.deepEqual(f.calls.open, []);
   assert.equal(f.runtimes.get(sessionId), f.original);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+});
+
+
+test('/cd carries only the current runtime controls to its same-UUID replacement', async (t) => {
+  const f = hostFixture(t);
+  f.original.runtimeControls = '{"private":"source-runtime-controls"}';
+  await f.host.updateSessionWorkspace(sessionId, { action: 'cd', path: f.target });
+  assert.equal(f.calls.openArguments[0]?.[5], f.original.runtimeControls);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8').includes('source-runtime-controls'), false);
 });

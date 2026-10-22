@@ -196,6 +196,7 @@ export class SessionRuntime {
   private adoptedProcessOwned = false;
   private activeWorkspace: string | undefined;
   private ownedTranscriptPath: string | undefined;
+  private remountControls: string | undefined;
   private activeWorkspaceTrusted = false;
   private runtimeCredentialProviders = new Set<string>();
   private persistedCredentialProviders = new Set<string>();
@@ -491,6 +492,7 @@ export class SessionRuntime {
   constructor(private readonly opts: BridgeManagerOptions) {
     this.sessionId = opts.sessionId ?? randomUUID();
     this.ownedTranscriptPath = opts.resumeTranscriptPath;
+    this.remountControls = opts.remountControls;
     this.projectPath = opts.projectPath ?? '';
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
     if (opts.audioService) {
@@ -553,6 +555,14 @@ export class SessionRuntime {
 
   getWorkspaceState(): Promise<SessionWorkspaceState> {
     return this.requireClient().getWorkspaceState();
+  }
+
+  completeWorkspaceRemount(): void { this.remountControls = undefined; }
+
+  private async restoreRemountControls(): Promise<void> {
+    if (!this.remountControls) return;
+    // This private restore never updates shared defaults or replays opt-in transitions.
+    await this.requireClient().restoreWorkspaceControls(this.remountControls);
   }
 
   get cronOperationPending(): boolean {
@@ -1332,7 +1342,8 @@ export class SessionRuntime {
     );
     if (restorePermission) {
       const permissionStartedAt = Date.now();
-      await this.restorePermissionMode();
+      if (this.remountControls) await this.restoreRemountControls();
+      else await this.restorePermissionMode();
       assertCurrentConnection();
       this.startupDiagnostic('bridge_connect_phase', {
         durationMs: Date.now() - permissionStartedAt,
@@ -1340,7 +1351,7 @@ export class SessionRuntime {
         phase: 'restore_permission_mode',
       });
       const fastStartedAt = Date.now();
-      await this.restoreFastMode();
+      if (!this.remountControls) await this.restoreFastMode();
       assertCurrentConnection();
       this.startupDiagnostic('bridge_connect_phase', {
         durationMs: Date.now() - fastStartedAt,
@@ -2760,9 +2771,12 @@ export class SessionRuntime {
       this.ownedTranscriptPath = selectedPath;
       await this.restoreModel();
       assertCurrent();
-      await this.restorePermissionMode();
-      assertCurrent();
-      await this.restoreFastMode();
+      if (this.remountControls) await this.restoreRemountControls();
+      else {
+        await this.restorePermissionMode();
+        assertCurrent();
+        await this.restoreFastMode();
+      }
       assertCurrent();
     }).finally(() => {
       this.resumeOperationInProgress = false;
@@ -3079,12 +3093,12 @@ export class SessionRuntime {
     }
   }
 
-  async dispose(): Promise<void> {
+  async dispose(options?: { replacing?: boolean }): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     await this.restartChain.catch(() => undefined);
     if (this.opts.envelopeEvents) {
-      this.setState({ status: 'disconnected', reason: SESSION_RUNTIME_DISPOSED_REASON });
+      this.setState({ status: 'disconnected', reason: options?.replacing ? 'session runtime replaced' : SESSION_RUNTIME_DISPOSED_REASON });
     }
     await this.stopBridge();
     this.unsubscribeAudioService?.();

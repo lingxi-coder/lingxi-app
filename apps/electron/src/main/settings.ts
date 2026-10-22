@@ -172,7 +172,9 @@ export class SettingsStore {
     const relocate = <T extends SessionRef>(entry: T): T => matches(entry) ? { ...entry, projectPath } : entry;
     const next = withAddedProject(previous, projectPath);
     next.activeProject = projectPath;
-    next.activeSession = moved;
+    // Unsent drafts have no transcript to restore after a process restart.
+    // Move their visible owner without making the volatile UUID durable.
+    next.activeSession = previousDraft && matches(previousDraft) ? previous.activeSession : moved;
     next.pinnedSessions = next.pinnedSessions.map(relocate);
     next.archivedSessions = next.archivedSessions?.map(relocate);
     next.sessionModels = next.sessionModels?.map(relocate);

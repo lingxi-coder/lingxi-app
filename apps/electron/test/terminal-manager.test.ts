@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { TerminalManager, terminalEnvironment } from '../src/main/terminal';
 function fixture(requestTimeoutMs?: number) {
   const child = new EventEmitter() as any;
@@ -33,6 +36,37 @@ test('scope isolation, migration and close preserve other sessions', async () =>
   const snapshot = f.manager.get(a.id)!; snapshot.scope.sessionId = 'mutated'; assert.equal(f.manager.get(a.id)!.scope.sessionId, 'actual');
   await f.manager.closeScope(actual); assert.equal(f.manager.get(a.id), undefined); assert.ok(f.manager.get(b.id));
   assert.ok(events.some(e => e.kind === 'scope')); assert.ok(events.some(e => e.kind === 'closed')); await f.manager.dispose();
+});
+test('directory relocation and aliased draft adoption preserve terminals and other owners', async (t) => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'lingxi-terminal-move-')));
+  const source = join(directory, 'source'), target = join(directory, 'target');
+  mkdirSync(source); mkdirSync(target);
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  for (const [fromId, toId] of [['same-session', 'same-session'], ['__draft__', 'restored-session']]) {
+    const f = fixture();
+    try {
+      const from = { projectPath: source, sessionId: fromId }, to = { projectPath: target, sessionId: toId };
+      const owned = await f.manager.create(from);
+      const other = await f.manager.create({ ...from, sessionId: 'other-source-session' });
+      const targetOther = await f.manager.create({ ...to, sessionId: 'other-target-session' });
+      f.send({ kind: 'output', terminalId: owned.id, data: 'existing shell output' }); await tick();
+      const commandsBefore = f.commands.length;
+      const events: any[] = []; f.manager.onEvent(event => events.push(event));
+      f.manager.migrateScope(from, to);
+      assert.deepEqual(f.manager.list(from), []);
+      assert.equal(f.manager.list(to)[0]?.id, owned.id);
+      assert.equal(f.manager.get(owned.id)?.output, 'existing shell output');
+      assert.equal(f.manager.get(owned.id)?.status, 'running');
+      assert.deepEqual(f.manager.get(other.id)?.scope, { ...from, sessionId: 'other-source-session' });
+      assert.deepEqual(f.manager.get(targetOther.id)?.scope, { ...to, sessionId: 'other-target-session' });
+      assert.equal(f.commands.length, commandsBefore, 'ownership migration must not restart or send commands to a running shell');
+      assert.deepEqual(events, [{ kind: 'scope', terminalId: owned.id, scope: to }]);
+      await f.manager.closeProject(source);
+      assert.equal(f.manager.get(other.id), undefined);
+      assert.equal(f.manager.get(owned.id)?.status, 'running');
+      assert.equal(f.manager.get(targetOther.id)?.status, 'running');
+    } finally { await f.manager.dispose(); }
+  }
 });
 test('UTF-8 split frames, ordered bounded history and exit state', async () => {
   const f = fixture(); const a = await f.manager.create(scope); const events: any[] = []; f.manager.onEvent(event => events.push(event));

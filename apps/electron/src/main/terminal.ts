@@ -122,9 +122,10 @@ export class TerminalManager {
   }
   async closeScope(scope: TerminalScope): Promise<void> { for (const row of this.list(scope)) await this.close(row.id); }
   async closeProject(projectPath: string): Promise<void> { for (const row of [...this.rows.values()]) if (row.scope.projectPath === projectPath) await this.close(row.id); }
+  /** Host-only ownership transfer for drafts, alias restores and directory changes.
+   * Existing shells retain their process state and cwd; new terminals use the new scope. */
   migrateScope(from: TerminalScope, inputTo: TerminalScope): void {
     const to = validateScope(inputTo);
-    if (from.projectPath !== to.projectPath) throw new Error('Cannot migrate terminal across projects');
     for (const row of this.rows.values()) if (sameScope(row.scope, from)) {
       row.scope = { ...to };
       this.emit({ kind: 'scope', terminalId: row.id, scope: { ...to } });

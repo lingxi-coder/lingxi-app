@@ -78,6 +78,8 @@ export interface BridgeManagerOptions {
   sessionResumeTimeoutMs?: number;
   /** Exact catalog selection retained when an idle runtime is recreated. */
   resumeTranscriptPath?: string;
+  /** Ephemeral same-UUID controls used only during a directory remount. */
+  remountControls?: string;
   stopTimeoutMs?: number;
   isPackaged?: boolean;
   resourcesPath?: string;

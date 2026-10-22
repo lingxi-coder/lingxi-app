@@ -302,6 +302,14 @@ pub trait CommandRouter: Send + Sync + 'static {
         Err("workspace state is unavailable".into())
     }
 
+    async fn restore_workspace_controls(
+        &self,
+        _request: Utf16JsonProjection,
+        _sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        Err("workspace controls are unavailable".into())
+    }
+
     async fn add_working_directory(
         &self,
         _request: Utf16JsonProjection,
@@ -1253,6 +1261,20 @@ impl CommandRouter for EngineCommandRouter {
             })
             .await;
         }
+        Ok(result)
+    }
+    async fn restore_workspace_controls(
+        &self,
+        request: Utf16JsonProjection,
+        sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        let result = self
+            .workspace_commands
+            .as_ref()
+            .ok_or("workspace controls are unavailable")?
+            .restore_runtime_controls(request)
+            .await?;
+        self.emit_controls_snapshot(sink.as_ref()).await;
         Ok(result)
     }
     fn realtime_audio_supported(&self) -> bool {

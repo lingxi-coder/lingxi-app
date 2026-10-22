@@ -1780,11 +1780,12 @@ export class HostController {
         // Releasing and removing the old runtime are synchronous up to the
         // close's first await. No prompt can enter the old composition here.
         release();
-        await this.bridge.closeSession(ref);
+        await this.bridge.closeSession(ref, { replacing: true });
         const row = await this.sessionCatalog.find(target, sessionId);
         const empty = after.has_conversation === false || row?.empty_session === true;
         await this.bridge.openSession(moved, empty,
-          row?.resume_model ?? this.settings.getSessionModel(moved), true, empty ? undefined : after.transcript_path ?? row?.path);
+          row?.resume_model ?? this.settings.getSessionModel(moved), true, empty ? undefined : after.transcript_path ?? row?.path,
+          after.runtime_controls);
         await this.loadProjectSessions(target);
         return this.bootstrap();
       } catch (error) {
@@ -1841,7 +1842,7 @@ export class HostController {
       await this.trustSessionSource({ projectPath: source, sessionId: ref.sessionId });
       if (releaseCopy && existing) {
         releaseCopy();
-        await this.bridge.closeSession({ projectPath: existing.projectPath, sessionId: existing.sessionId });
+        await this.bridge.closeSession({ projectPath: existing.projectPath, sessionId: existing.sessionId }, { replacing: true });
       }
       const canonical = { projectPath: source, sessionId: ref.sessionId } satisfies SessionRef;
       await this.bridge.openSession(canonical, session?.empty_session === true, session?.resume_model,

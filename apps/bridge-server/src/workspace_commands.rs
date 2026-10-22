@@ -32,6 +32,18 @@ pub(crate) struct WorkspaceCommands {
     cold_resume: std::sync::Mutex<Option<ColdBootResume>>,
 }
 
+/// Private, in-memory continuity across the same UUID's directory remount.
+/// Never write this carrier to transcript or shared user defaults.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeControls {
+    session_id: uuid::Uuid,
+    permission_mode: String,
+    reasoning: lingxi_core::host::ReasoningSelection,
+    fast_mode: bool,
+    proactivity: orchestrator::NativeProactivityRemountState,
+}
+
 /// The source captured before Runtime hydration and SessionStart hooks. It is
 /// consumed once, after the connected host can answer deferred tool approvals.
 pub(crate) struct ColdBootResume {
@@ -302,6 +314,22 @@ impl WorkspaceCommands {
     }
     pub(crate) async fn state(&self) -> Result<Utf16JsonProjection, String> {
         let runtime = self.host.runtime()?;
+        let controls = runtime
+            .orchestrator
+            .conversation_controls()
+            .await
+            .ok_or("conversation controls unavailable")?;
+        let runtime_controls = serde_json::to_string(&RuntimeControls {
+            session_id: runtime.orchestrator.current_session_id().await.as_uuid(),
+            permission_mode: runtime
+                .orchestrator
+                .permission_mode()
+                .unwrap_or_else(|| "default".into()),
+            reasoning: controls.requested_reasoning_selection,
+            fast_mode: runtime.orchestrator.fast_mode().await,
+            proactivity: runtime.orchestrator.native_proactivity_remount_state(),
+        })
+        .map_err(|error| error.to_string())?;
         let has_conversation =
             runtime
                 .orchestrator
@@ -335,7 +363,46 @@ impl WorkspaceCommands {
             "transcript_path":runtime.orchestrator.session_transcript_writer().map(|writer|writer.active_path()),
             "prompt_directories":runtime.registered_prompt_directories().await,
             "has_conversation":has_conversation,
+            "runtime_controls":runtime_controls,
         })))
+    }
+
+    pub(crate) async fn restore_runtime_controls(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, String> {
+        let encoded = request
+            .string_at("/snapshot")
+            .filter(|text| text.len() <= 16_384)
+            .ok_or("invalid runtime controls snapshot")?;
+        let controls: RuntimeControls =
+            serde_json::from_str(encoded).map_err(|_| "invalid runtime controls snapshot")?;
+        let runtime = self.host.runtime()?;
+        if runtime.orchestrator.current_session_id().await.as_uuid() != controls.session_id {
+            return Err("runtime controls belong to another session".into());
+        }
+        runtime
+            .orchestrator
+            .set_permission_mode(&controls.permission_mode)
+            .await?;
+        runtime
+            .orchestrator
+            .set_reasoning_selection(controls.reasoning)
+            .await
+            .map_err(|error| error.to_string())?;
+        runtime
+            .orchestrator
+            .set_fast_mode(controls.fast_mode)
+            .await
+            .map_err(|error| error.to_string())?;
+        runtime
+            .orchestrator
+            .restore_native_proactivity_remount_state(controls.proactivity);
+        lingxi_core::host::live_sessions::set_process_permission_mode(
+            &controls.permission_mode,
+            controls.permission_mode == "bypassPermissions",
+        );
+        Ok(response(serde_json::json!({"status":"ok"})))
     }
     pub(crate) async fn set_working_directory(
         &self,
@@ -1200,12 +1267,60 @@ mod tests {
         let commands = register(
             runtime,
             &settings,
-            config_home,
+            config_home.clone(),
             true,
             vec![shell.clone()],
             false,
         )
         .await;
+
+        // Remount continuity restores live controls without persisting global
+        // defaults or replaying proactivity initialize/level transitions.
+        let before_controls = commands.state().await.unwrap();
+        let carrier = before_controls
+            .string_at("/runtime_controls")
+            .unwrap()
+            .to_owned();
+        let defaults = config_home.join("settings.json");
+        let defaults_before = std::fs::read(&defaults).ok();
+        runtime
+            .orchestrator
+            .set_permission_mode("plan")
+            .await
+            .unwrap();
+        runtime
+            .orchestrator
+            .set_reasoning_selection(lingxi_core::host::ReasoningSelection::Disabled)
+            .await
+            .unwrap();
+        runtime
+            .orchestrator
+            .apply_native_proactivity_initialize(Some(false), false);
+        let restore = |snapshot: &str| response(serde_json::json!({"snapshot": snapshot}));
+        let mut wrong: RuntimeControls = serde_json::from_str(&carrier).unwrap();
+        wrong.session_id = uuid::Uuid::new_v4();
+        assert!(commands
+            .restore_runtime_controls(restore(&serde_json::to_string(&wrong).unwrap()))
+            .await
+            .unwrap_err()
+            .contains("another session"));
+        assert_eq!(
+            runtime.orchestrator.permission_mode().as_deref(),
+            Some("plan")
+        );
+        commands
+            .restore_runtime_controls(restore(&carrier))
+            .await
+            .unwrap();
+        assert_eq!(
+            commands
+                .state()
+                .await
+                .unwrap()
+                .string_at("/runtime_controls"),
+            Some(carrier.as_str())
+        );
+        assert_eq!(std::fs::read(&defaults).ok(), defaults_before);
 
         let quote = format!("'{}'", shell.to_string_lossy().replace('\'', "'\\''"));
         // Use the registered Bash tool, whose persistent cwd is shared with

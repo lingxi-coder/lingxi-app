@@ -53,14 +53,26 @@ test('relocation carries archived metadata to the same UUID in the new directory
   assert.deepEqual(saved.getPublic().archivedSessions, [{ ...before, projectPath: f.target }]);
 });
 
-test('relocation carries a volatile active draft to the same UUID in the new directory', (t) => {
+test('relocation carries a volatile draft without overwriting the last durable session', (t) => {
   const f = settingsFixture(t);
   f.settings.setActiveSession({ projectPath: f.old, sessionId: otherId });
   f.settings.setActiveSessionDraft(f.ref);
   f.settings.relocateSession(f.ref, f.target);
   assert.deepEqual(f.settings.getPublic().activeSession, f.moved);
   const saved = new SettingsStore(f.userData);
-  assert.deepEqual(saved.getPublic().activeSession, f.moved);
+  assert.deepEqual(saved.getPublic().activeSession, { projectPath: f.old, sessionId: otherId });
+  assert.equal(saved.getPublic().activeProject, f.target);
+});
+
+test('moving an unsent first draft persists its directory without a nonexistent resume target', (t) => {
+  const f = settingsFixture(t);
+  f.settings.setActiveSession(undefined);
+  f.settings.setActiveSessionDraft(f.ref);
+  f.settings.relocateSession(f.ref, f.target);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.moved);
+  const saved = new SettingsStore(f.userData);
+  assert.equal(saved.getPublic().activeSession, undefined);
+  assert.equal(saved.getPublic().activeProject, f.target);
 });
 
 test('a failed relocation write preserves the previous file, memory, pin and volatile active draft', (t) => {

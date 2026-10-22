@@ -8,6 +8,7 @@ import { BridgeClient } from '@lingxi/bridge-client';
 import type { SetWorkingDirectoryRequest } from '@lingxi/bridge-client';
 
 import { SessionRuntime } from '../src/main/bridge';
+import { isRuntimeRemovedState } from '../src/renderer/bridge/bridgeRuntimeState';
 import type { WorkspaceLaunchSettings } from '../src/main/bridgeTypes';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager';
 
@@ -629,4 +630,78 @@ test('a failed selected open never replaces the last successfully remembered sta
     await manager.openSession(ref);
     assert.equal(starts.at(-1), previousPath, 'the next ordinary open must not inherit a path from a rejected selection');
   }
+});
+
+
+test('same-UUID remount restores private controls after selected resume without replaying shared defaults', async (t) => {
+  const f = selectedResumeRuntime(t), internal = f.runtime as any;
+  internal.remountControls = 'ephemeral-controls';
+  Object.assign(f.client, { restoreWorkspaceControls: async (snapshot: string) => {
+    assert.equal(snapshot, 'ephemeral-controls'); f.restored.push('private-controls');
+  } });
+  const pending = f.runtime.resumeOwnedSession('/saved/selected.jsonl');
+  resumeProof(f.client); f.acknowledgement.resolve(undefined); await pending;
+  assert.deepEqual(f.restored, ['model', 'private-controls']);
+  f.runtime.completeWorkspaceRemount();
+  assert.equal(internal.remountControls, undefined, 'later control changes cannot be overwritten by the captured state');
+});
+
+test('private control restore failure rejects remount instead of exposing defaults as a successful resume', async (t) => {
+  const f = selectedResumeRuntime(t), internal = f.runtime as any;
+  internal.remountControls = 'ephemeral-controls';
+  Object.assign(f.client, { restoreWorkspaceControls: async () => { throw new Error('private restore rejected'); } });
+  const pending = f.runtime.resumeOwnedSession('/saved/selected.jsonl');
+  const rejected = assert.rejects(pending, /private restore rejected/);
+  resumeProof(f.client); f.acknowledgement.resolve(undefined); await rejected;
+  assert.deepEqual(f.restored, ['model']);
+});
+
+
+test('private controls finish before a replacement runtime publishes connected', async (t) => {
+  const connect = BridgeClient.prototype.connect, send = BridgeClient.prototype.sendCommand;
+  const restore = BridgeClient.prototype.restoreWorkspaceControls;
+  const pending = deferred<void>(), calls: string[] = [];
+  BridgeClient.prototype.connect = async () => ({ server_name: 'test', protocol_version: 'test', capabilities: {} } as any);
+  BridgeClient.prototype.sendCommand = () => {};
+  BridgeClient.prototype.restoreWorkspaceControls = async snapshot => {
+    assert.equal(snapshot, 'ephemeral'); calls.push('restore'); await pending.promise;
+  };
+  t.after(() => { BridgeClient.prototype.connect = connect; BridgeClient.prototype.sendCommand = send;
+    BridgeClient.prototype.restoreWorkspaceControls = restore; });
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/project', remountControls: 'ephemeral',
+    launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) });
+  const internal = runtime as any;
+  internal.activeWorkspaceTrusted = true;
+  internal.activeWorkspace = '/project';
+  internal.restorePermissionMode = internal.restoreFastMode = async () => { throw new Error('must not replay defaults'); };
+  internal.refreshProviderCredentials = async () => {};
+  const connecting = internal.connectBridgeClient('/unused', internal.generation);
+  await nextTurn();
+  assert.deepEqual(calls, ['restore']);
+  assert.equal(runtime.connectionState.status, 'connecting');
+  pending.resolve(undefined); await connecting;
+  assert.equal(runtime.connectionState.status, 'connected');
+  await runtime.dispose();
+});
+
+
+test('same-UUID replacement disposes the old owner without tombstoning replacement renderer events', async () => {
+  const sent: Array<{ channel: string; payload: any }> = [];
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  const ref = { projectPath: '/A', sessionId: '33333333-4444-4555-8666-777777777777' };
+  const window = Object.assign(new EventEmitter(), { isDestroyed: () => false,
+    send: (channel: string, payload: any) => sent.push({ channel, payload }) });
+  manager.registerWindow(window as any, 'app://desktop/index.html');
+  const old = await manager.ensure(ref, false);
+  await manager.closeSession(ref, { replacing: true });
+  const replacementState = sent.at(-1)?.payload.event;
+  assert.deepEqual(replacementState, { status: 'disconnected', reason: 'session runtime replaced' });
+  assert.equal(isRuntimeRemovedState(replacementState), false);
+  const replacement = await manager.ensure({ ...ref, projectPath: '/B' }, false);
+  assert.notEqual(old, replacement);
+  (replacement as any).setState({ status: 'connected' });
+  assert.equal(sent.at(-1)?.payload.event.status, 'connected');
+  await manager.closeSession({ ...ref, projectPath: '/B' });
+  assert.equal(isRuntimeRemovedState(sent.at(-1)?.payload.event), true);
+  await manager.dispose();
 });

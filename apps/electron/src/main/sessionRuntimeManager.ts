@@ -211,7 +211,7 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true, resumeModel?: string): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -224,7 +224,7 @@ export class SessionRuntimeManager {
 
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
-    const runtime = new SessionRuntime(runtimeOptions);
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls });
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const [webContents, origins] of this.targets) {
@@ -247,7 +247,7 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -271,7 +271,8 @@ export class SessionRuntimeManager {
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath).then((runtime) => {
+    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls).then((runtime) => {
+      runtime.completeWorkspaceRemount();
       if (transcriptPath) this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
       if (this.openingSessions.get(ref.sessionId)?.activate) this.activate(runtime);
       return runtime;
@@ -283,7 +284,7 @@ export class SessionRuntimeManager {
     return trackedPromise;
   }
 
-  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string): Promise<SessionRuntime> {
+  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string, remountControls?: string): Promise<SessionRuntime> {
     let runtime: SessionRuntime | undefined;
     const previousTranscriptPath = this.sessionTranscriptPaths.get(ref.sessionId);
     try {
@@ -297,7 +298,7 @@ export class SessionRuntimeManager {
         await existing.start();
         runtime = existing;
       } else {
-        runtime = await this.ensure(ref, true);
+        runtime = await this.ensure(ref, true, undefined, remountControls);
       }
       if (!empty && !runtime.recoveredLiveConnection) await runtime.resumeOwnedSession(transcriptPath);
       return runtime;
@@ -417,7 +418,7 @@ export class SessionRuntimeManager {
     await runtime.restoreOwnedSessionIfNeeded();
   }
 
-  async closeSession(ref: SessionRef): Promise<void> {
+  async closeSession(ref: SessionRef, options?: { replacing?: boolean }): Promise<void> {
     const runtime = this.require(ref);
     if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before closing this chat.');
     // Remove from the routable map BEFORE the first await, for the same reason
@@ -431,7 +432,7 @@ export class SessionRuntimeManager {
     this.sessionModelHints.delete(ref.sessionId);
     if (this.activeSessionId === ref.sessionId) this.activeSessionId = null;
     this.clearDraftSession(ref);
-    await runtime.dispose();
+    await runtime.dispose(options);
   }
 
   async closeProject(projectPath: string): Promise<void> {

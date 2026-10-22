@@ -98,3 +98,14 @@ test('workspace controls reject malformed replies and disconnect without replayi
   await rejected;
   assert.equal(fixture.internal.pendingResponses.size, 0);
 });
+
+
+test('private remount controls require a bounded carrier and a successful correlated acknowledgement', async () => {
+  const fixture = wire({ status: 'ok' });
+  await fixture.client.restoreWorkspaceControls('{"session_id":"same-session"}');
+  assert.equal(fixture.sent()?.payload.method, 'restore_workspace_controls');
+  assert.deepEqual(fixture.sent()?.payload.params, { snapshot: '{"session_id":"same-session"}' });
+  await assert.rejects(wire({ status: 'rejected' }).client.restoreWorkspaceControls('carrier'));
+  for (const value of ['', 'a'.repeat(16_385)]) await assert.rejects(fixture.client.restoreWorkspaceControls(value));
+  assert.equal(validateSessionWorkspaceState({ cwd: '/A', additional_directories: [], runtime_controls: 'private' }).runtime_controls, 'private');
+});

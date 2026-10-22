@@ -7,6 +7,7 @@ import type { ScheduledTaskService } from './scheduled.js';
 import type { HostNotifier } from './notifications.js';
 import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
+import type { RemoteControlUi } from './remoteControl/rendererIpc.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
 import {
@@ -367,6 +368,8 @@ function workspaceRecovery(workspace: string, error: unknown): NonNullable<Works
 export class HostController {
   private git?: GitService;
   private offGit?: () => void;
+  private remoteControlUi?: RemoteControlUi;
+  private remoteControlChannels: string[] = [];
   private readonly gitWatches = new Map<WebContents, Map<string, Promise<() => void>>>();
   private terminals?: TerminalManager;
   private offTerminals?: () => void;
@@ -424,6 +427,29 @@ export class HostController {
   }
 
   attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
+
+  /** The Remote Control settings page's handlers; registered with the rest by `registerIpc`. */
+  attachRemoteControl(ui: RemoteControlUi): void {
+    this.remoteControlUi = ui;
+    if (this.registered) this.registerRemoteControlIpc();
+  }
+
+  /** Send to every window of the app that is still alive. */
+  sendToWindows(channel: string, payload: unknown): void {
+    for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(channel, payload);
+  }
+
+  private registerRemoteControlIpc(): void {
+    const ui = this.remoteControlUi;
+    if (!ui || this.remoteControlChannels.length > 0) return;
+    for (const [channel, handler] of Object.entries(ui.handlers())) {
+      this.ipc.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+        this.assertSender(event);
+        return handler(...args);
+      });
+      this.remoteControlChannels.push(channel);
+    }
+  }
 
   /**
    * The notifier holds ARMED TIMERS, so it cannot poll the settings store —
@@ -528,6 +554,7 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    this.registerRemoteControlIpc();
     this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
       this.assertSender(event);
       if (!this.account) throw new Error('Account service is unavailable');
@@ -1634,7 +1661,7 @@ export class HostController {
     // and selected Project unchanged.
     this.settings.activateProject(project);
     const wasArchived = this.settings.isSessionArchived(canonical);
-    if (wasArchived) this.settings.setSessionArchived(canonical, false);
+    if (wasArchived) { this.settings.setSessionArchived(canonical, false); this.remoteControlUi?.sessionsChanged(); }
     this.settings.setActiveSession(canonical);
     if (wasArchived) await this.loadProjectSessions(project);
     return this.bootstrap();
@@ -1661,6 +1688,7 @@ export class HostController {
         const title = row?.title ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
         if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
         this.settings.setSessionArchived(ref, true, title);
+        this.remoteControlUi?.sessionsChanged();
         await this.terminals?.closeScope(ref);
         await this.bridge.closeSession(ref);
         this.sessionCatalog.invalidate(ref.projectPath);
@@ -1828,6 +1856,10 @@ export class HostController {
     this.account?.dispose();
     this.ipc.removeHandler(CH_ACCOUNT);
     this.ipc.removeHandler(CH_SCHEDULED);
+    for (const channel of this.remoteControlChannels) this.ipc.removeHandler(channel);
+    this.remoteControlChannels = [];
+    this.remoteControlUi?.dispose();
+    this.remoteControlUi = undefined;
     this.codexLoginAbort?.abort();
     this.offTerminals?.();
     this.offGit?.();

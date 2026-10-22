@@ -20,6 +20,7 @@ import type {
   CronRequestDto,
   FusionStrategyRefDto,
   FusionStrategySelectionDto,
+  ImageRefDto,
   PermissionModeId,
   PermissionRequest,
   NativeUiControlResponse,
@@ -33,8 +34,9 @@ import type {
 import type { WebContents } from 'electron';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { fusionInvocation, pinFusionStrategy } from '../shared/fusionStrategy.js';
+import { REMOTE_STATE_EVENT_TYPES } from '../shared/clientCommands.js';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -58,6 +60,7 @@ import {
   childExitDiagnostic,
   connectionDiagnostic,
   isTurnOwnedEvent,
+  slashRequestEchoes,
   urlOrigin,
 } from './bridgeEvents.js';
 import {
@@ -74,7 +77,13 @@ import type {
   BridgeRuntimeVersions,
   ConnectionState,
   HostPermissionRequest,
+  InteractionRecord,
+  PromptJournalEntry,
+  PromptSource,
   ProviderConnectionTestResult,
+  RemoteObservation,
+  RemoteObserver,
+  RemoteRuntimeView,
   SequencedRuntimeEventEnvelope,
   SessionRef,
   SessionRuntimeSummary,
@@ -169,6 +178,13 @@ const MAX_PENDING_ASK_USER_QUESTION = 1_000;
 
 const MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME = 256;
 
+// Remote Control's memory of what the engine's event stream does not hold.
+const MAX_PROMPT_JOURNAL = 500;
+const MAX_JOURNAL_ENTRIES_WITH_IMAGES = 20;
+const MAX_INTERACTION_RECORDS = 200;
+
+const REMOTE_STATE_EVENTS: ReadonlySet<string> = new Set(REMOTE_STATE_EVENT_TYPES);
+
 // Mod UI requests share the runtime's ordinary command lane, and a transcript
 // mounts a render site per tool row, so opening a long chat asks for well over
 // a hundred renders at once. The Bridge closes a connection with 64 commands
@@ -224,13 +240,24 @@ export class SessionRuntime {
   private foregroundInteractionEpoch = 0;
   /** Prevent a delayed duplicate permission frame from resurrecting a terminal request. */
   private readonly resolvedPermissionIds = new Set<number>();
-  private readonly pendingComputerAccessIds = new Set<number>();
+  /** Computer-access requests wait here as whole objects, so that a viewer can be shown them. */
+  private readonly pendingComputerAccessIds = new Map<number, ComputerAccessRequestDto>();
   private readonly pendingAskUserQuestionIds = new Set<number>();
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
   private pendingSessionResume: PendingSessionResume | null = null;
   private sessionHasHistory = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
+  /** Names this instance, so that a recreated runtime for the same session never reuses an epoch. */
+  readonly runtimeId = randomBytes(6).toString('hex');
+  private remoteBaseSequence = 0;
+  private readonly remoteObservers = new Set<RemoteObserver>();
+  private promptJournal: PromptJournalEntry[] = [];
+  private interactionRecords: InteractionRecord[] = [];
+  /** The newest sequence the bounded journal and interaction lists have dropped. */
+  private droppedThroughSequence = 0;
+  private readonly latestState = new Map<string, SequencedRuntimeEventEnvelope<ClientEvent>>();
+  private remotePendingNotified = false;
   private credentialRoutingSettings: unknown = undefined;
   private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; turnId?: number; promise: Promise<void>; complete(selected?: string): void; fail(error: Error): void } | undefined;
 
@@ -593,6 +620,7 @@ export class SessionRuntime {
         this.sessionHasHistory = true;
         try {
           client.sendCommand({ type: 'scheduled_run_turn', run_id: runId, prompt: task.prompt, model: config.model, reasoning: config.reasoning });
+          this.journalPrompt(task.prompt, [], 0, { origin: 'scheduled' });
         } catch (error) {
           this.pendingScheduledTurns.delete(runId);
           this.activeTurn = false;
@@ -764,6 +792,139 @@ export class SessionRuntime {
     })));
   }
 
+  // ── Remote Control ──────────────────────────────────────────────────────────
+
+  /**
+   * Watch the runtime from outside the desktop window: every client event as it
+   * is enveloped, prompts, permission and computer-access requests, changes to
+   * what is pending, connection states and disposal, all in the order they
+   * happen and synchronously. An observer that throws is ignored. Returns the
+   * function that stops watching.
+   */
+  observeRemote(observer: RemoteObserver): () => void {
+    this.remoteObservers.add(observer);
+    return () => { this.remoteObservers.delete(observer); };
+  }
+
+  /** Whether anything is watching with {@link observeRemote}. */
+  get remoteObserved(): boolean { return this.remoteObservers.size > 0; }
+
+  /** Read the state a snapshot is built from. Synchronous, so it can be paired with {@link observeRemote} without a gap. */
+  remoteView(): RemoteRuntimeView {
+    const first = this.replayEvents[0];
+    const base = first && TRANSCRIPT_REPLAY_BASE_EVENTS.has(first.event.type) ? first : undefined;
+    const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
+    return {
+      sessionId: this.sessionId,
+      runtimeId: this.runtimeId,
+      epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
+      baseSequence: this.remoteBaseSequence,
+      base,
+      events: base ? this.replayEvents.slice(1) : this.replayEvents,
+      state: [...this.latestState.values()],
+      prompts: this.promptJournal,
+      interactions: this.interactionRecords,
+      droppedThroughSequence: this.droppedThroughSequence,
+      lastSequence: this.eventSequence,
+      pending: this.remotePending(),
+      turn: { running: this.turnActive, ...(this.activeTurnId !== undefined ? { turn_id: this.activeTurnId } : {}) },
+      controls: controlsEvent?.type === 'conversation_controls_changed' ? controlsEvent.controls : undefined,
+      model: this.remoteModel,
+      connection: this.state,
+    };
+  }
+
+  /** The model the session is using: the engine's latest word, else the one it was launched with. */
+  get remoteModel(): string | undefined {
+    const event = this.latestState.get('model_changed')?.event;
+    return event?.type === 'model_changed' ? event.model : this.selectedModelReference;
+  }
+
+  /** Everything waiting for an answer, in full. */
+  remotePending(): RemoteRuntimeView['pending'] {
+    return {
+      permissions: [...this.pendingPermissionIds.values()].map(({ backgroundOwned: _owned, ...request }) => structuredClone(request)),
+      questions: this.pendingAskUserQuestions.map((request) => structuredClone(request)),
+      computer_access: [...this.pendingComputerAccessIds.values()].map((request) => structuredClone(request)),
+    };
+  }
+
+  /** The permission request with this id, if it is still waiting. */
+  pendingPermission(requestId: number): HostPermissionRequest | undefined {
+    return this.pendingPermissionIds.get(requestId);
+  }
+
+  pendingQuestion(requestId: number): AskUserQuestionRequestDto | undefined {
+    return this.pendingAskUserQuestionRequests.get(requestId)?.request;
+  }
+
+  /** The bytes of an image attached to the prompt at `sequence`, while the journal still holds them. */
+  promptImage(sequence: number, index: number): { media_type: string; base64: string } | undefined {
+    const image = this.promptJournal.find((entry) => entry.sequence === sequence)?.images[index];
+    return image?.base64 === undefined ? undefined : { media_type: image.media_type, base64: image.base64 };
+  }
+
+  private notifyRemote(observation: RemoteObservation): void {
+    for (const observer of [...this.remoteObservers]) {
+      try { observer(observation); } catch (error) {
+        this.diagnostics.add('warn', 'host', `remote observer failed: ${sanitizeDiagnostic(error)}`);
+      }
+    }
+  }
+
+  private noteRemoteEvent(envelope: SequencedRuntimeEventEnvelope<ClientEvent>): void {
+    if (REMOTE_STATE_EVENTS.has(envelope.event.type)) this.latestState.set(envelope.event.type, envelope);
+    this.notifyRemote({ type: 'event', envelope });
+  }
+
+  /** Tell observers the pending set changed. Coalesced into one notification per tick; the set is read when they handle it. */
+  private notifyRemotePending(): void {
+    if (this.remotePendingNotified || this.remoteObservers.size === 0) return;
+    this.remotePendingNotified = true;
+    queueMicrotask(() => {
+      this.remotePendingNotified = false;
+      this.notifyRemote({ type: 'pending' });
+    });
+  }
+
+  private recordInteraction(record: InteractionRecord['record']): void {
+    const interaction: InteractionRecord = { sequence: ++this.eventSequence, record };
+    this.interactionRecords = [...this.interactionRecords, interaction];
+    if (this.interactionRecords.length > MAX_INTERACTION_RECORDS) {
+      const dropped = this.interactionRecords.slice(0, this.interactionRecords.length - MAX_INTERACTION_RECORDS);
+      this.interactionRecords = this.interactionRecords.slice(-MAX_INTERACTION_RECORDS);
+      this.droppedThroughSequence = Math.max(this.droppedThroughSequence, dropped[dropped.length - 1]!.sequence);
+    }
+    this.notifyRemote({ type: 'interaction', interaction });
+  }
+
+  /** Remember a prompt the renderer shows as a user row. */
+  private journalPrompt(text: string, images: readonly ImageRefDto[], turnId: number, source: PromptSource | undefined): void {
+    const entry: PromptJournalEntry = {
+      sequence: ++this.eventSequence,
+      turnId,
+      text,
+      origin: source?.origin ?? 'desktop',
+      ...(source?.deviceName !== undefined ? { deviceName: source.deviceName } : {}),
+      images: images.map((image) => ({ media_type: image.media_type, base64: image.base64 })),
+    };
+    const journal = [...this.promptJournal, entry];
+    if (journal.length > MAX_PROMPT_JOURNAL) {
+      this.droppedThroughSequence = Math.max(this.droppedThroughSequence, journal[journal.length - MAX_PROMPT_JOURNAL - 1]!.sequence);
+    }
+    let withBytes = 0;
+    this.promptJournal = journal.slice(-MAX_PROMPT_JOURNAL).reverse().map((kept) => {
+      if (!kept.images.some((image) => image.base64 !== undefined) || ++withBytes <= MAX_JOURNAL_ENTRIES_WITH_IMAGES) return kept;
+      return { ...kept, images: kept.images.map((image) => ({ media_type: image.media_type })) };
+    }).reverse();
+    this.notifyRemote({ type: 'prompt', entry: this.promptJournal[this.promptJournal.length - 1]! });
+  }
+
+  /** The slash commands that make a user row in the renderer are journaled like prompts. */
+  private journalSlashCommand(command: ClientCommand, source: PromptSource | undefined): void {
+    if (command.type === 'run_slash_command' && slashRequestEchoes(command.raw)) this.journalPrompt(command.raw.trim(), command.images, command.turn_id ?? 0, source);
+  }
+
   private eventEnvelope(event: ClientEvent, retain: boolean): SequencedRuntimeEventEnvelope<ClientEvent> {
     const envelope = Object.freeze({
       sessionId: this.sessionId,
@@ -772,6 +933,11 @@ export class SessionRuntime {
     });
     if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
       this.replayEvents = [envelope];
+      // What came before the base is part of it (a resumed transcript holds the earlier prompts) or gone (`/clear`).
+      this.remoteBaseSequence = envelope.sequence;
+      this.promptJournal = [];
+      this.interactionRecords = [];
+      this.droppedThroughSequence = 0;
     } else if (retain && this.replayEvents.length > 0 && TRANSCRIPT_REPLAY_EVENTS.has(event.type)) {
       // Status is a snapshot, not a transcript event. Keep only the newest
       // one so repeated listing refreshes cannot grow the renderer replay
@@ -797,6 +963,7 @@ export class SessionRuntime {
     // renderer reconciles child state through side_chat_list / side_chat_get;
     // useBridge filters these events before parent conversation reducers.
     const envelope = this.eventEnvelope(event, true);
+    this.noteRemoteEvent(envelope);
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);
       return;
@@ -833,6 +1000,7 @@ export class SessionRuntime {
   private clearPendingAskUserQuestion(requestId: number): void {
     this.pendingAskUserQuestionRequests.delete(requestId);
     this.pendingAskUserQuestionIds.delete(requestId);
+    this.notifyRemotePending();
   }
 
   private notifyActivityChanged(): void {
@@ -854,12 +1022,14 @@ export class SessionRuntime {
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
       this.clearPendingAskUserQuestion(requestId);
     }
+    this.notifyRemotePending();
   }
 
   private clearPendingPermission(id: number): void {
     this.pendingPermissionIds.delete(id);
     this.backgroundPermissionIds.delete(id);
     this.permissionScopeChecks.delete(id);
+    this.notifyRemotePending();
   }
 
   private replayBackgroundPermissions(): void {
@@ -898,6 +1068,8 @@ export class SessionRuntime {
       this.permissionScopeChecks.delete(id);
       const scopedRequest: HostPermissionRequest = { ...request, backgroundOwned: scope.background_owned };
       this.pendingPermissionIds.set(id, scopedRequest);
+      this.recordInteraction({ type: 'permission_request', request: structuredClone(request) });
+      this.notifyRemotePending();
       this.broadcast(CH_PERMISSION, scopedRequest);
       this.opts.notifier?.permissionRequested(this.sessionId, id,
         request.kind.type === 'tool_use_confirm' ? request.kind.tool_name : request.kind.type, this.notificationRef);
@@ -1841,6 +2013,7 @@ export class SessionRuntime {
         this.pendingAskUserQuestionRequests.set(requestId, {
           request: event.request,
         });
+        this.notifyRemotePending();
       }
       if (event.type === 'ask_user_question_resolved') {
         this.clearPendingAskUserQuestion(event.request_id);
@@ -1892,7 +2065,9 @@ export class SessionRuntime {
           this.diagnostics.add('warn', 'bridge', 'computer access request limit reached');
           return;
         }
-        this.pendingComputerAccessIds.add(request.request_id);
+        this.pendingComputerAccessIds.set(request.request_id, structuredClone(request));
+        this.recordInteraction({ type: 'computer_access_request', request: structuredClone(request) });
+        this.notifyRemotePending();
         this.notifyActivityChanged();
         this.broadcast(CH_COMPUTER_ACCESS, request);
       }
@@ -2070,7 +2245,7 @@ export class SessionRuntime {
     pending.resolve(event);
   }
 
-  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown): void | Promise<void> {
+  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown, source?: PromptSource): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
@@ -2098,14 +2273,14 @@ export class SessionRuntime {
             this.diagnostics.add('warn', 'bridge', 'Optional Fusion credential preload failed.');
           });
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
-          this.sendPreparedPrompt(prompt, validatedImages, id, context);
+          this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
         } finally {
           this.pendingPromptHydrations.delete(token);
           this.notifyActivityChanged();
         }
       })();
     }
-    this.sendPreparedPrompt(prompt, validatedImages, id, context);
+    this.sendPreparedPrompt(prompt, validatedImages, id, context, source);
   }
 
   private sendPreparedPrompt(
@@ -2113,6 +2288,7 @@ export class SessionRuntime {
     validatedImages: ReturnType<typeof validateImageRefs>,
     turnId?: number,
     visualizationContext?: VisualizationReference,
+    source?: PromptSource,
   ): void {
     const needsIdentityCommit = !this.sessionIdentityCommitted;
     this.requireClient().sendPrompt(prompt, {
@@ -2120,6 +2296,7 @@ export class SessionRuntime {
       ...(turnId !== undefined ? { turnId } : {}),
       ...(visualizationContext !== undefined ? { visualizationContext } : {}),
     });
+    this.journalPrompt(prompt, validatedImages, turnId ?? 0, source);
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
       this.sessionIdentityCommitted = true;
@@ -2180,6 +2357,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().approveComputerAccess(id, computerAccessResponse);
     this.pendingComputerAccessIds.delete(id);
+    this.notifyRemotePending();
     this.notifyActivityChanged();
   }
 
@@ -2188,6 +2366,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().denyComputerAccess(id);
     this.pendingComputerAccessIds.delete(id);
+    this.notifyRemotePending();
     this.notifyActivityChanged();
   }
 
@@ -2288,7 +2467,7 @@ export class SessionRuntime {
    * never reaches the engine; the renderer's mode display reads the engine's
    * actual (unchanged) mode, so nothing to revert.
    */
-  async dispatchCommand(command: unknown): Promise<void> {
+  async dispatchCommand(command: unknown, source?: PromptSource): Promise<void> {
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (validated.type.startsWith('side_chat_')) {
@@ -2318,7 +2497,7 @@ export class SessionRuntime {
     if (validated.type === 'run_slash_command') {
       try { fusion = fusionInvocation(validated.raw); }
       catch (cause) {
-        this.recordFusionPreparationFailure(validated, cause);
+        this.recordFusionPreparationFailure(validated, cause, source);
         return;
       }
     }
@@ -2361,11 +2540,12 @@ export class SessionRuntime {
           // restarts invalidate ownership; they must never publish into a new one.
           if (this.disposed || this.archiving || !this.pendingPromptHydrations.has(token)
             || generation !== this.generation || client !== this.client) throw cause;
-          this.recordFusionPreparationFailure(validated, cause);
+          this.recordFusionPreparationFailure(validated, cause, source);
           return;
         }
         client.sendCommand({ ...validated, raw: pinnedRaw });
         this.commitFusionHistory(validated);
+        this.journalSlashCommand(validated, source);
       } finally {
         this.pendingPromptHydrations.delete(token);
         this.notifyActivityChanged();
@@ -2401,6 +2581,7 @@ export class SessionRuntime {
     }
     this.requireClient().sendCommand(validated);
     this.commitFusionHistory(validated);
+    this.journalSlashCommand(validated, source);
   }
 
   private commitFusionHistory(command: ClientCommand): void {
@@ -2409,12 +2590,13 @@ export class SessionRuntime {
     if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) this.sessionIdentityCommitted = true;
   }
 
-  private recordFusionPreparationFailure(command: Extract<ClientCommand, { type: 'run_slash_command' }>, cause: unknown): void {
+  private recordFusionPreparationFailure(command: Extract<ClientCommand, { type: 'run_slash_command' }>, cause: unknown, source?: PromptSource): void {
     const error = cause instanceof Error ? cause.message : String(cause);
     this.requireClient().sendCommand({ type: 'fusion_admin', command: {
       action: 'record_failure', payload_json: JSON.stringify({ raw: command.raw, error }),
     } });
     this.commitFusionHistory(command);
+    this.journalSlashCommand(command, source);
   }
 
   private resolveFusionStrategy(strategy?: FusionStrategyRefDto): Promise<FusionStrategySelectionDto> {
@@ -2785,6 +2967,7 @@ export class SessionRuntime {
     }
     this.diagnostics.add('info', 'host', connectionDiagnostic(next, this.generation));
     this.broadcast(CH_STATE_CHANGED, next);
+    this.notifyRemote({ type: 'state', state: next });
     this.notifyActivityChanged();
   }
 
@@ -2952,5 +3135,7 @@ export class SessionRuntime {
     await this.stopBridge();
     this.unsubscribeAudioService?.();
     this.targets.clear();
+    this.notifyRemote({ type: 'disposed' });
+    this.remoteObservers.clear();
   }
 }

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import {
+  MAX_REMOTE_SESSIONS,
   defaultSettings,
   isPermissionModeId,
   parseModelPickerVisibility,
@@ -383,6 +384,53 @@ export class SettingsStore {
       this.settings = previous;
       throw error;
     }
+  }
+
+  /** The sessions Remote Control shows to viewers. */
+  getRemoteSessions(): SessionRef[] {
+    return (this.settings.remoteSessions ?? []).map((ref) => ({ ...ref }));
+  }
+
+  isRemoteSession(sessionId: string): boolean {
+    return this.settings.remoteSessions?.some((ref) => ref.sessionId === sessionId) ?? false;
+  }
+
+  /** Switch Remote Control on or off for one session. A save failure leaves the list as it was. */
+  setRemoteSession(ref: SessionRef, enabled: boolean): void {
+    if (typeof enabled !== 'boolean') throw new Error('invalid remote control setting');
+    this.validateSessionRef(ref);
+    const previous = this.settings;
+    const others = (previous.remoteSessions ?? []).filter((item) => item.sessionId !== ref.sessionId);
+    if (enabled && others.length >= MAX_REMOTE_SESSIONS) throw new Error('too many sessions have Remote Control on');
+    this.settings = { ...previous, remoteSessions: enabled ? [...others, { projectPath: ref.projectPath, sessionId: ref.sessionId }] : others };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
+  }
+
+  /** Whether every new session starts with Remote Control on; off by default. */
+  getRemoteControlAtStartup(): boolean {
+    return this.settings.remoteControlAtStartup === true;
+  }
+
+  setRemoteControlAtStartup(enabled: boolean): void {
+    if (typeof enabled !== 'boolean') throw new Error('invalid remote control setting');
+    const previous = this.settings;
+    this.settings = { ...previous, remoteControlAtStartup: enabled };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
+  }
+
+  /** Whether a viewer may answer a permission prompt with "always allow". Only the settings file can turn this on. */
+  getRemoteAllowAlwaysAllow(): boolean {
+    return this.settings.remoteAllowAlwaysAllow === true;
   }
 
   /** Whether the user has previously accepted Bypass Permissions mode. */

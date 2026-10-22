@@ -46,6 +46,23 @@ const DEFAULT_MAX_CACHED_RUNTIMES = 6;
 
 const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
 
+/** Runtimes that exist only because a remote viewer opened them; more than this is refused. */
+export const MAX_REMOTE_OPENED_RUNTIMES = 3;
+
+/** Remote viewers hold this many runtimes open already (`capacity` on the wire). */
+export class RemoteCapacityError extends Error {
+  constructor() {
+    super('too many sessions are open for remote viewers');
+    this.name = 'RemoteCapacityError';
+  }
+}
+
+/** A runtime kept open for a remote viewer. Releasing it lets the cache trim the runtime again. */
+export interface RemoteLease {
+  readonly runtime: SessionRuntime;
+  release(): void;
+}
+
 
 
 /**
@@ -67,6 +84,9 @@ export class SessionRuntimeManager {
   private readonly sessionModelHints = new Map<string, string>();
   private readonly pendingEvictions = new Set<Promise<void>>();
   private readonly maxCachedRuntimes: number;
+  private readonly runtimeCreatedListeners = new Set<(runtime: SessionRuntime) => void>();
+  /** Sessions whose runtime was opened for a remote viewer and is still leased by one. */
+  private readonly remoteOpened = new Set<string>();
   private activeSessionId: string | null = null;
   private accessSequence = 0;
   private cacheTrimScheduled = false;
@@ -110,6 +130,22 @@ export class SessionRuntimeManager {
 
   get(sessionId: string): SessionRuntime | undefined {
     return this.runtimes.get(sessionId);
+  }
+
+  /**
+   * Be told about every runtime, now and whenever one is created (before it is
+   * started). Remote Control uses this to watch sessions it did not open.
+   */
+  onRuntimeCreated(listener: (runtime: SessionRuntime) => void): () => void {
+    this.runtimeCreatedListeners.add(listener);
+    for (const runtime of [...this.runtimes.values()]) this.announceRuntime(listener, runtime);
+    return () => { this.runtimeCreatedListeners.delete(listener); };
+  }
+
+  private announceRuntime(listener: (runtime: SessionRuntime) => void, runtime: SessionRuntime): void {
+    try { listener(runtime); } catch (error) {
+      this.opts.diagnostics?.add('warn', 'host', `runtime listener failed: ${sanitizeDiagnostic(error)}`);
+    }
   }
 
   private touch(sessionId: string): void {
@@ -211,6 +247,7 @@ export class SessionRuntimeManager {
     const runtime = new SessionRuntime(runtimeOptions);
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
+    for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
     for (const [webContents, origins] of this.targets) {
       if (webContents.isDestroyed()) {
         this.detachWindow(webContents);
@@ -298,6 +335,39 @@ export class SessionRuntimeManager {
       else this.backgroundSessionLeases.delete(ref.sessionId);
       this.trimCache();
     };
+  }
+
+  /**
+   * Open a session for a remote viewer, and keep it open until the lease is
+   * released. Nothing is shown on the desktop: the session is not activated.
+   * Resolves once the engine has resumed it. A session that has no runtime yet
+   * counts against {@link MAX_REMOTE_OPENED_RUNTIMES} for as long as the lease
+   * lasts (`RemoteCapacityError` beyond that); one that is already open is only
+   * kept. Take one lease per session, not one per viewer.
+   */
+  async openForRemote(ref: SessionRef, limit = MAX_REMOTE_OPENED_RUNTIMES): Promise<RemoteLease> {
+    assertSessionRef(ref);
+    this.assertProjectNotClosing(ref.projectPath);
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing && existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+    const counted = !existing && !this.openingSessions.has(ref.sessionId);
+    if (counted && this.remoteOpened.size >= limit) throw new RemoteCapacityError();
+    if (counted) this.remoteOpened.add(ref.sessionId);
+    const releaseBackground = this.retainBackgroundSession(ref);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      if (counted) this.remoteOpened.delete(ref.sessionId);
+      releaseBackground();
+    };
+    try {
+      const runtime = await this.openSession(ref, false, undefined, false);
+      return { runtime, release };
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   /** Keep an inactive runtime alive for the whole host operation, then enforce the cache bound. */
@@ -468,6 +538,8 @@ export class SessionRuntimeManager {
     this.sessionModelHints.clear();
     this.activeSessionId = null;
     this.openingSessions.clear();
+    this.remoteOpened.clear();
+    this.runtimeCreatedListeners.clear();
     this.draftSessions.clear();
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));

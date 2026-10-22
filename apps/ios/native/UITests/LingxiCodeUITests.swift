@@ -140,8 +140,12 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-read.icon.bookOpen"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search.icon.search"].exists)
-        app.descendants(matching: .any)["conversation.tool-call.ui-read.icon.bookOpen"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Read completed"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.staticTexts["Read fixture body"].exists)
+        let readDisclosure = app.buttons["conversation.tool-call.ui-read.toggle"]
+        XCTAssertTrue(readDisclosure.waitForExistence(timeout: 5), app.debugDescription)
+        readDisclosure.tap()
+        XCTAssertTrue(app.staticTexts["Read fixture body"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Read completed"].exists, app.debugDescription)
 
         // A normal completed turn has no persistent runtime footer.
         XCTAssertTrue(waitUntilGone(llmStatus, timeout: 5), app.debugDescription)

@@ -1,4 +1,5 @@
 import type { RunItem, ToolRunItem } from '../model/runItem';
+import { localAppReference } from '../model/localAppReference';
 
 export interface TranscriptToolGroup {
   readonly type: 'tool-group';
@@ -8,7 +9,7 @@ export interface TranscriptToolGroup {
 
 export type TranscriptRow = Exclude<RunItem, ToolRunItem> | TranscriptToolGroup;
 
-/** Presentation only: thinking never divides tools, other events retain boundaries. */
+/** Thinking never divides tools; messages and application deliverables retain boundaries. */
 export function transcriptRows(items: readonly RunItem[], running: boolean, hasPendingActivity = false): TranscriptRow[] {
   const rows: TranscriptRow[] = [];
   let group: TranscriptToolGroup | undefined;
@@ -26,6 +27,13 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
       continue;
     }
     if (item.type === 'tool') {
+      // A published application is a deliverable. Keep its open action visible
+      // when surrounding tools collapse or a following start is still running.
+      if (localAppReference(item)) {
+        rows.push({ type: 'tool-group', id: `tool-group:${item.id}`, tools: [item] });
+        group = undefined;
+        continue;
+      }
       if (!group) {
         group = { type: 'tool-group', id: `tool-group:${item.id}`, tools: [] };
         rows.push(group);

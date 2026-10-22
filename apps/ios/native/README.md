@@ -30,7 +30,7 @@ scripts/build-xcframework.sh
 scripts/install-sherpa-runtime.sh
 ```
 
-The first script builds a host cdylib + per-arch staticlibs, generates the Swift bindings
+The first script builds a host staticlib for metadata + per-arch staticlibs, generates the Swift bindings
 (deduped into a single Swift module), and assembles the xcframework. No secrets
 are baked in — the engine reads `ANTHROPIC_API_KEY` from the runtime
 environment, never from the framework.
@@ -100,6 +100,16 @@ xcodebuild -project LingxiCode.xcodeproj -scheme LingxiCode \
 are added to the app target's sources. `Frameworks/LingxiCodeFFI.xcframework`
 and the Sherpa/ONNX Runtime static XCFrameworks are linked but not embedded;
 all are referenced from `project.yml`.
+
+After changing the pinned Harness revision in `Cargo.toml` or the Rust iOS FFI
+source, rebuild **both** `Generated/` and `LingxiCodeFFI.xcframework` with
+`scripts/build-xcframework.sh`, then run `xcodegen generate` again before
+building or testing. Swift bindings and native archives are a versioned pair;
+copying only the new Swift files can compile but fail UniFFI checks at runtime.
+Errors such as an unexpected `appVersion` argument, optional tool headers where
+the source expects required headers, or a missing `PromptSuggestionDraftSource`
+can indicate stale bindings or a stale generated Xcode project. Regenerate these
+artifacts before changing the typed adapter to match an older API.
 
 ## Architecture
 

@@ -1,3 +1,5 @@
+import { AppsGlyph } from './LocalApps';
+import { localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance, type AudioSetupGuidance } from '../audio/audioFeatureGate';
 import { AudioSetupGuide } from './AudioSetupGuide';
@@ -403,13 +405,15 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, onOpenChat, children, topbar }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, onOpenChat, children, topbar }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
   onOpenSettings(): void;
   scheduled?: boolean;
   onOpenScheduled?(): void;
+  apps?: boolean;
+  onOpenApps?(): void;
   onOpenChat?(): void;
   children?: ReactNode;
   topbar?: ReactNode;
@@ -760,8 +764,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav className="desktop-nav-rail no-drag" aria-label="Main navigation">
-        <button type="button" className="desktop-rail-button" data-active={!scheduled || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label="Apps" title="Apps" onClick={onOpenApps}><AppsGlyph size={21}/></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label="Scheduled tasks" title="Scheduled tasks" onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }}><Icon name="goal" size={21} stroke={1.7} /></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
@@ -808,6 +813,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         >
           <Icon name="clock" size={18} stroke={1.8} />
           <span>Scheduled</span>
+        </button>
+        <button type="button" className="sidebar-primary-action" aria-current={apps ? 'page' : undefined} onClick={onOpenApps}
+          style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 10, border: 0, background: apps ? t.surfaceActive : 'transparent', color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}>
+          <AppsGlyph size={18}/><span>Apps</span>
         </button>
       </div>
 
@@ -1668,10 +1677,12 @@ function createFileMention(path: string, color: string): HTMLElement {
   return token;
 }
 
-export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage, onSetTheme, onOpenProviderSettings, onCreateSide }: {
+export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, ready, onOpenSettings, onOpenSettingsPage, onSetTheme, onOpenProviderSettings, onCreateSide }: {
   bridge: UseBridge;
   ready: boolean;
   onCreateSide?(input?: string): Promise<unknown>;
+  localAppDraft?: LocalAppDraft;
+  onLocalAppDraftConsumed?(nonce: number): void;
   onOpenSettings(): void;
   onOpenSettingsPage(pageId: string): void;
   onSetTheme(theme: 'dark' | 'light'): void;
@@ -2989,6 +3000,25 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setFilePicker(null);
     return range;
   };
+
+  const consumedLocalAppDraft = useRef<number>();
+  useEffect(() => {
+    if (!localAppDraft || !input.current || consumedLocalAppDraft.current === localAppDraft.nonce) return;
+    const disposition = localAppDraftDisposition(localAppDraft, bridge.activeSession, bridge.sessionLoading);
+    if (disposition === 'wait') return;
+    consumedLocalAppDraft.current = localAppDraft.nonce;
+    onLocalAppDraftConsumed?.(localAppDraft.nonce);
+    if (disposition === 'discard') return;
+    const prefix = localAppDraft.id
+      ? `修改本地应用「${localAppDraft.name}」（LocalApp id: ${localAppDraft.id}）。先用 LocalApp read 查看应用，修改后发布到同一个 id。\n`
+      : '创建一个本地应用，使用 local-app skill 并发布到应用库。需求：\n';
+    const editor = input.current;
+    editor.append(document.createTextNode(`${richPromptSnapshot(editor).text ? '\n' : ''}${prefix}`));
+    syncPromptState();
+    const caret = document.createRange();
+    caret.selectNodeContents(editor); caret.collapse(false);
+    focusPrompt(caret);
+  }, [localAppDraft, activeSessionId, bridge.activeSession?.projectPath, bridge.sessionLoading, onLocalAppDraftConsumed]);
 
   const chooseMention = (entry: MentionMenuEntry) => {
     if (entry.disabled) return;

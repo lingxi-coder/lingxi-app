@@ -356,7 +356,8 @@ test('active agent thinking shimmers the text without a leading indicator', () =
     sessionKey: 'session-a',
   }));
 
-  assert.match(html, /class="running-sweep"[^>]*>Thinking…</);
+  assert.match(html, /class="transcript-thinking-label running-sweep"[^>]*>Working</);
+  assert.doesNotMatch(html, />Thinking…</);
   assert.doesNotMatch(html, /width:10px;height:10px|border-radius:99px|box-shadow:0 0 0 4px/);
   assert.doesNotMatch(html, /cursor-blink[^>]*>Thinking…|<svg[^>]*>[^<]*Thinking…/);
 });
@@ -374,8 +375,8 @@ test('tool rows use compact adjacency hooks and a system-font transcript type sc
   assert.deepEqual(runTypes, ['tool']);
 
   const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
-  assert.match(css, /\.transcript-run-item \+ \.transcript-run-item\s*\{[^}]*margin-top:\s*18px;/s);
-  assert.match(css, /data-run-type='tool'[^}]*margin-top:\s*8px;/s);
+  assert.match(css, /\.transcript-row \+ \.transcript-row\s*\{[^}]*margin-top:\s*1\.5rem;/s);
+  assert.match(css, /data-row-type='tool-group'[^}]*data-row-type='thinking'[^}]*margin-top:\s*\.75rem;/s);
 
   const tool = render(React.createElement(ToolCall, { item: READ, onSetOpen: () => {} }));
   assert.match(tool, /font-size:13px/);
@@ -408,7 +409,7 @@ test('a multi-tool group keeps its transcript row wrapper so row spacing stays f
   assert.deepEqual(runTypes, ['tool']);
   // Direct child of the feed — not nested inside the site's `.mod-ui-parent-site`
   // wrapper, which is what the `+` sibling margin rules key off.
-  assert.match(html, /class="desktop-stage-feed"[^>]*>\s*<div class="transcript-run-item" data-run-type="tool"/);
+  assert.match(html, /class="desktop-stage-feed"[^>]*>\s*<div class="transcript-row" data-row-type="tool-group"[^>]*><div class="transcript-run-item" data-run-type="tool"/);
   assert.doesNotMatch(html, /class="desktop-stage-feed"[^>]*>\s*<div class="mod-ui-parent-site"/);
 });
 
@@ -893,7 +894,7 @@ test('a multi-key permission payload is labelled, redacted, and never dropped', 
   assert.match(html, /\[REDACTED\]/);
 });
 
-test('thinking is an in-place live status without reasoning content or a disclosure', () => {
+test('thinking displays the received content in place without a disclosure', () => {
   const html = render(React.createElement(Stage, {
     running: true,
     liveItems: [
@@ -901,10 +902,21 @@ test('thinking is an in-place live status without reasoning content or a disclos
       { type: 'narration', id: 'after-thinking', role: 'assistant', text: 'Following message' },
     ],
   }));
-  assert.match(html, /Thinking/);
+  assert.match(html, />Reasoning body</);
+  assert.match(html, /title="Reasoning body"/);
   assert.match(html, /running-sweep/);
-  assert.doesNotMatch(html, /Reasoning body|aria-expanded/);
-  assert.ok(html.indexOf('Thinking') < html.indexOf('Following message'));
+  assert.doesNotMatch(html, />Thinking…<|aria-expanded/);
+  assert.ok(html.indexOf('Reasoning body') < html.indexOf('Following message'));
+});
+
+test('thinking uses the generic label only until nonblank content arrives', () => {
+  for (const text of ['', ' \n\t ']) {
+    const html = render(React.createElement(Stage, {
+      running: true,
+      liveItems: [{ type: 'thinking', id: 'thought-empty', text, streamed: true }],
+    }));
+    assert.match(html, />Thinking…</);
+  }
 });
 
 test('completed, historical and stopped thinking is hidden regardless of legacy preference', () => {

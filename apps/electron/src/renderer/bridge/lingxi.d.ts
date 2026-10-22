@@ -1,3 +1,4 @@
+import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { AccountApi } from '../../shared/account.js';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
@@ -149,6 +150,8 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  localApps?: LocalAppsApi;
+  onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled?: ScheduledApi;
   git?: GitApi;
   terminal: TerminalApi;

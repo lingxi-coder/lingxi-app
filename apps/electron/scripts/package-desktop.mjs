@@ -101,6 +101,7 @@ async function createRuntimeAsar(resources, metadata) {
   const unpacked = join(resources, 'app');
   mkdirSync(unpacked, { recursive: true });
   cpSync(join(packageRoot, 'out'), join(unpacked, 'out'), { recursive: true });
+  cpSync(join(packageRoot, 'src/main/local-apps/upstream/DYAD-LICENSE'), join(unpacked, 'Dyad-LICENSE'));
   const dependencies = Object.fromEntries(
     Object.keys(metadata.dependencies ?? {}).sort().map((name) => {
       const dependency = readJson(join(packageRoot, 'node_modules', ...name.split('/'), 'package.json'));

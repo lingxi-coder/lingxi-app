@@ -55,7 +55,7 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron Stage scroll fixture timed out\n${errors.join('')}`));
-      }, 20_000);
+      }, 60_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
@@ -80,6 +80,12 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     assert.equal(result.finalAncestorScroll, 0);
     for (const layout of result.thinkingLayouts) {
       assert.deepEqual(layout, result.thinkingLayouts[0], 'thinking visibility must preserve tail height and scroll position');
+    }
+    for (const layout of result.activityLayouts) {
+      assert.deepEqual(layout, result.activityLayouts[0], 'tool results, grouped tools and streaming reasoning must preserve activity layout');
+      assert.equal(layout.toolHeight, layout.slotHeight, 'tools and thinking share one row height');
+      assert.equal(layout.toolGap, 12, 'the message wrapper must retain compact activity spacing');
+      assert.equal(layout.thinkingGap, 12, 'hidden and visible thinking slots have the same activity spacing');
     }
 
     for (const offset of [0, 4]) {

@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import {
   APP_NAME,
   NS_MICROPHONE_USAGE_DESCRIPTION,
+  NS_CAMERA_USAGE_DESCRIPTION,
   NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
   PACKAGE_OUTPUT_ROOT_ENV,
   artifactPaths,
@@ -119,6 +120,8 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     join(extractedApp, 'package.json'),
     join(extractedApp, 'out', 'main', 'index.js'),
     join(extractedApp, 'out', 'preload', 'index.cjs'),
+    join(extractedApp, 'out', 'preload', 'localApp.cjs'),
+    join(extractedApp, 'Dyad-LICENSE'),
     join(extractedApp, 'out', 'renderer', 'index.html'),
     join(extractedApp, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
     join(extractedApp, 'node_modules', 'ws', 'package.json'),
@@ -127,6 +130,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
   try {
   for (const path of expected) requirePath(path);
   assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'index.cjs'), 'utf8'));
+  assertSandboxedPreloadBundle(readFileSync(join(extractedApp, 'out', 'preload', 'localApp.cjs'), 'utf8'));
   const manifest = readJson(join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'));
   const identifiers = brokerIdentifiers(manifest.channel);
   verifyCrashlytics(resources, identifiers.desktopBundleId);
@@ -158,6 +162,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     CFBundleShortVersionString: metadata.version,
     CFBundleVersion: metadata.version,
     NSMicrophoneUsageDescription: NS_MICROPHONE_USAGE_DESCRIPTION,
+    NSCameraUsageDescription: NS_CAMERA_USAGE_DESCRIPTION,
     NSSpeechRecognitionUsageDescription: NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
   };
   for (const [key, value] of Object.entries(expectedPlist)) {
@@ -186,7 +191,6 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
     'NSAudioCaptureUsageDescription',
     'NSBluetoothAlwaysUsageDescription',
     'NSBluetoothPeripheralUsageDescription',
-    'NSCameraUsageDescription',
   ]) {
     if (plistHasKey(plistPath, key)) throw new Error(`unused or permissive plist key remains: ${key}`);
   }
@@ -283,6 +287,7 @@ export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKA
       verifySignedEntitlements(join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app'), teamId, identifiers.brokerBundleId);
       verifySignedEntitlements(paths.appPath, teamId, identifiers.desktopBundleId, {
         'com.apple.security.device.audio-input': true,
+        'com.apple.security.device.camera': true,
       });
       verifyTeamIdentifier(join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE), teamId);
       for (const path of findMachOFiles(join(contents, 'Frameworks'))) {

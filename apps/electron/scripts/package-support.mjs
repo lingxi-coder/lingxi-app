@@ -49,8 +49,10 @@ export const DEFAULT_SECRET_CANARY = 'LINGXI_SECRET_CANARY_DO_NOT_PACKAGE';
  * independently-typed copy that could silently drift from it.
  */
 export const NS_MICROPHONE_USAGE_DESCRIPTION =
-  'LingXi Code uses the microphone only while you actively use voice input or Flow Mode. '
-  + 'Audio stays on this Mac and is never sent to the language model or a third-party transcription provider.';
+  'LingXi Code uses the microphone for voice input, Flow Mode, or a local app you explicitly authorize. '
+  + 'Voice input is transcribed on this Mac. A local app controls how it uses audio after you grant access.';
+export const NS_CAMERA_USAGE_DESCRIPTION =
+  'LingXi Code uses the camera only for a local app you explicitly authorize. You can revoke its access in Apps.';
 export const NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION =
   'LingXi Code uses on-device speech recognition to transcribe spoken prompts while you actively use voice input or Flow Mode.';
 export const FIXED_MTIME_SECONDS = Number(process.env['SOURCE_DATE_EPOCH'] ?? 946684800);
@@ -467,6 +469,7 @@ export function rewriteInfoPlist(plistPath, version, bundleId = BUNDLE_ID) {
     CFBundleShortVersionString: version,
     CFBundleVersion: version,
     NSMicrophoneUsageDescription: NS_MICROPHONE_USAGE_DESCRIPTION,
+    NSCameraUsageDescription: NS_CAMERA_USAGE_DESCRIPTION,
     NSSpeechRecognitionUsageDescription: NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
   };
   for (const [key, value] of Object.entries(replacements)) {
@@ -483,7 +486,6 @@ export function rewriteInfoPlist(plistPath, version, bundleId = BUNDLE_ID) {
     'NSAudioCaptureUsageDescription',
     'NSBluetoothAlwaysUsageDescription',
     'NSBluetoothPeripheralUsageDescription',
-    'NSCameraUsageDescription',
   ]) {
     try {
       execFileSync('/usr/bin/plutil', ['-remove', key, plistPath], { stdio: 'pipe' });

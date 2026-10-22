@@ -46,7 +46,7 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
       label={`${summary}${failureSummary} · ${group.tools.length} tools`}
-      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 32, fontSize: 13, gap: 8, color: t.text3 } as CSSProperties}
+      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 40, fontSize: 13, gap: 8, color: t.text3 } as CSSProperties}
       summary={<>
         <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ToolActivityIcon name={toolIconName(lastTool.view.verb, lastTool.tool, lastTool.view.icon)} /></span>
         <span title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>

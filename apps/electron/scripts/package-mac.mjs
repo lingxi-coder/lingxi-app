@@ -135,6 +135,7 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
     allowJit: true,
     disableLibraryValidation: true,
     audioInput: true,
+    camera: true,
   });
   const brokerEntitlementsPath = join(appContainer, 'LingXiCredentialBroker.entitlements.plist');
   writeEntitlements(brokerEntitlementsPath, {
@@ -234,6 +235,7 @@ async function main() {
   rmSync(join(resources, 'default_app.asar'), { force: true });
   mkdirSync(packagedApp, { recursive: true });
   cpSync(join(packageRoot, 'out'), join(packagedApp, 'out'), { recursive: true });
+  cpSync(join(packageRoot, 'src/main/local-apps/upstream/DYAD-LICENSE'), join(packagedApp, 'Dyad-LICENSE'));
 
   const runtimeMetadata = {
     name: metadata.name,

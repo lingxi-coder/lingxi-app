@@ -1,0 +1,314 @@
+import { CancellationTombstones, createInvocationRef, type InvocationRef } from './upstream/dyadInvocation.js';
+/**
+ * App-owned runtime. Adapted from Dyad's transport-neutral AppRuntimeService:
+ * serialized operations, per-invocation output ownership, cancellation before
+ * queue admission, and cleanup on failed readiness. Pinokio's shell steps
+ * supply cwd/env/venv and independently-lived services. See REFERENCES.md.
+ */
+import { spawn, type ChildProcess } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import { join, dirname, delimiter } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { DesktopLocalApp, DesktopAppManifest, LocalAppLog, LocalAppPhase, LocalAppStep, LocalAppProcess } from '../../shared/localApps.js';
+import { LocalAppStore, atomicJson, containedFile } from './store.js';
+
+interface Invocation {
+  id: string; revision: number; controller: AbortController; phase: LocalAppPhase;
+  children: Set<ChildProcess>; services: Map<string, { port: number; url: string }>;
+  manifest: DesktopAppManifest;
+  readiness: Map<string, { needle: string; matched: boolean; stdout: string; stderr: string }>;
+  workspace: string; error?: string;
+}
+export interface RuntimeOptions { nodeExecutable?: string; bunExecutable?: string; shell?: string; environment?: NodeJS.ProcessEnv }
+export function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
+export function appEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP', 'TZ', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']) {
+    if (source[key] !== undefined) env[key] = source[key];
+  }
+  return env;
+}
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer(); server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') { server.close(); reject(new Error('No local port')); return; }
+      server.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+const stoppingChildren = new WeakMap<ChildProcess, Promise<void>>();
+function stopTree(child: ChildProcess): Promise<void> {
+  let pending = stoppingChildren.get(child);
+  if (!pending) { pending = terminateTree(child); stoppingChildren.set(child, pending); }
+  return pending;
+}
+async function terminateTree(child: ChildProcess): Promise<void> {
+  if (!child.pid) return;
+  const pid = child.pid;
+  if (process.platform === 'win32') {
+    await new Promise<void>(resolve => {
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.once('close', () => resolve()); killer.once('error', () => resolve());
+    });
+    return;
+  }
+  const signal = (s: NodeJS.Signals | 0): boolean => { try { process.kill(-pid, s); return true; } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH' || (code === 'EPERM' && (child.exitCode !== null || child.signalCode !== null))) return false;
+    throw error;
+  } };
+  if (!signal('SIGTERM')) return;
+  for (let n = 0; n < 30; n++) { if (!signal(0)) return; await delay(50); }
+  signal('SIGKILL');
+  for (let n = 0; n < 30; n++) { if (!signal(0)) return; await delay(50); }
+  throw new Error(`Application process group ${pid} did not stop`);
+}
+
+export class LocalAppRuntime {
+  private readonly invocations = new Map<string, Invocation>();
+  private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly output = new Map<string, LocalAppLog[]>();
+  private readonly sequence = new Map<string, number>();
+  private readonly deleting = new Set<string>();
+  private disposed = false;
+  private readonly starts = new Map<string, Promise<void>>();
+  private readonly requests = new Map<string, Set<InvocationRef>>();
+  private readonly cancellations = new CancellationTombstones(1000);
+  constructor(readonly store: LocalAppStore, private readonly changed: () => void, private readonly options: RuntimeOptions = {}) {}
+  status(row: DesktopLocalApp): DesktopLocalApp {
+    const run = this.invocations.get(row.id);
+    return { ...row, phase: run?.phase ?? 'stopped', runningRevision: run?.revision, error: run?.error };
+  }
+  hasRunning(): boolean { return [...this.invocations.values()].some(run => ['running', 'installing', 'building', 'starting'].includes(run.phase)); }
+  logs(id: string): LocalAppLog[] { return [...(this.output.get(id) ?? [])]; }
+  service(id: string, name: string): { port: number; url: string } | undefined { return this.invocations.get(id)?.services.get(name); }
+  workspace(id: string): string | undefined { return this.invocations.get(id)?.workspace; }
+  revision(id: string): number | undefined { return this.invocations.get(id)?.revision; }
+  invocationId(id: string): string | undefined { return this.invocations.get(id)?.id; }
+  phase(id: string): LocalAppPhase { return this.invocations.get(id)?.phase ?? 'stopped'; }
+  manifest(id: string): DesktopAppManifest | undefined { return this.invocations.get(id)?.manifest; }
+  private log(id: string, run: Invocation, process: string, text: string, stream: LocalAppLog['stream'] = 'host'): void {
+    if (this.invocations.get(id) !== run) return;
+    const readiness = run.readiness.get(process);
+    if (readiness && !readiness.matched && stream !== 'host') {
+      const combined = readiness[stream] + text;
+      readiness.matched = combined.includes(readiness.needle);
+      readiness[stream] = readiness.needle.length > 1 ? combined.slice(-(readiness.needle.length - 1)) : '';
+    }
+    const sequence = (this.sequence.get(id) ?? 0) + 1; this.sequence.set(id, sequence);
+    const lines = this.output.get(id) ?? [];
+    lines.push({ sequence, time: Date.now(), runId: run.id, process, stream, text: text.slice(-8192) });
+    if (lines.length > 500) lines.splice(0, lines.length - 500);
+    this.output.set(id, lines); this.changed();
+  }
+  async exclusive<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    if (this.disposed || this.deleting.has(id)) throw new Error('Application service is stopping or application is being deleted');
+    const before = this.queues.get(id) ?? Promise.resolve();
+    const pending = before.catch(() => undefined).then(operation);
+    this.queues.set(id, pending);
+    try { return await pending; }
+    finally { if (this.queues.get(id) === pending) this.queues.delete(id); }
+  }
+  async start(id: string, repair = false, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (!repair && this.starts.has(id)) return this.starts.get(id)!;
+    // Cancellation is owned by the invocation, not the currently selected UI.
+    const existing = this.invocations.get(id);
+    if (existing && ['installing', 'building', 'starting', 'running'].includes(existing.phase) && !repair) {
+      await this.queues.get(id); return;
+    }
+    const ref = createInvocationRef("local-app", id, { next: () => randomUUID() });
+    const requests = this.requests.get(id) ?? new Set<InvocationRef>();
+    requests.add(ref); this.requests.set(id, requests);
+    const cancel = () => {
+      this.cancellations.add(ref);
+      const run = this.invocations.get(id);
+      if (run?.id === ref.operationId) run.controller.abort();
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (repair) existing?.controller.abort();
+    const operation = this.exclusive(id, async () => {
+      if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
+      await this.stopCurrent(id);
+      if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
+      const row = await this.store.get(id);
+      if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
+      const missing = (row.manifest.capabilities ?? []).filter(c => !row.grants.includes(c));
+      if (missing.length) throw new Error(`Application permission required: ${missing.join(', ')}`);
+      const run: Invocation = { id: ref.operationId, revision: row.revision, controller: new AbortController(), phase: 'starting', children: new Set(), services: new Map(), workspace: '', manifest: row.manifest, readiness: new Map() };
+      this.invocations.set(id, run); this.changed();
+      try {
+        run.workspace = await this.store.prepareWorkspace(row);
+        const marker = join(run.workspace, '.lingxi-prepared.json');
+        let prepared = false;
+        try { prepared = JSON.parse(await fs.readFile(marker, 'utf8')).revision === row.revision; } catch { /* first install */ }
+        if (repair || !prepared) {
+          for (const [phase, steps] of [['installing', row.manifest.install ?? []], ['building', row.manifest.build ?? []]] as const) {
+            run.phase = phase; this.changed();
+            for (const step of steps) {
+              run.controller.signal.throwIfAborted();
+              this.log(id, run, phase, step.command);
+              const child = await this.launch(id, run, step, phase, {}, phase === 'installing');
+              await this.waitExit(child, run.controller.signal);
+            }
+          }
+          run.controller.signal.throwIfAborted();
+          await atomicJson(marker, { revision: row.revision });
+        }
+        run.phase = 'starting'; this.changed();
+        for (const spec of row.manifest.processes ?? []) {
+          run.controller.signal.throwIfAborted();
+          const port = await freePort();
+          run.services.set(spec.name, { port, url: `http://127.0.0.1:${port}` });
+          const serviceEnv: NodeJS.ProcessEnv = { PORT: String(port), HOST: '127.0.0.1' };
+          for (const [name, service] of run.services) serviceEnv[`LOCAL_APP_${name.toUpperCase().replaceAll('-', '_')}_URL`] = service.url;
+          if (spec.ready?.output) run.readiness.set(spec.name, { needle: spec.ready.output, matched: false, stdout: '', stderr: '' });
+          const child = await this.launch(id, run, spec, spec.name, serviceEnv, false);
+          child.once('exit', (code, signal) => {
+            if (this.invocations.get(id) !== run || run.controller.signal.aborted) return;
+            run.error = `${spec.name} exited (${code ?? signal})`; run.phase = 'failed';
+            this.log(id, run, spec.name, run.error, 'stderr'); run.controller.abort(); this.changed();
+            void this.killChildren(run).catch(error => this.log(id, run, 'host', String(error)));
+          });
+          await this.waitReady(id, run, spec, child, port);
+        }
+        if (row.manifest.entry.type === 'static' && !(await fs.stat(await containedFile(run.workspace, row.manifest.entry.path))).isFile()) throw new Error('The application entry is not a file');
+        run.controller.signal.throwIfAborted();
+        run.phase = 'running'; this.log(id, run, 'host', 'Application is ready'); this.changed();
+      } catch (error) {
+        const failure = run.error;
+        const canceled = run.controller.signal.aborted && !failure;
+        run.controller.abort();
+        await this.killChildren(run);
+        run.phase = canceled ? 'stopped' : 'failed';
+        run.error = canceled ? undefined : failure ?? String(error instanceof Error ? error.message : error);
+        if (run.error) this.log(id, run, 'host', run.error, 'stderr');
+        this.changed();
+        throw failure ? new Error(failure, { cause: error }) : error;
+      }
+    });
+    this.starts.set(id, operation);
+    try { await operation; } finally {
+      if (this.starts.get(id) === operation) this.starts.delete(id);
+      signal?.removeEventListener('abort', cancel);
+      requests.delete(ref); if (!requests.size) this.requests.delete(id);
+    }
+  }
+  private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean): Promise<ChildProcess> {
+    const cwd = await containedFile(run.workspace, step.cwd ?? '.');
+    const env: NodeJS.ProcessEnv = { ...appEnvironment(this.options.environment), ...step.env, ...extra, LOCAL_APP_DATA_DIR: this.store.dataPath(id), LOCAL_APP_ID: id };
+    // Finder/Dock launches have a minimal PATH. Reuse the same installed tools
+    // Bash provisions, and fall back to the already packaged Node/Bun runtimes.
+    const home = env.HOME ?? env.USERPROFILE;
+    const paths = [env.PATH ?? '', ...(home ? ['.local/bin', '.local/share/mise/shims', '.volta/bin', '.bun/bin', '.cargo/bin'].map(p => join(home, p)) : [])];
+    if (process.platform !== 'win32') paths.push('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin');
+    if (this.options.nodeExecutable || this.options.bunExecutable) {
+      const bin = join(this.store.directory(id), 'runtime-bin');
+      await fs.mkdir(bin, { recursive: true, mode: 0o700 });
+      for (const [name, executable] of [['node', this.options.nodeExecutable], ['bun', this.options.bunExecutable]] as const) {
+        if (!executable) continue;
+        await fs.writeFile(join(bin, name), `#!/bin/sh\n${name === 'node' ? 'ELECTRON_RUN_AS_NODE=1 ' : ''}exec ${shellQuote(executable)} "$@"\n`, { mode: 0o700 });
+      }
+      paths.push(bin);
+    }
+    env.PATH = paths.filter(Boolean).join(delimiter);
+    const command = step.command;
+    if (step.venv) {
+      const venv = join(run.workspace, step.venv);
+      const executable = join(venv, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+      if (createEnvironment) {
+        try { await fs.access(executable); }
+        catch {
+          const prepare = step.python ? `uv venv --python ${shellQuote(step.python)} ${shellQuote(venv)}` : `python3 -m venv ${shellQuote(venv)}`;
+          const child = this.spawn(id, run, name, prepare, cwd, env);
+          await this.waitExit(child, run.controller.signal);
+        }
+      }
+      await fs.access(executable);
+      env.PATH = `${dirname(executable)}${process.platform === 'win32' ? ';' : ':'}${env.PATH ?? ''}`;
+      Object.assign(env, { VIRTUAL_ENV: venv, PYTHONNOUSERSITE: '1' });
+    }
+    return this.spawn(id, run, name, command, cwd, env);
+  }
+  private spawn(id: string, run: Invocation, name: string, command: string, cwd: string, env: NodeJS.ProcessEnv): ChildProcess {
+    run.controller.signal.throwIfAborted();
+    const shell = this.options.shell ?? (process.platform === 'win32' ? 'bash.exe' : '/bin/bash');
+    const child = spawn(shell, ['-c', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true });
+    run.children.add(child);
+    // Drain descendants as soon as the root closes, then discard its pid.
+    // Keeping exited roots until a later restart risks signaling a recycled pid.
+    child.once('close', () => {
+      void stopTree(child).then(() => run.children.delete(child)).catch(error => this.log(id, run, name, String(error), 'stderr'));
+    });
+    child.stdout?.setEncoding('utf8').on('data', data => this.log(id, run, name, data, 'stdout'));
+    child.stderr?.setEncoding('utf8').on('data', data => this.log(id, run, name, data, 'stderr'));
+    child.on('error', error => this.log(id, run, name, error.message, 'stderr'));
+    return child;
+  }
+  private waitExit(child: ChildProcess, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const clean = () => { signal.removeEventListener('abort', abort); child.removeListener('error', error); child.removeListener('close', close); };
+      const error = (err: Error) => { clean(); reject(err); };
+      const close = (code: number | null) => { clean(); code === 0 ? resolve() : reject(new Error(`Command exited with code ${code}`)); };
+      const abort = () => { clean(); reject(new Error('Application operation cancelled')); };
+      child.once('error', error); child.once('close', close); signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort(); else if (child.exitCode !== null) close(child.exitCode);
+    });
+  }
+  private async waitReady(id: string, run: Invocation, spec: LocalAppProcess, child: ChildProcess, port: number): Promise<void> {
+    const deadline = Date.now() + (spec.ready?.timeoutMs ?? 120000);
+    while (Date.now() < deadline) {
+      run.controller.signal.throwIfAborted();
+      if (child.exitCode !== null || child.signalCode !== null || !child.pid) throw new Error(`${spec.name} exited before it was ready`);
+      if (spec.ready?.output) {
+        if (run.readiness.get(spec.name)?.matched) return;
+      } else {
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}${spec.ready?.path ?? '/'}`, { signal: AbortSignal.any([run.controller.signal, AbortSignal.timeout(1000)]), redirect: 'error' });
+          await response.body?.cancel();
+          if (response.ok) return;
+        } catch { /* A refused connection during startup is expected. */ }
+      }
+      await delay(100, undefined, { signal: run.controller.signal });
+    }
+    throw new Error(`${spec.name} did not become ready; see its logs`);
+  }
+  private async killChildren(run: Invocation): Promise<void> { await Promise.all([...run.children].map(stopTree)); run.children.clear(); run.services.clear(); }
+  private async stopCurrent(id: string): Promise<void> {
+    const run = this.invocations.get(id); if (!run) return;
+    run.controller.abort(); run.phase = 'stopping'; this.changed();
+    await this.killChildren(run); run.phase = 'stopped'; this.changed();
+  }
+  async stop(id: string): Promise<void> {
+    // Abort before waiting for the queue: Stop must interrupt an in-progress install/readiness wait.
+    for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
+    this.invocations.get(id)?.controller.abort();
+    await this.exclusive(id, () => this.stopCurrent(id));
+  }
+  async execute(id: string, command: string): Promise<{ output: string }> {
+    const run = this.invocations.get(id);
+    if (!run || run.phase !== 'running') throw new Error('Application is not running');
+    const name = `command-${randomUUID()}`;
+    const child = await this.launch(id, run, { command }, name, {}, false);
+    await this.waitExit(child, run.controller.signal);
+    return { output: this.logs(id).filter(l => l.runId === run.id && l.process === name).map(l => l.text).join('') };
+  }
+  async remove(id: string): Promise<void> {
+    for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
+    this.invocations.get(id)?.controller.abort();
+    const removal = this.exclusive(id, async () => { await this.stopCurrent(id); await this.store.remove(id); this.invocations.delete(id); this.output.delete(id); this.changed(); });
+    this.deleting.add(id);
+    try { await removal; } finally { this.deleting.delete(id); }
+  }
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    for (const requests of this.requests.values()) for (const ref of requests) this.cancellations.add(ref);
+    for (const run of this.invocations.values()) run.controller.abort();
+    await Promise.allSettled([...this.queues.values()]);
+    await Promise.all([...this.invocations.keys()].map(id => this.stopCurrent(id)));
+  }
+}

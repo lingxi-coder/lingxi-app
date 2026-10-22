@@ -598,12 +598,18 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .desktop-stage-jump { transition: none; }
 }
-.transcript-run-item + .transcript-run-item {
-  margin-top: 18px;
+/* Keep related activity close, with more breathing room around messages and
+   user turns. Apply spacing to the outer rows, including message-link wrappers. */
+.transcript-row + .transcript-row {
+  margin-top: 1.5rem;
 }
-.transcript-run-item[data-run-type='tool'] + .transcript-run-item,
-.transcript-run-item + .transcript-run-item[data-run-type='tool'] {
-  margin-top: 8px;
+.transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking']) + .transcript-row,
+.transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking']) {
+  margin-top: .75rem;
+}
+.transcript-row[data-message-role='user'] + .transcript-row,
+.transcript-row + .transcript-row[data-message-role='user'] {
+  margin-top: 2rem;
 }
 .command-result-card {
   width: min(880px, 100%);
@@ -2497,10 +2503,10 @@ textarea, input, select { font-family: inherit; }
   .composer-submit-button { transition: none; }
 }
 
-/* Compact activity rows share the transcript's existing type and color scale. */
-.transcript-thinking { min-height: 28px; display: flex; align-items: center; font-size: 13px; }
-.transcript-tool-group { min-width: 0; }
-.transcript-tool-group .tool-disclosure-trigger { min-height: 32px !important; }
+/* Match the 40px tool trigger in every activity state, including an empty slot. */
+.transcript-thinking { min-height: 40px; min-width: 0; display: flex; align-items: center; font-size: 13px; line-height: 1.4; }
+.transcript-thinking-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript-tool-group { min-width: 0; display: flex; flex-direction: column; }
 .tool-group-trigger:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 4px; }
 @media (prefers-reduced-motion: reduce) {
   .desktop-stage .running-sweep { animation: none; background: none; color: var(--sweep-base, inherit); -webkit-text-fill-color: currentColor; }

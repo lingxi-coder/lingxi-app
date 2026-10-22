@@ -22,6 +22,7 @@ async function main() {
     await settle();
     const metrics = `(() => { const node = document.querySelector('.desktop-stage'); return { top: node.scrollTop, gap: node.scrollHeight - node.clientHeight - node.scrollTop, ancestor: document.querySelector('#scroll-ancestor').scrollTop }; })()`;
     const initial = await run(metrics);
+    assert.equal(await run(`getComputedStyle(document.querySelectorAll('.transcript-row')[1]).marginTop`), '24px', 'messages have comfortable reading space');
     const result = { initialGap: initial.gap, ancestorScroll: initial.ancestor };
     await run(`(() => { const node = document.querySelector('.desktop-stage'); node.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true})); node.scrollTop = node.scrollHeight - node.clientHeight - 40; })()`);
     await settle();
@@ -53,6 +54,23 @@ async function main() {
         return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop, slotHeight: slot.getBoundingClientRect().height };
       })()`));
     }
+    result.activityLayouts = [];
+    for (const phase of ['running', 'empty-result', 'result', 'reasoning', 'next-tool', 'group-result', 'long-reasoning']) {
+      await run(`window.stageScrollFixture.activity(${JSON.stringify(phase)})`);
+      await settle();
+      result.activityLayouts.push(await run(`(() => {
+        const stage = document.querySelector('.desktop-stage');
+        const slot = document.querySelector('[data-thinking-slot]');
+        const tool = document.querySelector('[data-run-type="tool"]');
+        const previous = [...document.querySelectorAll('[data-run-type="narration"]')].at(-1);
+        return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop,
+          slotHeight: slot.getBoundingClientRect().height, toolHeight: tool.getBoundingClientRect().height,
+          toolGap: tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom,
+          thinkingGap: slot.getBoundingClientRect().top - tool.getBoundingClientRect().bottom };
+      })()`));
+    }
+    await run('window.stageScrollFixture.longList()');
+    await settle();
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
     await run(`document.querySelector('.transcript-thinking').style.height = '150px'`);
     await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
@@ -67,6 +85,7 @@ async function main() {
       for (const status of ['pending', undefined, 'failed', undefined]) {
         await run(`window.stageScrollFixture.delivery(${JSON.stringify(status)}, ${long})`);
         await settle();
+        assert.equal(await run(`getComputedStyle(document.querySelector('[data-message-role="user"] + .transcript-row')).marginTop`), '32px', 'user turns retain a clear boundary');
         const alignment = await run(`(() => {
           const bubble = document.querySelector('.user-message-bubble').getBoundingClientRect();
           const row = document.querySelector('.transcript-user-message').getBoundingClientRect();

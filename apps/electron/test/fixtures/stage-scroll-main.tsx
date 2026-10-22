@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { Stage } from '../../src/renderer/components/Stage';
-import type { RunItem } from '../../src/renderer/model/runItem';
+import type { RunItem, ToolRunItem } from '../../src/renderer/model/runItem';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
@@ -16,6 +16,13 @@ import '../../src/renderer/components/RuntimeCenter.css';
 let copyFails = false;
 Object.assign(window, {
   lingxi: {
+    // Keep real Native Parent UI wrappers mounted even when no Mod draws a tree.
+    modUi: {
+      control: async () => ({ response: { tree: null } }),
+      operation: async () => ({}),
+      onFrame: () => () => {},
+      onInvalidate: () => () => {},
+    },
     copyText: async (text: string) => {
       if (copyFails) throw new Error('Clipboard unavailable');
       Object.assign(window, { copiedMessage: text });
@@ -46,6 +53,19 @@ function Fixture() {
   const [ancestorHeight, setAncestorHeight] = useState(300);
   Object.assign(window, { stageScrollFixture: {
     thinking(visible: boolean) { flushSync(() => setThinkingVisible(visible)); },
+    activity(phase: 'running' | 'empty-result' | 'result' | 'reasoning' | 'next-tool' | 'group-result' | 'long-reasoning') {
+      const read: ToolRunItem = { type: 'tool', id: 'activity-read', tool: 'Read', status: phase === 'running' ? 'running' : 'done',
+        view: { verb: 'read', label: 'Read', title: 'Read Stage.tsx', primary: 'Stage.tsx' },
+        ...(phase === 'running' || phase === 'empty-result' ? {} : { result: { headline: 'Read 24 lines', body: 'File contents', body_lines: 1, body_truncated: false } }),
+      };
+      const grouped = ['next-tool', 'group-result', 'long-reasoning'].includes(phase);
+      flushSync(() => setItems([
+        ...initialItems.slice(0, -1), read,
+        ...(phase === 'reasoning' || grouped ? [{ type: 'thinking', id: 'activity-reasoning', streamed: true, done: grouped, text: 'Checking the transcript spacing' } as const] : []),
+        ...(grouped ? [{ ...read, id: 'activity-next', status: phase === 'next-tool' ? 'running' : 'done', result: phase === 'next-tool' ? undefined : read.result }] : []),
+        ...(phase === 'long-reasoning' ? [{ type: 'thinking', id: 'activity-long', streamed: true, text: '核对 thinking 与工具调用的间距。\n'.repeat(40) } as const] : []),
+      ]));
+    },
     readingWithInspector() { flushSync(() => {
       setInspector(true);
       setViewport({ width: 0, height: 560 });
@@ -110,7 +130,7 @@ function Fixture() {
     <div id="scroll-ancestor" style={{ height: ancestorHeight, overflowY: 'auto' }}>
       <div style={{ display: 'flex' }}>
         <div style={{ flex: viewport.width ? 'none' : 1, minWidth: 0, width: viewport.width || undefined, height: viewport.height, display: 'flex', flexDirection: 'column' }}>
-          <Stage pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" foldedItemIds={foldedItems} />
+          <Stage modUiSessionId="scroll-fixture" pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" foldedItemIds={foldedItems} />
         </div>
         {inspector && <aside className="runtime-inspector" style={{ width: 390 }}>Inspector</aside>}
       </div>

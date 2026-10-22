@@ -1,3 +1,7 @@
+import { LocalApps } from './components/LocalApps';
+import './components/LocalApps.css';
+import { localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
+import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
 import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type ScheduledLinkRequest } from './deepLinkRoutes';
 import { SETTINGS_NAV } from './components/settings/nav';
@@ -50,11 +54,49 @@ export function App() {
   const [terminalLinkScope, setTerminalLinkScope] = useState<TerminalScope | null>(null);
   const [scheduledTarget, setScheduledTarget] = useState<ScheduledLinkRequest | undefined>();
   const [activityView, setActivityView] = useState(false);
-  const [page, setPage] = useState<'chat' | 'scheduled'>('chat');
+  const [localAppDraft, setLocalAppDraft] = useState<LocalAppDraft>();
+  const [localAppNavigationError, setLocalAppNavigationError] = useState('');
+  const localAppNavigation = useRef(0);
+  const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
+  const [page, setPage] = useState<'chat' | 'scheduled' | 'apps'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
+  const localAppBridge = useRef(bridge);
+  localAppBridge.current = bridge;
+  const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
+    const nonce = ++localAppNavigation.current;
+    setLocalAppDraft(undefined);
+    setLocalAppNavigationError('');
+    const navigate = async () => {
+      const current = localAppBridge.current;
+      const target = await localAppChatTarget(app, {
+        activeProject: current.bootstrap?.settings.activeProject,
+        hasProject: path => Boolean(current.bootstrap?.settings.projects.includes(path)
+          || current.bootstrap?.scheduledWorkspace === path),
+        openSession: current.openSession,
+        addProject: current.addProject,
+        newSession: current.newSession,
+      }, () => localAppNavigation.current === nonce);
+      if (!target || localAppNavigation.current !== nonce) return;
+      setPage('chat');
+      setActivityView(false);
+      setLocalAppDraft({ id: app?.id ?? '', name: app?.name ?? '', nonce, target });
+    };
+    localAppNavigationQueue.current = localAppNavigationQueue.current.then(navigate, navigate).catch(error => {
+      if (localAppNavigation.current === nonce) setLocalAppNavigationError(error instanceof Error ? error.message : String(error));
+    });
+  }, []);
+  const consumeLocalAppDraft = useCallback((nonce: number) => {
+    setLocalAppDraft(current => current?.nonce === nonce ? undefined : current);
+  }, []);
+  const cancelLocalAppNavigation = useCallback(() => {
+    localAppNavigation.current++;
+    setLocalAppDraft(undefined);
+    setLocalAppNavigationError('');
+  }, []);
+  useEffect(() => () => { localAppNavigation.current++; }, []);
   const [visibleModToast, setVisibleModToast] = useState<typeof bridge.conversation.modToast>(null);
   useEffect(() => {
     const toast = bridge.conversation.modToast;
@@ -64,6 +106,7 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [bridge.conversation.modToast]);
   const toggleActivityView = () => {
+    cancelLocalAppNavigation();
     setPage('chat');
     setActivityView(!activityView);
     bridge.setRuntimeCenterOverviewOpen(!activityView);
@@ -72,6 +115,7 @@ export function App() {
     const toggle = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.altKey && !event.shiftKey && event.key.toLowerCase() === 'u' && !settingsRoute) {
         event.preventDefault();
+        cancelLocalAppNavigation();
         setPage('chat');
         setActivityView(!activityView);
         bridge.setRuntimeCenterOverviewOpen(!activityView);
@@ -79,7 +123,8 @@ export function App() {
     };
     window.addEventListener('keydown', toggle);
     return () => window.removeEventListener('keydown', toggle);
-  }, [settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen]);
+  }, [settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation]);
+  useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
   const workspace = bridge.bootstrap?.workspace;
   const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
   const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
@@ -123,19 +168,21 @@ export function App() {
     void bridge.setThemePreference(value).catch(() => undefined);
   };
   const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference' | 'linkRequest'>) => {
+    cancelLocalAppNavigation();
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
-  }, []);
+  }, [cancelLocalAppNavigation]);
   useEffect(() => window.lingxi?.onApplicationMenu?.((action) => {
     if (action === 'settings') {
       // Preserve the original focus restoration target when already open.
       if (!settingsRoute) openSettings();
     } else if (action === 'activity' && !settingsRoute) {
+      cancelLocalAppNavigation();
       setPage('chat');
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
     }
-  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen]);
+  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
@@ -149,6 +196,7 @@ export function App() {
     void (async () => {
       const delivery = await api.next();
       if (!delivery) return;
+      cancelLocalAppNavigation();
       delivered = true;
       let error: string | undefined;
       try {
@@ -260,9 +308,11 @@ export function App() {
             bridge={bridge}
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
+            apps={page === 'apps'}
+            onOpenApps={() => { cancelLocalAppNavigation(); setPage('apps'); }}
             scheduled={page === 'scheduled'}
-            onOpenScheduled={() => setPage('scheduled')}
-            onOpenChat={() => setPage('chat')}
+            onOpenScheduled={() => { cancelLocalAppNavigation(); setPage('scheduled'); }}
+            onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); }}
             onOpenSettings={() => openSettings()}
             topbar={
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
@@ -284,8 +334,10 @@ export function App() {
           <div className="desktop-content" style={{ background: palette.stageBg }}>
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
+          {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
+          <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
-          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => setPage('chat')} />
+          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); }} />
           </div>
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <ErrorBanner bridge={bridge} />
@@ -344,6 +396,8 @@ export function App() {
                   enabled={page === 'chat' && settingsRoute === null && bridge.connected && !bridge.sessionLoading}
                 />
                 <BetaComposer
+                  localAppDraft={localAppDraft}
+                  onLocalAppDraftConsumed={consumeLocalAppDraft}
                   bridge={bridge}
                   ready={ready}
                   onCreateSide={sideChats.create}

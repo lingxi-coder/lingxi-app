@@ -1,7 +1,7 @@
 # Desktop directory projects and sessions: Claude Code CLI 2.1.307
 
 Validated on macOS arm64, 2026-10-22. The product pins Harness SDK
-`2f8bd587dae04b1c062c0ff58b32d2e6b9b37d45` in all 39 workspace dependency
+`5a2de5b14e6c0d8d2e5bac9155c9c39accda86c7` in all 39 workspace dependency
 declarations. The lockfile uses the same Git revision for all 78 SDK packages.
 No local Cargo path overlay is required.
 
@@ -47,7 +47,7 @@ No extracted proprietary source is checked in. The SDK contains the extractor,
 range digests, controlled fixtures, implementation tests, and detailed limits in
 `docs/parity/workspace-session-2.1.307.md`.
 
-## Validation
+## Initial integration validation
 
 | Check | Result |
 | --- | --- |
@@ -86,3 +86,94 @@ status instead of a retired animation class.
 Publication uses scoped worktrees for both repositories. The product retains the
 independent LocalApp and tool-row commits `608f8c3d5` and `d7b855721`. Unrelated
 tracked/untracked work and the original indexes were excluded from these commits.
+
+## Signed cold-start and restart validation
+
+The subsequent signed acceptance used product code `b9c86c5bc` with published
+SDK `5a2de5b14e6c0d8d2e5bac9155c9c39accda86c7`. The documentation update after
+that build does not change packaged code. All 39 workspace declarations and
+78 lockfile packages use that SDK Git revision, without a local Cargo overlay.
+
+Real process testing and regression review found and repaired these issues:
+
+- Terminal ownership rejected a committed cross-directory session move. Existing
+  PTYs now retain their running process and cwd while their owner follows the
+  session; newly opened terminals use its new directory.
+- Moving an empty draft saved a UUID with no durable transcript. Directory
+  selection is now durable independently of a volatile draft, preserving any
+  previously remembered durable conversation.
+- Disposing a replaced runtime marked its still-live UUID as removed in the
+  renderer. An explicit replacement reason retains the owner while ordinary
+  disposal, archive, failure and stale-generation fences remain effective.
+- A remount reset live permission, reasoning, Fast and Proactivity controls to
+  defaults. An authenticated, bounded private restore carries same-session idle
+  controls through remount and selected resume. It does not write global
+  preferences or invent transcript metadata; target capability gates are
+  recalculated while Proactivity's original session baseline is retained.
+- The renderer displayed the old permission mode after successful restoration
+  and reported intentional replacement as an action error. It now renders the
+  effective permission from controls and suppresses only the exact intentional
+  replacement disconnect error.
+
+| Final check | Result |
+| --- | --- |
+| SDK orchestrator library | 2,143 passed |
+| Native workspace/private restore/WebSocket regressions | 22 unit + 2 integration passed |
+| Real PTY ownership and process lifecycle | 2 passed |
+| Focused Desktop remount/runtime suite after test ownership isolation | 71 passed |
+| Final renderer controls and connection lifecycle | 29 passed |
+| Bridge-client | 105 passed |
+| Electron node/web type checks and packaged Vite build | Passed |
+| Mandatory Flare package signing, portable native verification and full cold smoke | Passed |
+| Signed CUA directory/session acceptance, three launches and normal exits | Passed |
+| Final signed launch with original user profile | Passed; left open |
+
+The mandatory `package:mac:flare` wrapper used Team `AZ4AX7J833`, timestamped
+hardened signing and a cold Credential Broker with no warm-up. It passed static
+verification and the actual packaged credential, terminal, Git, scheduling,
+permission and security checks, authenticated localhost model request, LocalApp
+tool creation, delivery card, library, independent window, restart and cleanup.
+The final ZIP SHA-256 is
+`1da668a7f4e87cd88a24e5601031389413d2828c6acf380bc096c112a8af7841`.
+
+Additional CUA acceptance used an isolated HOME/config/userData, Git directory A,
+its linked worktree B, additional directory C and unrelated project D. All new
+interactive input used CUA; fixture probes only read state/catalogs/events and
+staged the disposable provider environment. Four authenticated fixture turns
+invoked the real Bash dispatcher in A, B, D and B after a process restart.
+
+An empty A-to-B move retained its UUID without creating a transcript; its next
+cold launch opened a fresh B draft. A used session retained its exact UUID,
+history, model, Ask permission and opted-in Proactivity when moved from A to B,
+and its transcript physically moved to B's directory bucket. A new chat used a
+different UUID. The native picker searched the original UUID and restored its
+physical transcript; from A, Current/Repository/All returned 0/1/2 conversations,
+respectively, and Repository selected B while excluding D. Invalid-directory
+failure and native additional-directory picker cancellation retained the owner.
+
+Three actual packaged processes exited normally with code zero. The final cold
+restart restored the exact selected B UUID and A/B history, then executed a fresh
+Bash command in B. D's transcript remained byte-identical. No renderer errors
+were captured. The final normal-profile launch restored the user's original
+project, session, model and history; active project/session, project list and
+pinned sessions matched their pre-test values. The original 11 dirty product
+files retained their hashes, both original indexes were unchanged, and the SDK's
+untracked directories remained present.
+
+Evidence is saved under the checkout parent's
+`acceptance/desktop-workspace-session-signed-782713ad5-20261022/`, including
+`acceptance-result.json`, `reviewed-build-inputs.json`,
+`build-reviewed-sign-verify.log`, `gui-verified/`, `preservation-final.json` and
+`user-profile-after.json`. `validate-evidence.py` rechecks saved proofs, artifact
+digest, file/index preservation and user-profile fields. This signed acceptance
+supersedes the earlier real-process-only boundary for the scenarios above.
+
+The full Desktop run before the final renderer additions had 1,870 passes,
+3 skips and 5 failures. All five reproduce on untouched main `782713ad5` with
+the same assertions: activity text, session hover/drag, the Settings
+`provider-credentials` editor, Stage scroll padding, and thought-preference tool
+text. Those unrelated UI fixtures remain failing; the whole Desktop suite is
+not represented as green. The localhost fixture does not establish production
+provider quality, this GUI model only supports automatic reasoning, and a
+different Mac's Gatekeeper transfer and Developer ID notarization/stapling were
+not tested.

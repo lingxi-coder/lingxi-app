@@ -6,6 +6,7 @@
  * The reconciliation test (`test/slash-registry-reconciliation.test.ts`) is
  * what keeps this table honest against the engine's registry.
  */
+import { parseRemoteToggleArg } from './remoteControl';
 import type { DesktopCommand, DesktopCommandContext } from './slashDispatch';
 
 const PERMISSION_MODE_IDS = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'] as const;
@@ -162,7 +163,31 @@ export const DESKTOP_COMMANDS: readonly DesktopCommand[] = [
       ctx.openSettings();
     },
   },
+  {
+    // Not an engine command: the engine aliases `/remote` to `/session`, and
+    // Remote Control is a Desktop feature, so this is declared in
+    // `DESKTOP_ONLY_COMMANDS`. Never matches `/remote`, which stays the engine's.
+    name: 'remote-control',
+    aliases: ['rc'],
+    args: 'optional',
+    async run(args, ctx) {
+      const wanted = parseRemoteToggleArg(args);
+      if (wanted === 'invalid') return ctx.emit(`/remote-control takes on or off, not: ${args}`, true);
+      const result = await ctx.toggleRemoteControl(wanted);
+      ctx.emit(result.message, result.isError);
+    },
+  },
 ];
+
+/**
+ * Desktop commands with no engine counterpart. The reconciliation test allows
+ * exactly these names to be absent from the engine's builtin table, and
+ * checks that none of them is (or aliases) a name the engine does have, so a
+ * Desktop-only command can never silently shadow an engine one.
+ */
+export const DESKTOP_ONLY_COMMANDS: Readonly<Record<string, string>> = {
+  'remote-control': 'Remote Control is hosted by the Desktop main process; the engine has no such command (it aliases /remote to /session).',
+};
 
 /** Builtins whose registry handlers are real on the bridge-server. */
 export const DESKTOP_ENGINE_BUILTIN_COMMANDS = [

@@ -773,6 +773,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   key drops that state and clears its reset timer.
                 */}
                 {user && goalMessageObjective(item.text) && !item.delivery && <div className="goal-message-caption" style={{ color: t.text3 }}><Icon name="goal" size={14} /><span>Sent as goal</span></div>}
+                {user && item.origin?.kind === 'device' && <div className="goal-message-caption remote-message-origin" style={{ color: t.text3 }}><span>来自 {item.origin.deviceName || '远程设备'}</span></div>}
                 {user && <UserMessageActions key={sessionKey} text={item.text} sentAt={item.sentAt} />}
               </div>
             );

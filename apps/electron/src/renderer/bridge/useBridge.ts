@@ -93,6 +93,7 @@ import type {
 import {
   acknowledgePromptDispatch,
   appendPendingUserPrompt,
+  appendRemoteUserPrompt,
   beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
@@ -409,6 +410,24 @@ export function useBridge(): UseBridge {
       return copy;
     });
   }, []);
+
+  // A paired device sent a prompt through Remote Control. The engine's event
+  // stream carries no user prompts, so the window shows the row itself, for any
+  // session whose state it keeps (a session that is not loaded reads it back
+  // from its transcript the next time it opens).
+  useEffect(() => {
+    const remote = host?.remoteControl;
+    if (!remote) return undefined;
+    return remote.onPromptEcho((echo) => {
+      if (!runtimeStatesRef.current.has(echo.sessionId)) return;
+      updateRuntime(echo.sessionId, (state) => {
+        const conversation = appendRemoteUserPrompt(state.conversation, {
+          turnId: echo.turnId, text: echo.text, images: echo.images, deviceName: echo.deviceName,
+        });
+        return conversation === state.conversation ? state : { ...state, conversation };
+      });
+    });
+  }, [host, updateRuntime]);
 
   const acknowledgeInteraction = useCallback((
     sessionId: string,

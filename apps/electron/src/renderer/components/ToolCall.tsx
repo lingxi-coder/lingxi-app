@@ -1,4 +1,5 @@
 import { LocalAppCard } from './LocalApps';
+import { localAppReference } from '../model/localAppReference';
 /**
  * One tool call in the transcript.
  *
@@ -261,7 +262,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
     )}
   </>;
   const answeredQuestions = questionAnswers(item);
-  const rowContent = answeredQuestions ? (
+  const rowContent = localAppReference(item) ? (
+    <LocalAppCard item={item} />
+  ) : answeredQuestions ? (
     <AskUserQuestionSummary id={item.id} rows={answeredQuestions} open={open ?? true}
       onToggle={() => onSetOpen(item.id, !(open ?? true))}
       keepMounted={Boolean(modUiSessionId)}
@@ -293,7 +296,6 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         '--permission-danger': t.danger,
       } as CSSProperties}
     >
-      <LocalAppCard item={item} />
       {/* The call and its response share one Thought-like disclosure row. */}
       {expandable ? (
         <Disclosure

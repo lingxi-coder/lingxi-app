@@ -36,9 +36,24 @@
 .local-app-logs header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--apps-border); font-size: 12px; }
 .local-app-logs header button { border: 0; }
 .local-app-logs pre { font: 11px/1.6 ui-monospace,monospace; padding: 14px; margin: 0; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.local-app-chat-card { display: flex; align-items: center; gap: 15px; padding: 16px; margin: 8px 0 12px 28px; border: 1px solid rgba(128,128,128,.25); border-radius: 12px; max-width: 470px; }
-.local-app-chat-card > div { display: flex; flex-direction: column; flex: 1; gap: 5px; min-width: 0; }
-.local-app-chat-card strong { font-size: 14px; }
-.local-app-chat-card small { opacity: .6; font-size: 11px; }
-.local-app-chat-card [role=alert] { font-size: 11px; color: #c65c5c; overflow-wrap: anywhere; }
-.local-app-chat-card button { font-size: 12px; white-space: nowrap; }
+.local-app-chat-card { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; box-sizing: border-box; width: 100%; max-width: 480px; padding: 14px 16px; margin: 6px 0; color: var(--apps-text); background: var(--apps-surface); border: 1px solid var(--apps-border); border-radius: 14px; }
+.local-app-chat-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; color: var(--apps-accent); background: var(--apps-accent-bg); }
+.local-app-chat-info { min-width: 0; }
+.local-app-chat-info strong { display: block; font-size: 14px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.local-app-chat-info p { margin: 4px 0 0; color: var(--apps-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.local-app-chat-card button { min-height: 34px; padding: 6px 12px; border: 0; border-radius: 8px; background: var(--apps-accent-bg); color: var(--apps-accent); font-size: 12px; font-weight: 600; white-space: nowrap; transition: background-color 120ms ease; }
+.local-app-chat-card button:hover { background: var(--apps-hover); }
+.local-app-chat-card button:active { background: var(--apps-accent-bg); opacity: .7; }
+.local-app-chat-card button:disabled { opacity: .55; cursor: progress; }
+.local-app-chat-error { grid-column: 2 / -1; margin: 0; color: var(--apps-error); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 380px) {
+  .local-app-chat-card { gap: 10px; padding: 12px; }
+  .local-app-chat-card button { grid-column: 2; justify-self: start; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .local-app-chat-card button { transition: none; }
+}
+@media (prefers-contrast: more) {
+  .local-app-chat-card { border-color: var(--apps-text); }
+  .local-app-chat-card button { outline: 1px solid currentColor; outline-offset: -1px; }
+}

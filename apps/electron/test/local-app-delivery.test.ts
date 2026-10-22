@@ -4,6 +4,7 @@ import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transcriptRows } from '../src/renderer/components/transcriptRows';
 import { ToolGroup } from '../src/renderer/components/ToolGroup';
+import { ToolCall } from '../src/renderer/components/ToolCall';
 import { Stage } from '../src/renderer/components/Stage';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
@@ -57,4 +58,18 @@ test('activity view preserves the app card outside collapsed tool details', () =
   assert.equal(collapsedGroups.length, 2, 'installation and start remain collapsed');
   for (const [details] of collapsedGroups) assert.doesNotMatch(details, /local-app-chat-card/);
   assert.equal((html.match(/>Open app<\/button>/g) ?? []).length, 1);
+});
+
+
+test('published apps show one summary without a duplicate tool disclosure or version label', () => {
+  for (const nativeOutput of [
+    { ...published.nativeOutput as object, summary: '每日选字、多音字与朗读练习' },
+    JSON.stringify({ ...published.nativeOutput as object, summary: '每日选字、多音字与朗读练习' }),
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) },
+      React.createElement(ToolCall, { item: { ...published, nativeOutput, result: { headline: 'Repeated summary', body: 'Repeated summary' } }, open: true, onSetOpen: () => {} })));
+    assert.equal((html.match(/每日选字、多音字与朗读练习/g) ?? []).length, 1);
+    assert.doesNotMatch(html, /tool-disclosure-trigger|Repeated summary|Local app ·|v1/);
+    assert.match(html, /aria-label="Open Reading garden"/);
+  }
 });

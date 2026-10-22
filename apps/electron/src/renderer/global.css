@@ -598,13 +598,18 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .desktop-stage-jump { transition: none; }
 }
-/* Space the direct feed children, including message-link wrappers. */
+/* Keep related activity close, with more breathing room around messages and
+   user turns. Apply spacing to the outer rows, including message-link wrappers. */
 .transcript-row + .transcript-row {
-  margin-top: 18px;
+  margin-top: 1.5rem;
 }
 .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking']) + .transcript-row,
 .transcript-row + .transcript-row:is([data-row-type='tool-group'], [data-row-type='thinking']) {
-  margin-top: 8px;
+  margin-top: .75rem;
+}
+.transcript-row[data-message-role='user'] + .transcript-row,
+.transcript-row + .transcript-row[data-message-role='user'] {
+  margin-top: 2rem;
 }
 .command-result-card {
   width: min(880px, 100%);

@@ -22,6 +22,7 @@ async function main() {
     await settle();
     const metrics = `(() => { const node = document.querySelector('.desktop-stage'); return { top: node.scrollTop, gap: node.scrollHeight - node.clientHeight - node.scrollTop, ancestor: document.querySelector('#scroll-ancestor').scrollTop }; })()`;
     const initial = await run(metrics);
+    assert.equal(await run(`getComputedStyle(document.querySelectorAll('.transcript-row')[1]).marginTop`), '24px', 'messages have comfortable reading space');
     const result = { initialGap: initial.gap, ancestorScroll: initial.ancestor };
     await run(`(() => { const node = document.querySelector('.desktop-stage'); node.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true})); node.scrollTop = node.scrollHeight - node.clientHeight - 40; })()`);
     await settle();
@@ -84,6 +85,7 @@ async function main() {
       for (const status of ['pending', undefined, 'failed', undefined]) {
         await run(`window.stageScrollFixture.delivery(${JSON.stringify(status)}, ${long})`);
         await settle();
+        assert.equal(await run(`getComputedStyle(document.querySelector('[data-message-role="user"] + .transcript-row')).marginTop`), '32px', 'user turns retain a clear boundary');
         const alignment = await run(`(() => {
           const bubble = document.querySelector('.user-message-bubble').getBoundingClientRect();
           const row = document.querySelector('.transcript-user-message').getBoundingClientRect();

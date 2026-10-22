@@ -862,7 +862,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             return source ? transcriptRowUuids(source) : [];
           }))];
           const uuid = messageTarget && uuids.includes(messageTarget) ? messageTarget : uuids[0];
-          return <div className="transcript-row" data-row-type={item.type} key={item.id} data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined} style={uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : undefined}>{content}</div>;
+          return <div className="transcript-row" data-row-type={item.type} data-message-role={item.type === 'narration' ? item.role : undefined} key={item.id} data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined} style={uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : undefined}>{content}</div>;
         })}
 
         {/* Keep the tail slot mounted even when thinking yields to another activity. */}

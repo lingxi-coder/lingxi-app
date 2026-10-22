@@ -172,8 +172,65 @@ The full Desktop run before the final renderer additions had 1,870 passes,
 3 skips and 5 failures. All five reproduce on untouched main `782713ad5` with
 the same assertions: activity text, session hover/drag, the Settings
 `provider-credentials` editor, Stage scroll padding, and thought-preference tool
-text. Those unrelated UI fixtures remain failing; the whole Desktop suite is
-not represented as green. The localhost fixture does not establish production
+text. At that acceptance checkpoint, the whole Desktop suite was not green.
+The follow-up below
+resolves those failures. The localhost fixture does not establish production
 provider quality, this GUI model only supports automatic reasoning, and a
 different Mac's Gatekeeper transfer and Developer ID notarization/stapling were
 not tested.
+
+## Complete Desktop UI suite follow-up
+
+The five failures were reproduced on clean latest main `0b3b188af`: 21 focused
+checks passed and five failed. The repairs in `b69be7838` update fixture inputs
+and assertions to the current production UI contracts:
+
+- Activity checks the current singular summary, separate failed badge and two
+  expanded tool rows.
+- The sidebar fixture supplies its required `sessionLoading: false` flag and
+  uses the current children layout. Omitting the flag had made the sidebar
+  inert, preventing actual native hover, hold, drag and click input.
+- Settings cancels the actual unsaved custom Provider draft before navigating
+  to the remaining editors. The production navigation guard remains active.
+- Stage checks the compact 28px tool row separately from the 40px thinking slot,
+  retaining its scroll position, spacing and resize assertions.
+- Thought preference uses the current `shell` tool verb and completed group
+  disclosure, retaining positive command and file-content checks after expansion.
+
+Running the complete suite with the packaged Bun and bridge-server enabled all
+three optional native checks and exposed one additional intermittent fixture
+race. `b0a890fc2` waits for the trusted native Enter keydown to reach the input
+before injecting the button click. It leaves the first Host post held and keeps
+the strict submit-before-press and latest-handle assertions. The fixture passed
+ten consecutive real Electron runs after the repair. Independent read-only
+review approved both repair sets without actionable findings.
+
+| Follow-up check | Result |
+| --- | --- |
+| Complete Desktop suite with packaged Bun and native bridge-server | 1,880 passed, 0 failed, 0 skipped |
+| Electron node/web type checks | Passed |
+| Native Client input-order fixture | 10 consecutive passes |
+| Flare signed package, portable native verification and full cold smoke | Passed |
+| Normal-profile signed launch | Original project/session, history and model restored; composer ready |
+| Other tasks' work | All 11 original dirty product paths, original staged contents and SDK untracked directories retained |
+
+The new signed package was built from `b69be7838` with published SDK
+`5a2de5b14e6c0d8d2e5bac9155c9c39accda86c7` through `package:mac:flare`.
+It uses Team `AZ4AX7J833`, timestamped hardened signing and an unwarmed cold
+Credential Broker. Static verification and the actual packaged credential,
+terminal, Git, scheduling, permission, security and authenticated localhost model
+checks passed, including LocalApp tool creation, delivery card, library,
+independent window, durable state, source-chat update, exit and restart.
+The final normal-profile app was left open. Active project/session, project list
+and pinned sessions matched their pre-test values.
+
+These changes affect tests and documentation only; the runtime source is
+unchanged from main `0b3b188af`. The later input-order fixture and documentation
+changes are not packaged, so the verified signed runtime also represents the
+final change set. The ZIP SHA-256 is
+`2016b0f066f19921964bb26e32029925caebf7d557c2866fe02b36951a2921a0`.
+
+Evidence is saved under `acceptance/desktop-ui-suite-20261022/`, including
+`desktop-full-final.log`, `full-suite-result.json`, `native-input-order-result.json`,
+`independent-review.md`, `build-sign-verify.log`, `package-result.json`,
+`normal-profile-result.json`, `preservation-final.json` and `REPORT.md`.

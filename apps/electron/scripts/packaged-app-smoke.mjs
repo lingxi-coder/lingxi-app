@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -398,14 +398,14 @@ async function connectToDebugger(port) {
 }
 
 async function evaluate(page, expression) {
-  // Awaited preload calls can include two bounded 20s broker requests on a
-  // newly signed copy. Keep CDP alive for that native budget; individual UI
-  // readiness checks still retain their own deadlines and assertions.
+  // Bootstrap can include health, account listing and an OAuth metadata read.
+  // Each native helper has a bounded 90s cold-start deadline. Keep CDP alive
+  // for that chain; individual UI checks retain their own readiness deadlines.
   const result = await page.send('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  }, 45_000);
+  }, 280_000);
   if (result.exceptionDetails) {
     throw new Error(`renderer evaluation failed: ${result.exceptionDetails.text ?? 'unknown error'}${result.exceptionDetails.exception?.description ? `: ${result.exceptionDetails.exception.description}` : ''}`);
   }
@@ -572,9 +572,8 @@ async function assertRendererContract(page, leakPatterns) {
         ? value
         : undefined;
     }),
-    // Bootstrap includes the broker's health and status requests (20s each).
-    // A fresh signed copy must be allowed to finish that bounded cold start.
-    { timeoutMs: 45_000, label: 'renderer bootstrap' },
+    // Health, listing and optional OAuth metadata each use a bounded helper.
+    { timeoutMs: 280_000, label: 'renderer bootstrap' },
   ).catch((error) => {
     log(`last renderer bootstrap: ${JSON.stringify(lastDetails)}`);
     throw error;
@@ -1041,6 +1040,22 @@ async function assertPackagedLocalApps(page, probe, sessionId, cdpPort) {
   log('packaged LocalApp: Bash/tool dispatch, visible delivery card, Apps library, isolated window, durable state and source-chat modification passed');
 }
 
+export async function unregisterCredentialBrokerForColdStart(channel, run = spawnSync) {
+  assert.ok(['development', 'production'].includes(channel));
+  const suffix = channel === 'development' ? '.development' : '';
+  const target = `gui/${process.getuid()}/com.lingxi.code.credential-broker${suffix}`;
+  const stopped = run('/bin/launchctl', ['bootout', target], { encoding: 'utf8', timeout: 10_000 });
+  assert.ok([0, 3].includes(stopped.status), 'cold-start broker bootout failed');
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const state = run('/bin/launchctl', ['print', target], { encoding: 'utf8', timeout: 10_000 });
+    if (state.status === 113) return;
+    assert.equal(state.status, 0, 'launchctl failed while waiting for broker removal');
+    if (Date.now() >= deadline) throw new Error('credential broker remained registered after bootout');
+    await delay(100);
+  }
+}
+
 export async function runPackagedAppSmoke(root = packageRoot, outputRoot = process.env[PACKAGE_OUTPUT_ROOT_ENV]) {
   if (process.platform !== 'darwin') {
     throw new Error(`packaged smoke verification requires macOS; received ${process.platform}`);
@@ -1054,6 +1069,15 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const preexistingAppCommands = runningAppCommands();
   if (preexistingAppCommands.length > 0) {
     throw new Error(`refusing packaged smoke launch while another ${APP_NAME} instance is running: ${preexistingAppCommands.join(' | ')}`);
+  }
+
+  if (process.env.LINGXI_CREDENTIAL_BROKER_COLD_START === '1') {
+    const manifest = JSON.parse(readFileSync(join(appPath, 'Contents', 'Resources',
+      'credential-broker', 'broker-manifest.json'), 'utf8'));
+    // The first real packaged client must register and start the service.
+    // launchd removal is asynchronous even after bootout returns successfully.
+    await unregisterCredentialBrokerForColdStart(manifest.channel);
+    log(`cold-start credential broker unregistered channel=${manifest.channel}; no readiness probe performed`);
   }
 
   // Keep nested supervisor Unix sockets below macOS SUN_LEN; the default

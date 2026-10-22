@@ -48,21 +48,13 @@ func readRequestFromStdin() throws -> Data {
     return firstChunk
 }
 
-func authorizedParentChannel(teamId: String) throws -> String {
-    for channel in ["production", "development"] {
-        do {
-            try validateProcessIdentifier(
-                getppid(),
-                expectedIdentifiers: BrokerSecurity.allowedCallerIdentifiers(channel: channel),
-                teamId: teamId,
-                action: "authorize broker caller"
-            )
-            return channel
-        } catch {
-            continue
-        }
-    }
-    throw BrokerFailure.permission("credential broker caller has an unauthorized code signature")
+func authorizeParent(teamId: String, channel: String) throws {
+    try validateProcessIdentifier(
+        getppid(),
+        expectedIdentifiers: BrokerSecurity.allowedCallerIdentifiers(channel: channel),
+        teamId: teamId,
+        action: "authorize broker caller"
+    )
 }
 
 func brokerInstallDirectory(for channel: String) throws -> URL {
@@ -333,6 +325,34 @@ func registerBrokerLaunchAgent(
     try launchctl(["kickstart", "-k", serviceTarget])
 }
 
+// Emit only phase timing, never request fields, account names or secret data.
+func timedBrokerPhase<T>(_ phase: String, work: () throws -> T) rethrows -> T {
+    let start = DispatchTime.now().uptimeNanoseconds
+    defer {
+        let elapsed = (DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        FileHandle.standardError.write(Data("credential_broker phase=\(phase) duration_ms=\(elapsed)\n".utf8))
+    }
+    return try work()
+}
+
+// A cold peer may need launchd and Security framework work before it can
+// receive any messages. Keep that readiness budget separate from the operation
+// budget, on the SAME authenticated connection. Never replay a mutation.
+func performReadyBrokerRequest(
+    requestData: Data,
+    exchange: (Data, TimeInterval) throws -> Data
+) throws -> Data {
+    let request = try JSONDecoder().decode(BrokerRequest.self, from: requestData)
+    let healthData = Data(#"{"op":"health"}"#.utf8)
+    let ready = try timedBrokerPhase("readiness") { try exchange(healthData, 60) }
+    let response = try JSONDecoder().decode(BrokerResponse.self, from: ready)
+    guard response.ok, response.protocolVersion == brokerProtocolVersion else {
+        throw BrokerFailure.unavailable("credential broker readiness check failed")
+    }
+    if request.op == "health" { return ready }
+    return try timedBrokerPhase("operation") { try exchange(requestData, 15) }
+}
+
 func performXpcCall(requestData: Data, teamId: String, channel: String) throws -> Data {
     let connection = NSXPCConnection(machServiceName: BrokerSecurity.machService(channel: channel), options: [])
     connection.remoteObjectInterface = NSXPCInterface(with: LingXiCredentialBrokerXPC.self)
@@ -342,6 +362,13 @@ func performXpcCall(requestData: Data, teamId: String, channel: String) throws -
         requirementString(teamId: teamId, identifier: BrokerSecurity.brokerBundleId(channel: channel))
     )
     connection.resume()
+    defer { connection.invalidate() }
+    return try performReadyBrokerRequest(requestData: requestData) { data, timeout in
+        try exchangeXpcRequest(connection: connection, requestData: data, timeout: timeout)
+    }
+}
+
+func exchangeXpcRequest(connection: NSXPCConnection, requestData: Data, timeout: TimeInterval) throws -> Data {
     let semaphore = DispatchSemaphore(value: 0)
     let replyLock = NSLock()
     var completed = false
@@ -371,7 +398,7 @@ func performXpcCall(requestData: Data, teamId: String, channel: String) throws -
         replyLock.unlock()
         semaphore.signal()
     }
-    let waitResult = semaphore.wait(timeout: .now() + 15)
+    let waitResult = semaphore.wait(timeout: .now() + timeout)
     // A timeout or invalidate may race a reply on XPC's private queue. Close
     // the result under the same lock before invalidating; late callbacks must
     // not mutate data that the calling thread is reading.
@@ -380,7 +407,6 @@ func performXpcCall(requestData: Data, teamId: String, channel: String) throws -
     let capturedError = replyError
     let capturedData = replyData
     replyLock.unlock()
-    connection.invalidate()
     guard waitResult == .success else {
         throw BrokerFailure.unavailable("credential broker XPC request timed out")
     }
@@ -402,17 +428,15 @@ struct CredentialClientEntry {
     static func main() {
         do {
             let teamId = try currentTeamIdentifier()
-            let channel = try authorizedParentChannel(teamId: teamId)
+            let packaged = try loadPackagedBrokerResources()
+            let channel = packaged.manifest.channel
+            try authorizeParent(teamId: teamId, channel: channel)
             try validateStaticCode(
                 at: URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath(),
                 expectedIdentifier: BrokerSecurity.clientIdentifier(channel: channel),
                 teamId: teamId,
                 action: "validate credential broker client"
             )
-            let packaged = try loadPackagedBrokerResources()
-            guard packaged.manifest.channel == channel else {
-                throw BrokerFailure.permission("credential broker package channel does not match its caller")
-            }
             _ = try installOrResolveBroker(packaged: packaged, teamId: teamId)
             let request = try readRequestFromStdin()
             let reply = try performXpcCall(

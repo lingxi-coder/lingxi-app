@@ -105,6 +105,8 @@ from the inside out, and runs static and runtime package verification.
 cd ~/lingxi/lingxi-app/apps/electron
 npm run package:mac:flare -- --check
 npm run package:mac:flare -- --launch
+# Cold acceptance: stop this channel before the first real app launch; do not prewarm XPC.
+LINGXI_CREDENTIAL_BROKER_COLD_START=1 npm run package:mac:flare -- --launch
 ```
 
 `npm run verify:package` now runs both the static bundle audit and a packaged

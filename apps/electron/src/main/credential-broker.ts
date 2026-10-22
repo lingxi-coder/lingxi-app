@@ -13,7 +13,9 @@ const CREDENTIAL_BROKER_PROTOCOL_VERSION = 1;
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_STDERR_BYTES = 8 * 1024;
-const DEFAULT_TIMEOUT_MS = 20_000;
+// Includes native cold service readiness (60s), one operation (15s), and
+// helper signature/install overhead. This remains a hard process deadline.
+const DEFAULT_TIMEOUT_MS = 90_000;
 
 export const providerEnvironmentVariables: Readonly<Record<string, string>> = {
   anthropic: 'ANTHROPIC_API_KEY',

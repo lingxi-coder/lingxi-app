@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,11 +15,28 @@ export function validateCrashlyticsConfig(config, bundleId) {
   return config;
 }
 
+// Map both logical paths and physical cache targets: SPM resolves symlinked
+// checkouts before compiling __FILE__ strings. Debug stripping cannot remove them.
+export function nativeSourcePrefixMaps(paths) {
+  return [...new Set(paths.flatMap(path => [resolve(path), realpathSync(path)]))]
+    .sort((a, b) => a.length - b.length)
+    .map(path => `${path}=.`);
+}
+
+// Xcode build settings parse a list of arguments, unlike execFile's argv.
+export function xcodeArgument(value) {
+  return '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
+}
+
 export function buildCrashlyticsBridge() {
   const source = join(root, 'native', 'crashlytics');
   const scratch = join(root, '.native-cache', 'crashlytics');
   mkdirSync(scratch, { recursive: true });
   const derived = join(root, '.native-cache', 'crashlytics-xcode');
+  mkdirSync(derived, { recursive: true });
+  const prefixMaps = nativeSourcePrefixMaps([root, scratch, derived]);
+  const clangMaps = prefixMaps.map(map => `-ffile-prefix-map=${map}`);
+  const swiftMaps = prefixMaps.flatMap(map => ['-file-prefix-map', map, '-debug-prefix-map', map]);
   execFileSync('xcodegen', ['generate', '--spec', join(source, 'project.yml')], { stdio: 'inherit' });
   const resolvedDirectory = join(source, 'LingXiDesktopCrashlytics.xcodeproj', 'project.xcworkspace', 'xcshareddata', 'swiftpm');
   mkdirSync(resolvedDirectory, { recursive: true });
@@ -28,8 +45,8 @@ export function buildCrashlyticsBridge() {
     '-scheme', 'LingXiDesktopCrashlytics', '-configuration', 'Release',
     '-destination', 'generic/platform=macOS', '-derivedDataPath', derived,
     '-clonedSourcePackagesDirPath', scratch, '-onlyUsePackageVersionsFromResolvedFile',
-    `OTHER_CFLAGS=$(inherited) -ffile-prefix-map=${root}=.`,
-    `OTHER_SWIFT_FLAGS=$(inherited) -debug-prefix-map ${root}=.`,
+    `OTHER_CFLAGS=$(inherited) ${clangMaps.map(xcodeArgument).join(' ')}`,
+    `OTHER_SWIFT_FLAGS=$(inherited) ${swiftMaps.map(xcodeArgument).join(' ')}`,
     'ARCHS=arm64', 'CODE_SIGNING_ALLOWED=NO', 'build'], { stdio: 'inherit' });
   const bin = join(derived, 'Build', 'Products', 'Release');
   // N-API is ABI-stable; no V8/Electron C++ ABI is used by this addon.
@@ -40,7 +57,7 @@ export function buildCrashlyticsBridge() {
   const addon = join(bin, 'crashlytics.node');
   const object = join(scratch, 'addon.o');
   execFileSync('xcrun', ['clang', '-arch', 'arm64', '-mmacosx-version-min=12.0', '-g',
-    '-DNAPI_VERSION=8', '-I', headers, '-c', join(source, 'addon.c'), '-o', object], { stdio: 'inherit' });
+    ...clangMaps, '-DNAPI_VERSION=8', '-I', headers, '-c', join(source, 'addon.c'), '-o', object], { stdio: 'inherit' });
   execFileSync('xcrun', ['clang', '-arch', 'arm64', '-mmacosx-version-min=12.0', '-g',
     '-bundle', '-undefined', 'dynamic_lookup', object,
     '-F', bin, '-framework', 'LingXiDesktopCrashlytics', '-Wl,-rpath,@loader_path', '-o', addon], { stdio: 'inherit' });

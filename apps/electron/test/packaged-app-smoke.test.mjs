@@ -6,6 +6,7 @@ import { afterEach, test } from 'node:test';
 
 import {
   APP_USER_DATA_SUBPATH,
+  unregisterCredentialBrokerForColdStart,
   assertCustomProviderTurn,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
@@ -134,4 +135,21 @@ test('workspace trust fingerprint changes when executable config changes', () =>
   const after = workspaceTrustFingerprint(workspace);
   assert.notEqual(after, before);
   assert.equal(after, hostWorkspaceFingerprint(workspace));
+});
+
+
+test('cold-start waits for asynchronous launchd removal and refuses unrelated failures', {
+  skip: typeof process.getuid !== 'function',
+}, async () => {
+  const calls = [];
+  const results = [{ status: 0 }, { status: 0 }, { status: 113 }];
+  await unregisterCredentialBrokerForColdStart('development', (_bin, args) => {
+    calls.push(args);
+    return results.shift();
+  });
+  assert.deepEqual(calls.map(args => args[0]), ['bootout', 'print', 'print']);
+  assert.ok(calls.every(args => args[1].endsWith('/com.lingxi.code.credential-broker.development')));
+  await unregisterCredentialBrokerForColdStart('development', (_bin, args) => ({ status: args[0] === 'bootout' ? 3 : 113 }));
+  await assert.rejects(unregisterCredentialBrokerForColdStart('development', () => ({ status: null })), /bootout failed/);
+  await assert.rejects(unregisterCredentialBrokerForColdStart('development', (_bin, args) => ({ status: args[0] === 'bootout' ? 0 : 1 })), /launchctl failed/);
 });

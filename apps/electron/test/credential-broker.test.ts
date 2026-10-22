@@ -478,3 +478,35 @@ test('repeated Anthropic status and preview queries never send credential mutati
   }
   assert.deepEqual(requests, ['health', 'list', 'preview', 'list', 'preview', 'list', 'preview']);
 });
+
+test('cold credential helper may finish after the former process deadline but remains bounded', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let child: ChildProcessWithoutNullStreams | undefined;
+  let killed = false;
+  const broker = createMacCredentialBrokerClient({
+    platform: 'darwin', isPackaged: true, channel: 'development', binaryPath: '/fake-credential-helper',
+    spawnProcess: () => {
+      child = fakeCredentialChild(() => {});
+      child.kill = () => { killed = true; return true; };
+      return child;
+    },
+  });
+  const pending = broker!.health();
+  t.mock.timers.tick(20_001);
+  assert.equal(killed, false, 'cold trust validation must not be killed by the old outer deadline');
+  child!.stdout.emit('data', JSON.stringify({ ok: true, protocol_version: 1, build_version: 'cold' }));
+  child!.emit('close', 0, null);
+  assert.deepEqual(await pending, { protocolVersion: 1, buildVersion: 'cold' });
+  const stalled = createMacCredentialBrokerClient({
+    platform: 'darwin', isPackaged: true, channel: 'development', binaryPath: '/fake-credential-helper',
+    spawnProcess: () => {
+      const process = fakeCredentialChild(() => {});
+      process.kill = () => { killed = true; return true; };
+      return process;
+    },
+  });
+  const rejection = assert.rejects(stalled!.health(), /credential broker timed out/);
+  t.mock.timers.tick(90_000);
+  await rejection;
+  assert.equal(killed, true, 'a stalled helper must still be terminated');
+});

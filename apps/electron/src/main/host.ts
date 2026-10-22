@@ -28,7 +28,7 @@ import {
   realpathSync,
   writeFileSync,
 } from 'node:fs';
-import { open, utimes } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
@@ -42,6 +42,7 @@ import type {
 } from './bridgeTypes.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import { isSessionId } from './sessionIdentity.js';
+import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
@@ -310,9 +311,28 @@ export interface BootstrapState {
 }
 
 export interface ProjectSessionCatalogState {
-  sessions: SessionRowDto[];
+  sessions: SessionCatalogRow[];
   error?: string;
 }
+
+export interface WorkspaceDialogs {
+  pickDirectory(defaultPath: string): Promise<string | undefined>;
+  trustDirectory(directory: string): Promise<boolean>;
+}
+
+const workspaceDialogs: WorkspaceDialogs = {
+  async pickDirectory(defaultPath) {
+    const result = await dialog.showOpenDialog({ defaultPath, properties: ['openDirectory', 'createDirectory'] });
+    return result.canceled ? undefined : result.filePaths[0];
+  },
+  async trustDirectory(directory) {
+    const result = await dialog.showMessageBox({ type: 'question', title: 'Trust directory',
+      message: `Do you trust the files in ${directory}?`,
+      detail: 'This chat will use this directory’s settings, hooks, MCP servers, skills and memory.',
+      buttons: ['Cancel', 'Trust and continue'], defaultId: 0, cancelId: 0, noLink: true });
+    return result.response === 1;
+  },
+};
 
 function origin(raw: string): string | undefined {
   try {
@@ -383,6 +403,7 @@ export class HostController {
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
+  private catalogEpoch = 0;
   private readonly brokerConfiguredProviders = new Set<string>();
   private readonly brokerCredentialPreviews = new Map<string, string>();
   private brokerStorageError: string | undefined;
@@ -409,6 +430,7 @@ export class HostController {
     private readonly credentialBroker?: ProviderCredentialBroker,
     private readonly nativeAudio?: NativeAudioManager,
     private readonly codexLogin: typeof loginCodex = loginCodex,
+    private readonly directoryDialogs: WorkspaceDialogs = workspaceDialogs,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -683,10 +705,10 @@ export class HostController {
         return this.selectWorkspaceInternal(canonical, false);
       });
     });
-    this.ipc.handle(CH_PROJECT_SESSIONS_LIST, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
+    this.ipc.handle(CH_PROJECT_SESSIONS_LIST, async (event: IpcMainInvokeEvent, projectPath: unknown, scope: unknown) => {
       this.assertSender(event);
       const project = this.requireProject(projectPath);
-      const result = await this.loadProjectSessions(project);
+      const result = await this.loadProjectSessions(project, sessionCatalogScope(scope));
       return { projectPath: project, ...result };
     });
     this.ipc.handle(CH_SESSION_NEW, async (event: IpcMainInvokeEvent, projectPath: unknown, model: unknown) => {
@@ -733,14 +755,34 @@ export class HostController {
         }
       });
     });
-    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const project = this.requireProject(projectPath);
         if (!isSessionId(sessionId)) throw new Error('invalid session id');
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
-        return this.openSessionAndActivateInternal(ref);
+        let selected: SessionOpenSelection | undefined;
+        if (selection !== undefined) {
+          if (!selection || typeof selection !== 'object' || Array.isArray(selection)) throw new Error('invalid session selection');
+          const input = selection as Record<string, unknown>;
+          if (input.scope === undefined || (input.transcriptPath !== undefined && (typeof input.transcriptPath !== 'string'
+            || !isAbsolute(input.transcriptPath) || input.transcriptPath.includes('\0') || input.transcriptPath.length > 32_768))) {
+            throw new Error('invalid session selection');
+          }
+          selected = { scope: sessionCatalogScope(input.scope), ...(typeof input.transcriptPath === 'string' ? { transcriptPath: input.transcriptPath } : {}) };
+        }
+        return this.openSessionAndActivateInternal(ref, selected);
       });
+    });
+    this.ipc.handle(CH_SESSION_WORKSPACE, async (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
+      this.assertSender(event);
+      if (!isSessionId(sessionId) || !operation || typeof operation !== 'object' || Array.isArray(operation)) throw new Error('invalid session workspace operation');
+      const input = operation as Record<string, unknown>;
+      if ((input.action !== 'cd' && input.action !== 'add-dir')
+        || (input.path !== undefined && (typeof input.path !== 'string' || input.path.length > 32_768 || input.path.includes('\0')))) {
+        throw new Error('invalid session workspace operation');
+      }
+      return this.updateSessionWorkspace(sessionId, input as unknown as SessionWorkspaceOperation);
     });
     this.ipc.handle(CH_SCHEDULED, async (event: IpcMainInvokeEvent, input: unknown) => {
       this.assertSender(event);
@@ -764,11 +806,12 @@ export class HostController {
     this.ipc.handle(CH_SESSION_ARCHIVE_PREFLIGHT, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
       this.assertSender(event);
       const ref = this.archiveRef(projectPath, sessionId);
-      const row = await this.assertSessionBelongsToProject(ref);
-      return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+      const source = await this.resolveSessionSource(ref);
+      await this.trustSessionSource(source.ref);
+      return this.bridge.withBackgroundSession(source.ref, source.row?.empty_session === true, source.row?.resume_model, async (runtime) => {
         const jobs = await runtime.manageCron({ action: 'list' });
         return jobs.filter((job) => job.automation?.targetSessionId === ref.sessionId || job.automation?.ownedSessionId === ref.sessionId);
-      });
+      }, source.transcriptPath);
     });
     this.ipc.handle(CH_SESSION_ARCHIVE, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
       this.assertSender(event);
@@ -788,13 +831,16 @@ export class HostController {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const ref = this.archiveRef(projectPath, sessionId);
-        const row = await this.assertSessionBelongsToProject(ref) ?? await this.sessionCatalog.find(ref.projectPath, ref.sessionId);
-        if (!row) throw new Error('session must be persisted before it can be reordered');
-        const sessionPath = realpathSync.native(row.path);
-        if (!lstatSync(sessionPath).isFile()) throw new Error('session path is not a file');
-        const now = new Date();
-        await utimes(sessionPath, now, now);
-        this.sessionCatalog.invalidate(ref.projectPath);
+        const source = await this.resolveSessionSource(ref, true);
+        if (!source.transcriptPath) throw new Error('session must be persisted before it can be reordered');
+        const file = await open(source.transcriptPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
+          const now = new Date();
+          await file.utimes(now, now);
+        } finally { await file.close(); }
+        this.sessionCatalog.invalidate(source.ref.projectPath);
+        if (source.ref.projectPath !== ref.projectPath) await this.loadProjectSessions(source.ref.projectPath);
         const catalog = await this.loadProjectSessions(ref.projectPath);
         return { projectPath: ref.projectPath, ...catalog };
       });
@@ -1573,23 +1619,28 @@ export class HostController {
     return this.bridge.require(ref);
   }
 
-  private async loadProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState> {
-    const generation = (this.catalogRequestGenerations.get(projectPath) ?? 0) + 1;
-    this.catalogRequestGenerations.set(projectPath, generation);
+  private async loadProjectSessions(projectPath: string, scope: SessionCatalogScope = 'current'): Promise<ProjectSessionCatalogState> {
+    const key = `${projectPath}\0${scope}`;
+    const epoch = this.catalogEpoch;
+    const generation = (this.catalogRequestGenerations.get(key) ?? 0) + 1;
+    this.catalogRequestGenerations.set(key, generation);
     try {
-      const result = await this.sessionCatalog.list(projectPath);
+      const result = await this.sessionCatalog.list(projectPath, scope);
       const state = {
-        sessions: result.sessions.filter((session) => !this.scheduled?.isControllerSession(projectPath, session.uuid) && !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })).map(({
+        sessions: result.sessions.filter((session) => !this.scheduled?.isControllerSession(session.workspace_path ?? projectPath, session.uuid)
+          && !this.settings.isSessionArchived({ projectPath, sessionId: session.uuid })
+          && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? projectPath, sessionId: session.uuid })).map(({
           empty_session: _emptySession,
           resume_model: _resumeModel,
+          workspace_path: _workspacePath,
           ...session
         }) => session),
       };
-      if (this.catalogRequestGenerations.get(projectPath) === generation) this.catalogs.set(projectPath, state);
+      if (scope === 'current' && this.catalogEpoch === epoch && this.catalogRequestGenerations.get(key) === generation) this.catalogs.set(projectPath, state);
       return state;
     } catch (error) {
       const state = { sessions: [], error: sanitizeDiagnostic(error) };
-      if (this.catalogRequestGenerations.get(projectPath) === generation) this.catalogs.set(projectPath, state);
+      if (scope === 'current' && this.catalogEpoch === epoch && this.catalogRequestGenerations.get(key) === generation) this.catalogs.set(projectPath, state);
       return state;
     }
   }
@@ -1614,30 +1665,194 @@ export class HostController {
     return session;
   }
 
-  async openSessionAndActivate(ref: SessionRef): Promise<BootstrapState> {
-    return this.enqueueNavigation(() => this.openSessionAndActivateInternal(ref));
+  /** Resolve metadata ownership without changing the caller's sidebar scope. */
+  private async resolveSessionSource(ref: SessionRef, requirePersisted = false): Promise<{ ref: SessionRef; row?: ProjectSessionCatalogRow; transcriptPath?: string }> {
+    const project = this.requireProject(ref.projectPath);
+    if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
+    if (this.isProjectClosing(project)) throw new Error('project is closing');
+    const runtime = this.bridge.get(ref.sessionId);
+    let source = runtime?.projectPath ?? project;
+    if (this.isProjectClosing(source)) throw new Error('project is closing');
+    // The manager keys runtimes by stable session UUID. A connected engine
+    // already proves its own source directory, including an unpersisted chat.
+    if (runtime?.connectionState.status === 'connected') {
+      const sourceRef = { projectPath: source, sessionId: ref.sessionId };
+      if (!requirePersisted) return { ref: sourceRef };
+      // Same-UUID copies can share a workspace. Only the writer's live target
+      // identifies the selected copy, so metadata must never resolve it again.
+      const state = await runtime.getWorkspaceState();
+      const path = state.transcript_path;
+      if (this.bridge.get(ref.sessionId) !== runtime || runtime.projectPath !== source) {
+        throw new Error('The session changed. Try again.');
+      }
+      if (typeof path !== 'string' || !isAbsolute(path) || path.includes('\0')
+        || basename(path).toLowerCase() !== `${ref.sessionId.toLowerCase()}.jsonl`) {
+        throw new Error('session must have an authoritative transcript before its metadata can be changed');
+      }
+      if (!lstatSync(path).isFile()) throw new Error('session path is not a file');
+      return { ref: sourceRef, transcriptPath: path };
+    }
+    if (runtime) throw new Error('Reconnect this chat before changing its metadata.');
+    this.sessionCatalog.invalidate(source);
+    // Sidebar actions select the same fresh Current+alias row the user sees.
+    // The CLI UUID resolver has deliberately different duplicate ordering.
+    const row = await this.sessionCatalog.select(source, ref.sessionId, { scope: 'current' });
+    if (!row) throw new Error('session does not belong to this project');
+    if (row.workspace_path) {
+      try { source = canonicalWorkspace(row.workspace_path); }
+      catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+        // A removed workspace keeps the selected transcript as authority,
+        // while any required runtime uses the existing launch directory.
+        source = project;
+      }
+    }
+    if (this.isProjectClosing(source)) throw new Error('project is closing');
+    return { ref: { projectPath: source, sessionId: ref.sessionId }, row, transcriptPath: row.path };
   }
 
-  private async openSessionAndActivateInternal(ref: SessionRef): Promise<BootstrapState> {
+  private async trustSessionSource(ref: SessionRef): Promise<void> {
+    if (this.isProjectClosing(ref.projectPath)) throw new Error('project is closing');
+    if (this.settings.isTrustedWorkspace(ref.projectPath)) return;
+    if (!await this.directoryDialogs.trustDirectory(ref.projectPath)) throw new Error('Opening this directory was cancelled.');
+    if (this.isProjectClosing(ref.projectPath)) throw new Error('project is closing');
+    if (canonicalWorkspace(ref.projectPath) !== ref.projectPath) throw new Error('The session directory changed. Refresh the session list and try again.');
+    this.settings.addProject(ref.projectPath);
+  }
+
+  async openSessionAndActivate(ref: SessionRef, selection?: SessionOpenSelection): Promise<BootstrapState> {
+    return this.enqueueNavigation(() => this.openSessionAndActivateInternal(ref, selection));
+  }
+
+  async updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null> {
+    return this.enqueueNavigation(async () => {
+      const ref = this.settings.getPublic().activeSession;
+      if (!ref || ref.sessionId !== sessionId) throw new Error('This chat is no longer active.');
+      const runtime = this.bridge.require(ref);
+      const release = runtime.beginWorkspaceChange();
+      let originalCwd: string | undefined;
+      let attemptedMove = false;
+      let committed = false;
+      try {
+        const before = await runtime.getWorkspaceState();
+        if (before.initial_project_root) this.bridge.setSessionProjectRoot(sessionId, before.initial_project_root);
+        if (before.prompt_directories) this.bridge.setSessionPromptDirectories(sessionId, before.prompt_directories);
+        originalCwd = before.cwd;
+        const path = operation.path ?? await this.directoryDialogs.pickDirectory(before.cwd);
+        if (path === undefined) return null;
+        if (operation.action === 'add-dir') {
+          const state = await runtime.addWorkingDirectory(path);
+          this.bridge.setSessionDirectoryGrants(sessionId, state.additional_directories);
+          if (state.prompt_directories) this.bridge.setSessionPromptDirectories(sessionId, state.prompt_directories);
+          this.sessionCatalog.invalidate();
+          this.catalogEpoch++;
+          this.catalogRequestGenerations.clear();
+          await this.loadProjectSessions(ref.projectPath);
+          return this.bootstrap();
+        }
+        this.settings.assertSessionRelocationAllowed(ref.projectPath);
+        this.bridge.setSessionDirectoryGrants(sessionId, before.additional_directories);
+        attemptedMove = true;
+        let result = await runtime.setWorkingDirectory({ path });
+        // Every affirmative answer is pinned to the canonical path shown by
+        // the engine. A symlink change must ask again for the new directory.
+        while (result.status === 'needs_trust') {
+          this.settings.assertSessionRelocationAllowed(result.directory);
+          if (!await this.directoryDialogs.trustDirectory(result.directory)) return null;
+          result = await runtime.setWorkingDirectory({ path, trust_accepted: true, trusted_directory: result.directory });
+        }
+        if (result.status === 'rejected') throw new Error(result.message);
+        if (!result.changed) return this.bootstrap();
+        const after = await runtime.getWorkspaceState();
+        const target = canonicalWorkspace(result.cwd);
+        if (this.isProjectClosing(target)) throw new Error('project is closing');
+        this.settings.relocateSession(ref, target);
+        committed = true;
+        if (after.initial_project_root) this.bridge.setSessionProjectRoot(sessionId, after.initial_project_root);
+        if (after.prompt_directories) this.bridge.setSessionPromptDirectories(sessionId, after.prompt_directories);
+        const moved = { projectPath: target, sessionId };
+        this.terminals?.migrateScope(ref, moved);
+        this.sessionCatalog.invalidate();
+        this.catalogEpoch++;
+        this.catalogRequestGenerations.clear();
+        this.catalogs.delete(ref.projectPath);
+        this.workspaceFiles.invalidate();
+        // Releasing and removing the old runtime are synchronous up to the
+        // close's first await. No prompt can enter the old composition here.
+        release();
+        await this.bridge.closeSession(ref);
+        const row = await this.sessionCatalog.find(target, sessionId);
+        const empty = after.has_conversation === false || row?.empty_session === true;
+        await this.bridge.openSession(moved, empty,
+          row?.resume_model ?? this.settings.getSessionModel(moved), true, empty ? undefined : after.transcript_path ?? row?.path);
+        await this.loadProjectSessions(target);
+        return this.bootstrap();
+      } catch (error) {
+        if (attemptedMove && !committed && originalCwd) {
+          try {
+            // A response timeout is not evidence that the mutation failed.
+            const actual = await runtime.getWorkspaceState();
+            if (actual.cwd !== originalCwd) {
+              const restored = await runtime.setWorkingDirectory({ path: originalCwd,
+                trust_accepted: true, trusted_directory: originalCwd });
+              if (restored.status !== 'ok' || restored.cwd !== originalCwd) throw new Error('directory rollback was rejected');
+            }
+          } catch (recoveryError) {
+            release();
+            await this.bridge.closeSession(ref).catch(() => undefined);
+            this.sessionCatalog.invalidate();
+            throw new Error(`${sanitizeDiagnostic(error)} The engine was stopped because its directory could not be restored: ${sanitizeDiagnostic(recoveryError)}`);
+          }
+        }
+        throw error;
+      } finally { release(); }
+    });
+  }
+
+  private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
     const project = this.requireProject(ref.projectPath);
     if (this.isProjectClosing(project)) throw new Error('project is closing');
-    const canonical = { projectPath: project, sessionId: ref.sessionId } satisfies SessionRef;
-    const session = await this.assertSessionBelongsToProject(canonical);
-    await this.bridge.openSession(
-      canonical,
-      session?.empty_session === true,
-      session?.resume_model,
-    );
-    // Persist navigation only after the engine has emitted a matching
-    // session_resumed event. A failed/corrupt resume leaves the visible session
-    // and selected Project unchanged.
-    this.settings.activateProject(project);
-    const wasArchived = this.settings.isSessionArchived(canonical);
-    if (wasArchived) this.settings.setSessionArchived(canonical, false);
-    this.settings.setActiveSession(canonical);
-    if (wasArchived) await this.loadProjectSessions(project);
-    return this.bootstrap();
+    const existing = this.bridge.get(ref.sessionId);
+    let source = existing?.projectPath ?? project;
+    const session = selection ? await this.sessionCatalog.select(project, ref.sessionId, selection) : existing
+      ? await this.assertSessionBelongsToProject({ projectPath: source, sessionId: ref.sessionId })
+      : await this.sessionCatalog.find(project, ref.sessionId);
+    if ((!existing || selection) && !session) throw new Error('session does not belong to this project');
+    if (selection?.transcriptPath !== undefined && session?.path !== selection.transcriptPath) throw new Error('This session selection has changed. Refresh the session list and try again.');
+    if (selection && (!session?.path || !isAbsolute(session.path))) throw new Error('invalid selected transcript path');
+    if ((!existing || selection) && session?.workspace_path) {
+      try { source = canonicalWorkspace(session.workspace_path); }
+      catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+        // A removed worktree resumes in the launch directory, while the
+        // engine keeps the authoritative transcript path it resolved by UUID.
+        source = project;
+      }
+    }
+    let releaseCopy: (() => void) | undefined;
+    if (selection && existing) {
+      const state = existing.connectionState.status === 'connected' ? await existing.getWorkspaceState() : undefined;
+      if (existing.projectPath !== source || state?.transcript_path !== session?.path) {
+        releaseCopy = existing.beginWorkspaceChange();
+      }
+    }
+    try {
+      await this.trustSessionSource({ projectPath: source, sessionId: ref.sessionId });
+      if (releaseCopy && existing) {
+        releaseCopy();
+        await this.bridge.closeSession({ projectPath: existing.projectPath, sessionId: existing.sessionId });
+      }
+      const canonical = { projectPath: source, sessionId: ref.sessionId } satisfies SessionRef;
+      await this.bridge.openSession(canonical, session?.empty_session === true, session?.resume_model,
+        true, selection ? session?.path : undefined);
+      // Persist navigation after a matching engine acknowledgement.
+      const wasArchived = this.settings.isSessionArchived(canonical) || this.settings.isSessionArchived(ref);
+      this.settings.relocateSession({ projectPath: project, sessionId: ref.sessionId }, source);
+      if (wasArchived) this.settings.setSessionArchived(canonical, false);
+      if (wasArchived) await this.loadProjectSessions(source);
+      return this.bootstrap();
+    } finally { releaseCopy?.(); }
   }
 
   private archiveRef(projectPath: unknown, sessionId: unknown): SessionRef {
@@ -1647,8 +1862,10 @@ export class HostController {
   }
 
   private async archiveSessionInternal(ref: SessionRef): Promise<BootstrapState> {
-    const row = await this.assertSessionBelongsToProject(ref);
-    return this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+    const source = await this.resolveSessionSource(ref);
+    await this.trustSessionSource(source.ref);
+    const sourceRef = source.ref;
+    return this.bridge.withBackgroundSession(sourceRef, source.row?.empty_session === true, source.row?.resume_model, async (runtime) => {
       const release = runtime.beginArchive();
       let removed = 0;
       try {
@@ -1658,23 +1875,25 @@ export class HostController {
           removed++;
         }
         const active = this.settings.getPublic().activeSession?.sessionId === ref.sessionId;
-        const title = row?.title ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
+        const title = source.row?.title ?? this.catalogs.get(sourceRef.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title
+          ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
         if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
-        this.settings.setSessionArchived(ref, true, title);
-        await this.terminals?.closeScope(ref);
-        await this.bridge.closeSession(ref);
-        this.sessionCatalog.invalidate(ref.projectPath);
-        await this.loadProjectSessions(ref.projectPath);
+        this.settings.setSessionArchived(sourceRef, true, title);
+        await this.terminals?.closeScope(sourceRef);
+        await this.bridge.closeSession(sourceRef);
+        this.sessionCatalog.invalidate(sourceRef.projectPath);
+        await this.loadProjectSessions(sourceRef.projectPath);
+        if (sourceRef.projectPath !== ref.projectPath) await this.loadProjectSessions(ref.projectPath);
         if (active) {
-          const replacement = await this.bridge.newSession(ref.projectPath);
+          const replacement = await this.bridge.newSession(sourceRef.projectPath);
           this.settings.setActiveSessionDraft(replacement);
         }
         return this.bootstrap();
       } catch (error) {
-        if (!this.settings.isSessionArchived(ref)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already paused. ` : ''}${error instanceof Error ? error.message : String(error)}`);
+        if (!this.settings.isSessionArchived(sourceRef)) throw new Error(`Chat was not archived. ${removed ? `${removed} scheduled task(s) were already paused. ` : ''}${error instanceof Error ? error.message : String(error)}`);
         throw new Error(`Chat was archived, but opening the next chat failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally { release(); }
-    });
+    }, source.transcriptPath);
   }
 
   private hasRetainedProjectForDirectory(project: string): boolean {
@@ -1716,7 +1935,8 @@ export class HostController {
       this.workspaceFiles.invalidate();
       this.catalogs.delete(project);
       this.sessionCatalog.invalidate(project);
-      this.catalogRequestGenerations.set(project, (this.catalogRequestGenerations.get(project) ?? 0) + 1);
+      this.catalogEpoch++;
+      this.catalogRequestGenerations.clear();
       return this.bootstrap();
     } finally {
       this.closingProjects.delete(project);
@@ -1727,18 +1947,27 @@ export class HostController {
     return this.closingProjects.has(projectPath) || this.bridge.isProjectClosing(projectPath);
   }
 
-  async restoreProjectSession(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
+  restoreProjectSession(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
+    return this.enqueueNavigation(() => this.restoreProjectSessionInternal(projectPath, activeSession));
+  }
+
+  private async restoreProjectSessionInternal(projectPath: string, activeSession?: SessionRef): Promise<SessionRef> {
     const project = this.requireProject(projectPath);
     if (activeSession?.projectPath === project) {
-      await this.openSessionAndActivate(activeSession);
-      return activeSession;
+      await this.openSessionAndActivateInternal(activeSession);
+      const active = this.settings.getPublic().activeSession;
+      if (!active || active.sessionId !== activeSession.sessionId) throw new Error('restored session is no longer active');
+      return active;
     }
     const catalog = await this.sessionCatalog.list(project);
-    catalog.sessions = catalog.sessions.filter((session) => !this.scheduled?.isControllerSession(project, session.uuid) && !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid }));
+    catalog.sessions = catalog.sessions.filter((session) => !this.scheduled?.isControllerSession(session.workspace_path ?? project, session.uuid)
+      && !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid })
+      && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? project, sessionId: session.uuid }));
     this.catalogs.set(project, {
       sessions: catalog.sessions.map(({
         empty_session: _emptySession,
         resume_model: _resumeModel,
+        workspace_path: _workspacePath,
         ...session
       }) => session),
     });
@@ -1746,22 +1975,27 @@ export class HostController {
     const ref = first
       ? { projectPath: project, sessionId: first.uuid }
       : await this.bridge.newSession(project);
-    if (first) await this.bridge.openSession(ref, first.empty_session === true, first.resume_model);
+    if (first) {
+      await this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.path });
+      const active = this.settings.getPublic().activeSession;
+      if (!active || active.sessionId !== ref.sessionId) throw new Error('restored session is no longer active');
+      this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, active);
+      return active;
+    }
     this.settings.activateProject(project);
-    if (first) this.settings.setActiveSession(ref);
-    else this.settings.setActiveSessionDraft(ref);
+    this.settings.setActiveSessionDraft(ref);
     this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, ref);
     return ref;
   }
 
   private async persistSessionTitle(ref: SessionRef, customTitle: string): Promise<ProjectSessionCatalogState> {
-    const row = await this.assertSessionBelongsToProject(ref) ?? await this.sessionCatalog.find(ref.projectPath, ref.sessionId);
-    if (!row) throw new Error('session must be persisted before it can be renamed');
+    const source = await this.resolveSessionSource(ref, true);
+    if (!source.transcriptPath) throw new Error('session must be persisted before it can be renamed');
     // Renaming is persisted metadata, not a model operation. Starting or
     // resuming an engine here can wait on credentials or an active turn.
     // Use the same append-only side record as JsonlWriter::append_custom_title;
     // its metadata backstop adopts the newest on-disk title on later writes.
-    const file = await open(row.path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+    const file = await open(source.transcriptPath, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
     try {
       if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
       await file.writeFile(`${JSON.stringify({ type: 'custom-title', customTitle, sessionId: ref.sessionId })}\n`);
@@ -1769,7 +2003,12 @@ export class HostController {
     } finally {
       await file.close();
     }
-    this.sessionCatalog.invalidate(ref.projectPath);
+    this.sessionCatalog.invalidate(source.ref.projectPath);
+    if (source.ref.projectPath !== ref.projectPath) await this.refreshSessionTitleCatalog(source.ref, customTitle);
+    return this.refreshSessionTitleCatalog(ref, customTitle);
+  }
+
+  private async refreshSessionTitleCatalog(ref: SessionRef, customTitle: string): Promise<ProjectSessionCatalogState> {
     const previousCatalog = this.catalogs.get(ref.projectPath);
     const catalog = await this.loadProjectSessions(ref.projectPath);
     if (catalog.error && previousCatalog) {
@@ -1839,6 +2078,7 @@ export class HostController {
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
+      CH_SESSION_WORKSPACE,
       CH_WORKSPACE_FILES_SEARCH,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,

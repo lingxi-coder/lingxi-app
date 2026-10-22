@@ -292,6 +292,7 @@ test('session clear accepts Claude Code name syntax and labels the session being
   const runtime = {
     projectPath: project,
     connectionState: { status: 'connected' as const },
+    getWorkspaceState: async () => ({ cwd: project, additional_directories: [], transcript_path: transcriptPath }),
     pendingInteractions: 0,
     pendingAskUserQuestions: [],
   };
@@ -504,13 +505,16 @@ test('historical startup opens the catalog session before persisting it active',
   settings.addProject(project);
   const calls: string[] = [];
   const bridge = {
+    runtimeSummaries: [],
     get: () => undefined,
     isProjectClosing: () => false,
     openSession: async (ref: { sessionId: string }) => { calls.push(`open:${ref.sessionId}`); },
     newSession: async () => { throw new Error('must restore history instead of creating'); },
   };
+  const restoredRow = { uuid: sessionId, title: 'History', modified_rfc3339: '', message_count: 2, path: join(project, `${sessionId}.jsonl`) };
   const catalog = {
-    list: async () => ({ sessions: [{ uuid: sessionId, title: 'History', modified_rfc3339: '', message_count: 2, path: 'history.jsonl' }] }),
+    list: async () => ({ sessions: [restoredRow] }),
+    select: async () => restoredRow,
     invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);

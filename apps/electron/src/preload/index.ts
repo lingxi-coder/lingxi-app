@@ -21,7 +21,6 @@ import type {
   NativeUiControlRequest,
   NativeUiControlResponseFor,
   PermissionResponseDto,
-  SessionRowDto,
   UiClientFrameEventDto,
   UiClientOperation,
   UiClientOperationResponseFor,
@@ -48,6 +47,7 @@ import type {
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../shared/generatedAudioConfiguration.js';
+import { CH_SESSION_WORKSPACE, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
 import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
@@ -135,7 +135,7 @@ export interface SessionRuntimeSummary {
 }
 
 export interface ProjectSessionCatalogState {
-  sessions: SessionRowDto[];
+  sessions: SessionCatalogRow[];
   error?: string;
 }
 
@@ -250,9 +250,10 @@ export interface LingxiApi {
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
-  listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   newSession(projectPath: string, model?: string): Promise<BootstrapState>;
-  openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<BootstrapState>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
@@ -384,9 +385,12 @@ const api: LingxiApi = {
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,
   copyText: (text) => ipcRenderer.invoke(CH_CLIPBOARD_WRITE_TEXT, text) as Promise<void>,
   exportDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_EXPORT) as Promise<string | null>,
-  listProjectSessions: (projectPath) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
+  listProjectSessions: (projectPath, scope) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath, scope) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
+  updateSessionWorkspace: (sessionId, operation) => ipcRenderer.invoke(CH_SESSION_WORKSPACE, sessionId, operation) as Promise<BootstrapState | null>,
   newSession: (projectPath, model) => ipcRenderer.invoke(CH_SESSION_NEW, projectPath, model) as Promise<BootstrapState>,
-  openSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId) as Promise<BootstrapState>,
+  openSession: (projectPath, sessionId, selection) => (selection === undefined
+    ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId)
+    : ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection)) as Promise<BootstrapState>,
   preflightSessionArchive: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId) as Promise<CronJobDto[]>,
   archiveSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE, projectPath, sessionId) as Promise<BootstrapState>,
   touchSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_TOUCH, projectPath, sessionId) as Promise<ProjectSessionCatalogState & { projectPath: string }>,

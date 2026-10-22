@@ -92,6 +92,7 @@ export const DesktopDialog = forwardRef<HTMLDivElement, DesktopDialogProps>(func
         onBlurCapture={onBlurCapture}
         onKeyDown={(event) => {
           if (event.key === 'Escape' && onEscape) {
+            if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             event.preventDefault();
             onEscape();
             return;

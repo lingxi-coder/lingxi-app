@@ -474,7 +474,7 @@ for (const outcome of ['restart', 'background', 'fresh'] as const) {
     host.registerWindow(window, window.mainFrame.url); host.registerIpc();
     t.after(() => host.dispose());
     const launch = h.internal.opts.launchConfig;
-    h.internal.opts.launchConfig = () => ({ ...launch(), pluginSecrets: { fixture: { token: updated ? 'fake-new-material' : 'fake-old-material' } } });
+    h.internal.opts.launchConfig = async () => ({ ...await launch(), pluginSecrets: { fixture: { token: updated ? 'fake-new-material' : 'fake-old-material' } } });
     let replacements = 0;
     let stops = 0;
     h.internal.spawnServer = (config: any, directory: string) => {

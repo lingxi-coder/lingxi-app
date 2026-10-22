@@ -16,7 +16,6 @@ import type {
   NativeUiControlRequest,
   NativeUiControlResponseFor,
   PermissionResponseDto,
-  SessionRowDto,
   UiClientFrameEventDto,
   UiClientOperation,
   UiClientOperationResponseFor,
@@ -34,6 +33,7 @@ import type {
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
+import type { SessionCatalogRow, SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 
 export interface WorkspaceFilePreview {
   kind: 'text' | 'binary';
@@ -74,7 +74,7 @@ export interface SessionRuntimeSummary {
   pendingAskUserQuestions: number;
 }
 export interface ProjectSessionCatalogState {
-  sessions: SessionRowDto[];
+  sessions: SessionCatalogRow[];
   error?: string;
 }
 export interface WorkspaceMetadata {
@@ -194,9 +194,10 @@ export interface LingxiApi {
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
-  listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   newSession(projectPath: string, model?: string): Promise<BootstrapState>;
-  openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<BootstrapState>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;

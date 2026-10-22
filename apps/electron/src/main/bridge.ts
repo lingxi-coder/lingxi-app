@@ -29,6 +29,9 @@ import type {
   VisualizationServeDto,
   VisualizationStateWriteDto,
   VisualizationThemeDto,
+  SessionWorkspaceState,
+  SetWorkingDirectoryRequest,
+  SetWorkingDirectoryResult,
 } from '@lingxi/bridge-client';
 import type { WebContents } from 'electron';
 import { spawn } from 'node:child_process';
@@ -154,6 +157,9 @@ interface PendingSessionResume {
   generation: number;
   client: BridgeClient;
   sessionResumed: boolean;
+  responseReceived: boolean;
+  controller: AbortController;
+  activeTools: Set<string>;
   model?: string;
   hydrationStarted: boolean;
   resolve: () => void;
@@ -189,6 +195,7 @@ export class SessionRuntime {
   private adoptedPid: number | null = null;
   private adoptedProcessOwned = false;
   private activeWorkspace: string | undefined;
+  private ownedTranscriptPath: string | undefined;
   private activeWorkspaceTrusted = false;
   private runtimeCredentialProviders = new Set<string>();
   private persistedCredentialProviders = new Set<string>();
@@ -203,6 +210,7 @@ export class SessionRuntime {
   private outstandingModUiRequests = 0;
   private readonly queuedModUiRequests: Array<{ send(): void; reject(error: Error): void }> = [];
   private archiving = false;
+  private changingWorkspace = false;
   private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
@@ -228,6 +236,7 @@ export class SessionRuntime {
   private readonly pendingAskUserQuestionIds = new Set<number>();
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
   private pendingSessionResume: PendingSessionResume | null = null;
+  private resumeOperationInProgress = false;
   private sessionHasHistory = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
@@ -481,6 +490,7 @@ export class SessionRuntime {
 
   constructor(private readonly opts: BridgeManagerOptions) {
     this.sessionId = opts.sessionId ?? randomUUID();
+    this.ownedTranscriptPath = opts.resumeTranscriptPath;
     this.projectPath = opts.projectPath ?? '';
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
     if (opts.audioService) {
@@ -515,6 +525,36 @@ export class SessionRuntime {
     return () => { this.archiving = false; };
   }
 
+  /** Fence prompts, restarts, eviction and other controls throughout host migration. */
+  beginWorkspaceChange(): () => void {
+    if (this.archiving || this.hasActiveWork || this.pendingCron.size > 0 || this.activeCronExecutions > 0 || this.isStarting) {
+      throw new Error('Wait for active work and pending interactions before changing this chat’s directory.');
+    }
+    this.changingWorkspace = true;
+    this.notifyActivityChanged();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.changingWorkspace = false;
+      this.notifyActivityChanged();
+    };
+  }
+
+  setWorkingDirectory(request: SetWorkingDirectoryRequest): Promise<SetWorkingDirectoryResult> {
+    if (!this.changingWorkspace) throw new Error('workspace operation is not fenced');
+    return this.requireClient().setWorkingDirectory(request);
+  }
+
+  addWorkingDirectory(path: string): Promise<SessionWorkspaceState> {
+    if (!this.changingWorkspace) throw new Error('workspace operation is not fenced');
+    return this.requireClient().addWorkingDirectory(path);
+  }
+
+  getWorkspaceState(): Promise<SessionWorkspaceState> {
+    return this.requireClient().getWorkspaceState();
+  }
+
   get cronOperationPending(): boolean {
     return this.archiving || this.pendingCron.size > 0 || this.activeCronExecutions > 0;
   }
@@ -546,18 +586,26 @@ export class SessionRuntime {
   }
 
   async runScheduledTurn(runId: string, task: CronJobDto, beforeStart?: () => Promise<void>): Promise<string> {
+    if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+    if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
     const config = task.automation;
     if (!config?.model) throw new Error('paused: Configure a model for this task.');
     const generation = this.generation;
     while (this.turnActive || this.pendingInteractions > 0) {
+      if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+      if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
       if (this.disposed || generation !== this.generation || this.state.status !== 'connected') throw new Error('interrupted: Scheduled execution interrupted.');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
     if (this.archiving) throw new Error('paused: The target chat is being archived.');
+    if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
     const client = this.requireClient();
     const token = Symbol('scheduled hydration');
     this.pendingPromptHydrations.set(token, undefined);
     const assertPreparing = () => {
+      if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+      if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
       if (this.disposed || generation !== this.generation || client !== this.client) throw new Error('interrupted: Scheduled execution interrupted.');
       if (!this.pendingPromptHydrations.has(token)) throw new Error('cancelled: Scheduled execution was cancelled before starting.');
       if (this.archiving) throw new Error('paused: The target chat is being archived.');
@@ -606,6 +654,8 @@ export class SessionRuntime {
   }
 
   private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
+    if (this.resumeOperationInProgress) return Promise.reject(new Error('This chat is being resumed.'));
+    if (this.changingWorkspace) return Promise.reject(new Error('This chat’s directory is being changed.'));
     const { request_id, request } = command;
     if (this.pendingCron.has(request_id)) return Promise.reject(new Error('Scheduled task request is already pending.'));
     return new Promise((resolve, reject) => {
@@ -635,7 +685,12 @@ export class SessionRuntime {
   }
 
   get hasActiveWork(): boolean {
-    return this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+  }
+
+  private currentResumeOwner(): PendingSessionResume | null {
+    const pending = this.pendingSessionResume;
+    return pending?.generation === this.generation && pending.client === this.client && !this.disposed ? pending : null;
   }
 
   private readonly gitActivity = new GitActivityTracker();
@@ -879,6 +934,7 @@ export class SessionRuntime {
       return;
     }
     const foregroundEpoch = this.foregroundInteractionEpoch;
+    const resumeOwner = this.currentResumeOwner();
     this.permissionScopeChecks.set(id, request);
     this.notifyActivityChanged();
     try {
@@ -888,7 +944,7 @@ export class SessionRuntime {
       if (this.permissionScopeChecks.get(id) !== request || generation !== this.generation
         || client !== this.client || this.disposed || this.resolvedPermissionIds.has(id)) return;
       if (!scope) return;
-      if (!scope.background_owned && (!this.activeTurn || this.cancellingTurn
+      if (!scope.background_owned && ((!this.activeTurn && (!resumeOwner || this.currentResumeOwner() !== resumeOwner)) || this.cancellingTurn
         || foregroundEpoch !== this.foregroundInteractionEpoch)) {
         this.diagnostics.add('warn', 'bridge', `dropped permission request ${id}: foreground owner ended or is cancelling`);
         return;
@@ -908,6 +964,7 @@ export class SessionRuntime {
       }
     } finally {
       if (this.permissionScopeChecks.get(id) === request) this.permissionScopeChecks.delete(id);
+      this.completePendingSessionResumeIfReady();
       this.notifyActivityChanged();
     }
   }
@@ -962,14 +1019,15 @@ export class SessionRuntime {
     this.client = null;
     if (client) this.closeDetachedClient(client);
     const previousGeneration = this.generation++;
+    const recoveredGeneration = this.generation;
     await this.teardownAudioGeneration(previousGeneration);
     await this.oauthPersistence;
-    if (this.disposed) throw new Error('SessionRuntime is disposed');
+    if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
     this.clearPendingConnectionOperations();
     try {
-      await this.connectBridgeClient(lockfilePath, this.generation, false, false);
+      await this.connectBridgeClient(lockfilePath, recoveredGeneration, false, false);
+      if (this.disposed || recoveredGeneration !== this.generation) throw new Error('bridge connection superseded');
       const recoveredClient = this.requireClient();
-      const recoveredGeneration = this.generation;
       await recoveredClient.requestRuntimeSnapshot((events) => {
         // Apply at the response boundary, before later live frames. An old
         // connection response must never overwrite a newer runtime's roster.
@@ -984,6 +1042,9 @@ export class SessionRuntime {
         for (const event of events) this.broadcastClientEvent(event);
         this.notifyActivityChanged();
       });
+      if (this.disposed || recoveredGeneration !== this.generation || recoveredClient !== this.client) {
+        throw new Error('bridge connection superseded');
+      }
       // Accepted hello follows the Rust connection-close join barrier. The
       // previous foreground driver and its questions are gone; background
       // agents still belong to this living process and must stay pinned.
@@ -1007,9 +1068,11 @@ export class SessionRuntime {
       this.notifyActivityChanged();
       this.setState({ status: 'connected' });
     } catch (error) {
-      const failedClient = this.client as BridgeClient | null;
-      this.client = null;
-      if (failedClient) this.closeDetachedClient(failedClient);
+      if (recoveredGeneration === this.generation) {
+        const failedClient = this.client as BridgeClient | null;
+        this.client = null;
+        if (failedClient) this.closeDetachedClient(failedClient);
+      }
       throw error;
     }
   }
@@ -1213,6 +1276,7 @@ export class SessionRuntime {
   }
 
   private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true): Promise<void> {
+    if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     this.connectionLockfilePath = lockfilePath;
     this.setState({ status: 'connecting' });
     const startedAt = Date.now();
@@ -1222,6 +1286,7 @@ export class SessionRuntime {
     } catch (error) {
       this.diagnostics.add('warn', 'bridge', `audio capability initialization failed: ${sanitizeDiagnostic(error)}`);
     }
+    if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     const initialAudioCapabilities = this.opts.audioService?.getCapabilities();
     const client = new BridgeClient({
       lockfilePath,
@@ -1230,17 +1295,22 @@ export class SessionRuntime {
     });
     this.cachedAudioSessionContext = undefined;
     this.verifiedRealtimeAudio = false;
-    this.client = client;
     this.wireClient(client, generation);
+    const assertCurrentConnection = (): void => {
+      if (generation !== this.generation || client !== this.client || this.disposed) {
+        this.closeDetachedClient(client);
+        throw new Error('bridge connection superseded');
+      }
+    };
     const handshakeStartedAt = Date.now();
     const hello = await client.connect();
+    assertCurrentConnection();
     this.verifiedRealtimeAudio = hello.capabilities.realtime_audio === true;
     this.startupDiagnostic('bridge_connect_phase', {
       durationMs: Date.now() - handshakeStartedAt,
       generation,
       phase: 'websocket_handshake',
     });
-    if (generation !== this.generation || this.disposed) return;
     client.sendCommand({ type: 'get_audio_session_context' });
     const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
     if (
@@ -1263,6 +1333,7 @@ export class SessionRuntime {
     if (restorePermission) {
       const permissionStartedAt = Date.now();
       await this.restorePermissionMode();
+      assertCurrentConnection();
       this.startupDiagnostic('bridge_connect_phase', {
         durationMs: Date.now() - permissionStartedAt,
         generation,
@@ -1270,13 +1341,14 @@ export class SessionRuntime {
       });
       const fastStartedAt = Date.now();
       await this.restoreFastMode();
+      assertCurrentConnection();
       this.startupDiagnostic('bridge_connect_phase', {
         durationMs: Date.now() - fastStartedAt,
         generation,
         phase: 'restore_fast_mode',
       });
     }
-    if (generation !== this.generation || this.disposed) return;
+    assertCurrentConnection();
     if (this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0) this.requireClient().sendCommand({ type: 'side_chat_list' });
     if (publishConnected) this.setState({ status: 'connected' });
     this.startupDiagnostic('bridge_connect_completed', {
@@ -1316,6 +1388,12 @@ export class SessionRuntime {
       workspace: launch.workspace,
       sessionId: this.sessionId,
       bridgeDir,
+      sessionTranscriptPath: this.ownedTranscriptPath,
+      additionalDirectories: launch.additionalDirectories,
+      promptDirectories: launch.promptDirectories,
+      initialProjectRoot: launch.initialProjectRoot,
+      configHome: launch.configHome,
+      globalConfigPath: launch.globalConfigPath,
       model: launch.model,
       hasApiKey: Boolean(launch.apiKey),
       hasCredentialStdin: Boolean(launch.openaiOAuth) || Object.keys(launch.providerCredentials ?? {}).length > 0
@@ -1327,7 +1405,7 @@ export class SessionRuntime {
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 
-    const environment = buildBridgeEnvironment(process.env, launch.apiBaseUrl);
+    const environment = { ...buildBridgeEnvironment(process.env, launch.apiBaseUrl), ...launch.settingsEnvironment };
     // The packaged Electron executable has Node mode, so Mod workers do not
     // depend on a separate system Node installation.
     environment.LINGXI_MOD_NODE_EXECUTABLE = process.execPath;
@@ -1546,10 +1624,11 @@ export class SessionRuntime {
   }
 
   private wireClient(client: BridgeClient, generation: number): void {
+    if (generation === this.generation && !this.disposed) this.client = client;
     // Restored usage is explicitly marked by the engine and may be separated
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', (event: ClientEvent) => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || client !== this.client || this.disposed) return;
       if (event.type === 'side_chat_created') { this.pendingSideCreates.delete(event.request_id); this.liveSideChats.add(event.side_id); }
       if (event.type === 'side_chat_error' && event.request_id) this.pendingSideCreates.delete(event.request_id);
       if (event.type === 'side_chat_list') { this.pendingSideCreates.clear(); this.liveSideChats.clear(); for (const id of event.side_ids) this.liveSideChats.add(id); }
@@ -1689,9 +1768,15 @@ export class SessionRuntime {
         })().finally(() => { this.activeCronExecutions--; this.notifyActivityChanged(); });
         return;
       }
-      if (isTurnOwnedEvent(event) && !this.activeTurn && !resumedUsage) {
+      const resumeOwner = this.currentResumeOwner();
+      if (isTurnOwnedEvent(event) && !this.activeTurn && !resumeOwner && !resumedUsage) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
+      }
+      if (resumeOwner) {
+        if (event.type === 'tool_use_started') resumeOwner.activeTools.add(event.id);
+        else if (event.type === 'tool_use_result') resumeOwner.activeTools.delete(event.id);
+        if (event.type === 'tool_use_started' || event.type === 'tool_heartbeat' || event.type === 'tool_use_result') resumeOwner.timer.refresh();
       }
       if (event.type === 'cron_result') {
         const pending = this.pendingCron.get(event.request_id);
@@ -1849,6 +1934,9 @@ export class SessionRuntime {
         this.resolvedPermissionIds.add(event.request_id);
         this.clearPendingPermission(event.request_id);
       }
+      if (event.type === 'tool_use_result' || event.type === 'ask_user_question_resolved' || event.type === 'permission_request_resolved') {
+        this.completePendingSessionResumeIfReady();
+      }
       if (
         event.type === 'turn_started'
         || event.type === 'turn_ended'
@@ -1877,10 +1965,10 @@ export class SessionRuntime {
       });
     });
     client.on('computerAccess', (request: ComputerAccessRequestDto) => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || client !== this.client || this.disposed) return;
       // Same reasoning as the permission handler above: the engine is parked on
       // an answer, so a discarded request is a stall, not a no-op.
-      if (!this.activeTurn || this.cancellingTurn) {
+      if ((!this.activeTurn && !this.currentResumeOwner()) || this.cancellingTurn) {
         this.diagnostics.add('warn', 'bridge', `dropped computer access request ${request.request_id}: ${this.cancellingTurn ? 'turn is cancelling' : 'no active turn'}`);
         return;
       }
@@ -1898,14 +1986,16 @@ export class SessionRuntime {
       }
     });
     client.on('close', (code, reason) => {
-      if (generation === this.generation) this.permissionScopeChecks.clear();
-      if (generation === this.generation) void this.teardownAudioGeneration(generation);
-      if (generation === this.generation && !this.disposed) this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
+      if (generation !== this.generation || client !== this.client || this.disposed) return;
+      this.permissionScopeChecks.clear();
+      void this.teardownAudioGeneration(generation);
+      this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
     });
     client.on('error', (error) => {
-      if (generation === this.generation) this.permissionScopeChecks.clear();
-      if (generation === this.generation) void this.teardownAudioGeneration(generation);
-      if (generation === this.generation && !this.disposed) this.fail(error);
+      if (generation !== this.generation || client !== this.client || this.disposed) return;
+      this.permissionScopeChecks.clear();
+      void this.teardownAudioGeneration(generation);
+      this.fail(error);
     });
   }
 
@@ -2072,6 +2162,8 @@ export class SessionRuntime {
 
   sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
+    if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
+    if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
@@ -2163,6 +2255,7 @@ export class SessionRuntime {
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().approvePermission(id, permissionResponse);
     this.clearPendingPermission(id);
+    this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
   }
 
@@ -2171,6 +2264,7 @@ export class SessionRuntime {
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().denyPermission(id);
     this.clearPendingPermission(id);
+    this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
   }
 
@@ -2180,6 +2274,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().approveComputerAccess(id, computerAccessResponse);
     this.pendingComputerAccessIds.delete(id);
+    this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
   }
 
@@ -2188,6 +2283,7 @@ export class SessionRuntime {
     if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
     this.requireClient().denyComputerAccess(id);
     this.pendingComputerAccessIds.delete(id);
+    this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
   }
 
@@ -2197,6 +2293,7 @@ export class SessionRuntime {
     if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
     this.requireClient().answerAskUserQuestion(id, validatedAnswers);
     this.clearPendingAskUserQuestion(id);
+    this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
   }
 
@@ -2205,6 +2302,7 @@ export class SessionRuntime {
     if (!this.pendingAskUserQuestionIds.has(id)) throw new Error('AskUserQuestion request is not pending');
     this.requireClient().cancelAskUserQuestion(id);
     this.clearPendingAskUserQuestion(id);
+    this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
   }
 
@@ -2289,6 +2387,8 @@ export class SessionRuntime {
    * actual (unchanged) mode, so nothing to revert.
    */
   async dispatchCommand(command: unknown): Promise<void> {
+    if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
+    if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (validated.type.startsWith('side_chat_')) {
@@ -2596,13 +2696,25 @@ export class SessionRuntime {
     ]);
   }
 
+  /** Remember a host-verified selection when reusing a connected runtime. */
+  rememberTranscriptSelection(transcriptPath: string | undefined): void {
+    this.ownedTranscriptPath = transcriptPath;
+  }
+
   /** Resume the one session owned by this runtime and wait for engine proof. */
-  resumeOwnedSession(): Promise<void> {
-    if (this.pendingSessionResume) return Promise.reject(new Error('session resume is already pending'));
+  resumeOwnedSession(transcriptPath?: string): Promise<void> {
+    if (this.resumeOperationInProgress) return Promise.reject(new Error('session resume is already pending'));
     const client = this.requireClient();
     const generation = this.generation;
+    const selectedPath = transcriptPath ?? this.ownedTranscriptPath;
+    let selectedResponse: Promise<void> | undefined;
+    this.resumeOperationInProgress = true;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (this.currentResumeOwner() === pending && (this.pendingInteractions > 0 || this.permissionScopeChecks.size > 0 || pending.activeTools.size > 0)) {
+          timer.refresh();
+          return;
+        }
         this.rejectPendingSessionResume(new Error(`timed out resuming session ${this.sessionId}`), pending);
       }, this.opts.sessionResumeTimeoutMs ?? 15_000);
       timer.unref();
@@ -2611,38 +2723,57 @@ export class SessionRuntime {
         generation,
         client,
         sessionResumed: false,
+        responseReceived: !selectedPath,
+        controller: new AbortController(),
+        activeTools: new Set(),
         hydrationStarted: false,
         resolve,
         reject,
         timer,
       };
       this.pendingSessionResume = pending;
+      this.notifyActivityChanged();
       try {
-        client.sendCommand({
-          type: 'resume_session',
-          session_id: this.sessionId,
-          cwd: this.projectPath || this.activeWorkspace,
-        });
+        if (selectedPath) {
+          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, pending.controller.signal);
+          void selectedResponse.then(() => {
+            if (this.currentResumeOwner() !== pending) return;
+            pending.responseReceived = true;
+            this.completePendingSessionResumeIfReady();
+          }, () => undefined);
+          void selectedResponse.catch((error: unknown) => {
+            this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
+          });
+        } else {
+          client.sendCommand({ type: 'resume_session', session_id: this.sessionId,
+            cwd: this.projectPath || this.activeWorkspace });
+        }
       } catch (error) {
         this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
       }
     }).then(async () => {
+      if (selectedResponse) await selectedResponse;
       const assertCurrent = () => {
         if (generation !== this.generation || client !== this.client || this.disposed) throw new Error('session resume was interrupted');
       };
       assertCurrent();
+      this.ownedTranscriptPath = selectedPath;
       await this.restoreModel();
       assertCurrent();
       await this.restorePermissionMode();
       assertCurrent();
       await this.restoreFastMode();
       assertCurrent();
+    }).finally(() => {
+      this.resumeOperationInProgress = false;
+      this.notifyActivityChanged();
     });
   }
 
   private completePendingSessionResumeIfReady(): void {
     const pending = this.pendingSessionResume;
-    if (!pending?.sessionResumed || !pending.model || pending.hydrationStarted) return;
+    if (!pending?.sessionResumed || !pending.responseReceived || !pending.model || pending.hydrationStarted
+      || pending.activeTools.size > 0 || this.pendingInteractions > 0 || this.permissionScopeChecks.size > 0) return;
     pending.hydrationStarted = true;
     // A credential that cannot be read does not keep the chat closed: the
     // next prompt that needs it loads it again or fails saying why.
@@ -2660,6 +2791,9 @@ export class SessionRuntime {
       || pending.generation !== this.generation || pending.client !== this.client || this.disposed) return;
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
+    pending.controller.abort();
+    this.clearTurnInteractions();
+    this.notifyActivityChanged();
     pending.resolve();
   }
 
@@ -2668,6 +2802,9 @@ export class SessionRuntime {
     if (!pending || (owner && (owner !== pending || owner.generation !== this.generation || owner.client !== this.client))) return;
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
+    pending.controller.abort();
+    this.clearTurnInteractions();
+    this.notifyActivityChanged();
     pending.reject(error);
   }
 

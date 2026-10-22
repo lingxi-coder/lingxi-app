@@ -52,6 +52,10 @@ use crate::settings_bridge::{
     SettingsPaths,
 };
 
+#[cfg(all(test, unix))]
+#[path = "boot/workspace_resume_tests.rs"]
+mod workspace_resume_tests;
+
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
 /// The canonical Anthropic endpoint used when [`API_BASE_ENV`] is unset.
@@ -75,8 +79,25 @@ pub struct BridgeArgs {
     pub cwd: Option<PathBuf>,
     /// `--session-id <uuid>`: stable session identity supplied by the Desktop host.
     pub session_id: Option<String>,
+    /// Exact UUID spelling retained for Native catalog path lookup.
+    pub catalog_session_id: Option<String>,
+    /// Exact persisted source selected by the host before lifecycle hooks run.
+    pub session_transcript_path: Option<PathBuf>,
     /// `--list-sessions-json`: read the session catalog and exit without building an engine.
     pub list_sessions_json: bool,
+    /// Read the merged workspace environment without building an engine.
+    pub workspace_environment_json: bool,
+    /// Private catalog scope; accepted only beside `--list-sessions-json`.
+    pub session_scope: Option<session::jsonl::SessionDiscoveryScope>,
+    /// Explicit session grants replayed by the Desktop during a workspace remount.
+    pub add_dir: Vec<PathBuf>,
+    /// Original session hook root retained across a workspace remount.
+    pub session_project_root: Option<PathBuf>,
+    /// Persistent configuration owners captured before project env is overlaid.
+    pub session_config_home: Option<PathBuf>,
+    pub session_global_config_path: Option<PathBuf>,
+    /// Session prompt roots replayed without creating permission grants.
+    pub session_prompt_directory: Vec<PathBuf>,
     /// `--model <id>`: the default model id (overrides the desktop default).
     pub model: Option<String>,
     /// Read one bounded credential line from stdin before assembling the engine.
@@ -131,6 +152,61 @@ impl BridgeArgs {
                     );
                 }
                 "--list-sessions-json" => out.list_sessions_json = true,
+                "--workspace-environment-json" => out.workspace_environment_json = true,
+                "--session-scope" => {
+                    let value = it
+                        .next()
+                        .ok_or("--session-scope requires current, repository, or all")?;
+                    out.session_scope = Some(match value.as_ref() {
+                        "current" => session::jsonl::SessionDiscoveryScope::Current,
+                        "repository" => session::jsonl::SessionDiscoveryScope::Repository,
+                        "all" => session::jsonl::SessionDiscoveryScope::All,
+                        _ => {
+                            return Err(
+                                "--session-scope requires current, repository, or all".into()
+                            )
+                        }
+                    });
+                }
+                "--add-dir" => {
+                    let directory = it.next().ok_or("--add-dir requires a directory argument")?;
+                    out.add_dir.push(PathBuf::from(directory.as_ref()));
+                }
+                "--session-project-root" => {
+                    let directory = it
+                        .next()
+                        .ok_or("--session-project-root requires a directory argument")?;
+                    let path = PathBuf::from(directory.as_ref());
+                    if !path.is_absolute() {
+                        return Err("--session-project-root must be an absolute path".into());
+                    }
+                    out.session_project_root = Some(path);
+                }
+                "--session-config-home" | "--session-global-config-path" => {
+                    let flag = arg.as_ref();
+                    let value = it
+                        .next()
+                        .ok_or_else(|| format!("{flag} requires an absolute path"))?;
+                    let path = PathBuf::from(value.as_ref());
+                    if !path.is_absolute() {
+                        return Err(format!("{flag} requires an absolute path"));
+                    }
+                    if flag == "--session-config-home" {
+                        out.session_config_home = Some(path);
+                    } else {
+                        out.session_global_config_path = Some(path);
+                    }
+                }
+                "--session-prompt-directory" => {
+                    let value = it
+                        .next()
+                        .ok_or("--session-prompt-directory requires an absolute path")?;
+                    let path = PathBuf::from(value.as_ref());
+                    if !path.is_absolute() {
+                        return Err("--session-prompt-directory requires an absolute path".into());
+                    }
+                    out.session_prompt_directory.push(path);
+                }
                 "--cwd" => {
                     let v = it
                         .next()
@@ -144,6 +220,24 @@ impl BridgeArgs {
                     let parsed = lingxi_core::types::SessionId::parse_prefixed(value.as_ref())
                         .ok_or_else(|| "--session-id must be a valid UUID".to_string())?;
                     out.session_id = Some(parsed.as_uuid().to_string());
+                    out.catalog_session_id =
+                        Some(if uuid::Uuid::parse_str(value.as_ref()).is_ok() {
+                            value.as_ref().to_owned()
+                        } else {
+                            parsed.as_uuid().to_string()
+                        });
+                }
+                "--session-transcript-path" => {
+                    let value = it
+                        .next()
+                        .ok_or("--session-transcript-path requires an absolute JSONL path")?;
+                    let path = PathBuf::from(value.as_ref());
+                    if !path.is_absolute() {
+                        return Err(
+                            "--session-transcript-path requires an absolute JSONL path".into()
+                        );
+                    }
+                    out.session_transcript_path = Some(path);
                 }
                 "--model" => {
                     let v = it
@@ -197,6 +291,22 @@ impl BridgeArgs {
                 }
                 other => return Err(format!("unknown argument: {other}")),
             }
+        }
+        if out.session_scope.is_some() && !out.list_sessions_json {
+            return Err("--session-scope requires --list-sessions-json".into());
+        }
+        if let Some(path) = &out.session_transcript_path {
+            let id = out
+                .session_id
+                .as_deref()
+                .ok_or("--session-transcript-path requires --session-id")?;
+            validate_selected_transcript_identity(path, id)?;
+            if out.list_sessions_json || out.workspace_environment_json {
+                return Err("--session-transcript-path requires a runtime launch".into());
+            }
+        }
+        if out.workspace_environment_json && (out.list_sessions_json || out.session_id.is_some()) {
+            return Err("--workspace-environment-json accepts only a workspace directory".into());
         }
         Ok(out)
     }
@@ -644,7 +754,11 @@ pub fn lingxi_config_home() -> Option<PathBuf> {
 #[must_use]
 pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let lingxi_home = lingxi_config_home().unwrap_or_else(|| PathBuf::from("/dev/null"));
+    let lingxi_home = args
+        .session_config_home
+        .clone()
+        .or_else(lingxi_config_home)
+        .unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
     // User/global-scope MCP servers live INSIDE `~/.lingxi.json` (top-level
     // `mcpServers`), exactly like claude-code — NOT a standalone file under the
@@ -697,7 +811,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // `spawn_mcp_startup_publisher` re-publishes the listings as each
         // settles.
         __desktop_config.connect_mcp_in_background = true;
-        __desktop_config.session_transcript_path = None;
+        __desktop_config.session_transcript_path = args.session_transcript_path.clone();
         __desktop_config.session_resume_snapshot = None;
         __desktop_config.session_resume_cost = None;
         __desktop_config.max_structured_output_retries = 5;
@@ -741,6 +855,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // defaults.
         __desktop_config.managed_oauth_only = false;
         __desktop_config.anthropic_key_fd_present = false;
+        __desktop_config.initial_project_root = args.session_project_root.clone();
+        __desktop_config.initial_prompt_directories = args.session_prompt_directory.clone();
         __desktop_config.cwd = cwd;
         // Bridge-server is a local host; it exposes no remote workspace,
         // diskless session, or pre-resolved Windows network-drive roots.
@@ -845,7 +961,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // keeps all otherwise eligible registered skills model-invocable.
         __desktop_config.session_skill_allowlist = None;
         // The Electron bridge has no --add-dir flag.
-        __desktop_config.add_dir = Vec::new();
+        __desktop_config.add_dir = args.add_dir.clone();
         // The Electron bridge has no --mcp-config flag.
         __desktop_config.cli_mcp_servers = Vec::new();
         // The Electron bridge has no --strict-mcp-config flag either; ambient
@@ -939,7 +1055,7 @@ pub struct BoundServer {
     /// registries) stay alive for as long as the server serves. Not exposed:
     /// `DesktopRuntime` carries broad handles (the tool registry among them)
     /// that nothing outside this struct has a reason to hold.
-    runtime: DesktopRuntime,
+    runtime: Arc<DesktopRuntime>,
     /// The request half of THIS connection's audio bridge — the same object
     /// that went into `DesktopConfig::audio` and whose responder half is bound
     /// to `connection`. Held so the pairing is visible at the composition root
@@ -953,6 +1069,11 @@ pub struct BoundServer {
 }
 
 impl BoundServer {
+    #[cfg(test)]
+    pub(crate) fn runtime_for_test(&self) -> &Arc<DesktopRuntime> {
+        &self.runtime
+    }
+
     /// The names of the tools the assembled engine registered.
     ///
     /// Delegates to [`DesktopRuntime::registered_tool_names`]; the runtime
@@ -1117,6 +1238,104 @@ fn canonical_session_id(raw: Option<&str>) -> Result<String, String> {
     .unwrap_or_else(|| Ok(lingxi_core::types::SessionId::new().as_uuid().to_string()))
 }
 
+fn validate_selected_transcript_identity(path: &Path, id: &str) -> Result<uuid::Uuid, String> {
+    let expected = uuid::Uuid::parse_str(id)
+        .map_err(|_| "selected transcript requires a valid session UUID")?;
+    let source_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| session::jsonl::validate_uuid(stem))
+        .and_then(|stem| uuid::Uuid::parse_str(stem).ok());
+    if !path.is_absolute()
+        || path.to_str().is_none()
+        || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+        || source_id != Some(expected)
+    {
+        return Err(
+            "selected transcript path must be an absolute JSONL file matching the session UUID"
+                .into(),
+        );
+    }
+    Ok(expected)
+}
+
+/// Bind a selected transcript under its writer authority before configuration,
+/// provider assembly, or lifecycle hooks can write a default transcript.
+async fn prepare_selected_boot_session(cfg: &mut DesktopConfig) -> Result<(), String> {
+    let Some(path) = cfg.session_transcript_path.clone() else {
+        return Ok(());
+    };
+    let id = cfg
+        .session_id_override
+        .as_deref()
+        .ok_or("selected transcript requires a session UUID")?;
+    let uuid = validate_selected_transcript_identity(&path, id)?;
+    // A caller-provided leased snapshot may target a lazy new fork file. Keep
+    // its captured revision; the private launch flag supplies no snapshot.
+    if cfg.session_resume_snapshot.is_some() {
+        return Ok(());
+    }
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| "selected transcript is unavailable")?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("selected transcript must be a nonempty JSONL file".into());
+    }
+    let lease = if let Some(lease) = cfg.session_writer_lease.as_ref() {
+        if lease.canonical_session_id().map(|id| id.as_uuid()) != Some(uuid) {
+            return Err(
+                "selected transcript writer authority does not match the session UUID".into(),
+            );
+        }
+        lease.clone()
+    } else {
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
+            .claim_session_id(&uuid.to_string(), std::process::id())
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "bridge session id is already active".to_string()
+                }
+                _ => "bridge session writer authority is unavailable".to_string(),
+            })?
+            .into_shared()
+    };
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(HostFileSystem::new(cfg.cwd.clone()));
+    let (_, content, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(&path, uuid, fs)
+            .await
+            .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &uuid.to_string());
+    if messages.is_empty() && !loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
+        return Err("selected transcript has no resumable conversation".into());
+    }
+    if let Some(workspace) = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
+        .map(PathBuf::from)
+        .filter(|workspace| workspace.is_dir())
+    {
+        let workspace = std::fs::canonicalize(workspace)
+            .map_err(|_| "selected transcript workspace is unavailable")?;
+        let launch = std::fs::canonicalize(&cfg.cwd)
+            .map_err(|_| "selected transcript launch directory is unavailable")?;
+        if workspace != launch {
+            return Err("selected transcript workspace changed; refresh its metadata and trust before launching".into());
+        }
+    }
+    let resume_cost = harness_runtime::desktop::session_state::capture_resume_cost(
+        &cfg.lingxi_home,
+        uuid,
+        lease.clone(),
+        &content,
+    )
+    .await?;
+    cfg.session_resume_cost = resume_cost;
+    cfg.session_resume_snapshot = Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
+        source_session_id: uuid.to_string(),
+        content: content.into(),
+    });
+    cfg.session_writer_lease = Some(lease);
+    Ok(())
+}
+
 fn initialize_live_session(
     cfg: &mut DesktopConfig,
     receive_gate: Option<Arc<lingxi_core::host::uds_inbox::PeerReceiveGateSlot>>,
@@ -1130,13 +1349,21 @@ fn initialize_live_session(
     // Only live records/PIDs participate in writer ownership. The persisted
     // `<session-id>.jsonl` transcript is intentionally ignored here because a
     // historical resume must reuse that same UUID.
-    let writer_claim = dir
-        .claim_session_id(&session_id, pid)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::AlreadyExists => "bridge session id is already active".to_string(),
-            _ => "bridge live-session registry is unavailable".to_string(),
-        })?
-        .into_shared();
+    let writer_claim = match cfg.session_writer_lease.take() {
+        Some(lease) if lease.session_id() == session_id => lease,
+        Some(_) => {
+            return Err("bridge session writer authority does not match its session UUID".into())
+        }
+        None => dir
+            .claim_session_id(&session_id, pid)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "bridge session id is already active".to_string()
+                }
+                _ => "bridge live-session registry is unavailable".to_string(),
+            })?
+            .into_shared(),
+    };
     // Consume this construction-only claim into the desktop config. The
     // coordinator, Fusion recorder, and ordinary transcript writer all clone
     // this exact lease; build must not reacquire a second OS lock.
@@ -1224,6 +1451,77 @@ fn initialize_live_session(
     Ok(live_session)
 }
 
+/// Read settings-owned environment values before the parent spawns a runtime.
+/// This path never resolves providers, credentials, hooks, MCP, or tools.
+pub async fn workspace_environment_json(cwd: &Path) -> Result<String, String> {
+    let lingxi_home = lingxi_config_home().ok_or("workspace environment requires a config home")?;
+    let mut cfg = DesktopConfig::default();
+    cfg.cwd = cwd.to_path_buf();
+    cfg.lingxi_home = lingxi_home.clone();
+    let managed = harness_runtime::desktop::managed_settings_overlay(&cfg)
+        .await
+        .map_err(|_| "workspace environment settings are unavailable")?
+        .unwrap_or_else(empty_settings_source);
+    workspace_environment_json_from(cwd, &lingxi_home, managed)
+}
+
+fn workspace_environment_json_from(
+    cwd: &Path,
+    lingxi_home: &Path,
+    managed: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<String, String> {
+    let snapshot = crate::settings_bridge::build_snapshot(
+        &SettingsPaths {
+            lingxi_home: lingxi_home.to_path_buf(),
+            project_dir: cwd.to_path_buf(),
+        },
+        empty_settings_source(),
+        managed,
+    )
+    .map_err(|_| "workspace environment settings are unavailable")?;
+    if snapshot.files.iter().any(|file| file.parse_error.is_some()) {
+        return Err("workspace environment settings are unavailable".into());
+    }
+    let mut environment = BTreeMap::new();
+    if let Some(env) = snapshot
+        .effective_source
+        .get_property("env")
+        .filter(|value| !value.is_null())
+    {
+        let entries = env
+            .object_entries()
+            .ok_or("workspace environment must be an object of strings")?;
+        for entry in entries {
+            let key = String::from_utf16(entry.code_units)
+                .map_err(|_| "workspace environment contains an invalid key")?;
+            let value = entry
+                .value
+                .as_str()
+                .ok_or("workspace environment contains a non-string value")?;
+            if !key.is_empty() && !key.contains(['\0', '=']) && !value.contains('\0') {
+                environment.insert(key, value.to_owned());
+            }
+        }
+    }
+    let config_home = if lingxi_home.is_absolute() {
+        lingxi_home.to_path_buf()
+    } else {
+        cwd.join(lingxi_home)
+    };
+    let global_config_path = migrations::global_config::global_config_path().map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    });
+    serde_json::to_string(&serde_json::json!({
+        "version":1, "environment":environment,
+        "config_home":config_home, "global_config_path":global_config_path,
+    }))
+    .map_err(|_| "failed to encode workspace environment".into())
+}
+
 /// Enumerate the persisted session catalog without constructing an engine.
 ///
 /// This path deliberately does not call config resolution, credential loading,
@@ -1239,13 +1537,43 @@ pub async fn list_sessions_json(cwd: &Path, session_id: Option<&str>) -> Result<
     list_sessions_json_from(cwd, &lingxi_home, session_id).await
 }
 
+/// Private Desktop metadata launch-hint catalog. It never constructs an engine.
+pub async fn list_sessions_json_in_scope(
+    cwd: &Path,
+    session_id: Option<&str>,
+    scope: session::jsonl::SessionDiscoveryScope,
+) -> Result<String, String> {
+    let lingxi_home =
+        lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
+    list_sessions_json_from_in_scope(cwd, &lingxi_home, session_id, scope).await
+}
+
 async fn list_sessions_json_from(
     cwd: &Path,
     lingxi_home: &Path,
     session_id: Option<&str>,
 ) -> Result<String, String> {
+    list_sessions_json_from_with_scope(cwd, lingxi_home, session_id, None).await
+}
+
+async fn list_sessions_json_from_in_scope(
+    cwd: &Path,
+    lingxi_home: &Path,
+    session_id: Option<&str>,
+    scope: session::jsonl::SessionDiscoveryScope,
+) -> Result<String, String> {
+    list_sessions_json_from_with_scope(cwd, lingxi_home, session_id, Some(scope)).await
+}
+
+async fn list_sessions_json_from_with_scope(
+    cwd: &Path,
+    lingxi_home: &Path,
+    session_id: Option<&str>,
+    scope: Option<session::jsonl::SessionDiscoveryScope>,
+) -> Result<String, String> {
     let fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(HostFileSystem::new(cwd.to_path_buf()));
+    let raw_session_id = session_id;
     let session_id = session_id
         .map(|raw| {
             lingxi_core::types::SessionId::parse_prefixed(raw)
@@ -1255,18 +1583,81 @@ async fn list_sessions_json_from(
         .transpose()?;
     let listing = match session_id {
         Some(session_id) => {
-            session::jsonl::find_session_with_diagnostics(
-                lingxi_home,
-                &cwd.to_string_lossy(),
-                session_id,
-                fs.clone(),
-            )
-            .await
+            let found = match scope {
+                Some(scope) => {
+                    session::jsonl::find_session_in_scope_with_diagnostics(
+                        lingxi_home,
+                        &cwd.to_string_lossy(),
+                        scope,
+                        session_id,
+                        fs.clone(),
+                    )
+                    .await
+                }
+                None => {
+                    session::jsonl::find_session_exact_raw_with_diagnostics(
+                        lingxi_home,
+                        &cwd.to_string_lossy(),
+                        raw_session_id.expect("a parsed session id retains its spelling"),
+                        fs.clone(),
+                    )
+                    .await
+                }
+            };
+            match found {
+                Err(session::jsonl::LoaderError::SessionNotFound { .. }) => {
+                    // Mobile's explicit zero-message anchor is a product
+                    // extension. Never broaden this exception to arbitrary
+                    // metadata-only files or foreign UUID buckets.
+                    let path = session::jsonl::session_path(
+                        lingxi_home,
+                        &cwd.to_string_lossy(),
+                        &session_id.to_string(),
+                    );
+                    let loaded = session::jsonl::JsonlReader::new(path.clone(), fs.clone())
+                        .read_routed()
+                        .await;
+                    match loaded {
+                        Ok(loaded)
+                            if loaded
+                                .mobile_empty_sessions
+                                .contains(&session_id.to_string()) =>
+                        {
+                            session::jsonl::find_session_with_diagnostics(
+                                lingxi_home,
+                                &cwd.to_string_lossy(),
+                                session_id,
+                                fs.clone(),
+                            )
+                            .await
+                        }
+                        Ok(_) => Ok(session::jsonl::SessionCatalog {
+                            sessions: Vec::new(),
+                            skipped_files: 0,
+                        }),
+                        Err(_) if matches!(tokio::fs::try_exists(&path).await, Ok(false)) => {
+                            Ok(session::jsonl::SessionCatalog {
+                                sessions: Vec::new(),
+                                skipped_files: 0,
+                            })
+                        }
+                        Err(error) => Err(session::jsonl::LoaderError::Io {
+                            arg: path.display().to_string(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                error.to_string(),
+                            ),
+                        }),
+                    }
+                }
+                result => result,
+            }
         }
         None => {
-            session::jsonl::list_recent_sessions_with_diagnostics(
+            session::jsonl::list_recent_sessions_in_scope_with_diagnostics(
                 lingxi_home,
                 &cwd.to_string_lossy(),
+                scope.unwrap_or_default(),
                 usize::MAX,
                 fs.clone(),
             )
@@ -1279,7 +1670,10 @@ async fn list_sessions_json_from(
             sessions: Vec::new(),
             skipped_files: 0,
         },
-        Err(_) => return Err("session catalog is unavailable".to_string()),
+        Err(error) => {
+            tracing::warn!(%error, "bridge-server: metadata catalog is unavailable");
+            return Err("session catalog is unavailable".to_string());
+        }
     };
     let mut sessions = Vec::with_capacity(catalog.sessions.len());
     for row in catalog.sessions {
@@ -1303,6 +1697,18 @@ async fn list_sessions_json_from(
                 "empty_session".to_string(),
                 serde_json::Value::Bool(empty_session),
             );
+            if let Some(workspace_path) = row.workspace_path.as_deref() {
+                object.insert(
+                    "workspace_path".into(),
+                    serde_json::Value::String(workspace_path.into()),
+                );
+            }
+            if let Some(title) = row.custom_or_ai_title.as_deref() {
+                object.insert(
+                    "resume_title".into(),
+                    serde_json::Value::String(title.into()),
+                );
+            }
             if let Some(model) = row.resume_model.as_deref() {
                 object.insert(
                     "resume_model".to_string(),
@@ -1436,7 +1842,7 @@ pub(crate) async fn seed_parent_supplied_provider_keys(
 /// Returns the [`harness_runtime::desktop::BuildError`] string if the engine cannot be
 /// assembled (effectively infallible today).
 pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
-    assemble_with_provider_keys(cfg, BTreeMap::new()).await
+    Box::pin(assemble_with_provider_keys(cfg, BTreeMap::new())).await
 }
 
 /// Assemble a runtime after injecting provider credentials received over the
@@ -1448,7 +1854,7 @@ pub async fn assemble_with_provider_keys(
     cfg: DesktopConfig,
     provider_keys: BTreeMap<String, String>,
 ) -> Result<BoundServer, String> {
-    assemble_with_credentials(cfg, provider_keys, None).await
+    Box::pin(assemble_with_credentials(cfg, provider_keys, None)).await
 }
 
 /// Assemble a host-owned OAuth session without storing secrets in configuration.
@@ -1457,11 +1863,26 @@ pub async fn assemble_with_credentials(
     provider_keys: BTreeMap<String, String>,
     openai_oauth: Option<client::protocol::events::OpenAiOAuthSessionDto>,
 ) -> Result<BoundServer, String> {
+    prepare_selected_boot_session(&mut cfg).await?;
+    let cold_resume = crate::workspace_commands::ColdBootResume::capture(&cfg)?;
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
     );
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
+    let initial_workspace_trusted = cfg.host_workspace_trusted == Some(true);
+    let initial_session_resumed = cfg.session_resume_snapshot.is_some();
+    let initial_add_dirs = cfg
+        .add_dir
+        .iter()
+        .map(|path| {
+            command_api::workspace_directory::resolve_path(
+                &path.to_string_lossy(),
+                &cfg.cwd,
+                dirs::home_dir().as_deref(),
+            )
+        })
+        .collect();
     let receive_gate = Arc::new(lingxi_core::host::uds_inbox::PeerReceiveGateSlot::new());
     let mut live_session = initialize_live_session(&mut cfg, Some(receive_gate.clone()))?;
     let connection = BridgeConnection::new().with_visualization(
@@ -1684,13 +2105,31 @@ pub async fn assemble_with_credentials(
                 }));
         }
     }
-    let runtime =
-        harness_runtime::desktop::build_with_host_automation(cfg, output, permission_sink, shared)
-            .await
-            .map_err(|e| e.to_string())?;
+    let runtime = Arc::new(
+        // Do not nest the SDK's large assembly future in every transport wrapper.
+        // This also keeps cold resume within ordinary worker-thread stack limits.
+        Box::pin(harness_runtime::desktop::build_with_host_automation(
+            cfg,
+            output,
+            permission_sink,
+            shared,
+        ))
+        .await
+        .map_err(|e| e.to_string())?,
+    );
     // Replace the lazy placeholder with the exact session used by desktop
     // discovery and PluginManager before the context is attached to the Router.
     settings_context.plugin_archive_session = runtime.plugin_archive_session.clone();
+    let workspace_commands = crate::workspace_commands::register(
+        &runtime,
+        &settings_context,
+        session_store.lingxi_home().to_path_buf(),
+        initial_workspace_trusted,
+        initial_add_dirs,
+        initial_session_resumed,
+    )
+    .await;
+    workspace_commands.bind_cold_resume(cold_resume);
     receive_gate.set(runtime.orchestrator.clone());
     // The runtime cloned the exact construction-only lease into its hydrated
     // coordinator. Do not let the bridge's process-registration guard pin the
@@ -1850,6 +2289,7 @@ pub async fn assemble_with_credentials(
     // terminal frames arrive in 41ms with no retry backoff.
     let driver: Arc<dyn TurnDriver> = Arc::new(
         OrchestratorTurnDriver::with_error_sink(runtime.orchestrator.clone(), event_sink)
+            .with_workspace_session_facts(workspace_commands.session_facts())
             .with_message_output(message_output)
             .with_queue(queue, cancel_reason)
             .with_wakeup_scheduler(driver_wakeup_scheduler)
@@ -1891,6 +2331,7 @@ pub async fn assemble_with_credentials(
         Some(dispatcher),
         Some(runtime.shared_command_registry.clone()),
     )
+    .with_workspace_commands(workspace_commands)
     .with_side_chat_runtime(
         runtime.orchestrator.clone(),
         runtime.side_chat_factory.clone(),
@@ -1904,7 +2345,9 @@ pub async fn assemble_with_credentials(
     .with_openai_host_session(openai_host_session)
     .with_http(runtime.http.clone())
     .with_session_store(
-        session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()),
+        session_store
+            .with_runtime_cwd(runtime.session_cwd.clone())
+            .with_transcript_writer(runtime.orchestrator.session_transcript_writer()),
     )
     .with_session_agent_observer(session_agent_observer)
     .with_team_registry(runtime.coordinator.clone())
@@ -2134,6 +2577,402 @@ mod tests {
         );
         assert!(args.list_sessions_json);
         assert!(BridgeArgs::parse(["--session-id", "not-a-uuid"]).is_err());
+    }
+
+    #[test]
+    fn selected_workspace_boot_path_is_private_absolute_and_matches_the_stable_uuid() {
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let source = format!("/persisted source/{}.jsonl", id.to_uppercase());
+        let args =
+            BridgeArgs::parse(["--session-id", id, "--session-transcript-path", &source]).unwrap();
+        assert_eq!(args.session_transcript_path, Some(PathBuf::from(&source)));
+        for flags in [
+            vec!["--session-transcript-path", source.as_str()],
+            vec![
+                "--session-id",
+                id,
+                "--session-transcript-path",
+                "relative.jsonl",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--session-transcript-path",
+                "/11111111-2222-4333-8444-555555555555.jsonl",
+            ],
+            vec![
+                "--session-id",
+                id,
+                "--session-transcript-path",
+                source.as_str(),
+                "--list-sessions-json",
+            ],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+    }
+
+    #[test]
+    fn private_catalog_scope_is_explicit_and_catalog_only() {
+        use session::jsonl::SessionDiscoveryScope as Scope;
+        for (value, scope) in [
+            ("current", Scope::Current),
+            ("repository", Scope::Repository),
+            ("all", Scope::All),
+        ] {
+            let args =
+                BridgeArgs::parse(["--list-sessions-json", "--session-scope", value]).unwrap();
+            assert_eq!(args.session_scope, Some(scope));
+        }
+        assert!(BridgeArgs::parse(["--session-scope", "all"]).is_err());
+        assert!(BridgeArgs::parse(["--list-sessions-json", "--session-scope", "unknown"]).is_err());
+        let args = BridgeArgs::parse(["--add-dir", "/one space", "--add-dir", "/目录"]).unwrap();
+        assert_eq!(
+            args.add_dir,
+            vec![PathBuf::from("/one space"), PathBuf::from("/目录")]
+        );
+        let args = BridgeArgs::parse(["--session-project-root", "/初始 workspace"]).unwrap();
+        assert_eq!(
+            args.session_project_root,
+            Some(PathBuf::from("/初始 workspace"))
+        );
+        assert!(BridgeArgs::parse(["--session-project-root", "relative"]).is_err());
+        assert!(BridgeArgs::parse(["--session-project-root"]).is_err());
+        let owners = BridgeArgs::parse([
+            "--session-config-home",
+            "/identity/config",
+            "--session-global-config-path",
+            "/identity/global.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            owners.session_config_home.as_deref(),
+            Some(Path::new("/identity/config"))
+        );
+        assert_eq!(
+            owners.session_global_config_path.as_deref(),
+            Some(Path::new("/identity/global.json"))
+        );
+        assert!(BridgeArgs::parse(["--session-config-home", "relative"]).is_err());
+        assert!(BridgeArgs::parse(["--session-global-config-path", "relative"]).is_err());
+    }
+
+    #[test]
+    fn workspace_environment_metadata_merges_all_sources_and_filters_os_invalid_entries() {
+        use migrations::settings_update::{settings_path, WritableScope};
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        let home = root.path().join("config");
+        for (scope, value) in [
+            (
+                WritableScope::User,
+                serde_json::json!({"env":{"USER_ONLY":"user", "SAME":"user"}}),
+            ),
+            (
+                WritableScope::Project,
+                serde_json::json!({"env":{"PROJECT_ONLY":"project", "SAME":"project"}}),
+            ),
+            (
+                WritableScope::Local,
+                serde_json::json!({"env":{"LOCAL_ONLY":"local", "SAME":"local", "INVALID=KEY":"omitted", "NUL":"bad\0value"}}),
+            ),
+        ] {
+            let path = settings_path(scope, &home, &cwd);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, value.to_string()).unwrap();
+        }
+        let managed = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"env":{"MANAGED_ONLY":"managed","SAME":"managed"}}"#,
+        )
+        .unwrap();
+        let result: serde_json::Value =
+            serde_json::from_str(&workspace_environment_json_from(&cwd, &home, managed).unwrap())
+                .unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "version":1,
+                "config_home":home,
+                "global_config_path":migrations::global_config::global_config_path().map(|path| if path.is_absolute() {path} else {cwd.join(path)}),
+                "environment":{
+                    "USER_ONLY":"user", "PROJECT_ONLY":"project", "LOCAL_ONLY":"local", "MANAGED_ONLY":"managed", "SAME":"managed",
+                },
+            })
+        );
+        assert!(
+            !home.join("projects").exists(),
+            "environment metadata must not create a session store"
+        );
+    }
+
+    #[test]
+    fn workspace_environment_metadata_rejects_non_string_values_without_echoing_them() {
+        let root = tempfile::tempdir().unwrap();
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"env":{"DO_NOT_ECHO":{"secret":"credential-like-value"}}}"#,
+        )
+        .unwrap();
+        let error = workspace_environment_json_from(root.path(), root.path(), source).unwrap_err();
+        assert!(!error.contains("DO_NOT_ECHO") && !error.contains("credential-like-value"));
+    }
+
+    fn write_workspace_catalog_row(home: &Path, cwd: &Path, id: &str) -> PathBuf {
+        let path = session::jsonl::session_path(home, &cwd.to_string_lossy(), id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let row = serde_json::json!({
+            "type":"user", "uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "parentUuid":null,
+            "sessionId":id, "timestamp":"2026-10-21T00:00:00.000Z", "cwd":cwd,
+            "isSidechain":false, "message":{"role":"user","content":"workspace catalog"},
+        });
+        std::fs::write(&path, format!("{row}\n")).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn selected_boot_workspace_captures_exact_source_without_mutating_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cwd = root.path().join("trusted workspace");
+        std::fs::create_dir(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let default_path = write_workspace_catalog_row(&home, &cwd, id);
+        let default_bytes = std::fs::read(&default_path).unwrap();
+        let selected = home
+            .join("projects/selected-source")
+            .join(format!("{}.jsonl", id.to_uppercase()));
+        std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+        let selected_content = String::from_utf8(default_bytes.clone())
+            .unwrap()
+            .replace("workspace catalog", "exact selected source B");
+        std::fs::write(&selected, &selected_content).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = cwd.clone();
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected.clone());
+        prepare_selected_boot_session(&mut cfg).await.unwrap();
+        assert_eq!(cfg.cwd, cwd);
+        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&selected));
+        let snapshot = cfg.session_resume_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.source_session_id, id);
+        assert_eq!(snapshot.content.as_ref(), selected_content);
+        assert_eq!(cfg.session_writer_lease.as_ref().unwrap().session_id(), id);
+        assert_eq!(std::fs::read(&default_path).unwrap(), default_bytes);
+        assert_eq!(
+            std::fs::read_to_string(&selected).unwrap(),
+            selected_content
+        );
+        drop(cfg);
+        assert!(
+            LiveSessionDir::at_live(home.join("sessions"))
+                .claim_session_id(id, std::process::id())
+                .is_ok(),
+            "failed boot preparation must not strand a lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_boot_workspace_rejects_missing_empty_and_wrong_uuid_before_registry() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let selected = root.path().join(format!("{id}.jsonl"));
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = root.path().into();
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected.clone());
+        assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
+        assert!(!home.exists());
+        std::fs::write(&selected, "").unwrap();
+        assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
+        assert!(!home.exists());
+        cfg.session_transcript_path = Some(
+            root.path()
+                .join("11111111-2222-4333-8444-555555555555.jsonl"),
+        );
+        assert!(prepare_selected_boot_session(&mut cfg).await.is_err());
+        assert!(!home.exists());
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(cfg.session_resume_snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_boot_workspace_rejects_stale_existing_workspace_and_keeps_missing_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let launch = root.path().join("trusted launch");
+        let recorded = root.path().join("recorded workspace");
+        std::fs::create_dir(&launch).unwrap();
+        std::fs::create_dir(&recorded).unwrap();
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let selected = write_workspace_catalog_row(&home, &recorded, id);
+        let original = std::fs::read(&selected).unwrap();
+        let mut cfg = DesktopConfig::default();
+        cfg.cwd = launch.clone();
+        cfg.lingxi_home = home.clone();
+        cfg.session_id_override = Some(id.into());
+        cfg.session_transcript_path = Some(selected.clone());
+        let error = prepare_selected_boot_session(&mut cfg).await.unwrap_err();
+        assert!(error.contains("refresh its metadata and trust"));
+        assert!(cfg.session_writer_lease.is_none());
+        assert!(cfg.session_resume_snapshot.is_none());
+        assert_eq!(std::fs::read(&selected).unwrap(), original);
+        std::fs::remove_dir(&recorded).unwrap();
+        prepare_selected_boot_session(&mut cfg).await.unwrap();
+        assert_eq!(cfg.cwd, launch);
+        assert_eq!(cfg.session_transcript_path.as_ref(), Some(&selected));
+        assert_eq!(
+            cfg.session_resume_snapshot
+                .as_ref()
+                .unwrap()
+                .content
+                .as_bytes(),
+            original
+        );
+        assert!(!session::jsonl::session_path(&home, &cfg.cwd.to_string_lossy(), id).exists());
+    }
+
+    #[tokio::test]
+    async fn catalog_scopes_and_exact_lookup_keep_authoritative_workspace_hints_private() {
+        use session::jsonl::SessionDiscoveryScope as Scope;
+        let root = tempfile::tempdir().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let home = canonical_root.join("home");
+        let current = canonical_root.join("current workspace");
+        let other = canonical_root.join("另一目录");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let current_id = "11111111-2222-4333-8444-555555555555";
+        let other_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let source = write_workspace_catalog_row(&home, &current, current_id);
+        write_workspace_catalog_row(&home, &other, other_id);
+        let current_json: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from(&current, &home, None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current_json["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            current_json["sessions"][0]["workspace_path"],
+            current.to_string_lossy().as_ref()
+        );
+        let all_json: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from_in_scope(&current, &home, None, Scope::All)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(all_json["sessions"].as_array().unwrap().len(), 2);
+        let exact: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from(&current, &home, Some(other_id))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            exact["sessions"][0]["workspace_path"],
+            other.to_string_lossy().as_ref()
+        );
+        assert_eq!(exact["sessions"][0]["uuid"], other_id);
+
+        let scoped: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from_in_scope(&current, &home, Some(other_id), Scope::Current)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scoped["sessions"].as_array().unwrap().len(), 0);
+        let scoped: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from_in_scope(&current, &home, Some(other_id), Scope::All)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scoped["sessions"][0]["uuid"], other_id);
+
+        session::jsonl::record_session_alias(&home, source.parent().unwrap(), &other)
+            .await
+            .unwrap();
+        let local: serde_json::Value =
+            serde_json::from_str(&list_sessions_json_from(&other, &home, None).await.unwrap())
+                .unwrap();
+        assert_eq!(local["sessions"].as_array().unwrap().len(), 2);
+        let aliased: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from_in_scope(&other, &home, None, Scope::Repository)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(aliased["sessions"].as_array().unwrap().len(), 2);
+        let reverse: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from(&current, &home, None)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reverse["sessions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn catalog_resume_title_keeps_full_custom_title_separate_from_display_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = "11111111-2222-4333-8444-555555555555";
+        let path = write_workspace_catalog_row(&home, &cwd, id);
+        let title = format!(" {} 完整标题 ", "title".repeat(90));
+        let mut source = std::fs::read_to_string(&path).unwrap();
+        source.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"custom-title", "sessionId":id, "customTitle":title,
+            })
+        ));
+        std::fs::write(&path, source).unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_str(&list_sessions_json_from(&cwd, &home, None).await.unwrap())
+                .unwrap();
+        assert_eq!(catalog["sessions"][0]["resume_title"], title);
+        assert!(
+            catalog["sessions"][0]["resume_title"]
+                .as_str()
+                .unwrap()
+                .len()
+                > 400
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_launch_hint_uses_relocation_instead_of_the_old_message_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let old = root.path().join("old");
+        let target = root.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let id = "11111111-2222-4333-8444-555555555555";
+        let original = write_workspace_catalog_row(&home, &old, id);
+        let moved = session::jsonl::session_path(&home, &target.to_string_lossy(), id);
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(original, &moved).unwrap();
+        let mut contents = std::fs::read_to_string(&moved).unwrap();
+        contents.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"type":"relocated","sessionId":id,"relocatedCwd":target})
+        ));
+        std::fs::write(moved, contents).unwrap();
+        let exact: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from(&target, &home, Some(id))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            exact["sessions"][0]["workspace_path"],
+            target.to_string_lossy().as_ref()
+        );
     }
 
     #[tokio::test]
@@ -3002,8 +3841,8 @@ mod tests {
 /// Shared stalling-storage fixtures; each test owns its credential scope.
 #[cfg(test)]
 pub(crate) mod fusion_refresh_test_support {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// A credential backend whose READS never answer — the contended macOS
     /// keychain broker whose 5s stall the boot availability probe already wraps

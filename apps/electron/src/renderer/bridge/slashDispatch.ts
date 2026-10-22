@@ -9,6 +9,7 @@
  * the whole resolution path is unit-testable.
  */
 import type { PermissionModeId, SlashCommandDto } from '@lingxi/bridge-client';
+import type { SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 
 export interface ParsedSlashLine {
   readonly name: string;
@@ -37,9 +38,8 @@ export interface DesktopCommandContext {
   openPermissionPicker(): void;
   openSettings(): void;
   openSettingsPage(pageId: string): void;
-  addWorkspaceDirectory(path: string): Promise<void>;
-  chooseProject(): Promise<void>;
-  activateProject(path: string): Promise<void>;
+  updateSessionWorkspace(operation: SessionWorkspaceOperation): Promise<void>;
+  resumeSession(query?: string): void;
   clearSession(name?: string): Promise<void>;
   forceCompact(instructions?: string): Promise<void>;
   copyLastResponse(): Promise<boolean>;

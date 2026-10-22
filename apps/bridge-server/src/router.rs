@@ -79,6 +79,7 @@ use client::adapter::ClientEventSink;
 use client::protocol::commands::{ClientCommand, ListingKindDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::{AuthStateDto, SessionModeDto};
+use client::protocol::text::ClientTextDto;
 use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
@@ -132,11 +133,58 @@ fn split_model_selection_source(
 pub struct SessionStoreContext {
     lingxi_home: PathBuf,
     session_cwd: String,
+    runtime_cwd: Option<Arc<tool_api::SessionCwd>>,
     fs: Arc<dyn lingxi_core::host::FileSystem>,
     transcript_writer: Option<Arc<session::jsonl::JsonlWriter>>,
 }
 
 impl SessionStoreContext {
+    pub(crate) fn lingxi_home(&self) -> &std::path::Path {
+        &self.lingxi_home
+    }
+    /// Follow the same cwd cell that the running runtime publishes on a move.
+    pub fn with_runtime_cwd(mut self, cwd: Arc<tool_api::SessionCwd>) -> Self {
+        self.runtime_cwd = Some(cwd);
+        self
+    }
+
+    fn current_cwd(&self) -> String {
+        self.runtime_cwd.as_ref().map_or_else(
+            || self.session_cwd.clone(),
+            |cwd| cwd.cwd().to_string_lossy().into_owned(),
+        )
+    }
+
+    fn main_transcript_path(&self, session_id: &str) -> PathBuf {
+        self.transcript_writer
+            .as_ref()
+            .filter(|writer| {
+                writer
+                    .active_path()
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| uuid::Uuid::parse_str(name).ok())
+                    .zip(uuid::Uuid::parse_str(session_id).ok())
+                    .is_some_and(|(source, requested)| source == requested)
+            })
+            .map_or_else(
+                || {
+                    orchestrator::transcript_paths::main_transcript_path(
+                        &self.lingxi_home,
+                        &self.current_cwd(),
+                        session_id,
+                    )
+                },
+                |writer| writer.active_path(),
+            )
+    }
+
+    fn subagents_dir(&self, session_id: &str) -> PathBuf {
+        self.main_transcript_path(session_id)
+            .with_extension("")
+            .join("subagents")
+    }
+
     /// Retain the prepared session's authoritative writer for identity snapshots.
     pub fn with_transcript_writer(
         mut self,
@@ -153,11 +201,7 @@ impl SessionStoreContext {
             .as_uuid()
             .to_string();
         let session_id = session_uuid.as_str();
-        let path = orchestrator::transcript_paths::main_transcript_path(
-            &self.lingxi_home,
-            &self.session_cwd,
-            session_id,
-        );
+        let path = self.main_transcript_path(session_id);
         let reader = session::jsonl::reader::JsonlReader::new(path.clone(), self.fs.clone());
         let mut title = "Scheduled task".to_string();
         match reader.read_routed().await {
@@ -202,6 +246,7 @@ impl SessionStoreContext {
         Self {
             lingxi_home,
             session_cwd,
+            runtime_cwd: None,
             fs,
             transcript_writer: None,
         }
@@ -242,6 +287,36 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// state, drain an interaction broker, or wait for the SDK turn gate.
     async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
         Err("desktop runtime snapshot is unavailable".into())
+    }
+
+    /// Authenticated, private Native `set_cwd` control request.
+    async fn set_working_directory(
+        &self,
+        _request: Utf16JsonProjection,
+        _sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        Err("set_cwd is unavailable".into())
+    }
+
+    async fn workspace_state(&self) -> Result<Utf16JsonProjection, String> {
+        Err("workspace state is unavailable".into())
+    }
+
+    async fn add_working_directory(
+        &self,
+        _request: Utf16JsonProjection,
+        _sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        Err("add_directory is unavailable".into())
+    }
+
+    /// Resume the exact row selected by the Desktop's scoped metadata catalog.
+    async fn resume_selected_session(
+        &self,
+        _request: Utf16JsonProjection,
+        _sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        Err("resume_selected_session is unavailable".into())
     }
 
     /// Dispatch a raw `/<name> [args]` line and hand back the dispatch RESULT so
@@ -321,6 +396,10 @@ mod session_transition_slash_tests {
         compact.name = "compact".into();
         compact.source = CommandSource::Builtin;
         registry.register_command(compact);
+        let mut cd = command_api::model::SlashCommand::default();
+        cd.name = "cd".into();
+        cd.source = CommandSource::Builtin;
+        registry.register_command(cd);
 
         for raw in ["/clear", "/new title", "/reset"] {
             assert!(
@@ -329,6 +408,10 @@ mod session_transition_slash_tests {
             );
         }
         assert!(requires_idle_turn_for_slash(&registry, &"/compact".into()));
+        assert!(requires_idle_turn_for_slash(
+            &registry,
+            &"/cd /tmp/path with spaces".into()
+        ));
 
         // The parser and registry preserve case. Unknown spellings and custom
         // commands must not be reclassified as the builtin transition.
@@ -346,6 +429,32 @@ mod session_transition_slash_tests {
             &registry,
             &"/custom-clear".into()
         ));
+    }
+
+    #[test]
+    fn session_store_uses_live_cwd_and_authoritative_writer_path() {
+        let cwd = tool_api::SessionCwd::new(PathBuf::from("/old"), vec![PathBuf::from("/old")]);
+        let fs: Arc<dyn lingxi_core::host::FileSystem> =
+            Arc::new(crate::HostFileSystem::new("/old".into()));
+        let id = "11111111-2222-4333-8444-555555abcdef";
+        let source = PathBuf::from(format!(
+            "/config/projects/source/{}.jsonl",
+            id.to_uppercase()
+        ));
+        let writer = Arc::new(session::jsonl::JsonlWriter::new(source.clone(), fs.clone()));
+        let store = SessionStoreContext::new("/config".into(), "/old".into(), fs)
+            .with_runtime_cwd(cwd.clone())
+            .with_transcript_writer(Some(writer));
+        cwd.change_cwd("/new".into());
+        assert_eq!(store.current_cwd(), "/new");
+        assert_eq!(store.main_transcript_path(id), source);
+        assert_eq!(
+            store.subagents_dir(id),
+            PathBuf::from(format!(
+                "/config/projects/source/{}/subagents",
+                id.to_uppercase()
+            ))
+        );
     }
 }
 
@@ -436,6 +545,7 @@ fn provider_model_catalog_from_listings(
 /// The production [`CommandRouter`]: wraps the real engine handles and lowers
 /// each reply with the pure `client::adapter::lowering` parity fns.
 pub struct EngineCommandRouter {
+    workspace_commands: Option<Arc<crate::workspace_commands::WorkspaceCommands>>,
     session_cron: Option<Arc<cron::CronScheduler>>,
     cron_firer: Option<Arc<crate::cron_host::HostCronFirer>>,
     handle: Arc<dyn OrchestratorHandle>,
@@ -606,6 +716,142 @@ impl EngineCommandRouter {
         None
     }
 
+    async fn resume_replayed_session(
+        &self,
+        uuid: uuid::Uuid,
+        mut replayed: orchestrator::ReplayedSession,
+        sink: Arc<dyn ClientEventSink>,
+    ) -> Result<(), String> {
+        if let Some(workspace) = &self.workspace_commands {
+            workspace.discard_cold_resume();
+        }
+        let resume_plan_mode = replayed.state.plan_mode;
+        let previous_session_id = self.handle.current_session_id().await;
+        let previous_permission_mode = self
+            .handle
+            .permission_mode()
+            .await
+            .unwrap_or_else(|| "default".to_string());
+        let previous_plan_mode = self.handle.plan_mode().await;
+        let runtime_snapshot = replayed.handle_runtime_snapshot();
+        let restored_usage = runtime_snapshot.current_usage;
+        if resume_plan_mode {
+            self.handle
+                .set_permission_mode("plan")
+                .await
+                .map_err(|error| format!("resume plan permission mode failed: {error}"))?;
+            if let Err(error) = self.handle.set_plan_mode(true).await {
+                let _ = self
+                    .handle
+                    .set_permission_mode(&previous_permission_mode)
+                    .await;
+                return Err(format!("resume plan mode failed: {error}"));
+            }
+        }
+        if let Err(error) = self
+            .handle
+            .resume_session(
+                lingxi_core::types::SessionId::from_uuid(uuid),
+                std::mem::take(&mut replayed.state.history),
+                replayed.last_message_uuid.map(|value| value.to_string()),
+                replayed.state.active_goal.take().map(|goal| {
+                    lingxi_core::host::ActiveGoalSnapshot {
+                        condition: goal.condition,
+                        set_at: goal.set_at,
+                        last_reason: goal.last_reason,
+                        iterations: goal.iterations,
+                        tokens_at_start: goal.tokens_at_start,
+                    }
+                }),
+                runtime_snapshot,
+            )
+            .await
+        {
+            if resume_plan_mode {
+                let _ = self.handle.set_plan_mode(previous_plan_mode).await;
+                let _ = self
+                    .handle
+                    .set_permission_mode(&previous_permission_mode)
+                    .await;
+            }
+            return Err(format!("resume_session failed: {error}"));
+        }
+        if let Some(workspace) = &self.workspace_commands {
+            workspace.session_facts().reset(true);
+            // Owned resume may append deferred tool results. Publish them with
+            // the complete captured display history rather than replacing the
+            // streamed results with a pre-activation transcript snapshot.
+            workspace.merge_live_resume_display(&mut replayed).await?;
+        }
+        let messages = client::adapter::lowering::lower_replayed_transcript(&replayed);
+
+        // The device-level reasoning default is the counterpart to
+        // Electron's persisted model/permission preferences. Apply it
+        // after transcript hydration so an old assistant row cannot
+        // silently replace the user's last selected effort on restart.
+        let _ = self.restore_persisted_reasoning_selection().await;
+
+        let presence_warning = self
+            .refresh_process_session_presence(
+                previous_session_id,
+                lingxi_core::types::SessionId::from_uuid(uuid),
+            )
+            .await;
+
+        self.emit_resumed_session(uuid, messages, restored_usage, presence_warning, sink)
+            .await;
+        Ok(())
+    }
+
+    async fn emit_resumed_session(
+        &self,
+        uuid: uuid::Uuid,
+        messages: Vec<client::protocol::message::MessageDto>,
+        restored_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
+        presence_warning: Option<String>,
+        sink: Arc<dyn ClientEventSink>,
+    ) {
+        sink.emit(ClientEvent::SessionResumed {
+            session_id: uuid.to_string(),
+            mode: SessionModeDto::Code,
+            messages,
+        })
+        .await;
+        if let Some(usage) = restored_usage {
+            sink.emit(client::adapter::lowering::lower_current_usage(usage))
+                .await;
+        }
+        if let Some(message) = presence_warning {
+            sink.emit(ClientEvent::SystemNotice {
+                message: message.into(),
+                is_error: false,
+            })
+            .await;
+        }
+        // resume_session restores the model/effort held by this exact
+        // transcript. Publish that authoritative session state after
+        // activation so clients do not keep showing the model selected
+        // in whichever session happened to be open previously.
+        let status = self.handle.get_status_snapshot().await;
+        sink.emit(ClientEvent::StatusSnapshot {
+            snapshot: lower_status_snapshot(&status),
+        })
+        .await;
+        if !status.model.is_empty() {
+            sink.emit(ClientEvent::ModelChanged {
+                model: lingxi_core::host::qualified_model_ref(
+                    &status.model,
+                    status.model_profile.as_deref(),
+                ),
+                model_source: status.model_source.as_ref().and_then(|source| {
+                    client::protocol::text::ClientTextDto::from_projection(source).ok()
+                }),
+            })
+            .await;
+        }
+        self.emit_controls_snapshot(&*sink).await;
+    }
+
     async fn dispatch_desktop_plan(
         &self,
         args: &Utf16JsonProjection,
@@ -669,6 +915,7 @@ impl EngineCommandRouter {
         slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
     ) -> Self {
         Self {
+            workspace_commands: None,
             cron_firer: None,
             session_cron: None,
             handle,
@@ -697,6 +944,14 @@ impl EngineCommandRouter {
             file_changed_watcher: None,
             turn_active: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn with_workspace_commands(
+        mut self,
+        commands: Arc<crate::workspace_commands::WorkspaceCommands>,
+    ) -> Self {
+        self.workspace_commands = Some(commands);
+        self
     }
 
     /// Attach the runtime's shared credential manager so Desktop credential
@@ -903,6 +1158,103 @@ impl EngineCommandRouter {
 
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
+    async fn resume_selected_session(
+        &self,
+        request: Utf16JsonProjection,
+        sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        if self.is_turn_active() {
+            return Err("cannot resume while a turn is in flight".into());
+        }
+        let id = request
+            .string_at("/session_id")
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            .ok_or("resume_selected_session requires a valid session_id")?;
+        if self.handle.current_session_id().await.as_uuid() != id {
+            return Err("resume_selected_session must retain the active session UUID".into());
+        }
+        let path = request
+            .string_at("/transcript_path")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or("resume_selected_session requires an absolute transcript_path")?;
+        if let Some(workspace) = &self.workspace_commands {
+            if let Some(proof) = workspace.complete_cold_resume(id, &path).await? {
+                self.emit_resumed_session(id, proof.messages, proof.current_usage, None, sink)
+                    .await;
+                return Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
+                    .map_err(|error| error.to_string());
+            }
+        }
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or("resume: persisted session store is unavailable")?;
+        let replayed =
+            orchestrator::resume::replay_session_state_from_path(&path, id, store.fs.clone())
+                .await
+                .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
+        self.resume_replayed_session(id, replayed, sink).await?;
+        Utf16JsonProjection::parse(r#"{"status":"ok"}"#).map_err(|error| error.to_string())
+    }
+
+    async fn add_working_directory(
+        &self,
+        request: Utf16JsonProjection,
+        sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        let before = self.capture_slash_authority().await;
+        let commands = self
+            .workspace_commands
+            .as_ref()
+            .ok_or("add_directory is unavailable")?;
+        let result = commands.add_working_directory(request).await;
+        let (display, is_error) = match &result {
+            Ok((_, display)) => (display.clone(), false),
+            Err(display) => (display.clone(), true),
+        };
+        sink.emit(ClientEvent::SlashCommandResult {
+            turn_id: None,
+            display: ClientTextDto::from_projection(&display)
+                .expect("directory command display is text"),
+            is_error,
+        })
+        .await;
+        let after = self.capture_slash_authority().await;
+        self.emit_slash_authority_changes(&before, &after, sink.as_ref())
+            .await;
+        result.map(|(state, _)| state).map_err(|display| {
+            display
+                .string_at("")
+                .unwrap_or("The directory command failed.")
+                .to_owned()
+        })
+    }
+    async fn workspace_state(&self) -> Result<Utf16JsonProjection, String> {
+        self.workspace_commands
+            .as_ref()
+            .ok_or("workspace state is unavailable")?
+            .state()
+            .await
+    }
+    async fn set_working_directory(
+        &self,
+        request: Utf16JsonProjection,
+        sink: Arc<dyn ClientEventSink>,
+    ) -> Result<Utf16JsonProjection, String> {
+        let commands = self
+            .workspace_commands
+            .as_ref()
+            .ok_or("set_cwd is unavailable")?;
+        let result = commands.set_working_directory(request).await?;
+        if result.string_at("/status") == Some("ok") {
+            sink.emit(ClientEvent::StatusSnapshot {
+                snapshot: lower_status_snapshot(&self.handle.get_status_snapshot().await),
+            })
+            .await;
+        }
+        Ok(result)
+    }
     fn realtime_audio_supported(&self) -> bool {
         self.realtime_audio.is_some()
     }
@@ -965,6 +1317,8 @@ impl CommandRouter for EngineCommandRouter {
         cancellation: CancellationToken,
     ) -> Option<SlashDispatchOutcome> {
         let before = self.capture_slash_authority().await;
+        let is_cd = parse_slash_command(&raw)
+            .is_some_and(|parsed| source_text_eq_ascii(&parsed.name, "cd"));
         let result = match self.dispatch_desktop_slash(&raw).await {
             Some(result) => result,
             None => self.dispatcher.as_ref()?.dispatch(raw, cancellation).await,
@@ -972,9 +1326,25 @@ impl CommandRouter for EngineCommandRouter {
         // Display-only feedback belongs to the client's command surface. Persist
         // actual task turns and command effects through their existing paths.
         let after = self.capture_slash_authority().await;
+        if before.session_id != after.session_id {
+            if let Some(workspace) = &self.workspace_commands {
+                workspace.session_facts().reset(false);
+            }
+        }
+        let mut authority_events = Self::slash_authority_change_events(&before, &after);
+        if is_cd
+            && matches!(
+                &result,
+                lingxi_core::host::SlashDispatchResult::Handled { .. }
+            )
+        {
+            authority_events.push(ClientEvent::StatusSnapshot {
+                snapshot: lower_status_snapshot(&self.handle.get_status_snapshot().await),
+            });
+        }
         Some(SlashDispatchOutcome {
             result,
-            authority_events: Self::slash_authority_change_events(&before, &after),
+            authority_events,
         })
     }
 
@@ -2021,6 +2391,9 @@ impl CommandRouter for EngineCommandRouter {
                 let previous_session_id = self.handle.current_session_id().await;
                 match self.handle.clear_session().await {
                     Ok(()) => {
+                        if let Some(workspace) = &self.workspace_commands {
+                            workspace.session_facts().reset(false);
+                        }
                         let current_session_id = self.handle.current_session_id().await;
                         let presence_warning = self
                             .refresh_process_session_presence(
@@ -2095,6 +2468,9 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                     return;
                 }
+                if let Some(workspace) = &self.workspace_commands {
+                    workspace.session_facts().reset(false);
+                }
                 let current_session_id = self.handle.current_session_id().await;
                 let presence_warning = self
                     .refresh_process_session_presence(previous_session_id, current_session_id)
@@ -2159,7 +2535,7 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                     return;
                 };
-                let cwd = cwd.unwrap_or_else(|| store.session_cwd.clone());
+                let cwd = cwd.unwrap_or_else(|| store.current_cwd());
                 let replayed = match orchestrator::replay_session_state(
                     &store.lingxi_home,
                     &cwd,
@@ -2180,129 +2556,16 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 };
 
-                // The engine resumes from the compacted history below, while
-                // the renderer receives the complete main-thread transcript so
-                // pre-compaction messages remain visible without re-entering
-                // the LLM context.
-                let messages = client::adapter::lowering::lower_replayed_transcript(&replayed);
-                let resume_plan_mode = replayed.state.plan_mode;
-                let previous_session_id = self.handle.current_session_id().await;
-                let previous_permission_mode = self
-                    .handle
-                    .permission_mode()
-                    .await
-                    .unwrap_or_else(|| "default".to_string());
-                let previous_plan_mode = self.handle.plan_mode().await;
-                let runtime_snapshot = replayed.handle_runtime_snapshot();
-                let restored_usage = runtime_snapshot.current_usage;
-                if resume_plan_mode {
-                    if let Err(error) = self.handle.set_permission_mode("plan").await {
-                        sink.emit(ClientEvent::Error {
-                            kind: ErrorKindDto::Internal,
-                            message: format!("resume plan permission mode failed: {error}").into(),
-                        })
-                        .await;
-                        return;
-                    }
-                    if let Err(error) = self.handle.set_plan_mode(true).await {
-                        let _ = self
-                            .handle
-                            .set_permission_mode(&previous_permission_mode)
-                            .await;
-                        sink.emit(ClientEvent::Error {
-                            kind: ErrorKindDto::Internal,
-                            message: format!("resume plan mode failed: {error}").into(),
-                        })
-                        .await;
-                        return;
-                    }
-                }
-                if let Err(error) = self
-                    .handle
-                    .resume_session(
-                        lingxi_core::types::SessionId::from_uuid(uuid),
-                        replayed.state.history,
-                        replayed.last_message_uuid.map(|value| value.to_string()),
-                        replayed.state.active_goal.clone().map(|goal| {
-                            lingxi_core::host::ActiveGoalSnapshot {
-                                condition: goal.condition,
-                                set_at: goal.set_at,
-                                last_reason: goal.last_reason,
-                                iterations: goal.iterations,
-                                tokens_at_start: goal.tokens_at_start,
-                            }
-                        }),
-                        runtime_snapshot,
-                    )
+                if let Err(message) = self
+                    .resume_replayed_session(uuid, replayed, sink.clone())
                     .await
                 {
-                    if resume_plan_mode {
-                        let _ = self.handle.set_plan_mode(previous_plan_mode).await;
-                        let _ = self
-                            .handle
-                            .set_permission_mode(&previous_permission_mode)
-                            .await;
-                    }
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
-                        message: format!("resume_session failed: {error}").into(),
-                    })
-                    .await;
-                    return;
-                }
-
-                // The device-level reasoning default is the counterpart to
-                // Electron's persisted model/permission preferences. Apply it
-                // after transcript hydration so an old assistant row cannot
-                // silently replace the user's last selected effort on restart.
-                let _ = self.restore_persisted_reasoning_selection().await;
-
-                let presence_warning = self
-                    .refresh_process_session_presence(
-                        previous_session_id,
-                        lingxi_core::types::SessionId::from_uuid(uuid),
-                    )
-                    .await;
-
-                sink.emit(ClientEvent::SessionResumed {
-                    session_id: uuid.to_string(),
-                    mode: SessionModeDto::Code,
-                    messages,
-                })
-                .await;
-                if let Some(usage) = restored_usage {
-                    sink.emit(client::adapter::lowering::lower_current_usage(usage))
-                        .await;
-                }
-                if let Some(message) = presence_warning {
-                    sink.emit(ClientEvent::SystemNotice {
                         message: message.into(),
-                        is_error: false,
                     })
                     .await;
                 }
-                // resume_session restores the model/effort held by this exact
-                // transcript. Publish that authoritative session state after
-                // activation so clients do not keep showing the model selected
-                // in whichever session happened to be open previously.
-                let status = self.handle.get_status_snapshot().await;
-                sink.emit(ClientEvent::StatusSnapshot {
-                    snapshot: lower_status_snapshot(&status),
-                })
-                .await;
-                if !status.model.is_empty() {
-                    sink.emit(ClientEvent::ModelChanged {
-                        model: lingxi_core::host::qualified_model_ref(
-                            &status.model,
-                            status.model_profile.as_deref(),
-                        ),
-                        model_source: status.model_source.as_ref().and_then(|source| {
-                            client::protocol::text::ClientTextDto::from_projection(source).ok()
-                        }),
-                    })
-                    .await;
-                }
-                self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::RequestExit => {
                 self.handle.request_exit().await;
@@ -2487,7 +2750,8 @@ pub(crate) fn requires_idle_turn_for_slash(
     // case-mismatched spellings keep their ordinary dispatch behavior.
     command.source == CommandSource::Builtin
         && (source_text_eq_ascii(&command.name, "clear")
-            || source_text_eq_ascii(&command.name, "compact"))
+            || source_text_eq_ascii(&command.name, "compact")
+            || source_text_eq_ascii(&command.name, "cd"))
 }
 
 /// Serve the access token of the Codex session the desktop sent. Returns the

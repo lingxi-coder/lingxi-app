@@ -54,17 +54,21 @@ export const DESKTOP_COMMANDS: readonly DesktopCommand[] = [
     name: 'add-dir',
     args: 'optional',
     async run(args, ctx) {
-      if (!args) return ctx.openSettingsPage('permissions');
-      await ctx.addWorkspaceDirectory(args);
-      ctx.emit(`Added working directory: ${args}`);
+      await ctx.updateSessionWorkspace({ action: 'add-dir', path: args || undefined });
     },
   },
   {
     name: 'cd',
     args: 'optional',
     async run(args, ctx) {
-      if (!args) return ctx.chooseProject();
-      await ctx.activateProject(args);
+      await ctx.updateSessionWorkspace({ action: 'cd', path: args || undefined });
+    },
+  },
+  {
+    name: 'resume',
+    args: 'optional',
+    run(args, ctx) {
+      ctx.resumeSession(args || undefined);
     },
   },
   {
@@ -170,7 +174,7 @@ export const DESKTOP_ENGINE_BUILTIN_COMMANDS = [
   'commit-push-pr', 'connect', 'context', 'diff', 'doctor', 'export', 'files',
   'fork', 'fusion', 'goal', 'hooks', 'ide', 'init', 'init-verifiers', 'insights',
   'keybindings', 'mcp', 'memory', 'output-style', 'plan', 'powerup', 'recap',
-  'release-notes', 'reload-skills', 'rename', 'resume', 'security-review', 'skill-doctor',
+  'release-notes', 'reload-skills', 'rename', 'security-review', 'skill-doctor',
   'skills', 'status',
   'stickers', 'stop', 'subtask', 'team-onboarding', 'usage', 'workflows', 'worktree',
 ] as const;

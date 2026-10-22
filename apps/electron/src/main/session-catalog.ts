@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
 import { resolveServerBin } from './bridgeDiscovery.js';
-import type { BridgeManagerOptions } from './bridgeTypes.js';
+import type { BridgeManagerOptions, WorkspaceLaunchSettings } from './bridgeTypes.js';
 import { isSessionId } from './sessionIdentity.js';
+import { sessionCatalogScope, type SessionCatalogScope, type SessionOpenSelection } from '../shared/sessionWorkspace.js';
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SESSIONS = 200;
@@ -30,6 +32,9 @@ export interface ProjectSessionCatalogRow extends SessionRowDto {
   empty_session: boolean;
   /** Private launch hint reconstructed from the session transcript. */
   resume_model?: string;
+  /** Authoritative source cwd; used only by the host when opening this UUID. */
+  workspace_path?: string;
+  resume_title?: string;
 }
 
 interface CatalogCacheEntry {
@@ -47,6 +52,8 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
   const row = value as Record<string, unknown>;
   const messageCount = row['message_count'];
   const resumeModel = row['resume_model'];
+  const workspace = row['workspace_path'];
+  const resumeTitle = row['resume_title'];
   if (
     !isSessionId(row['uuid'])
     || typeof row['title'] !== 'string'
@@ -55,6 +62,9 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     || !Number.isSafeInteger(messageCount)
     || typeof row['path'] !== 'string'
     || typeof row['empty_session'] !== 'boolean'
+    || (resumeTitle !== undefined && (typeof resumeTitle !== 'string' || resumeTitle.includes('\0')))
+    || (workspace !== undefined && (typeof workspace !== 'string' || !isAbsolute(workspace)
+      || workspace.length > 32_768 || workspace.includes('\0')))
     || (resumeModel !== undefined && (
       typeof resumeModel !== 'string'
       || resumeModel.length === 0
@@ -71,6 +81,8 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     path: row['path'],
     empty_session: row['empty_session'],
     ...(typeof resumeModel === 'string' ? { resume_model: resumeModel } : {}),
+    ...(typeof workspace === 'string' ? { workspace_path: workspace } : {}),
+    ...(typeof resumeTitle === 'string' ? { resume_title: resumeTitle } : {}),
   };
 }
 
@@ -99,15 +111,34 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private generation = 0;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
 
-  async list(projectPath: string): Promise<ProjectSessionCatalogResult> {
-    const result = await this.load(projectPath);
+  /** Read settings with the engine's merge rules before starting its process. */
+  async workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {
+    const canonical = realpathSync.native(projectPath);
+    const output = await this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json']);
+    const input = JSON.parse(boundedOutput(output)) as { version?: unknown; environment?: unknown; config_home?: unknown; global_config_path?: unknown };
+    if (input?.version !== 1 || !input.environment || typeof input.environment !== 'object' || Array.isArray(input.environment)) {
+      throw new Error('invalid workspace environment response');
+    }
+    const entries = Object.entries(input.environment);
+    if (entries.length > 4096 || entries.some(([key, value]) => !key || /[=\0]/.test(key)
+      || typeof value !== 'string' || value.includes('\0'))) throw new Error('invalid workspace environment entry');
+    if (typeof input.config_home !== 'string' || !isAbsolute(input.config_home) || input.config_home.includes('\0')
+      || (input.global_config_path !== null && input.global_config_path !== undefined && (typeof input.global_config_path !== 'string'
+        || !isAbsolute(input.global_config_path) || input.global_config_path.includes('\0')))) throw new Error('invalid workspace configuration owner');
+    return { environment: Object.fromEntries(entries) as Record<string, string>, configHome: input.config_home,
+      ...(typeof input.global_config_path === 'string' ? { globalConfigPath: input.global_config_path } : {}) };
+  }
+
+  async list(projectPath: string, scope: SessionCatalogScope = 'current'): Promise<ProjectSessionCatalogResult> {
+    const result = await this.load(projectPath, sessionCatalogScope(scope));
     return {
       // Never hand callers the cached array itself: restore/archive code filters
       // its local result and must not mutate the shared project snapshot.
-      sessions: result.sessions.slice(0, MAX_SESSIONS).map((session) => ({ ...session })),
+      sessions: result.sessions.slice(0, scope === 'current' ? MAX_SESSIONS : undefined).map((session) => ({ ...session })),
     };
   }
 
@@ -122,47 +153,64 @@ export class ProjectSessionCatalog {
   async find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
     const canonical = realpathSync.native(projectPath);
-    const cached = this.cache.get(canonical);
+    const cached = this.cache.get(`${canonical}\0current`);
     // Every session open waits on this lookup. Without a fresh catalog, ask
     // for this one row: the full catalog parses every transcript in the
     // Project, most of a second once one of them is tens of megabytes. A
     // runtime that predates the narrowed mode ignores the filter and returns
     // the full catalog, which the search below handles the same way.
-    const result = cached && cached.expiresAt > Date.now()
-      ? cached.result
-      : await this.loadSession(canonical, sessionId);
+    const match = cached && cached.expiresAt > Date.now()
+      ? cached.result.sessions.find((candidate) => candidate.uuid === sessionId) : undefined;
+    if (match) return { ...match };
+    const result = await this.loadSession(canonical, sessionId);
     const session = result.sessions.find((candidate) => candidate.uuid === sessionId);
     return session ? { ...session } : undefined;
   }
 
-  /** Invalidate after a durable transcript/metadata mutation. */
-  invalidate(projectPath?: string): void {
-    if (!projectPath) {
-      this.cache.clear();
-      return;
+  /** A picker selection must retain its displayed scope and exact file. */
+  async select(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> {
+    if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    const canonical = realpathSync.native(projectPath);
+    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope));
+    const row = result.sessions.find((candidate) => candidate.uuid === sessionId);
+    if (row && selection.transcriptPath !== undefined && row.path !== selection.transcriptPath) {
+      throw new Error('This session selection has changed. Refresh the session list and try again.');
     }
-    try { this.cache.delete(realpathSync.native(projectPath)); } catch { this.cache.delete(projectPath); }
+    return row ? { ...row } : undefined;
   }
 
-  private load(projectPath: string): Promise<ProjectSessionCatalogResult> {
+  /** Invalidate after a durable transcript/metadata mutation. */
+  invalidate(projectPath?: string): void {
+    this.generation++;
+    // An alias may refer to the mutated transcript, so all discovery scopes
+    // expire together. Pending readers may finish, but cannot repopulate them.
+    this.cache.clear();
+    this.pending.clear();
+    this.pendingSessions.clear();
+    void projectPath;
+  }
+
+  private load(projectPath: string, scope: SessionCatalogScope): Promise<ProjectSessionCatalogResult> {
     const canonical = realpathSync.native(projectPath);
-    const cached = this.cache.get(canonical);
+    const key = `${canonical}\0${scope}`;
+    const generation = this.generation;
+    const cached = this.cache.get(key);
     if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.result);
-    if (cached) this.cache.delete(canonical);
-    const existing = this.pending.get(canonical);
+    if (cached) this.cache.delete(key);
+    const existing = this.pending.get(key);
     if (existing) return existing;
-    const operation = this.run(canonical)
+    const operation = this.run(canonical, undefined, scope)
       .then((result) => {
-        this.cache.set(canonical, {
+        if (this.generation === generation) this.cache.set(key, {
           result,
           expiresAt: Date.now() + (this.options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS),
         });
         return result;
       })
       .finally(() => {
-        if (this.pending.get(canonical) === operation) this.pending.delete(canonical);
+        if (this.pending.get(key) === operation) this.pending.delete(key);
       });
-    this.pending.set(canonical, operation);
+    this.pending.set(key, operation);
     return operation;
   }
 
@@ -177,21 +225,26 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private run(canonical: string, sessionId?: string): Promise<ProjectSessionCatalogResult> {
+  private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogResult> {
     const args = buildBridgeArguments({
       workspace: canonical,
       bridgeDir: '',
       listSessionsJson: true,
+      sessionScope: scope,
       ...(sessionId ? { sessionId } : {}),
       hasApiKey: false,
       trusted: false,
     });
+    return this.runOutput(canonical, args).then((output) => parseCatalog(output));
+  }
+
+  private runOutput(canonical: string, args: string[]): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath,
     } as Omit<BridgeManagerOptions, 'launchConfig'>);
-    return new Promise<ProjectSessionCatalogResult>((resolve, reject) => {
+    return new Promise<string>((resolve, reject) => {
       const child = (this.options.spawnProcess ?? spawn)(bin, args, {
         cwd: canonical,
         env: buildBridgeEnvironment(process.env),
@@ -260,7 +313,7 @@ export class ProjectSessionCatalog {
           return;
         }
         try {
-          resolve(parseCatalog(Buffer.concat(stdout, stdoutBytes).toString('utf8')));
+          resolve(Buffer.concat(stdout, stdoutBytes).toString('utf8'));
         } catch (error) {
           reject(error instanceof Error ? error : new Error(String(error)));
         }

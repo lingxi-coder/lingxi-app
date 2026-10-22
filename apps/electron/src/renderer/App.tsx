@@ -46,6 +46,16 @@ import { GitWorkspaceProvider } from './components/GitReview';
 import './components/TranscriptAgents.css';
 import './components/TerminalPanel.css';
 import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
+import { restoreSessionPickerFocus, SessionPicker } from './components/SessionPicker';
+import './components/SessionPicker.css';
+import { SESSION_PICKER_EVENT } from '../shared/sessionWorkspace';
+
+interface SessionPickerRequest {
+  id: number;
+  projectPath?: string;
+  query: string;
+  opener: HTMLElement | null;
+}
 
 export function App() {
   const [messageTarget, setMessageTarget] = useState<string | null>(null);
@@ -61,11 +71,16 @@ export function App() {
   const [page, setPage] = useState<'chat' | 'scheduled' | 'apps'>('chat');
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
+  const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);
+  const sessionPickerRequest = useRef<SessionPickerRequest | null>(null);
+  const sessionPickerSequence = useRef(0);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
+  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
+    if (sessionNavigationBlocked()) return;
     const nonce = ++localAppNavigation.current;
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
@@ -87,7 +102,7 @@ export function App() {
     localAppNavigationQueue.current = localAppNavigationQueue.current.then(navigate, navigate).catch(error => {
       if (localAppNavigation.current === nonce) setLocalAppNavigationError(error instanceof Error ? error.message : String(error));
     });
-  }, []);
+  }, [sessionNavigationBlocked]);
   const consumeLocalAppDraft = useCallback((nonce: number) => {
     setLocalAppDraft(current => current?.nonce === nonce ? undefined : current);
   }, []);
@@ -96,6 +111,11 @@ export function App() {
     setLocalAppDraft(undefined);
     setLocalAppNavigationError('');
   }, []);
+  const openPage = useCallback((next: 'chat' | 'scheduled' | 'apps') => {
+    if (sessionNavigationBlocked()) return;
+    cancelLocalAppNavigation();
+    setPage(next);
+  }, [cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => () => { localAppNavigation.current++; }, []);
   const [visibleModToast, setVisibleModToast] = useState<typeof bridge.conversation.modToast>(null);
   useEffect(() => {
@@ -106,6 +126,7 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [bridge.conversation.modToast]);
   const toggleActivityView = () => {
+    if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     setPage('chat');
     setActivityView(!activityView);
@@ -113,7 +134,8 @@ export function App() {
   };
   useEffect(() => {
     const toggle = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.altKey && !event.shiftKey && event.key.toLowerCase() === 'u' && !settingsRoute) {
+      if (sessionNavigationBlocked()) return;
+      if ((event.metaKey || event.ctrlKey) && event.altKey && !event.shiftKey && event.key.toLowerCase() === 'u' && !settingsRoute && !sessionPicker) {
         event.preventDefault();
         cancelLocalAppNavigation();
         setPage('chat');
@@ -123,9 +145,42 @@ export function App() {
     };
     window.addEventListener('keydown', toggle);
     return () => window.removeEventListener('keydown', toggle);
-  }, [settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation]);
+  }, [settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onLocalAppEdit?.(openLocalAppChat), [openLocalAppChat]);
   const workspace = bridge.bootstrap?.workspace;
+  const sessionPickerProject = bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path ?? bridge.bootstrap?.settings.projects[0];
+  const closeSessionPicker = useCallback(() => {
+    const request = sessionPickerRequest.current;
+    sessionPickerRequest.current = null;
+    setSessionPicker(null);
+    window.requestAnimationFrame(() => {
+      if (sessionPickerRequest.current) return;
+      restoreSessionPickerFocus(request?.opener ?? null, document.querySelector<HTMLElement>('.beta-rich-prompt'));
+    });
+  }, []);
+  const openedPickerSession = useCallback(() => {
+    cancelLocalAppNavigation();
+    setPage('chat');
+    setActivityView(false);
+    setSettingsRoute(null);
+  }, [cancelLocalAppNavigation]);
+  useEffect(() => {
+    const openPicker = (event: Event) => {
+      if (sessionNavigationBlocked()) return;
+      cancelLocalAppNavigation();
+      const detail = (event as CustomEvent<{ query?: unknown }>).detail;
+      const request: SessionPickerRequest = {
+        id: ++sessionPickerSequence.current,
+        projectPath: sessionPickerProject,
+        query: typeof detail?.query === 'string' ? detail.query.trim() : '',
+        opener: sessionPickerRequest.current?.opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null),
+      };
+      sessionPickerRequest.current = request;
+      setSessionPicker(request);
+    };
+    window.addEventListener(SESSION_PICKER_EVENT, openPicker);
+    return () => window.removeEventListener(SESSION_PICKER_EVENT, openPicker);
+  }, [sessionPickerProject, sessionNavigationBlocked, cancelLocalAppNavigation]);
   const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
   const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
   // Stage's agent-anchor cache compares this prop BY REFERENCE, so an inline
@@ -168,11 +223,13 @@ export function App() {
     void bridge.setThemePreference(value).catch(() => undefined);
   };
   const openSettings = useCallback((route?: Pick<SettingsRoute, 'pageId' | 'providerId' | 'pendingModelReference' | 'linkRequest'>) => {
+    if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSettingsRoute({ ...route, restoreFocus: () => opener?.focus() });
-  }, [cancelLocalAppNavigation]);
+  }, [cancelLocalAppNavigation, sessionNavigationBlocked]);
   useEffect(() => window.lingxi?.onApplicationMenu?.((action) => {
+    if (sessionPicker || sessionNavigationBlocked()) return;
     if (action === 'settings') {
       // Preserve the original focus restoration target when already open.
       if (!settingsRoute) openSettings();
@@ -182,20 +239,24 @@ export function App() {
       setActivityView(!activityView);
       bridge.setRuntimeCenterOverviewOpen(!activityView);
     }
-  }), [openSettings, settingsRoute, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation]);
+  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
-  useEffect(() => { linkSurfacePending.current = Boolean(settingsRoute || terminal.hasCommandReview); }, [settingsRoute, terminal.hasCommandReview]);
+  useEffect(() => { linkSurfacePending.current = Boolean(settingsRoute || sessionPicker || terminal.hasCommandReview); }, [settingsRoute, sessionPicker, terminal.hasCommandReview]);
   const linkHandler = useRef<() => void>(() => {});
   linkHandler.current = () => {
     const api = window.lingxi?.deepLinks;
-    if (!api || !bridge.bootstrap || bridge.sessionLoading || settingsRoute || terminal.hasCommandReview || linkSurfacePending.current || linkBusy.current) return;
+    if (!api || !bridge.bootstrap || bridge.sessionLoading || settingsRoute || sessionPicker || terminal.hasCommandReview || linkSurfacePending.current || linkBusy.current) return;
     linkBusy.current = true;
     let delivered = false;
     void (async () => {
       const delivery = await api.next();
       if (!delivery) return;
+      if (sessionNavigationBlocked()) {
+        await api.acknowledge(delivery.id, 'Wait for the session to finish opening before navigating.');
+        return;
+      }
       cancelLocalAppNavigation();
       delivered = true;
       let error: string | undefined;
@@ -268,7 +329,7 @@ export function App() {
     const unsubscribe = window.lingxi?.deepLinks?.onAvailable(() => linkHandler.current());
     linkHandler.current();
     return unsubscribe;
-  }, [bridge.bootstrap, bridge.sessionLoading, settingsRoute, terminal.hasCommandReview]);
+  }, [bridge.bootstrap, bridge.sessionLoading, settingsRoute, sessionPicker, terminal.hasCommandReview]);
   useEffect(() => {
     if (!messageRequest || bridge.sessionLoading) return;
     if (bridge.activeSession?.sessionId !== messageRequest.sessionId || bridge.activeSession?.projectPath !== messageRequest.projectPath) {
@@ -292,7 +353,9 @@ export function App() {
     : bridge.activeSession
       ? 'This session has no messages yet. Ask LingXi to inspect the project.'
       : 'Create a session and ask LingXi to inspect, explain, or change this project.';
-  const askQuestion = bridge.sessionLoading ? null : bridge.pendingAskUserQuestion;
+  const askQuestion = bridge.pendingAskUserQuestion;
+  const sessionPickerSuspended = Boolean(sessionPicker && bridge.sessionLoading
+    && (bridge.pendingPermission || bridge.pendingAskUserQuestion || bridge.pendingComputerAccess));
 
   return (
     <Theme.Provider value={palette}>
@@ -303,16 +366,16 @@ export function App() {
         data-screen-label="LingXi Code Desktop Beta"
         style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border } as CSSProperties}
       >
-        <SettingsBackground active={settingsRoute !== null}>
+        <SettingsBackground active={settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
           <BetaSidebar
             bridge={bridge}
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
             apps={page === 'apps'}
-            onOpenApps={() => { cancelLocalAppNavigation(); setPage('apps'); }}
+            onOpenApps={() => openPage('apps')}
             scheduled={page === 'scheduled'}
-            onOpenScheduled={() => { cancelLocalAppNavigation(); setPage('scheduled'); }}
-            onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); }}
+            onOpenScheduled={() => openPage('scheduled')}
+            onOpenChat={() => openPage('chat')}
             onOpenSettings={() => openSettings()}
             topbar={
               <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
@@ -337,7 +400,7 @@ export function App() {
           {localAppNavigationError && <div role="alert" className="local-app-error">{localAppNavigationError}</div>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps visible={page === 'apps'} onCreate={() => openLocalAppChat()} /></div>
           <div style={{ display: page === 'scheduled' ? 'contents' : 'none' }}>
-          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); }} />
+          <ScheduledTasks initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => openPage('chat')} />
           </div>
           <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
           <ErrorBanner bridge={bridge} />
@@ -369,7 +432,7 @@ export function App() {
                   onVisualizationFollowup={bridge.offerVisualizationFollowup}
                 />
                 <PermissionPrompt
-                  request={bridge.sessionLoading ? null : bridge.pendingPermission}
+                  request={bridge.pendingPermission}
                   onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
                   onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
                 />
@@ -411,7 +474,9 @@ export function App() {
                   }}
                   onOpenSettingsPage={(pageId) => openSettings({ pageId })}
                   onSetTheme={changeTheme}
-                  onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
+                  onOpenProviderSettings={(providerId, modelReference, restoreFocus) => {
+                    if (!sessionNavigationBlocked()) setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus });
+                  }}
                 />
                 {!bridge.sessionLoading && visibleModToast && (
                   <div role="status" aria-live="polite" style={{ padding: '7px 16px',
@@ -439,7 +504,7 @@ export function App() {
             />
           )}
           <ComputerAccessPrompt
-            request={bridge.sessionLoading ? null : bridge.pendingComputerAccess}
+            request={bridge.pendingComputerAccess}
             onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
             onDeny={(requestId) => { void bridge.denyComputerAccess(requestId).catch(() => undefined); }}
             onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
@@ -470,6 +535,10 @@ export function App() {
             }}
           />
         )}
+        {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} initialQuery={sessionPicker.query}
+          suspended={sessionPickerSuspended}
+          activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={bridge.openSession}
+          onOpened={openedPickerSession} onClose={closeSessionPicker} />}
       </div>
       </GitWorkspaceProvider>
       </ModUiSurfaceClientIdProvider>

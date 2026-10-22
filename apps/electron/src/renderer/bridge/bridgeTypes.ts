@@ -39,6 +39,7 @@ import type { NotificationPreferences } from '../../shared/notificationPreferenc
 import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
+import type { SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
 import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem.js';
 import type { ConversationState, UsageSnapshot } from './conversation.js';
@@ -174,7 +175,7 @@ export interface UseBridge {
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
   beginLocalCommand(raw: string): Promise<void>;
   /** Push a locally-produced command's own output into the transcript. */
-  emitCommandOutput(output: string, isError: boolean): void;
+  emitCommandOutput(output: string, isError: boolean, sessionId?: string): void;
   cancel(turnId?: number): Promise<void>;
   cancelTrackedPrompt(token: DesktopTurnToken): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
@@ -206,8 +207,9 @@ export interface UseBridge {
   touchSession(projectPath: string, sessionId: string): Promise<void>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string): Promise<boolean>;
-  listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState | undefined>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<boolean>;
+  listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<(ProjectSessionCatalogState & { projectPath: string }) | undefined>;
+  updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;

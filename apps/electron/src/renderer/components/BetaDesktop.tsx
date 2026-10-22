@@ -5,6 +5,7 @@ import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, a
 import { AudioSetupGuide } from './AudioSetupGuide';
 import { ComposerSlashArgumentHint } from './ComposerSlashArgumentHint';
 import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
+import { SESSION_PICKER_EVENT } from '../../shared/sessionWorkspace';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
 import { createPortal } from 'react-dom';
@@ -420,6 +421,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
 }) {
   const t = useT();
   const asideRef = useRef<HTMLElement>(null);
+  const railRef = useRef<HTMLElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const resizingPointerRef = useRef<number | null>(null);
   const settings = bridge.bootstrap?.settings;
   const scheduledWorkspace = bridge.bootstrap?.scheduledWorkspace;
@@ -443,7 +446,16 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const projectsHeadingRef = useRef<HTMLElement>(null);
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
   const matchesSearch = (value: string) => !normalizedSearch || value.toLocaleLowerCase().includes(normalizedSearch);
-  useEffect(() => { asideRef.current?.toggleAttribute('inert', sidebarCollapsed); }, [sidebarCollapsed]);
+  useLayoutEffect(() => {
+    asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.sessionLoading);
+    railRef.current?.toggleAttribute('inert', bridge.sessionLoading);
+    toolbarRef.current?.toggleAttribute('inert', bridge.sessionLoading);
+  }, [bridge.sessionLoading, sidebarCollapsed]);
+  const blockNavigation = useCallback((event: { preventDefault(): void; stopPropagation(): void }) => {
+    if (!bridge.sessionLoading) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, [bridge.sessionLoading]);
   const activeCatalogRows = visibleSession ? bridge.bootstrap?.projectCatalogs?.[visibleSession.projectPath]?.sessions : undefined;
   const activeRowIndex = activeCatalogRows?.findIndex((row) => row.uuid === visibleSession?.sessionId) ?? -1;
   const revealedSessionKey = !scheduled && visibleSession && activeRowIndex >= 0
@@ -609,21 +621,27 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     [pinnedSessions],
   );
   const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
+    if (bridge.sessionLoading) return;
     onOpenChat?.();
     const key = `${projectPath}\0${sessionId}`;
     setOpeningSessionKey(key);
-    void bridge.openSession(projectPath, sessionId)
+    const row = bridge.bootstrap?.projectCatalogs?.[projectPath]?.sessions.find((session) => session.uuid === sessionId);
+    const opening = row
+      ? bridge.openSession(projectPath, sessionId, { scope: 'current', transcriptPath: row.path })
+      : bridge.openSession(projectPath, sessionId);
+    void opening
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
-  }, [bridge.openSession, onOpenChat]);
+  }, [bridge.bootstrap?.projectCatalogs, bridge.openSession, bridge.sessionLoading, onOpenChat]);
   const editProject = useCallback((projectPath: string) => {
+    if (bridge.sessionLoading) return;
     onOpenChat?.();
     setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
     setEditingProject(projectPath);
     void bridge.newSession(projectPath)
       .catch(() => undefined)
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
-  }, [bridge.newSession, onOpenChat]);
+  }, [bridge.newSession, bridge.sessionLoading, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
   const manualSessionOrder = settings?.sidebar?.manualSessionOrder ?? {};
   const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
@@ -753,7 +771,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   return (
     <>
     <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} data-workspace={children ? 'true' : undefined} style={{ '--rail-material': t.sidebarBg, '--sidebar-material': t.sidebarPanelBg, '--desktop-surface': t.stageBg, '--desktop-sidebar-width': `${sidebarWidth}px`, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
-      <div className="drag-region desktop-window-toolbar">
+      <div ref={toolbarRef} className="drag-region desktop-window-toolbar" aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
         <div className="desktop-sidebar-brand">
           <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
           <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>LingXi</strong>
@@ -763,7 +781,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         {topbar}
       </div>
       <div className="desktop-body">
-      <nav className="desktop-nav-rail no-drag" aria-label="Main navigation">
+      <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label="Main navigation" aria-disabled={bridge.sessionLoading || undefined} onClickCapture={blockNavigation}>
         <button type="button" className="desktop-rail-button" data-active={!scheduled && !apps || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" data-active={apps || undefined} aria-label="Apps" title="Apps" onClick={onOpenApps}><AppsGlyph size={21}/></button>
@@ -779,6 +797,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       className="desktop-sidebar"
       ref={asideRef}
       aria-hidden={sidebarCollapsed || undefined}
+      aria-disabled={bridge.sessionLoading || undefined}
+      onClickCapture={blockNavigation}
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
@@ -1847,9 +1867,11 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     openPermissionPicker: () => setPermissionOpen(true),
     openSettings: onOpenSettings,
     openSettingsPage: onOpenSettingsPage,
-    addWorkspaceDirectory: (path) => bridge.updateWorkspaceDirectories('project', [path], []),
-    chooseProject: async () => { await bridge.addProject(); },
-    activateProject: async (path) => { await bridge.activateProject(path); },
+    updateSessionWorkspace: async (operation) => {
+      if (!activeSessionId) throw new Error(`/${operation.action} requires an active session.`);
+      await bridge.updateSessionWorkspace(activeSessionId, operation);
+    },
+    resumeSession: (query) => window.dispatchEvent(new CustomEvent(SESSION_PICKER_EVENT, { detail: { query: query ?? '' } })),
     clearSession: (name) => bridge.clearSession(name),
     forceCompact: (instructions) => bridge.forceCompact(instructions),
     copyLastResponse: async () => {
@@ -1867,9 +1889,9 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       bridge.setRuntimeCenterOverviewOpen(true);
       await bridge.refreshTasks();
     },
-    showHelp: () => bridge.emitCommandOutput(renderDesktopSlashHelp(bridge.desktop.slashCommands), false),
-    emit: (output, isError) => bridge.emitCommandOutput(output, isError === true),
-  }), [bridge, onOpenSettings, onOpenSettingsPage, onSetTheme]);
+    showHelp: () => bridge.emitCommandOutput(renderDesktopSlashHelp(bridge.desktop.slashCommands), false, activeSessionId ?? undefined),
+    emit: (output, isError) => bridge.emitCommandOutput(output, isError === true, activeSessionId ?? undefined),
+  }), [activeSessionId, bridge, onOpenSettings, onOpenSettingsPage, onSetTheme]);
 
   const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
   const argumentHint = useMemo(() => !promptComposing && !hasMentionTokens && !filePicker
@@ -2740,9 +2762,17 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           setImageNotice('桌面本地命令不支持图片附件，请移除图片后重试。');
           return;
         }
+        const submittedSessionId = activeSessionId;
         clearComposer();
-        await bridge.beginLocalCommand(slashCommand);
-        void Promise.resolve(resolved.command.run(resolved.args, commandContext)).catch(() => undefined);
+        try {
+          await bridge.beginLocalCommand(slashCommand);
+          if (submittedSessionId !== draftSessionId.current) return;
+          await resolved.command.run(resolved.args, commandContext);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          if (submittedSessionId) bridge.emitCommandOutput(message, true, submittedSessionId);
+          else setImageNotice(message);
+        }
         return;
       }
       const submittingSessionId = draftSessionId.current;

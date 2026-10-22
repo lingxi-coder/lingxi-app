@@ -39,6 +39,7 @@ import type {
 import type { NotificationPreferences } from '../../shared/notificationPreferences.js';
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
+import type { SessionCatalogScope, SessionOpenSelection, SessionWorkspaceOperation } from '../../shared/sessionWorkspace.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
 import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem.js';
 import {
@@ -516,6 +517,7 @@ export function useBridge(): UseBridge {
   }, [completeTrackedSpeech]);
 
   const beginNavigationOperation = useCallback((): number => {
+    if (sessionLoadingRef.current) throw new Error('Wait for the session to finish opening before navigating.');
     pendingSessionRef.current = null;
     setSessionReady(false);
     sessionLoadingRef.current = false;
@@ -538,20 +540,30 @@ export function useBridge(): UseBridge {
   // `bridge` it closed over is that render's snapshot — so handing back the
   // value is what lets "switch to this project" open the newest session instead
   // of falling through to a stray new one.
-  const listProjectSessions = useCallback(async (projectPath: string): Promise<ProjectSessionCatalogState | undefined> => {
+  const listProjectSessions = useCallback(async (
+    projectPath: string,
+    scope: SessionCatalogScope = 'current',
+  ): Promise<(ProjectSessionCatalogState & { projectPath: string }) | undefined> => {
     if (!host) return undefined;
-    const generation = beginProjectCatalogRequest(catalogRequestGenerations.current, projectPath);
-    const result = await host.listProjectSessions(projectPath);
-    if (!isLatestProjectCatalogRequest(catalogRequestGenerations.current, projectPath, generation)) return undefined;
+    const bootstrapRevision = latestBootstrapRevisionRef.current;
+    const requestKey = `${scope}\0${projectPath}`;
+    const generation = beginProjectCatalogRequest(catalogRequestGenerations.current, requestKey);
+    const result = await host.listProjectSessions(projectPath, scope);
+    // A move, removal or other accepted host snapshot owns its complete
+    // sidebar catalog. An older list must not merge disposed rows back in.
+    if (scope === 'current' && latestBootstrapRevisionRef.current !== bootstrapRevision) return undefined;
+    if (!isLatestProjectCatalogRequest(catalogRequestGenerations.current, requestKey, generation)) return undefined;
     const catalog: ProjectSessionCatalogState = {
       sessions: result.sessions.map((session) => ({ ...session })),
       ...(result.error ? { error: result.error } : {}),
     };
-    setBootstrap((previous) => previous ? {
-      ...previous,
-      projectCatalogs: { ...previous.projectCatalogs, [result.projectPath]: catalog },
-    } : previous);
-    return catalog;
+    if (scope === 'current') {
+      setBootstrap((previous) => previous && latestBootstrapRevisionRef.current === bootstrapRevision ? {
+        ...previous,
+        projectCatalogs: { ...previous.projectCatalogs, [result.projectPath]: catalog },
+      } : previous);
+    }
+    return { ...catalog, projectPath: result.projectPath };
   }, [host]);
 
   const scheduleProjectCatalogRefresh = useCallback((sessionId: string): void => {
@@ -1291,8 +1303,7 @@ export function useBridge(): UseBridge {
     }));
   }, [updateRuntime]);
 
-  const emitCommandOutput = useCallback((output: string, isError: boolean) => {
-    const sessionId = activeSessionIdRef.current;
+  const emitCommandOutput = useCallback((output: string, isError: boolean, sessionId = activeSessionIdRef.current) => {
     if (!sessionId) return;
     updateRuntime(sessionId, (state) => ({
       ...state,
@@ -1501,6 +1512,31 @@ export function useBridge(): UseBridge {
     }
   }, [beginNavigationOperation, capture, host, isCurrentNavigationOperation, patchBootstrap]);
 
+  const updateSessionWorkspace = useCallback(async (
+    sessionId: string,
+    operation: SessionWorkspaceOperation,
+  ): Promise<BootstrapState | null> => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    if (!sessionId || !activeSessionIdRef.current) throw new Error('An active session is required to change its workspace.');
+    if (activeSessionIdRef.current !== sessionId) throw new Error('The active session changed before its workspace could be updated.');
+    if (sessionLoadingRef.current) throw new Error('Wait for the session to finish opening before changing its workspace.');
+    // A canceled native picker must preserve the current UI. Reserve the
+    // navigation generation without clearing readiness or the active session.
+    const operationId = nextOperationId(navigationOperationRef.current);
+    navigationOperationRef.current = operationId;
+    try {
+      const snapshot = await host.updateSessionWorkspace(sessionId, operation);
+      if (snapshot && isCurrentNavigationOperation(operationId) && activeSessionIdRef.current === sessionId) {
+        applyBootstrap(snapshot);
+        setError(null);
+      }
+      return snapshot;
+    } catch (cause) {
+      if (isCurrentNavigationOperation(operationId) && activeSessionIdRef.current === sessionId) capture(cause);
+      throw cause;
+    }
+  }, [applyBootstrap, capture, host, isCurrentNavigationOperation]);
+
   const removeProject = useCallback(async (path: string) => {
     if (!host) return;
     const operationId = beginNavigationOperation();
@@ -1571,7 +1607,7 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host]);
 
-  const openSession = useCallback(async (projectPath: string, sessionId: string) => {
+  const openSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection) => {
     if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
     const target = { projectPath, sessionId } satisfies SessionRef;
@@ -1581,7 +1617,9 @@ export function useBridge(): UseBridge {
     setPendingSession(target);
     removedRuntimeIds.current.delete(sessionId);
     try {
-      const snapshot = await host.openSession(projectPath, sessionId);
+      const snapshot = selection === undefined
+        ? await host.openSession(projectPath, sessionId)
+        : await host.openSession(projectPath, sessionId, selection);
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
         setSessionReady(false);
@@ -2298,6 +2336,7 @@ export function useBridge(): UseBridge {
     audioFinishListen,
     addProject,
     activateProject,
+    updateSessionWorkspace,
     removeProject,
     updateSidebarPreferences,
     archiveSession,

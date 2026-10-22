@@ -56,7 +56,7 @@ const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
-  private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
   private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly draftSessions = new Map<string, SessionRef>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
@@ -65,6 +65,12 @@ export class SessionRuntimeManager {
   private readonly targetDestroyedHandlers = new Map<WebContents, () => void>();
   private readonly lastUsed = new Map<string, number>();
   private readonly sessionModelHints = new Map<string, string>();
+  private readonly sessionDirectoryGrants = new Map<string, readonly string[]>();
+  private readonly sessionPromptDirectories = new Map<string, readonly string[]>();
+  private readonly sessionSettingsEnvironment = new Map<string, Record<string, string>>();
+  private readonly sessionProjectRoots = new Map<string, string>();
+  private readonly sessionTranscriptPaths = new Map<string, string>();
+  private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string }>();
   private readonly pendingEvictions = new Set<Promise<void>>();
   private readonly maxCachedRuntimes: number;
   private activeSessionId: string | null = null;
@@ -112,6 +118,18 @@ export class SessionRuntimeManager {
     return this.runtimes.get(sessionId);
   }
 
+  setSessionDirectoryGrants(sessionId: string, directories: readonly string[]): void {
+    this.sessionDirectoryGrants.set(sessionId, [...directories]);
+  }
+
+  setSessionProjectRoot(sessionId: string, projectRoot: string): void {
+    this.sessionProjectRoots.set(sessionId, projectRoot);
+  }
+
+  setSessionPromptDirectories(sessionId: string, directories: readonly string[]): void {
+    this.sessionPromptDirectories.set(sessionId, [...directories]);
+  }
+
   private touch(sessionId: string): void {
     if (this.runtimes.has(sessionId)) this.lastUsed.set(sessionId, ++this.accessSequence);
   }
@@ -125,9 +143,7 @@ export class SessionRuntimeManager {
   private runtimeIsPinned(runtime: SessionRuntime): boolean {
     const status = runtime.connectionState.status;
     return runtime.sessionId === this.activeSessionId
-      || runtime.turnActive
-      || runtime.hasActiveAgents
-      || runtime.pendingInteractions > 0
+      || runtime.hasActiveWork
       || runtime.cronOperationPending
       || status === 'spawning'
       || status === 'restarting'
@@ -231,7 +247,7 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -241,29 +257,40 @@ export class SessionRuntimeManager {
     const pending = this.openingSessions.get(ref.sessionId);
     if (pending) {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      if (transcriptPath && pending.transcriptPath !== transcriptPath) throw new Error('another transcript selection is being opened');
       pending.activate ||= activate;
       return pending.promise;
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     if (existing?.connectionState.status === 'connected' && !existing.isStarting) {
+      if (transcriptPath) {
+        this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
+        existing.rememberTranscriptSelection(transcriptPath);
+      }
       if (activate) this.activate(existing);
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty).then((runtime) => {
+    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath).then((runtime) => {
+      if (transcriptPath) this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
       if (this.openingSessions.get(ref.sessionId)?.activate) this.activate(runtime);
       return runtime;
     });
     const trackedPromise = promise.finally(() => {
       if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
     });
-    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, promise: trackedPromise, activate });
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, promise: trackedPromise, activate });
     return trackedPromise;
   }
 
-  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean): Promise<SessionRuntime> {
+  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string): Promise<SessionRuntime> {
     let runtime: SessionRuntime | undefined;
+    const previousTranscriptPath = this.sessionTranscriptPaths.get(ref.sessionId);
     try {
+      if (transcriptPath) {
+        this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
+        existing?.rememberTranscriptSelection(transcriptPath);
+      }
       if (existing) {
         // A disconnected transport does not authorize replacing its living
         // session process, and its old foreground latch cannot gate recovery.
@@ -272,9 +299,14 @@ export class SessionRuntimeManager {
       } else {
         runtime = await this.ensure(ref, true);
       }
-      if (!empty && !runtime.recoveredLiveConnection) await runtime.resumeOwnedSession();
+      if (!empty && !runtime.recoveredLiveConnection) await runtime.resumeOwnedSession(transcriptPath);
       return runtime;
     } catch (error) {
+      if (transcriptPath) {
+        if (previousTranscriptPath) this.sessionTranscriptPaths.set(ref.sessionId, previousTranscriptPath);
+        else this.sessionTranscriptPaths.delete(ref.sessionId);
+        existing?.rememberTranscriptSelection(previousTranscriptPath);
+      }
       if (!existing && runtime) {
         this.runtimes.delete(ref.sessionId);
         this.visualizations.forgetSession(ref.sessionId);
@@ -306,11 +338,12 @@ export class SessionRuntimeManager {
     empty: boolean,
     resumeModel: string | undefined,
     operation: (runtime: SessionRuntime) => Promise<T>,
+    transcriptPath?: string,
   ): Promise<T> {
     assertSessionRef(ref);
     this.backgroundSessionLeases.set(ref.sessionId, (this.backgroundSessionLeases.get(ref.sessionId) ?? 0) + 1);
     try {
-      return await operation(await this.openSession(ref, empty, resumeModel, false));
+      return await operation(await this.openSession(ref, empty, resumeModel, false, transcriptPath));
     } finally {
       const count = (this.backgroundSessionLeases.get(ref.sessionId) ?? 1) - 1;
       if (count) this.backgroundSessionLeases.set(ref.sessionId, count);
@@ -567,6 +600,7 @@ export class SessionRuntimeManager {
       getSavedModel,
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
+      workspaceSettings,
       codexTokens,
       ...base
     } = this.opts;
@@ -579,8 +613,26 @@ export class SessionRuntimeManager {
       } : {}),
       sessionId: ref.sessionId,
       projectPath: ref.projectPath,
+      resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),
       envelopeEvents: true,
-      launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
+      launchConfig: async () => {
+        const config = await launchConfig(ref, this.sessionModelHints.get(ref.sessionId));
+        const initialProjectRoot = this.sessionProjectRoots.get(ref.sessionId) ?? config.initialProjectRoot ?? ref.projectPath;
+        this.sessionProjectRoots.set(ref.sessionId, initialProjectRoot);
+        const settings = await workspaceSettings?.(ref.projectPath);
+        const environment = settings ? {
+          ...this.sessionSettingsEnvironment.get(ref.sessionId),
+          ...settings.environment,
+        } : config.settingsEnvironment;
+        const owner = this.sessionConfigOwners.get(ref.sessionId) ?? (settings ? {
+          configHome: settings.configHome, globalConfigPath: settings.globalConfigPath,
+        } : undefined);
+        if (owner) this.sessionConfigOwners.set(ref.sessionId, owner);
+        if (environment) this.sessionSettingsEnvironment.set(ref.sessionId, { ...environment });
+        return { ...config, ...owner, settingsEnvironment: environment, initialProjectRoot,
+          additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId),
+          promptDirectories: this.sessionPromptDirectories.get(ref.sessionId) };
+      },
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),

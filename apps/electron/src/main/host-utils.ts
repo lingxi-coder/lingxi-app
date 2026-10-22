@@ -159,7 +159,7 @@ function boundedStringArray(value: unknown, maxItems: number): string[] {
   return [...unique];
 }
 
-const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isPermissionModeId(value: unknown): value is PermissionModeId {
   return value === 'default' || value === 'acceptEdits' || value === 'plan'
@@ -397,7 +397,7 @@ export function canonicalWorkspace(input: string): string {
   const absolute = isAbsolute(input) ? normalize(input) : resolve(input);
   const canonical = realpathSync.native(absolute);
   if (!lstatSync(canonical).isDirectory()) throw new Error('workspace path is not a directory');
-  return canonical;
+  return canonical.normalize('NFC');
 }
 
 export function withAddedProject(settings: PersistedSettings, projectPath: string): PersistedSettings {
@@ -636,6 +636,13 @@ export function buildBridgeArguments(config: {
   bridgeDir: string;
   sessionId?: string;
   listSessionsJson?: boolean;
+  sessionTranscriptPath?: string;
+  sessionScope?: 'current' | 'repository' | 'all';
+  additionalDirectories?: readonly string[];
+  promptDirectories?: readonly string[];
+  initialProjectRoot?: string;
+  configHome?: string;
+  globalConfigPath?: string;
   model?: string;
   hasApiKey: boolean;
   hasCredentialStdin?: boolean;
@@ -648,11 +655,19 @@ export function buildBridgeArguments(config: {
   scheduledController?: boolean;
 }): string[] {
   if (config.listSessionsJson) {
-    return ['--cwd', config.workspace, '--list-sessions-json', ...(config.sessionId ? ['--session-id', config.sessionId] : [])];
+    return ['--cwd', config.workspace, '--list-sessions-json',
+      ...(config.sessionScope ? ['--session-scope', config.sessionScope] : []),
+      ...(config.sessionId ? ['--session-id', config.sessionId] : [])];
   }
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
   if (config.appVersion) args.push('--app-version', config.appVersion);
   if (config.sessionId) args.push('--session-id', config.sessionId);
+  if (config.sessionTranscriptPath) args.push('--session-transcript-path', config.sessionTranscriptPath);
+  if (config.initialProjectRoot) args.push('--session-project-root', config.initialProjectRoot);
+  if (config.configHome) args.push('--session-config-home', config.configHome);
+  if (config.globalConfigPath) args.push('--session-global-config-path', config.globalConfigPath);
+  for (const directory of config.additionalDirectories ?? []) args.push('--add-dir', directory);
+  for (const directory of config.promptDirectories ?? []) args.push('--session-prompt-directory', directory);
   if (config.model) args.push('--model', config.model);
   if (config.hasCredentialStdin) args.push('--credential-stdin');
   else if (config.hasApiKey) args.push('--api-key-stdin');

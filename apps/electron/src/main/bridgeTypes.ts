@@ -39,6 +39,13 @@ export interface BridgeLaunchConfig {
   workspace: string;
   /** Stable identity for the engine process and its persisted transcript. */
   sessionId?: string;
+  /** Explicit session directory grants retained across a directory remount. */
+  additionalDirectories?: readonly string[];
+  promptDirectories?: readonly string[];
+  settingsEnvironment?: Readonly<Record<string, string>>;
+  initialProjectRoot?: string;
+  configHome?: string;
+  globalConfigPath?: string;
   apiKey?: string;
   providerCredentials?: Record<string, string>;
   openaiOAuth?: OpenAiOAuthSession;
@@ -69,6 +76,8 @@ export interface BridgeManagerOptions {
   bridgeRoot?: string;
   lockfileTimeoutMs?: number;
   sessionResumeTimeoutMs?: number;
+  /** Exact catalog selection retained when an idle runtime is recreated. */
+  resumeTranscriptPath?: string;
   stopTimeoutMs?: number;
   isPackaged?: boolean;
   resourcesPath?: string;
@@ -154,6 +163,7 @@ export interface SessionRuntimeSummary {
 }
 
 export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+  workspaceSettings?: (projectPath: string) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
@@ -164,4 +174,10 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   maxCachedRuntimes?: number;
   /** The one refresher of the Codex session; every engine is served its access tokens. */
   codexTokens?: CodexTokenManager;
+}
+
+export interface WorkspaceLaunchSettings {
+  environment: Record<string, string>;
+  configHome: string;
+  globalConfigPath?: string;
 }

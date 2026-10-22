@@ -540,6 +540,7 @@ impl cron::scheduler::SessionCronDelivery for MsgQueueWakeupScheduler {
 /// flow through the orchestrator's own output stream, not through this handle.
 pub struct OrchestratorTurnDriver {
     orchestrator: Arc<ConversationOrchestrator>,
+    workspace_session_facts: Option<Arc<crate::workspace_commands::WorkspaceSessionFacts>>,
     /// The connection's event sink, shared with the orchestrator's output stream.
     /// Used solely to emit a terminal [`ClientEvent::Error`] on turn failure;
     /// `None` to drop errors silently (e.g. tests that only assert success).
@@ -584,6 +585,7 @@ impl OrchestratorTurnDriver {
     pub fn new(orchestrator: Arc<ConversationOrchestrator>) -> Self {
         Self {
             orchestrator,
+            workspace_session_facts: None,
             error_sink: None,
             message_output: None,
             queue: None,
@@ -627,6 +629,7 @@ impl OrchestratorTurnDriver {
     ) -> Self {
         Self {
             orchestrator,
+            workspace_session_facts: None,
             error_sink: Some(error_sink),
             message_output: None,
             queue: None,
@@ -642,6 +645,16 @@ impl OrchestratorTurnDriver {
     #[must_use]
     pub fn with_message_output(mut self, output: client::adapter::AdapterOutputStream) -> Self {
         self.message_output = Some(output);
+        self
+    }
+
+    /// Record actual dequeued work independently of provider success or usage.
+    #[must_use]
+    pub(crate) fn with_workspace_session_facts(
+        mut self,
+        facts: Arc<crate::workspace_commands::WorkspaceSessionFacts>,
+    ) -> Self {
+        self.workspace_session_facts = Some(facts);
         self
     }
 
@@ -776,6 +789,9 @@ impl OrchestratorTurnDriver {
         inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
         row_token: Option<String>,
     ) {
+        if let Some(facts) = &self.workspace_session_facts {
+            facts.record_request_dequeued();
+        }
         lingxi_core::host::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
             output.reset_message_buffer().await;
@@ -1039,6 +1055,9 @@ impl TurnDriver for OrchestratorTurnDriver {
         use lingxi_core::host::OrchestratorHandle;
         if !self.orchestrator.workspace_trusted().await {
             return Err("paused:Trust this workspace before running scheduled tasks".into());
+        }
+        if let Some(facts) = &self.workspace_session_facts {
+            facts.record_request_dequeued();
         }
         let reasoning = crate::router::decode_reasoning_selection(reasoning);
         if let Some(output) = &self.message_output {

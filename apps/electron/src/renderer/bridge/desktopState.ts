@@ -136,7 +136,7 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'model_changed':
       return { ...state, currentModel: event.model, currentModelSource: event.model_source ?? null };
     case 'conversation_controls_changed':
-      return { ...state, conversationControls: event.controls };
+      return { ...state, conversationControls: event.controls, permissionMode: event.controls.permission.effective };
     case 'permission_request_resolved':
       return { ...state, lastPermissionResolution: event };
     case 'fast_mode_changed':

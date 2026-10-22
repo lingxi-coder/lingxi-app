@@ -14,6 +14,7 @@ function Fixture() {
   const [catalogSessions, setCatalogSessions] = useState(sessions);
   events.sessions = catalogSessions;
   const bridge = {
+    sessionLoading: false,
     bootstrap: {
       settings: { projects: ['/fixture'], pinnedSessions: [{ projectPath: '/pinned', sessionId: 'pinned', title: 'pinned' }], activeProject: '/fixture', sidebar },
       workspace: { path: '/fixture' }, projectCatalogs: { '/fixture': { sessions: catalogSessions }, '/pinned': { sessions: [{ uuid: 'pinned', title: 'pinned' }] } },
@@ -26,6 +27,12 @@ function Fixture() {
       setCatalogSessions(current => current.map(session => session.uuid === id ? { ...session, modified_rfc3339: '2026-09-23T00:00:00Z' } : session));
     },
   } as unknown as UseBridge;
-  return <Theme.Provider value={tokens(false)}><div className="desktop-shell" style={{ display: 'flex', height: '100vh' }}><BetaSidebar bridge={bridge} onOpenSettings={() => {}} /><main>Isolated session gesture fixture</main></div></Theme.Provider>;
+  return <Theme.Provider value={tokens(false)}>
+    <div className="desktop-shell" style={{ display: 'flex', height: '100vh' }}>
+      <BetaSidebar bridge={bridge} onOpenSettings={() => {}}>
+        <main>Isolated session gesture fixture</main>
+      </BetaSidebar>
+    </div>
+  </Theme.Provider>;
 }
 createRoot(document.getElementById('root')!).render(<Fixture />);

@@ -9,6 +9,7 @@ export * from './toolview.js';
 export * from './lockfile.js';
 export * from './validation.js';
 export * from './eventCorrelation.js';
+export * from './workspace.js';
 export { versionCompatible } from './version.js';
 export {
   BridgeClient,

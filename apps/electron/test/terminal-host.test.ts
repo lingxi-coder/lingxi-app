@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostController } from '../src/main/host';
@@ -76,7 +76,7 @@ test('the host tells the terminal manager when a chat or project goes away', asy
   const replacement = { projectPath: project, sessionId: '22222222-3333-4444-8555-666666666666' };
   const bridge = {
     registerWindow() {}, registerIpc() {}, isProjectClosing: () => false, hasActiveWork: () => false,
-    get: () => ({ projectPath: project, connectionState: { status: 'idle' }, pendingInteractions: 0, pendingAskUserQuestions: [] }),
+    get: () => undefined,
     closeSession: async () => { calls.push('closeSession'); },
     closeProject: async () => { calls.push('closeProject:bridge'); },
     newSession: async () => replacement,
@@ -95,7 +95,12 @@ test('the host tells the terminal manager when a chat or project goes away', asy
     // A draft chat's shells follow it into the session it becomes: the scope id
     // is what addresses a shell, and `__draft__` stops addressing anything the
     // moment the engine hands back a real session id.
-    (host as any).sessionCatalog = { list: async () => ({ sessions: [] }), invalidate: () => undefined };
+    const path = join(project, `${sessionId}.jsonl`);
+    writeFileSync(path, `${JSON.stringify({ type: 'user', sessionId, cwd: project, message: { role: 'user', content: 'chat' } })}\n`);
+    const row = { uuid: sessionId, title: 'chat', path, workspace_path: project,
+      modified_rfc3339: new Date().toISOString(), message_count: 1, mode: 'code', empty_session: false };
+    const persisted = async (source: string, id: string) => source === project && id === sessionId ? row : undefined;
+    (host as any).sessionCatalog = { list: async () => ({ sessions: [] }), find: persisted, select: persisted, invalidate: () => undefined };
     const restored = await host.restoreProjectSession(project);
     assert.equal(restored.sessionId, replacement.sessionId);
     assert.deepEqual(calls, [`migrate:__draft__->${replacement.sessionId}`]);

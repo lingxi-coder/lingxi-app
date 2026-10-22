@@ -4759,6 +4759,16 @@ pub(crate) async fn run_permission_action(
                         // already-trusted directory is a no-op for both. The
                         // source doubles as the hook matcher query.
                         orch.fire_directory_added(&path, "slash_command").await;
+                        if let Some(writer) = orch.session_transcript_writer() {
+                            let transcript = writer.active_path();
+                            if let Some(source) = transcript.parent() {
+                                if let Err(error) = session::jsonl::record_session_alias(
+                                    &paths.lingxi_home, source, std::path::Path::new(&path),
+                                ).await {
+                                    tracing::warn!(%error, "session alias could not be recorded after /add-dir");
+                                }
+                            }
+                        }
                     }
                     // claude-code 2.1.205 success/already echoes, byte-exact:
                     // `Added ${path} as a working directory and saved to local

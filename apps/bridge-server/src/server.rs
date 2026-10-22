@@ -325,6 +325,7 @@ struct FrameEventSink {
     cron_requests: Arc<crate::cron_host::HostCronRequests>,
     handshaken: Arc<AtomicBool>,
     active_turn: ActiveTurnControl,
+    resume_interactions: ActiveTurnControl,
     ask_user_question_broker: SharedAskUserQuestionBroker,
     question_rejections: QuestionRejections,
 }
@@ -402,13 +403,21 @@ impl ClientEventSink for FrameEventSink {
         // leaving its broker receiver parked until timeout.
         if let ClientEvent::AskUserQuestion { request } = &event {
             let out = self.out.lock().await;
-            let forwarded = self.active_turn.with_accepted_interaction(|| {
-                if let Some(sink) = out.as_ref() {
-                    let _ = sink.send(Frame::Event(event.clone()));
+            let mut delivered = false;
+            let owner = if self.resume_interactions.accepts_interactions() {
+                &self.resume_interactions
+            } else {
+                &self.active_turn
+            };
+            owner.with_accepted_interaction(|| {
+                if self.handshaken.load(Ordering::SeqCst) {
+                    if let Some(sink) = out.as_ref() {
+                        delivered = sink.send(Frame::Event(event.clone()));
+                    }
                 }
             });
             drop(out);
-            if !forwarded {
+            if !delivered {
                 let broker = self
                     .ask_user_question_broker
                     .lock()
@@ -443,7 +452,19 @@ impl ClientEventSink for FrameEventSink {
                     *outcome = client::protocol::events::TurnOutcomeDto::Cancelled;
                 }
             }
-        } else if is_owned_turn_event(&event) && !self.active_turn.accepts_turn_events() {
+        } else if is_owned_turn_event(&event)
+            && !self.active_turn.accepts_turn_events()
+            && !(self.resume_interactions.accepts_interactions()
+                && matches!(
+                    &event,
+                    ClientEvent::ToolUseStarted { .. }
+                        | ClientEvent::ToolHeartbeat { .. }
+                        | ClientEvent::ToolUseResult { .. }
+                        | ClientEvent::MessageComplete { .. }
+                        | ClientEvent::Attachment { .. }
+                        | ClientEvent::SystemNotice { .. }
+                ))
+        {
             tracing::debug!(event = ?std::mem::discriminant(&event), "dropping terminal or unowned turn event");
             return;
         }
@@ -473,6 +494,7 @@ struct FramePermissionSink {
     out: SharedFrameSink,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
     active_turn: ActiveTurnControl,
+    resume_interactions: ActiveTurnControl,
     gate: SharedPermissionGate,
     handshaken: Arc<AtomicBool>,
 }
@@ -494,7 +516,10 @@ impl PermissionRequestSink for FramePermissionSink {
             return;
         };
         let owner_id = gate.request_owner_id(request_id).await;
-        if !background_owned && !self.active_turn.accepts_permission_owner(owner_id) {
+        if !background_owned
+            && !self.active_turn.accepts_permission_owner(owner_id)
+            && !self.resume_interactions.accepts_permission_owner(owner_id)
+        {
             self.reject(request_id).await;
             return;
         }
@@ -527,6 +552,9 @@ impl PermissionRequestSink for FramePermissionSink {
         };
         if background_owned {
             send();
+        } else if self.resume_interactions.accepts_permission_owner(owner_id) {
+            self.resume_interactions
+                .with_accepted_permission_owner(owner_id, send);
         } else {
             self.active_turn
                 .with_accepted_permission_owner(owner_id, send);
@@ -566,14 +594,19 @@ impl FramePermissionSink {
 struct FrameComputerAccessSink {
     out: SharedFrameSink,
     active_turn: ActiveTurnControl,
+    resume_interactions: ActiveTurnControl,
     broker: SharedComputerAccessBroker,
+    handshaken: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl ComputerAccessRequestSink for FrameComputerAccessSink {
     async fn emit_request(&self, request: ComputerAccessRequestDto) {
         let request_id = request.request_id;
-        if !self.active_turn.accepts_interactions() {
+        if !self.handshaken.load(Ordering::SeqCst)
+            || !(self.active_turn.accepts_interactions()
+                || self.resume_interactions.accepts_interactions())
+        {
             self.reject(request_id).await;
             return;
         }
@@ -581,13 +614,21 @@ impl ComputerAccessRequestSink for FrameComputerAccessSink {
         // final ownership check and send so cancellation either drains it or
         // follows a request that was already exposed, never the reverse.
         let out = self.out.lock().await;
-        let forwarded = self.active_turn.with_accepted_interaction(|| {
-            if let Some(sink) = out.as_ref() {
-                let _ = sink.send(Frame::ComputerAccessRequest(request));
+        let mut delivered = false;
+        let owner = if self.resume_interactions.accepts_interactions() {
+            &self.resume_interactions
+        } else {
+            &self.active_turn
+        };
+        owner.with_accepted_interaction(|| {
+            if self.handshaken.load(Ordering::SeqCst) {
+                if let Some(sink) = out.as_ref() {
+                    delivered = sink.send(Frame::ComputerAccessRequest(request));
+                }
             }
         });
         drop(out);
-        if !forwarded {
+        if !delivered {
             self.reject(request_id).await;
         }
     }
@@ -621,16 +662,21 @@ impl FrameComputerAccessSink {
 /// caller's own concern; a dropped caller drops the receiver.
 struct FrameAudioSink {
     out: SharedFrameSink,
+    handshaken: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl AudioRequestSink for FrameAudioSink {
     async fn emit_request(&self, request: ClientEvent) -> bool {
+        let out = self.out.lock().await;
+        if !self.handshaken.load(Ordering::SeqCst) {
+            return false;
+        }
         // `FrameSink::send` is false once the connection's write task has ended,
         // and the cell itself is `None` before a client attaches or after it
         // detaches — both are "nobody is listening", which the bridge turns into
         // an immediate failure instead of a parked request.
-        match self.out.lock().await.as_ref() {
+        match out.as_ref() {
             Some(sink) => sink.send(Frame::Event(request)),
             None => false,
         }
@@ -723,6 +769,9 @@ pub struct BridgeConnection {
     /// this outside the spawned driver closes the race where Cancel arrives
     /// after SendPrompt but before the driver registers with msgqueue.
     active_turn: ActiveTurnControl,
+    /// Foreground permission/input ownership for the private resume RPC. It
+    /// never owns the prompt queue or emits ordinary turn lifecycle events.
+    resume_interactions: ActiveTurnControl,
     /// Abort handle for the currently-owned spawned turn-drain loop. On close we
     /// abort it so stale turn work cannot survive into the next reconnect and
     /// emit onto a newly-claimed outbound sink.
@@ -754,6 +803,39 @@ struct ActiveTurnOwner {
     cancel: CancellationToken,
     terminal: bool,
     permission_owner_id: Option<u64>,
+}
+
+struct ResumeInteractionLease {
+    owner: ActiveTurnControl,
+    generation: u64,
+    cancel: CancellationToken,
+}
+
+impl Drop for ResumeInteractionLease {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.owner.finish(self.generation);
+    }
+}
+
+struct ResumeEventSink {
+    out: SharedFrameSink,
+    owner: ActiveTurnControl,
+    handshaken: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ClientEventSink for ResumeEventSink {
+    async fn emit(&self, event: ClientEvent) {
+        let out = self.out.lock().await;
+        self.owner.with_accepted_interaction(|| {
+            if self.handshaken.load(Ordering::SeqCst) {
+                if let Some(sink) = out.as_ref() {
+                    let _ = sink.send(Frame::Event(event));
+                }
+            }
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -2567,6 +2649,7 @@ impl Drop for BridgeConnection {
             task.abort();
         }
         self.active_turn.clear();
+        self.resume_interactions.clear();
     }
 }
 
@@ -2615,6 +2698,7 @@ impl BridgeConnection {
             turn_handoff: Arc::new(tokio::sync::Mutex::new(())),
             transition_active: Arc::new(AtomicBool::new(false)),
             active_turn: ActiveTurnControl::default(),
+            resume_interactions: ActiveTurnControl::default(),
             active_turn_task: Arc::new(StdMutex::new(None)),
             queue_wakeup_task: None,
             task_notification_registry: None,
@@ -2912,6 +2996,7 @@ impl BridgeConnection {
             cron_requests: self.cron_requests.clone(),
             handshaken: self.handshaken.clone(),
             active_turn: self.active_turn.clone(),
+            resume_interactions: self.resume_interactions.clone(),
             ask_user_question_broker: self.ask_user_question_broker_ref.clone(),
             question_rejections: self.question_rejections.clone(),
         })
@@ -3014,6 +3099,7 @@ impl BridgeConnection {
             out: self.out.clone(),
             tool_names: self.tool_names.clone(),
             active_turn: self.active_turn.clone(),
+            resume_interactions: self.resume_interactions.clone(),
             gate: self.permission_gate_ref.clone(),
             handshaken: self.handshaken.clone(),
         })
@@ -3027,7 +3113,9 @@ impl BridgeConnection {
         Arc::new(FrameComputerAccessSink {
             out: self.out.clone(),
             active_turn: self.active_turn.clone(),
+            resume_interactions: self.resume_interactions.clone(),
             broker: self.computer_access_broker_ref.clone(),
+            handshaken: self.handshaken.clone(),
         })
     }
 
@@ -3045,6 +3133,11 @@ impl BridgeConnection {
             .permission_gate
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&gate));
+        *self
+            .resume_interactions
+            .permission_gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&gate));
         self.gate = Some(gate);
         self.driver = Some(driver);
         self
@@ -3058,6 +3151,7 @@ impl BridgeConnection {
     pub fn audio_sink(&self) -> Arc<dyn AudioRequestSink> {
         Arc::new(FrameAudioSink {
             out: self.out.clone(),
+            handshaken: self.handshaken.clone(),
         })
     }
 
@@ -3363,6 +3457,9 @@ impl BridgeConnection {
     }
 
     async fn dispatch(&self, command: ClientCommand) {
+        if matches!(&command, ClientCommand::RequestExit) && self.resume_interactions.cancel(None) {
+            self.drain_parked_interactions().await;
+        }
         let slash_turn_id = match &command {
             ClientCommand::RunSlashCommand { turn_id, .. } => *turn_id,
             _ => None,
@@ -4205,6 +4302,12 @@ impl BridgeConnection {
     }
 
     async fn cancel_active_turn(&self, turn_id: Option<u64>) {
+        if turn_id.is_none() && self.resume_interactions.cancel(None) {
+            // The private resume keeps its durable owner until its callback
+            // settles, but cancellation closes every interactive grant now.
+            self.drain_parked_interactions().await;
+            return;
+        }
         // The active token can be cancelled without waiting for an ordinary
         // control's handoff. Queue lookup must re-check after acquiring that
         // lock because the input may just have been promoted to its own turn;
@@ -4278,6 +4381,20 @@ impl BridgeConnection {
             return;
         };
         let background_owned = gate.request_is_background(request_id).await == Some(true);
+        let permission_owner_id = gate.request_owner_id(request_id).await;
+        let response = if self.handshaken.load(Ordering::SeqCst)
+            && (background_owned
+                || self
+                    .active_turn
+                    .accepts_permission_owner(permission_owner_id)
+                || self
+                    .resume_interactions
+                    .accepts_permission_owner(permission_owner_id))
+        {
+            response
+        } else {
+            PermissionResponseDto::Deny
+        };
         let tool_name = self
             .tool_names
             .lock()
@@ -4291,7 +4408,9 @@ impl BridgeConnection {
         // terminal/disconnected state when cancellation won the race.
         if resolved
             && self.handshaken.load(Ordering::SeqCst)
-            && (background_owned || self.active_turn.accepts_interactions())
+            && (background_owned
+                || self.active_turn.accepts_interactions()
+                || self.resume_interactions.accepts_interactions())
         {
             lingxi_core::host::live_sessions::set_process_status("busy", None);
         }
@@ -4316,7 +4435,14 @@ impl BridgeConnection {
         let Some(broker) = self.computer_access_broker.as_ref() else {
             return;
         };
-        let resolved = broker.resolve(request_id, response).await;
+        let resolved = if self.handshaken.load(Ordering::SeqCst)
+            && (self.active_turn.accepts_interactions()
+                || self.resume_interactions.accepts_interactions())
+        {
+            broker.resolve(request_id, response).await
+        } else {
+            broker.deny(request_id).await
+        };
         if !resolved {
             tracing::debug!(
                 request_id,
@@ -4383,7 +4509,15 @@ impl BridgeConnection {
         let Some(broker) = self.ask_user_question_broker.as_ref() else {
             return;
         };
-        if !broker.resolve(request_id, answers.into_projections()).await {
+        let resolved = if self.handshaken.load(Ordering::SeqCst)
+            && (self.active_turn.accepts_interactions()
+                || self.resume_interactions.accepts_interactions())
+        {
+            broker.resolve(request_id, answers.into_projections()).await
+        } else {
+            broker.cancel(request_id).await
+        };
+        if !resolved {
             tracing::debug!(
                 request_id,
                 "bridge-server: resolve for unknown / already-resolved AskUserQuestion id"
@@ -4424,7 +4558,10 @@ impl FramePump for BridgeConnection {
             // prompt has claimed an owner and the cancelled work starts later.
             Ok(ClientCommand::Cancel { turn_id }) => {
                 self.active_turn.cancellation_target(turn_id).is_some()
+                    || (turn_id.is_none()
+                        && self.resume_interactions.cancellation_target(None).is_some())
             }
+            Ok(ClientCommand::RequestExit) => self.resume_interactions.accepts_interactions(),
             // Keep epoch changes ordered with audio responses even when an
             // unrelated ordinary command is stalled. Before hello completes,
             // the update must remain behind the handshake.
@@ -4549,6 +4686,110 @@ impl FramePump for BridgeConnection {
                     });
                     return;
                 }
+                if method == "workspace_state" {
+                    let result = match &self.router {
+                        Some(router) => router.workspace_state().await,
+                        None => Err("workspace state is unavailable".into()),
+                    };
+                    let response = match result {
+                        Ok(result) => Frame::Response(BridgeResponse {
+                            id,
+                            result: Some(result),
+                            error: None,
+                        }),
+                        Err(error) => Self::error_response(id, error),
+                    };
+                    if let Some(sink) = self.out.lock().await.as_ref() {
+                        let _ = sink.send(response);
+                    }
+                    return;
+                }
+                if matches!(
+                    method.as_str(),
+                    "set_cwd"
+                        | "add_directory"
+                        | "resume_selected_session"
+                        | "restore_workspace_controls"
+                ) {
+                    // One authenticated client owns this control request. Hold
+                    // the same admission lock as prompts and session changes
+                    // through validation, trust recording, and relocation.
+                    let handoff = self.turn_handoff.try_lock();
+                    let result = if handoff.is_err()
+                        || self.turn_running.load(Ordering::SeqCst)
+                        || self.transition_active.load(Ordering::SeqCst)
+                    {
+                        if method == "set_cwd" {
+                            Ok(crate::workspace_commands::busy_response())
+                        } else {
+                            Err("this command requires an idle session".into())
+                        }
+                    } else {
+                        let _handoff = handoff.expect("the successful admission remains owned");
+                        let _transition = TransitionScope::begin(&self.transition_active);
+                        match &self.router {
+                            Some(router) if method == "set_cwd" => {
+                                router
+                                    .set_working_directory(params, self.unscoped_event_sink())
+                                    .await
+                            }
+                            Some(router) if method == "restore_workspace_controls" => {
+                                router
+                                    .restore_workspace_controls(params, self.unscoped_event_sink())
+                                    .await
+                            }
+                            Some(router) if method == "resume_selected_session" => {
+                                self.refresh_permission_session().await;
+                                let (generation, cancel) = self.resume_interactions.begin(None);
+                                let lease = ResumeInteractionLease {
+                                    owner: self.resume_interactions.clone(),
+                                    generation,
+                                    cancel,
+                                };
+                                let sink = Arc::new(ResumeEventSink {
+                                    out: self.out.clone(),
+                                    owner: self.resume_interactions.clone(),
+                                    handshaken: self.handshaken.clone(),
+                                });
+                                let result = router.resume_selected_session(params, sink).await;
+                                let cancelled =
+                                    self.resume_interactions.begin_terminal().unwrap_or(true);
+                                TurnInteractions {
+                                    gate: self.gate.clone(),
+                                    computer_access_broker: self.computer_access_broker.clone(),
+                                    ask_user_question_broker: self.ask_user_question_broker.clone(),
+                                    tool_names: self.tool_names.clone(),
+                                }
+                                .drain(self.resume_interactions.permission_owner_id(generation))
+                                .await;
+                                drop(lease);
+                                if cancelled {
+                                    Err("session resume was cancelled".into())
+                                } else {
+                                    result
+                                }
+                            }
+                            Some(router) => {
+                                router
+                                    .add_working_directory(params, self.unscoped_event_sink())
+                                    .await
+                            }
+                            None => Err(format!("{method} is unavailable")),
+                        }
+                    };
+                    let response = match result {
+                        Ok(result) => Frame::Response(BridgeResponse {
+                            id,
+                            result: Some(result),
+                            error: None,
+                        }),
+                        Err(message) => Self::error_response(id, message),
+                    };
+                    if let Some(sink) = self.out.lock().await.as_ref() {
+                        let _ = sink.send(response);
+                    }
+                    return;
+                }
                 if method == "desktop_runtime_snapshot" {
                     // This router seam only reads state into a collector. Fence
                     // its read and reply against live outbound pushes: a worker
@@ -4608,6 +4849,24 @@ impl FramePump for BridgeConnection {
 
     async fn on_close(&self) {
         self.close_connection(None).await;
+    }
+
+    async fn on_transport_disconnected(&self, sink: FrameSink) {
+        let _admission = self.connection_admission.lock().await;
+        let active = self.out.lock().await;
+        if active
+            .as_ref()
+            .is_none_or(|current| !current.same_channel(&sink))
+        {
+            return;
+        }
+        // Keep the outbound owner reserved until durable callbacks settle.
+        // New interaction attempts must fail closed as well as those already
+        // parked; a deferred replay can contain more than one pending tool.
+        self.handshaken.store(false, Ordering::SeqCst);
+        self.resume_interactions.cancel(None);
+        drop(active);
+        self.drain_parked_interactions().await;
     }
 
     async fn on_close_with_sink(&self, sink: FrameSink) {
@@ -4696,6 +4955,7 @@ impl BridgeConnection {
         self.abort_and_join_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);
         self.active_turn.clear();
+        self.resume_interactions.clear();
         self.queue.clear_active_turn().await;
         self.queue.clear().await;
         for (_, pending) in self.mod_commands.lock().unwrap().drain() {
@@ -4714,6 +4974,10 @@ impl BridgeConnection {
         self.loop_runtime.take_in_flight_prompt();
         self.tool_names.lock().await.clear();
 
+        self.drain_parked_interactions().await;
+    }
+
+    async fn drain_parked_interactions(&self) {
         // Fail-closed: drop every parked permission sender so any in-flight
         // `check()` resolves `Deny` (the client that would approve is gone).
         if let Some(gate) = self.gate.as_ref() {
@@ -8089,5 +8353,205 @@ mod realtime_audio_connection_tests {
         connection.close_connection(None).await;
         endpoint.shutdown().await;
         assert!(!Capabilities::default().realtime_audio);
+    }
+}
+
+#[cfg(test)]
+mod workspace_control_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct Router(AtomicUsize);
+    #[async_trait]
+    impl CommandRouter for Router {
+        async fn route(&self, _: ClientCommand, _: Arc<dyn ClientEventSink>) {}
+        async fn set_working_directory(
+            &self,
+            _: Utf16JsonProjection,
+            _: Arc<dyn ClientEventSink>,
+        ) -> Result<Utf16JsonProjection, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Utf16JsonProjection::parse(
+                r#"{"status":"ok","cwd":"/target","changed":true,"transcript_relocated":true}"#,
+            )
+            .unwrap())
+        }
+        async fn add_working_directory(
+            &self,
+            _: Utf16JsonProjection,
+            sink: Arc<dyn ClientEventSink>,
+        ) -> Result<Utf16JsonProjection, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            sink.emit(ClientEvent::SlashCommandResult {
+                turn_id: None,
+                display: "native added-directory result".into(),
+                is_error: false,
+            })
+            .await;
+            Ok(Utf16JsonProjection::parse(
+                r#"{"cwd":"/target","additional_directories":["/added"]}"#,
+            )
+            .unwrap())
+        }
+        async fn restore_workspace_controls(
+            &self,
+            _: Utf16JsonProjection,
+            sink: Arc<dyn ClientEventSink>,
+        ) -> Result<Utf16JsonProjection, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            sink.emit(ClientEvent::SlashCommandResult {
+                turn_id: None,
+                display: "restored controls".into(),
+                is_error: false,
+            })
+            .await;
+            Ok(Utf16JsonProjection::parse(r#"{"status":"ok"}"#).unwrap())
+        }
+        async fn resume_selected_session(
+            &self,
+            _: Utf16JsonProjection,
+            sink: Arc<dyn ClientEventSink>,
+        ) -> Result<Utf16JsonProjection, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            sink.emit(ClientEvent::SessionResumed {
+                session_id: "11111111-2222-4333-8444-555555555555".into(),
+                mode: client::protocol::listings::SessionModeDto::Code,
+                messages: Vec::new(),
+            })
+            .await;
+            Ok(Utf16JsonProjection::parse(r#"{"status":"ok"}"#).unwrap())
+        }
+    }
+
+    fn request(id: u64, method: &str) -> Frame {
+        Frame::Request(BridgeRequest {
+            id,
+            method: method.into(),
+            params: Utf16JsonProjection::parse(r#"{"path":"/target"}"#).unwrap(),
+        })
+    }
+
+    #[tokio::test]
+    async fn private_workspace_controls_require_hello_idle_and_complete_before_their_response() {
+        use super::connection_regression_test::{captured_sink, hello, next_frame};
+        let (endpoint, mut socket, sink) = captured_sink().await;
+        let router = Arc::new(Router::default());
+        let connection = BridgeConnection::new().bind_router(router.clone());
+        connection
+            .on_frame(request(1, "set_cwd"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected refusal")
+        };
+        assert!(response.error.is_some());
+        assert_eq!(router.0.load(Ordering::SeqCst), 0);
+        connection
+            .on_frame(
+                Frame::Request(BridgeRequest {
+                    id: 2,
+                    method: "hello".into(),
+                    params: serialize_source(&hello()).unwrap(),
+                }),
+                sink.clone(),
+            )
+            .await;
+        assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+
+        connection.turn_running.store(true, Ordering::SeqCst);
+        connection
+            .on_frame(request(3, "set_cwd"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected busy")
+        };
+        assert_eq!(response.result.unwrap().string_at("/reason"), Some("busy"));
+        assert_eq!(router.0.load(Ordering::SeqCst), 0);
+        connection.turn_running.store(false, Ordering::SeqCst);
+        let handoff = connection.turn_handoff.lock().await;
+        connection
+            .on_frame(request(4, "set_cwd"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected busy")
+        };
+        assert_eq!(response.result.unwrap().string_at("/reason"), Some("busy"));
+        drop(handoff);
+        assert_eq!(router.0.load(Ordering::SeqCst), 0);
+
+        connection
+            .on_frame(request(5, "set_cwd"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected success")
+        };
+        assert_eq!(response.result.unwrap().string_at("/cwd"), Some("/target"));
+        connection
+            .on_frame(request(6, "add_directory"), sink.clone())
+            .await;
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::SlashCommandResult {
+                is_error: false,
+                ..
+            })
+        ));
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected directory state")
+        };
+        assert_eq!(
+            response
+                .result
+                .unwrap()
+                .string_at("/additional_directories/0"),
+            Some("/added")
+        );
+        assert_eq!(router.0.load(Ordering::SeqCst), 2);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        connection
+            .on_frame(request(7, "resume_selected_session"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected selected-session busy refusal")
+        };
+        assert!(response.error.is_some());
+        assert_eq!(router.0.load(Ordering::SeqCst), 2);
+        connection.turn_running.store(false, Ordering::SeqCst);
+        connection
+            .on_frame(request(8, "resume_selected_session"), sink.clone())
+            .await;
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::SessionResumed { .. })
+        ));
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected selected-session completion after resumed event")
+        };
+        assert_eq!(response.result.unwrap().string_at("/status"), Some("ok"));
+        assert_eq!(router.0.load(Ordering::SeqCst), 3);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        connection
+            .on_frame(request(9, "restore_workspace_controls"), sink.clone())
+            .await;
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected idle refusal")
+        };
+        assert!(response.error.is_some());
+        assert_eq!(router.0.load(Ordering::SeqCst), 3);
+        connection.turn_running.store(false, Ordering::SeqCst);
+        connection
+            .on_frame(request(10, "restore_workspace_controls"), sink.clone())
+            .await;
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::SlashCommandResult { .. })
+        ));
+        let Frame::Response(response) = next_frame(&mut socket).await else {
+            panic!("expected controls completion")
+        };
+        assert_eq!(response.result.unwrap().string_at("/status"), Some("ok"));
+        assert_eq!(router.0.load(Ordering::SeqCst), 4);
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
     }
 }

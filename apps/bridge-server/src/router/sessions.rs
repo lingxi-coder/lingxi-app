@@ -217,7 +217,7 @@ impl EngineCommandRouter {
 
         match session::jsonl::list_recent_sessions_with_diagnostics(
             &store.lingxi_home,
-            &store.session_cwd,
+            &store.current_cwd(),
             limit,
             store.fs.clone(),
         )
@@ -290,11 +290,7 @@ impl EngineCommandRouter {
             latest_activity: None,
             updated_at_ms: None,
         }];
-        let dir = orchestrator::transcript_paths::subagents_dir(
-            &store.lingxi_home,
-            &store.session_cwd,
-            &session_id.as_uuid().to_string(),
-        );
+        let dir = store.subagents_dir(&session_id.as_uuid().to_string());
         let mut unreadable = 0usize;
         match harness_runtime::desktop::session_agents::collect_transcript_paths(&dir).await {
             Ok(paths) => {
@@ -438,18 +434,14 @@ impl EngineCommandRouter {
             let uuid = requested_session_id.as_uuid();
             match orchestrator::replay_session_state(
                 &store.lingxi_home,
-                &store.session_cwd,
+                &store.current_cwd(),
                 uuid,
                 store.fs.clone(),
             )
             .await
             {
                 Ok(replayed) => {
-                    let path = orchestrator::transcript_paths::main_transcript_path(
-                        &store.lingxi_home,
-                        &store.session_cwd,
-                        &uuid.to_string(),
-                    );
+                    let path = store.main_transcript_path(&uuid.to_string());
                     let raw = match tokio::fs::read(&path).await {
                         Ok(raw) => raw,
                         Err(error) => {
@@ -513,11 +505,7 @@ impl EngineCommandRouter {
                 .await;
                 return;
             };
-            let dir = orchestrator::transcript_paths::subagents_dir(
-                &store.lingxi_home,
-                &store.session_cwd,
-                &requested_session_id.as_uuid().to_string(),
-            );
+            let dir = store.subagents_dir(&requested_session_id.as_uuid().to_string());
             let path = match harness_runtime::desktop::session_agents::find_transcript_path(
                 &dir,
                 &parsed.to_string(),

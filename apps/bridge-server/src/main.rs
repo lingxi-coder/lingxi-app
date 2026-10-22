@@ -80,14 +80,41 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to chdir into --cwd {}: {e}", cwd.display()))?;
     }
 
+    if args.workspace_environment_json {
+        let cwd = std::env::current_dir()
+            .map_err(|_| anyhow::anyhow!("failed to resolve workspace environment directory"))?;
+        let json = boot::workspace_environment_json(&cwd)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        println!("{json}");
+        return Ok(());
+    }
+
     if args.list_sessions_json {
         let cwd = std::env::current_dir()
             .map_err(|_| anyhow::anyhow!("failed to resolve session catalog directory"))?;
-        let json = boot::list_sessions_json(&cwd, args.session_id.as_deref())
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let session_id = args
+            .catalog_session_id
+            .as_deref()
+            .or(args.session_id.as_deref());
+        let json = match args.session_scope {
+            Some(scope) => boot::list_sessions_json_in_scope(&cwd, session_id, scope).await,
+            None => boot::list_sessions_json(&cwd, session_id).await,
+        }
+        .map_err(|e| anyhow::anyhow!(e))?;
         println!("{json}");
         return Ok(());
+    }
+
+    if let Some(path) = &args.session_global_config_path {
+        migrations::global_config::set_global_config_path_override(path.clone())
+            .map_err(|_| anyhow::anyhow!("session global configuration owner is already fixed"))?;
+    }
+    if let Some(home) = &args.session_config_home {
+        migrations::global_config::set_config_home_override(home.clone())
+            .map_err(|_| anyhow::anyhow!("session configuration owner is already fixed"))?;
+        lingxi_core::settings::loader::set_user_settings_path_override(home.join("settings.json"))
+            .map_err(|_| anyhow::anyhow!("session user settings owner is already fixed"))?;
     }
 
     let _telemetry_guard = telemetry::otel::install_process("bridge-server", false);

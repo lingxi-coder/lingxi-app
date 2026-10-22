@@ -64,6 +64,13 @@ import {
   type Lockfile,
 } from './lockfile.js';
 import { versionCompatible } from './version.js';
+import {
+  validateSessionWorkspaceState,
+  validateSetWorkingDirectoryResult,
+  type SessionWorkspaceState,
+  type SetWorkingDirectoryRequest,
+  type SetWorkingDirectoryResult,
+} from './workspace.js';
 
 /** Literal WS subprotocol the endpoint echoes back on a successful upgrade. */
 const WS_SUBPROTOCOL = 'mcp';
@@ -316,21 +323,35 @@ export class BridgeClient extends EventEmitter {
   private request(
     method: string,
     params: unknown,
-    timeoutMs = 30_000,
+    timeoutMs: number | null = 30_000,
     accept?: (result: unknown) => void,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const id = this.nextRequestId++;
     const frame: Frame = { type: 'request', payload: { id, method, params } };
 
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const aborted = () => {
         this.pendingResponses.delete(id);
+        cleanup();
+        reject(new Error(`bridge request "${method}" was aborted`));
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', aborted);
+      };
+      const timer = timeoutMs === null ? undefined : setTimeout(() => {
+        this.pendingResponses.delete(id);
+        cleanup();
         reject(new Error(`bridge request "${method}" (id=${id}) timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
+      if (signal?.aborted) { aborted(); return; }
+      signal?.addEventListener('abort', aborted, { once: true });
+
       this.pendingResponses.set(id, {
         resolve: (r) => {
-          clearTimeout(timer);
+          cleanup();
           try {
             // Apply authoritative snapshots inside the response boundary,
             // before later live frames can overtake a Promise continuation.
@@ -341,7 +362,7 @@ export class BridgeClient extends EventEmitter {
           }
         },
         reject: (e) => {
-          clearTimeout(timer);
+          cleanup();
           reject(e);
         },
       });
@@ -349,7 +370,7 @@ export class BridgeClient extends EventEmitter {
       try {
         this.sendFrame(frame);
       } catch (err) {
-        clearTimeout(timer);
+        cleanup();
         this.pendingResponses.delete(id);
         reject(err instanceof Error ? err : new Error(String(err)));
       }
@@ -363,6 +384,35 @@ export class BridgeClient extends EventEmitter {
       events = validateRuntimeSnapshot(result);
       accept?.(events);
     }).then(() => events);
+  }
+
+  /** Move the owned session after the engine validates permissions and trust. */
+  async setWorkingDirectory(request: SetWorkingDirectoryRequest): Promise<SetWorkingDirectoryResult> {
+    return validateSetWorkingDirectoryResult(await this.request('set_cwd', request));
+  }
+
+  async addWorkingDirectory(path: string): Promise<SessionWorkspaceState> {
+    return validateSessionWorkspaceState(await this.request('add_directory', { path }));
+  }
+
+  async getWorkspaceState(): Promise<SessionWorkspaceState> {
+    return validateSessionWorkspaceState(await this.request('workspace_state', {}));
+  }
+
+  async restoreWorkspaceControls(snapshot: string): Promise<void> {
+    if (typeof snapshot !== 'string' || snapshot.length === 0 || snapshot.length > 16_384) throw new Error('invalid runtime controls snapshot');
+    const result = await this.request('restore_workspace_controls', { snapshot });
+    if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') throw new Error('invalid runtime controls restore response');
+  }
+
+  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, signal?: AbortSignal): Promise<void> {
+    // The Desktop resume owner pauses its deadline for live tool interactions.
+    // Its signal replaces the fixed request deadline only for that owner.
+    const result = await this.request('resume_selected_session', { session_id: sessionId, transcript_path: transcriptPath },
+      signal ? null : 30_000, undefined, signal);
+    if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') {
+      throw new Error('invalid selected session resume response');
+    }
   }
 
   /** Read immutable SDK ownership while this permission ask is still pending. */

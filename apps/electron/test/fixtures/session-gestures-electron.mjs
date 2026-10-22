@@ -68,6 +68,16 @@ async function main() {
           const hit = lastSentMouse ? document.elementFromPoint(lastSentMouse.x, lastSentMouse.y) : null;
           return {
             documentHasFocus: document.hasFocus(),
+            layout: ['.desktop-navigation', '.desktop-body', '.desktop-surface', '.desktop-sidebar', '.desktop-sidebar-list'].map(selector => {
+              const element = document.querySelector(selector);
+              const style = element && getComputedStyle(element);
+              return { selector, bounds: rect(element), overflow: style?.overflow, pointerEvents: style?.pointerEvents,
+                visibility: style?.visibility, opacity: style?.opacity, zIndex: style?.zIndex, inert: element?.inert,
+                backdropFilter: style?.backdropFilter, transform: style?.transform };
+            }),
+            hitStack: lastSentMouse && document.elementsFromPoint(lastSentMouse.x, lastSentMouse.y).map(element => ({
+              tag: element.tagName, className: typeof element.className === 'string' ? element.className : '',
+            })),
             activeElement: document.activeElement && { tag: document.activeElement.tagName,
               ariaLabel: document.activeElement.getAttribute('aria-label'),
               sessionId: document.activeElement.dataset?.sessionId },
@@ -129,6 +139,7 @@ async function main() {
     const click = async id => { await wait(hitTargetExpression(id)); const p = await point(id); await input('mouseMove', p); await down(p); await up(p); };
     const opened = () => run('window.sessionGesturesFixture.opened');
     await wait(`Boolean(${selector('gamma')})`);
+    await wait(`document.querySelector('.desktop-sidebar')?.inert === false`);
     await focusForInput('alpha hover, focus, and click');
     await delay(150);
     let alpha = await point('alpha');

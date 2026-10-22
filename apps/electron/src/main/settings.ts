@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
+import { isSessionId } from './sessionIdentity.js';
 
 import {
   MAX_REMOTE_SESSIONS,
@@ -161,6 +162,50 @@ export class SettingsStore {
       this.volatileActiveSession = undefined;
     }
     return this.getPublic();
+  }
+
+  /** Move host metadata with the transcript's stable UUID in one settings write. */
+  relocateSession(ref: SessionRef, projectPath: string): void {
+    const previous = this.settings;
+    const previousDraft = this.volatileActiveSession;
+    const moved = { projectPath, sessionId: ref.sessionId };
+    const matches = (entry: SessionRef) => entry.sessionId === ref.sessionId && entry.projectPath === ref.projectPath;
+    const relocate = <T extends SessionRef>(entry: T): T => matches(entry) ? { ...entry, projectPath } : entry;
+    const next = withAddedProject(previous, projectPath);
+    next.activeProject = projectPath;
+    // Unsent drafts have no transcript to restore after a process restart.
+    // Move their visible owner without making the volatile UUID durable.
+    next.activeSession = previousDraft && matches(previousDraft) ? previous.activeSession : moved;
+    next.pinnedSessions = next.pinnedSessions.map(relocate);
+    next.archivedSessions = next.archivedSessions?.map(relocate);
+    next.sessionModels = next.sessionModels?.map(relocate);
+    next.remoteSessions = next.remoteSessions?.map(relocate);
+    if (next.sidebar && ref.projectPath !== projectPath) {
+      const orders = { ...next.sidebar.manualSessionOrder };
+      const oldOrder = orders[ref.projectPath] ?? [];
+      const index = oldOrder.indexOf(ref.sessionId);
+      orders[ref.projectPath] = oldOrder.filter((id) => id !== ref.sessionId);
+      if (index >= 0) {
+        const target = (orders[projectPath] ?? []).filter((id) => id !== ref.sessionId);
+        target.splice(Math.min(index, target.length), 0, ref.sessionId);
+        orders[projectPath] = target;
+      }
+      next.sidebar = { ...next.sidebar, manualSessionOrder: orders };
+    }
+    this.settings = next;
+    this.volatileActiveSession = previousDraft && matches(previousDraft) ? moved : undefined;
+    try { this.persist(); }
+    catch (error) {
+      this.settings = previous;
+      this.volatileActiveSession = previousDraft;
+      throw error;
+    }
+  }
+
+  /** Validate host capacity before asking the engine to migrate files. */
+  assertSessionRelocationAllowed(projectPath: string): void {
+    if (!this.settingsWritable) throw new Error(this.audioConfigurationError ?? 'Device settings cannot be safely updated.');
+    withAddedProject(this.settings, projectPath);
   }
 
   get scheduledWorkspace(): string {
@@ -448,7 +493,7 @@ export class SettingsStore {
 
   private validateSessionRef(ref: SessionRef): void {
     if (!this.isTrustedWorkspace(ref.projectPath)) throw new Error('project is not in the project list');
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ref.sessionId)) {
+    if (!isSessionId(ref.sessionId)) {
       throw new Error('invalid session id');
     }
   }

@@ -65,5 +65,6 @@ pub use configuration_admin::plugin_admin;
 mod provider_connection;
 pub mod router;
 pub mod server;
+mod workspace_commands;
 pub use configuration_admin::settings_bridge;
 pub use configuration_admin::skills_admin;

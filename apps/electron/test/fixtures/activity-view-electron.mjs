@@ -19,10 +19,13 @@ try {
     wc.sendInputEvent({type: 'mouseUp', button: 'left', clickCount: 1, ...point});
     await new Promise(resolve => setTimeout(resolve, 80));
   };
-  assert.match(await js(`document.querySelector('.activity-tool-group summary').textContent`), /Read files, Ran commands · 2 tools · 1 failed/);
+  assert.equal(await js(`document.querySelector('.activity-tool-group summary > span').textContent`), 'Read a file, ran a command');
+  assert.equal(await js(`document.querySelector('.activity-tool-group summary .activity-tool-failed').textContent`), '1 failed');
   assert.equal(await js(`document.querySelector('.activity-tool-group').open`), false);
   await click('.activity-tool-group summary');
   assert.equal(await js(`document.querySelector('.activity-tool-group').open`), true);
+  assert.equal(await js(`document.querySelectorAll('.activity-tool-details .transcript-tool-row').length`), 2, 'expansion retains both tool calls');
+  assert.equal(await js(`document.querySelectorAll('.activity-tool-details .tool-group-trigger').length`), 0, 'expanded activity has no nested group heading');
   await click('.activity-tool-group summary');
   assert.equal(await js(`document.querySelector('.activity-tool-group').open`), false);
   assert.equal(await js(`document.querySelector('.session-needs-input').textContent`), 'Needs input');

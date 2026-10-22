@@ -17,9 +17,13 @@ test('rename persists and returns a title without starting or dispatching to an 
   writeFileSync(path, original);
   let catalogFailure = false;
   const handlers = new Map<string, (...args: any[]) => any>();
+  const runtime = {
+    projectPath: directory, connectionState: { status: 'connected' },
+    getWorkspaceState: async () => ({ cwd: directory, additional_directories: [], transcript_path: path }),
+  };
   const bridge = {
     registerWindow() {}, registerIpc() {},
-    get: () => ({ projectPath: directory, connectionState: { status: 'connected' } }),
+    get: () => runtime,
     isProjectClosing: () => false,
     withBackgroundSession: () => { throw new Error('rename must not wait on engine readiness'); },
   };

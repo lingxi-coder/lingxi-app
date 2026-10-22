@@ -1,7 +1,7 @@
 import { questionAnswers } from './AskUserQuestionSummary';
 import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
-import { toolDisplayHeader } from '../model/runItem';
+import { toolGroupSummary } from './toolPresentation';
 import { Disclosure } from './Disclosure';
 import { ToolCall, toolIconName } from './ToolCall';
 import { ToolActivityIcon } from './ToolActivityIcon';
@@ -11,13 +11,15 @@ interface ToolGroupProps {
   group: TranscriptToolGroup;
   modUiSessionId?: string;
   open: boolean;
+  /** An outer activity disclosure already supplies the group heading. */
+  ungrouped?: boolean;
   toolOpen(id: string): boolean | undefined;
   onSetOpen(id: string, next: boolean): void;
 }
 
-export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: ToolGroupProps) {
+export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen, ungrouped = false }: ToolGroupProps) {
   const t = useT();
-  if (group.tools.some((tool) => questionAnswers(tool))) {
+  if (ungrouped || group.tools.some((tool) => questionAnswers(tool))) {
     return <div className="transcript-tool-group">
       {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </div>;
@@ -37,22 +39,20 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: 
   const failed = group.tools.filter((tool) => tool.status === 'error').length;
   const lastTool = group.tools.at(-1);
   if (!lastTool) return null;
-  const view = toolDisplayHeader(lastTool);
-  const title = view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title;
-  const detail = view.sub_line;
-  const summary = `${title}${detail ? ` · ${detail.prefix}${detail.text}` : ''}`;
+  const summary = toolGroupSummary(group.tools);
+  const firstTool = group.tools[0]!;
   const failureSummary = failed ? ` · ${failed} failed` : '';
   return <div className="transcript-tool-group">
     <Disclosure id={group.id} open={open} onToggle={() => onSetOpen(group.id, !open)}
       buttonClassName="tool-group-trigger"
       label={`${summary}${failureSummary} · ${group.tools.length} tools`}
-      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 40, fontSize: 13, gap: 8, color: t.text3 } as CSSProperties}
+      buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 28, fontSize: 13, fontWeight: 400, gap: 8, color: t.text3, '--tool-focus-color': t.text } as CSSProperties}
       summary={<>
-        <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ToolActivityIcon name={toolIconName(lastTool.view.verb, lastTool.tool, lastTool.view.icon)} /></span>
-        <span title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
+        <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ToolActivityIcon name={toolIconName(firstTool.view.verb, firstTool.tool, firstTool.view.icon)} /></span>
+        <span className="tool-group-summary-text" title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
         {failed > 0 && <span style={{ flexShrink: 0, color: t.danger }}>{failureSummary}</span>}
       </>}
-      bodyStyle={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 12, margin: '4px 0 0 8px' }}>
+      bodyStyle={{ margin: '2px 0 0', minWidth: 0 }}>
       {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </Disclosure>
   </div>;

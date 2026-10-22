@@ -1,0 +1,191 @@
+{
+  "source": "Claude Code CLI 2.1.307 captured xwe and Pwe call chain",
+  "add_dir_cases": [
+    {
+      "name": "current_directory_short_circuits_alias",
+      "input": {
+        "current_dir": "/workspace/A",
+        "path": "/workspace/A"
+      },
+      "expected": {
+        "result": {
+          "type": "text",
+          "value": "/workspace/A is already the current working directory."
+        },
+        "validations": [
+          {
+            "resultType": "alreadyInWorkingDirectory",
+            "directoryPath": "/workspace/A",
+            "absolutePath": "/workspace/A",
+            "workingDir": "/workspace/A",
+            "isExactMatch": true,
+            "isOriginalCwd": true
+          }
+        ],
+        "prompt_directories": [],
+        "additional_directories": [],
+        "files": [],
+        "calls": [
+          {
+            "operation": "controlled_network_probe",
+            "path": "/workspace/A"
+          },
+          {
+            "operation": "stat_directory",
+            "path": "/workspace/A"
+          }
+        ],
+        "logs": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "project_settings_exact_grant_short_circuits_alias",
+      "input": {
+        "current_dir": "/workspace/A",
+        "path": "/workspace/B",
+        "additional_directories": [
+          {
+            "path": "/workspace/B",
+            "source": "projectSettings"
+          }
+        ]
+      },
+      "expected": {
+        "result": {
+          "type": "text",
+          "value": "/workspace/B is already added as a working directory."
+        },
+        "validations": [
+          {
+            "resultType": "alreadyInWorkingDirectory",
+            "directoryPath": "/workspace/B",
+            "absolutePath": "/workspace/B",
+            "workingDir": "/workspace/B",
+            "isExactMatch": true,
+            "isOriginalCwd": false
+          }
+        ],
+        "prompt_directories": [],
+        "additional_directories": [
+          {
+            "path": "/workspace/B",
+            "source": "projectSettings"
+          }
+        ],
+        "files": [],
+        "calls": [
+          {
+            "operation": "controlled_network_probe",
+            "path": "/workspace/B"
+          },
+          {
+            "operation": "stat_directory",
+            "path": "/workspace/B"
+          }
+        ],
+        "logs": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "additional_directory_child_short_circuits_alias",
+      "input": {
+        "current_dir": "/workspace/A",
+        "path": "/workspace/B/child",
+        "additional_directories": [
+          {
+            "path": "/workspace/B",
+            "source": "localSettings"
+          }
+        ]
+      },
+      "expected": {
+        "result": {
+          "type": "text",
+          "value": "/workspace/B/child is already accessible within the additional working directory /workspace/B."
+        },
+        "validations": [
+          {
+            "resultType": "alreadyInWorkingDirectory",
+            "directoryPath": "/workspace/B/child",
+            "absolutePath": "/workspace/B/child",
+            "workingDir": "/workspace/B",
+            "isExactMatch": false,
+            "isOriginalCwd": false
+          }
+        ],
+        "prompt_directories": [],
+        "additional_directories": [
+          {
+            "path": "/workspace/B",
+            "source": "localSettings"
+          }
+        ],
+        "files": [],
+        "calls": [
+          {
+            "operation": "controlled_network_probe",
+            "path": "/workspace/B/child"
+          },
+          {
+            "operation": "stat_directory",
+            "path": "/workspace/B/child"
+          }
+        ],
+        "logs": [],
+        "errors": []
+      }
+    },
+    {
+      "name": "read_fence_retains_user_settings_grant",
+      "input": {
+        "current_dir": "/workspace/A",
+        "path": "/workspace/B",
+        "block_reads_outside": true,
+        "additional_directories": [
+          {
+            "path": "/workspace/B",
+            "source": "userSettings"
+          }
+        ]
+      },
+      "expected": {
+        "result": {
+          "type": "text",
+          "value": "/workspace/B is already added as a working directory."
+        },
+        "validations": [
+          {
+            "resultType": "alreadyInWorkingDirectory",
+            "directoryPath": "/workspace/B",
+            "absolutePath": "/workspace/B",
+            "workingDir": "/workspace/B",
+            "isExactMatch": true,
+            "isOriginalCwd": false
+          }
+        ],
+        "prompt_directories": [],
+        "additional_directories": [
+          {
+            "path": "/workspace/B",
+            "source": "userSettings"
+          }
+        ],
+        "files": [],
+        "calls": [
+          {
+            "operation": "controlled_network_probe",
+            "path": "/workspace/B"
+          },
+          {
+            "operation": "stat_directory",
+            "path": "/workspace/B"
+          }
+        ],
+        "logs": [],
+        "errors": []
+      }
+    }
+  ]
+}

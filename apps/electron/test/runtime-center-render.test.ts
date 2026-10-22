@@ -325,7 +325,7 @@ test('explicit agent activity suppresses only synthetic thinking, retaining live
     liveItems: [{ type: 'tool', id: 'tool-1', tool: 'Read', status: 'running', view: { verb: 'read', label: 'Read', primary: 'src/main.ts', title: 'Read(src/main.ts)' } }],
   }));
   assert.ok(tool.includes('src/main.ts'));
-  assert.ok(tool.includes('running-sweep'));
+  assert.match(tool, /role="status" aria-label="Running"/);
   assert.ok(!tool.includes('Thinking'));
 });
 

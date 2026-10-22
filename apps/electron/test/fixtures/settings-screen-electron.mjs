@@ -1112,7 +1112,12 @@ async function runMacosEditors(window, webContents) {
       mkdirSync(dir, { recursive: true }); window.showInactive(); await delay(60);
       writeFileSync(join(dir, `${theme}-editor-${page}.png`), (await window.capturePage()).toPNG());
     }
-    if (page === 'skills') {
+    if (page === 'custom-providers') {
+      // Leave the newly opened draft through its own Cancel action so the next
+      // page audit still exercises the real unsaved-draft navigation guard.
+      await run(`[...document.querySelectorAll('.settings-content-inner button')].find(button => button.textContent.trim() === '取消').click()`);
+      await waitFor(webContents, `!document.querySelector('[aria-label="Profile 名称"]')`);
+    } else if (page === 'skills') {
       await run('document.querySelector(\'[aria-label="Close details"]\').click()');
     }
   }

@@ -66,11 +66,30 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
 }
 
 export function LocalAppCard({ item }: { item: ToolRunItem }) {
+  const t = useT();
   const app = localAppReference(item);
   const [error, setError] = useState('');
   const [opening, setOpening] = useState(false);
+  const openingRef = useRef(false);
   if (!app) return null;
-  return <div className="local-app-chat-card"><AppsGlyph size={25}/><div><strong>{app.name}</strong><small>Local app · v{app.revision}</small>{error && <span role="alert">{error}</span>}</div><button disabled={opening} onClick={async () => {
-    setOpening(true); setError(''); try { await appsApi().open(app.id); } catch (error) { setError(error instanceof Error ? error.message : String(error)); } finally { setOpening(false); }
-  }}>{opening ? 'Opening…' : 'Open app'}</button></div>;
+  return <div className="local-app-chat-card" style={{
+    '--apps-text': t.text, '--apps-muted': t.text2, '--apps-surface': t.surface,
+    '--apps-border': t.border, '--apps-accent': t.accent, '--apps-accent-bg': t.accentBg,
+    '--apps-hover': t.surfaceHover, '--apps-error': t.danger,
+  } as CSSProperties}>
+    <span className="local-app-chat-icon"><AppsGlyph size={20}/></span>
+    <div className="local-app-chat-info">
+      <strong>{app.name}</strong>
+      {app.summary && <p>{app.summary}</p>}
+    </div>
+    <button type="button" disabled={opening} aria-busy={opening} aria-label={`${opening ? 'Opening' : 'Open'} ${app.name}`} onClick={async () => {
+      if (openingRef.current) return;
+      openingRef.current = true;
+      setOpening(true); setError('');
+      try { await appsApi().open(app.id); }
+      catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+      finally { openingRef.current = false; setOpening(false); }
+    }}>{opening ? 'Opening…' : 'Open app'}</button>
+    {error && <p className="local-app-chat-error" role="alert">{error}</p>}
+  </div>;
 }

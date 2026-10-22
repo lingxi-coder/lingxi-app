@@ -463,7 +463,17 @@ async function main() {
     const rapidTarget = 'packaged-host-cua-valuexy';
     sendText(rapidTarget);
     await wait(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-input')?.value === '${rapidTarget}' && window.__modUiClientFixture.rapidInputSnapshot().rapidPostOrdinal === 1`, 'rapid local edits while first Host post is delayed');
+    await run(`(() => {
+      window.__rapidEnterDelivered = false;
+      document.querySelector('[data-client="rapid-input"] .mod-ui-client-input').addEventListener('keydown', event => {
+        window.__rapidEnterDelivered = event.isTrusted && event.key === 'Enter';
+      }, { once: true });
+    })()`);
     sendEnter();
+    // Native input delivery is asynchronous. Observe Enter reaching the input
+    // before injecting a DOM click, preserving the intended user action order
+    // while the first Host post remains held.
+    await wait(`window.__rapidEnterDelivered === true`);
     await run(`document.querySelector('[data-client="rapid-input"] .mod-ui-client-button').click()`);
     await wait(`window.__modUiClientFixture.rapidInputSnapshot().controlRequests.length === 1 && window.__modUiClientFixture.rapidInputSnapshot().runHeld.length === 1`, 'queued events wait for the first settled post');
     const rapidBeforeRelease = await run(`window.__modUiClientFixture.rapidInputSnapshot()`);
@@ -493,7 +503,7 @@ async function main() {
     ]);
     assert.deepEqual(rapidInputRegression.rapidButtonCallbacks, [rapidTarget]);
     assert.deepEqual(rapidInputRegression.controlRequests.slice(0, rapidTarget.length).map((event) => event.value), rapidPrefixes);
-    assert.equal(rapidInputRegression.controlRequests.at(-2).kind, 'submit');
+    assert.equal(rapidInputRegression.controlRequests.at(-2).kind, 'submit', JSON.stringify(rapidInputRegression.controlRequests.slice(-3)));
     assert.equal(rapidInputRegression.controlRequests.at(-1).type, 'press');
     const rapidHeldHandles = rapidInputRegression.runHeld.map(({ handle }) => handle);
     assert.equal(new Set(rapidHeldHandles).size, rapidHeldHandles.length, 'each queued event must use the latest frame handle');

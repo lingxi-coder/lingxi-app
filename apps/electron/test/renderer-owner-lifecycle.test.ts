@@ -7,6 +7,7 @@ import { runInNewContext } from 'node:vm';
 import React, { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
+import { isRuntimeRemovedState, isRuntimeReplacementState, shouldClearPendingPermissions, clearSlashTurnClaim } from '../src/renderer/bridge/bridgeRuntimeState';
 import { SlashCommandTerminalRegistry } from '../src/renderer/bridge/slashCommandTerminals';
 import { SettingsScreen } from '../src/renderer/components/settings/SettingsScreen';
 import * as layerFields from '../src/renderer/components/settings/layerFields';
@@ -292,4 +293,26 @@ test('mixed-file attachment errors cannot paint another session after an image r
   harness.context.draftSessionId.current = 'B'; harness.context.imageDraftGeneration.current += 1;
   harness.release(); await pending;
   assert.deepEqual(harness.notices, []);
+});
+
+
+test('an intentional runtime replacement remains routable and does not surface an error notification', () => {
+  const file = source('src/renderer/bridge/useBridge.ts');
+  const call = findNode(file, node => ts.isCallExpression(node)
+    && node.expression.getText(file) === 'host.onConnectionStateChanged') as ts.CallExpression;
+  const errors: string[] = [];
+  const context: any = { pendingConfigurationOperations: { current: new Map() }, interruptConfigurationOperations,
+    removedRuntimeIds: { current: new Set() }, isRuntimeRemovedState, isRuntimeReplacementState,
+    bootstrapRef: { current: { runtimes: [{ sessionId: 'A', projectPath: '/A' }] } }, pendingSessionRef: { current: null },
+    sharedDesktopCacheRef: { current: new Map() }, updateRuntime: () => {}, shouldClearPendingPermissions,
+    clearSlashTurnClaim, completeTrackedSpeech: () => {}, activeSessionIdRef: { current: 'A' },
+    setError: (message: string) => errors.push(message) };
+  for (const name of ['turnActiveRefs', 'engineTurnActiveRefs', 'slashPendingRefs', 'pendingFusionDispatches',
+    'sideQuestionTurns', 'cancellingRefs', 'cancellationTasks']) context[name] = { current: new Map() };
+  evaluate(`globalThis.handleState = ${call.arguments[0].getText(file)};`, context);
+  context.handleState({ sessionId: 'A', event: { status: 'disconnected', reason: 'session runtime replaced' } });
+  assert.deepEqual(errors, []);
+  assert.equal(context.removedRuntimeIds.current.has('A'), false);
+  context.handleState({ sessionId: 'A', event: { status: 'disconnected', reason: 'unexpected loss' } });
+  assert.deepEqual(errors, ['unexpected loss']);
 });

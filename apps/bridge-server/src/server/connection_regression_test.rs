@@ -175,6 +175,14 @@ async fn reconnect_cannot_claim_until_old_cleanup_has_finished() {
         .queue
         .enqueue(prompt_command("new input".into()))
         .await;
+    connection.handshaken.store(true, Ordering::SeqCst);
+    connection
+        .on_transport_disconnected(first_sink.clone())
+        .await;
+    assert!(
+        connection.handshaken.load(Ordering::SeqCst),
+        "a stale peer disconnect cannot close the new interaction owner"
+    );
     connection.close_connection(Some(&first_sink)).await;
     assert_eq!(
         connection.queue.len().await,

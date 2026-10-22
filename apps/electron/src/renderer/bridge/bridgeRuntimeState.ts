@@ -160,6 +160,10 @@ export function reconcilePendingCount(localOverride: number | undefined, snapsho
 
 const SESSION_RUNTIME_DISPOSED_REASON = 'session runtime disposed';
 
+export function isRuntimeReplacementState(state: ConnectionState): boolean {
+  return state.status === 'disconnected' && state.reason === 'session runtime replaced';
+}
+
 export function isRuntimeRemovedState(state: ConnectionState): boolean {
   return state.status === 'disconnected' && state.reason === SESSION_RUNTIME_DISPOSED_REASON;
 }

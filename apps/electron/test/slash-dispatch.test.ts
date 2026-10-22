@@ -8,6 +8,7 @@ import {
   type DesktopCommand,
 } from '../src/renderer/bridge/slashDispatch';
 import { ALL_DESKTOP_COMMANDS, DESKTOP_COMMANDS } from '../src/renderer/bridge/desktopCommands';
+import type { SessionWorkspaceOperation } from '../src/shared/sessionWorkspace';
 
 const noop = () => undefined;
 const table: DesktopCommand[] = [
@@ -84,9 +85,10 @@ function recordingContext() {
     openPermissionPicker: () => { calls.push('openPermissionPicker'); },
     openSettings: () => { calls.push('openSettings'); },
     openSettingsPage: (page: string) => { calls.push(`openSettingsPage:${page}`); },
-    addWorkspaceDirectory: async (path: string) => { calls.push(`addWorkspaceDirectory:${path}`); },
-    chooseProject: async () => { calls.push('chooseProject'); },
-    activateProject: async (path: string) => { calls.push(`activateProject:${path}`); },
+    updateSessionWorkspace: async (operation: SessionWorkspaceOperation) => {
+      calls.push(`updateSessionWorkspace:${operation.action}:${operation.path ?? '<picker>'}`);
+    },
+    resumeSession: (query?: string) => { calls.push(`resumeSession:${query ?? ''}`); },
     clearSession: async (name?: string) => { calls.push(name ? `clearSession:${name}` : 'clearSession'); },
     forceCompact: async (instructions?: string) => { calls.push(instructions ? `forceCompact:${instructions}` : 'forceCompact'); },
     copyLastResponse: async () => { calls.push('copyLastResponse'); return true; },
@@ -185,12 +187,13 @@ test('Desktop-owned slash commands call real GUI and IPC actions', async () => {
   assert.deepEqual(await run('/login'), ['login']);
   assert.deepEqual(await run('/logout'), ['logout']);
   assert.deepEqual(await run('/add-dir /tmp/work'), [
-    'addWorkspaceDirectory:/tmp/work',
-    'emit:ok:Added working directory: /tmp/work',
+    'updateSessionWorkspace:add-dir:/tmp/work',
   ]);
-  assert.deepEqual(await run('/add-dir'), ['openSettingsPage:permissions']);
-  assert.deepEqual(await run('/cd'), ['chooseProject']);
-  assert.deepEqual(await run('/cd /tmp/work'), ['activateProject:/tmp/work']);
+  assert.deepEqual(await run('/add-dir'), ['updateSessionWorkspace:add-dir:<picker>']);
+  assert.deepEqual(await run('/cd'), ['updateSessionWorkspace:cd:<picker>']);
+  assert.deepEqual(await run('/cd /tmp/work'), ['updateSessionWorkspace:cd:/tmp/work']);
+  assert.deepEqual(await run('/resume'), ['resumeSession:']);
+  assert.deepEqual(await run('/resume parser investigation'), ['resumeSession:parser investigation']);
   assert.deepEqual(await run('/copy'), [
     'copyLastResponse',
     'emit:ok:Copied the last response to the clipboard.',
@@ -198,6 +201,25 @@ test('Desktop-owned slash commands call real GUI and IPC actions', async () => {
   assert.deepEqual(await run('/tasks'), ['openTasks']);
   assert.deepEqual(await run('/plugin'), ['openSettingsPage:plugins']);
   assert.deepEqual(await run('/reload-plugins'), ['reloadPlugins']);
+});
+
+test('workspace failures reach the composer without an invented success result', async () => {
+  for (const raw of ['/cd /missing', '/add-dir /missing']) {
+    const { ctx, calls } = recordingContext();
+    ctx.updateSessionWorkspace = async () => { throw new Error('Directory does not exist.'); };
+    await assert.rejects(() => dispatch(raw, ctx), /Directory does not exist/);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('project and plugin resume commands keep precedence over the Desktop picker', () => {
+  assert.ok(resolveDesktopCommand('/resume search query', DESKTOP_COMMANDS));
+  assert.equal(desktopCommandIsShadowed('/resume search query', [{
+    name: 'resume', description: 'Project resume workflow', source: 'project',
+  }]), true);
+  assert.equal(desktopCommandIsShadowed('/resume search query', [{
+    name: 'resume', description: 'Builtin resume', source: 'builtin',
+  }]), false);
 });
 
 test('a directly typed unsupported command reports Desktop unavailability locally', async () => {

@@ -83,7 +83,8 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     }
     for (const layout of result.activityLayouts) {
       assert.deepEqual(layout, result.activityLayouts[0], 'tool results, grouped tools and streaming reasoning must preserve activity layout');
-      assert.equal(layout.toolHeight, layout.slotHeight, 'tools and thinking share one row height');
+      assert.equal(layout.toolHeight, 28, 'ordinary tools retain their compact row height');
+      assert.equal(layout.slotHeight, 40, 'the persistent thinking slot retains its reserved height');
       assert.equal(layout.toolGap, 12, 'the message wrapper must retain compact activity spacing');
       assert.equal(layout.thinkingGap, 12, 'hidden and visible thinking slots have the same activity spacing');
     }

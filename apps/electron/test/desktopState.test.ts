@@ -208,3 +208,18 @@ test('status refresh preserves the qualified route and source', () => {
   assert.equal(refreshed.modelDetails.find(row => row.reference === refreshed.currentModel)?.context_budget?.effective_input_budget, 200000);
   assert.deepEqual(refreshed.status, snapshot);
 });
+
+
+test('authoritative controls restore the displayed permission after runtime state resets', () => {
+  for (const effective of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'] as const) {
+    const controls = { qualified_model: 'test/model',
+      permission: { requested: 'auto' as const, effective, options: [] },
+      reasoning: { requested: { type: 'automatic' as const }, effective: { type: 'automatic' as const },
+        spec: { options: [], provider_default: { type: 'automatic' as const }, forced_reasoning: false, editable: false } },
+      proactivity: { opted_in: true, selector_gate: true, selector_gate_ever_on: true,
+        attachments_enabled: true, opt_in_available: true, level: 'default' as const } };
+    const restored = reduceDesktopEvent(emptyDesktopState(), { type: 'conversation_controls_changed', controls });
+    assert.equal(restored.permissionMode, effective);
+    assert.equal(restored.conversationControls, controls);
+  }
+});

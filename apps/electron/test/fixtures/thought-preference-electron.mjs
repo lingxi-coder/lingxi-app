@@ -60,7 +60,9 @@ async function main() {
     assert.doesNotMatch((await state()).text, /Streaming reasoning/);
     assert.equal(await evaluate('document.querySelector(".transcript-thinking-label").title'), 'Checking the transcript spacing');
     await evaluate('window.thoughtFixture.finishTools()'); await wait();
-    assert.match((await state()).text, /npm run typecheck/);
+    assert.equal(await evaluate(`document.querySelector('.tool-group-trigger').getAttribute('aria-expanded')`), 'false');
+    assert.equal(await evaluate(`document.querySelector('.tool-group-trigger').getAttribute('aria-label')`), 'Read a file, ran a command · 2 tools');
+    assert.doesNotMatch((await state()).text, /npm run typecheck/);
     assert.doesNotMatch((await state()).text, /Used 2 tools/);
     assert.doesNotMatch((await state()).text, /Stage.tsx/);
     await evaluate(`document.querySelector('.tool-group-trigger').click()`); await wait();

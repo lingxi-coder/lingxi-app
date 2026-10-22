@@ -43,7 +43,7 @@ function Fixture() {
         { id: 'before', type: 'narration', role: 'assistant', text: 'Checking the project.' },
         { id: 'read', type: 'tool', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', primary: 'Stage.tsx', title: 'Read Stage.tsx' } },
         { id: 'thought', type: 'thinking', streamed: true, done, text: done ? 'Finished reasoning' : reasoningText },
-        { id: 'shell', type: 'tool', tool: 'Bash', status: toolsDone ? 'done' : 'running', view: { verb: 'run', label: 'Shell', primary: 'npm run typecheck', title: 'Check TypeScript' } },
+        { id: 'shell', type: 'tool', tool: 'Bash', status: toolsDone ? 'done' : 'running', view: { verb: 'shell', label: 'Shell', primary: 'npm run typecheck', title: 'Check TypeScript' } },
         { id: 'after', type: 'narration', role: 'assistant', text: 'Following message.' },
       ]} />
     </main>

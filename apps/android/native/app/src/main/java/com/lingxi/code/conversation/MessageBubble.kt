@@ -78,6 +78,7 @@ fun MessageBubble(
     message: Message,
     modifier: Modifier = Modifier,
     dimmed: Boolean = false,
+    bottomSpacing: Dp = 18.dp,
     onShare: (String) -> Unit = {},
     onOpenLink: (String) -> Unit = {},
     /** Tool-use ids whose result body/diff is expanded — owned by `ChatState`. */
@@ -94,7 +95,7 @@ fun MessageBubble(
         }
         var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Column(
-            modifier = modifier.padding(bottom = 18.dp),
+            modifier = modifier.padding(bottom = bottomSpacing),
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -161,7 +162,7 @@ fun MessageBubble(
         var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Row(
             modifier = modifier
-                .padding(bottom = 18.dp)
+                .padding(bottom = bottomSpacing)
                 .graphicsLayer { alpha = if (dimmed) 0.4f else 1f },
             horizontalArrangement = Arrangement.spacedBy(11.dp),
             verticalAlignment = Alignment.Top,

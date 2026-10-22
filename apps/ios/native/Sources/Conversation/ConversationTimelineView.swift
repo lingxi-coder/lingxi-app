@@ -5,6 +5,7 @@ import SwiftUI
 /// in the execution ledger; only its current Thinking status enters this view.
 struct ConversationTimelineView: View {
     @Environment(\.theme) private var t
+    @ScaledMetric(relativeTo: .body) private var spacingScale: CGFloat = 1
 
     let groups: [ConversationTimelineGroup]
     var liveToolIDs: Set<String>? = nil
@@ -29,18 +30,31 @@ struct ConversationTimelineView: View {
             ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
                 segmentView(segment)
                     .background(t.accent.opacity(highlightedRowID == segment.id ? 0.12 : 0), in: .rect(cornerRadius: 10))
-                    .padding(.top, index == 0 ? 0 : Self.spacing(before: segments[index - 1], current: segment))
+                    .padding(.top, index == 0 ? 0 : Self.spacing(before: segments[index - 1], current: segment) * spacingScale)
             }
         }
         .scrollTargetLayout()
     }
 
-    /// Desktop separates narration/activity rows by 18pt, while adjacent tool
-    /// rows stay in a compact 8pt rhythm. Applying this at the segment boundary
-    /// keeps the spacing stable as a tool group grows during streaming.
+    /// Match desktop grouping without depending on live activity visibility.
     private static func spacing(before: Segment, current: Segment) -> CGFloat {
-        if case .toolBatch = before, case .toolBatch = current { return 8 }
-        return 18
+        if before.isUser || current.isUser { return 32 }
+        if before.isActivity || current.isActivity { return 12 }
+        return 24
+    }
+
+    static func projectedSegmentSpacings(
+        groups: [ConversationTimelineGroup],
+        streaming: Bool = false,
+        showThinking: Bool = true
+    ) -> [CGFloat] {
+        let segments = projectedSegments(
+            groups: groups, transcriptAgents: [], transcriptAgentAnchors: [:],
+            liveToolIDs: nil, hasLiveOwner: true, streaming: streaming, showThinking: showThinking
+        )
+        return segments.enumerated().map { index, segment in
+            index == 0 ? 0 : spacing(before: segments[index - 1], current: segment)
+        }
     }
 
     private var timelineSegments: [Segment] {
@@ -267,6 +281,18 @@ struct ConversationTimelineView: View {
         case toolBatch(id: String, tools: [ConversationToolTrace])
         case notice(id: String, notice: ConversationExecutionNotice)
         case agents(id: String, agents: [ConversationAgentSummary])
+
+        var isUser: Bool {
+            if case let .message(_, message) = self { return message.role == .user }
+            return false
+        }
+
+        var isActivity: Bool {
+            switch self {
+            case .toolBatch, .reasoning, .thinkingSlot: return true
+            default: return false
+            }
+        }
 
         var id: String {
             switch self {

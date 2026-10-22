@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 
 @testable import LingxiCode
 
@@ -7,6 +8,37 @@ import XCTest
 /// `ForEach` id, SwiftUI tears the row down and rebuilds it, which moves the
 /// scroll position under the reader.
 final class ConversationTimelineSegmentsTests: XCTestCase {
+    func testSpacingMatchesDesktopAndThinkingVisibilityDoesNotChangeLayout() {
+        let user = Message(role: .user, text: "Question")
+        let assistant = Message(role: .ai, text: "Reply")
+        let groups = [user, assistant, Message(role: .ai, text: "Follow-up")].enumerated().map { index, message in
+            ConversationTimelineGroup(id: "message-\(index)", runID: nil, rows: [.message(message)], status: nil)
+        }
+        let hidden = ConversationTimelineView.projectedSegmentSpacings(groups: groups, showThinking: false)
+        XCTAssertEqual(hidden, [0, 32, 24, 12])
+        XCTAssertEqual(hidden, ConversationTimelineView.projectedSegmentSpacings(groups: groups, streaming: true))
+        let withTools = groups + [toolGroup([trace("t1")])]
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: withTools), [0, 32, 24, 12, 12])
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0, 32])
+    }
+
+    @MainActor
+    func testThinkingVisibilityKeepsRenderedTranscriptHeight() throws {
+        let message = Message(role: .ai, text: "A stable reply")
+        let groups = [ConversationTimelineGroup(id: "reply", runID: nil, rows: [.message(message)])]
+        func height(streaming: Bool, showThinking: Bool) throws -> CGFloat {
+            let renderer = ImageRenderer(content: ConversationTimelineView(
+                groups: groups, messageDetails: [:], expandedToolCalls: [],
+                onToggleToolCall: { _ in }, streaming: streaming, showThinking: showThinking
+            ).frame(width: 320))
+            return try XCTUnwrap(renderer.uiImage).size.height
+        }
+        let visible = try height(streaming: true, showThinking: true)
+        XCTAssertGreaterThan(visible, 40)
+        XCTAssertEqual(visible, try height(streaming: true, showThinking: false), accuracy: 0.5)
+        XCTAssertEqual(visible, try height(streaming: false, showThinking: true), accuracy: 0.5)
+    }
+
     private func trace(_ id: String) -> ConversationToolTrace {
         ConversationToolTrace(id: id, tool: "Bash", status: .completed)
     }

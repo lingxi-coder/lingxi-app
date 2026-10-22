@@ -91,7 +91,7 @@ final class MockConversationSource: ConversationSource {
                 elapsedMs: 18,
                 display: ConversationToolResultDisplay(
                     headline: "Read completed", headlineKind: nil, headlineArgs: [], diff: nil,
-                    body: nil, bodyLines: 0, bodyTruncated: false, collapsed: false
+                    body: "Read fixture body", bodyLines: 1, bodyTruncated: false, collapsed: false
                 )
             )
             let searchTrace = ConversationToolTrace(

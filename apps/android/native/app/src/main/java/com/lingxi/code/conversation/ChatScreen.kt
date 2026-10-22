@@ -24,7 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -610,52 +610,56 @@ private fun MessageList(
             start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp,
         ),
     ) {
-        // ONE list, ONE items() block: order and keys come from
+        // ONE list, ONE itemsIndexed() block: order and keys come from
         // buildChatRenderItems, which preserves the exact visual order and
         // stable keys of the old hand-stitched blocks.
-        items(
+        itemsIndexed(
             items = items,
-            key = { it.key },
-            contentType = { it.contentType },
-        ) { item ->
-            when (item) {
-                ChatRenderItem.Empty -> BoxWithConstraints(Modifier.fillParentMaxHeight().fillMaxWidth()) {
-                    val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
-                    EmptyState(compact = maxHeight < (200 * fontScale).dp,
-                        modifier = Modifier.fillMaxWidth().height(minOf(maxHeight, 360.dp)))
-                }
-                is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
-                    ToolGroupView(TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall)
-                }
-                is ChatRenderItem.Message -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
-                    MessageBubble(
+            key = { _, item -> item.key },
+            contentType = { _, item -> item.contentType },
+        ) { index, item ->
+            Column(Modifier.fillMaxWidth().padding(top = transcriptSpacingBefore(items.getOrNull(index - 1), item).dp)) {
+                when (item) {
+                    ChatRenderItem.Empty -> BoxWithConstraints(Modifier.fillParentMaxHeight().fillMaxWidth()) {
+                        val fontScale = androidx.compose.ui.platform.LocalDensity.current.fontScale
+                        EmptyState(compact = maxHeight < (200 * fontScale).dp,
+                            modifier = Modifier.fillMaxWidth().height(minOf(maxHeight, 360.dp)))
+                    }
+                    is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
+                        ToolGroupView(TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall)
+                    }
+                    is ChatRenderItem.Message -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
+                        MessageBubble(
+                            message = item.message,
+                            bottomSpacing = 0.dp,
+                            onShare = stableOnShare,
+                            onOpenLink = stableOnOpenLink,
+                            expandedToolCalls = state.expandedToolCalls,
+                            onToggleToolCall = stableOnToggleToolCall,
+                        )
+                    }
+                    is ChatRenderItem.Streaming -> MessageBubble(
                         message = item.message,
+                        bottomSpacing = 0.dp,
                         onShare = stableOnShare,
                         onOpenLink = stableOnOpenLink,
                         expandedToolCalls = state.expandedToolCalls,
                         onToggleToolCall = stableOnToggleToolCall,
                     )
+                    is ChatRenderItem.AgentRun -> AgentRunTimeline(
+                        state = item.run,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        expandedToolCalls = state.expandedToolCalls,
+                        onToggleToolCall = stableOnToggleToolCall,
+                    )
+                    is ChatRenderItem.Shell -> ShellToolCard(
+                        state = item.shell,
+                        onOpenTerminal = onOpenTerminal,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                    ChatRenderItem.StreamingIndicator -> StreamingRow()
+                    is ChatRenderItem.Visualization -> VisualizationCard(item.status, item.reference)
                 }
-                is ChatRenderItem.Streaming -> MessageBubble(
-                    message = item.message,
-                    onShare = stableOnShare,
-                    onOpenLink = stableOnOpenLink,
-                    expandedToolCalls = state.expandedToolCalls,
-                    onToggleToolCall = stableOnToggleToolCall,
-                )
-                is ChatRenderItem.AgentRun -> AgentRunTimeline(
-                    state = item.run,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    expandedToolCalls = state.expandedToolCalls,
-                    onToggleToolCall = stableOnToggleToolCall,
-                )
-                is ChatRenderItem.Shell -> ShellToolCard(
-                    state = item.shell,
-                    onOpenTerminal = onOpenTerminal,
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
-                ChatRenderItem.StreamingIndicator -> StreamingRow()
-                is ChatRenderItem.Visualization -> VisualizationCard(item.status, item.reference)
             }
         }
         // Zero-height anchor past the last real row, so scrolling to the latest

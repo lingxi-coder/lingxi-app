@@ -1,3 +1,6 @@
+import { LocalAppHost } from './local-apps/host.js';
+import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
+import { homedir } from 'node:os';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
@@ -28,7 +31,7 @@ import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
-import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic } from './host-utils.js';
+import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { requestMicrophoneAccess } from './microphoneAccess.js';
 import { ProjectSessionCatalog } from './session-catalog.js';
@@ -54,6 +57,9 @@ installCrashReporting();
 // scheme must be privileged before `app.ready` so its pages get a real origin
 // and secure context; its handler is installed on the dedicated partition.
 protocol.registerSchemesAsPrivileged([{
+  scheme: LOCAL_APP_SCHEME,
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, allowServiceWorkers: true },
+}, {
   scheme: VISUALIZATION_SCHEME,
   privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false, stream: false, codeCache: false },
 }]);
@@ -68,12 +74,15 @@ let terminals: TerminalManager | null = null;
 let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
+let localApps: LocalAppHost | null = null;
+const mainWindows = new Set<BrowserWindow>();
+function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }
 let deepLinkProjects: () => string[] = () => [];
 let resolveDeepLinkReady: () => void;
 const deepLinkReady = new Promise<void>(resolve => { resolveDeepLinkReady = resolve; });
 const deepLinks = installDeepLinks(() => deepLinkProjects(), () => {
-  let window = BrowserWindow.getAllWindows()[0];
-  if (!window && host) { createWindow(); window = BrowserWindow.getAllWindows()[0]; }
+  let window = getMainWindow();
+  if (!window && host) { createWindow(); window = getMainWindow(); }
   if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
 }, () => deepLinkReady);
 
@@ -167,6 +176,9 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  mainWindows.add(mainWindow);
+  mainWindow.once('closed', () => mainWindows.delete(mainWindow));
+  localApps?.registerMainWindow(mainWindow, target.url);
   secureSession(mainWindow.webContents.session);
   host?.registerWindow(mainWindow.webContents, target.url);
   mainWindow.webContents.on('did-finish-load', () => {
@@ -227,7 +239,7 @@ if (!hasSingleInstanceLock) app.quit();
 if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate(process.platform, (action) => {
     if (action === 'open-link') { deepLinks.openClipboard(); return; }
-    const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? createWindow();
+    const window = getMainWindow() ?? createWindow();
     const send = () => {
       if (window.isDestroyed()) return;
       if (window.isMinimized()) window.restore();
@@ -305,7 +317,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     const notification = new Notification(notificationPresentation(title, body, ref));
     notification.on('click', () => {
       if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
-      const window = BrowserWindow.getAllWindows()[0];
+      const window = getMainWindow();
       window?.show(); window?.focus();
     });
     notification.show();
@@ -369,7 +381,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           'By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.\n\n' +
           'https://code.claude.com/docs/en/security',
       };
-      const parent = BrowserWindow.getAllWindows()[0];
+      const parent = getMainWindow();
       const confirmation = parent
         ? await dialog.showMessageBox(parent, options)
         : await dialog.showMessageBox(options);
@@ -475,6 +487,21 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } });
   host.attachGit(git);
   host.registerIpc();
+  localApps = new LocalAppHost({
+    configHome: process.env.LINGXI_CONFIG_DIR ?? join(homedir(), '.lingxi'),
+    preload: join(moduleDirectory, '../preload/localApp.cjs'),
+    nodeExecutable: process.execPath,
+    bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
+    mainWindow: getMainWindow,
+    edit: async row => {
+      const window = getMainWindow() ?? createWindow();
+      window.show(); window.focus();
+      // The renderer owns navigation and must apply the selected chat's bootstrap
+      // before placing an edit request in its session-bound composer draft.
+      window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession });
+    },
+  });
+  await localApps.initialize();
   try {
     await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
   } catch (error) {
@@ -509,13 +536,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (!getMainWindow()) createWindow();
   });
 
   });
 
   app.on('second-instance', () => {
-  const window = BrowserWindow.getAllWindows()[0];
+  const window = getMainWindow() ?? (host ? createWindow() : undefined);
   if (!window) return;
   if (window.isMinimized()) window.restore();
   window.show();
@@ -524,7 +551,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
 
   app.on('window-all-closed', () => {
   // On macOS the app remains alive and the bridge stays available for reopen.
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform !== 'darwin') void (async () => {
+    const background = await localApps?.hasBackgroundApps();
+    if (!background && BrowserWindow.getAllWindows().length === 0) app.quit();
+  })().catch(error => console.error('Unable to check background applications', error));
   });
 
   app.on('before-quit', (event) => {
@@ -535,6 +565,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host = null;
   notifier?.dispose();
   notifier = null;
+  const currentLocalApps = localApps;
+  localApps = null;
   const currentGit = git;
   git = null;
   const currentTerminals = terminals;
@@ -544,6 +576,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const currentBridge = bridge;
   bridge = null;
   void Promise.all([
+    currentLocalApps?.dispose() ?? Promise.resolve(),
     currentGit?.dispose() ?? Promise.resolve(),
     currentTerminals?.dispose() ?? Promise.resolve(),
     currentAudio?.dispose() ?? Promise.resolve(),

@@ -537,8 +537,8 @@ test('the rewritten outer app Info.plist declares real native voice usage', { sk
     const speechDescription = plist.NSSpeechRecognitionUsageDescription;
     assert.equal(
       microphoneDescription,
-      'LingXi Code uses the microphone only while you actively use voice input or Flow Mode. '
-      + 'Audio stays on this Mac and is never sent to the language model or a third-party transcription provider.',
+      'LingXi Code uses the microphone for voice input, Flow Mode, or a local app you explicitly authorize. '
+      + 'Voice input is transcribed on this Mac. A local app controls how it uses audio after you grant access.',
     );
     assert.equal(
       speechDescription,
@@ -547,11 +547,11 @@ test('the rewritten outer app Info.plist declares real native voice usage', { sk
     );
 
     // Sanity that this exercised the real rewrite, not a stub: other keys
-    // landed, the version was substituted, and the permissive template key
-    // that ships with Electron was actually removed.
+    // landed, the version was substituted, and camera access describes the
+    // Local App consent boundary instead of Electron's generic template.
     assert.equal(plist.CFBundleIdentifier, 'com.lingxi.code');
     assert.equal(plist.CFBundleShortVersionString, '9.9.9');
-    assert.equal('NSCameraUsageDescription' in plist, false);
+    assert.equal(plist.NSCameraUsageDescription, 'LingXi Code uses the camera only for a local app you explicitly authorize. You can revoke its access in Apps.');
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

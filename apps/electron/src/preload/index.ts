@@ -1,3 +1,4 @@
+import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
@@ -206,6 +207,8 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  localApps: LocalAppsApi;
+  onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
   git?: GitApi;
   terminal: TerminalApi;
@@ -313,6 +316,20 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  localApps: {
+    list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,
+    open: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'open', id }),
+    stop: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'stop', id }),
+    restart: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'restart', id }),
+    repair: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'repair', id }),
+    logs: async id => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'logs', id })).logs,
+    remove: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remove', id }),
+    setBackground: (id, enabled) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'background', id, enabled }),
+    revoke: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'revoke', id }),
+    edit: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'edit', id }),
+    onChanged: callback => subscribe(CH_LOCAL_APPS_CHANGED, callback),
+  },
+  onLocalAppEdit: callback => subscribe('lingxi:local-app:edit', callback),
   git: {
     request: (scope, request) => ipcRenderer.invoke(CH_GIT_REQUEST, scope, request),
     onChanged: (callback) => subscribe(CH_GIT_EVENT, callback),

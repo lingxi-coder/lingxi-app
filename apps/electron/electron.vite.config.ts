@@ -25,6 +25,7 @@ export default defineConfig({
           index: resolve(__dirname, 'src/preload/index.ts'),
           // Inline visualization guests: a minimal bridge for the shell frame.
           visualization: resolve(__dirname, 'src/preload/visualization.ts'),
+          localApp: resolve(__dirname, 'src/preload/localApp.ts'),
         },
         output: {
           format: 'cjs',

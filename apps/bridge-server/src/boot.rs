@@ -902,9 +902,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // Electron renders inline widgets (`lingxi-viz://visualization`), so
         // the `Visualization` tool and `/visualize` skill are offered here.
         __desktop_config.inline_visualization = true;
-        // Desktop has no Apps page for the built-in library yet; the
-        // local-app-builder plugin builds and opens apps in the browser.
-        __desktop_config.local_apps = false;
+        // Electron owns the desktop project library, application windows and process lifecycle.
+        __desktop_config.local_apps = true;
         __desktop_config
     }
 }

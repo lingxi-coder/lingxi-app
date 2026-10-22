@@ -263,6 +263,7 @@ export function writeEntitlements(path, {
   allowJit = false,
   disableLibraryValidation = false,
   audioInput = false,
+  camera = false,
 }) {
   const rows = [
     ['com.apple.application-identifier', `${teamId}.${bundleId}`],
@@ -272,6 +273,7 @@ export function writeEntitlements(path, {
   if (allowJit) rows.push(['com.apple.security.cs.allow-unsigned-executable-memory', true]);
   if (disableLibraryValidation) rows.push(['com.apple.security.cs.disable-library-validation', true]);
   if (audioInput) rows.push(['com.apple.security.device.audio-input', true]);
+  if (camera) rows.push(['com.apple.security.device.camera', true]);
   const body = rows.map(([key, value]) => {
     const rendered = value === true ? '<true/>' : `<string>${plistEscape(String(value))}</string>`;
     return `  <key>${plistEscape(String(key))}</key>${rendered}`;

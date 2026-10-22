@@ -398,11 +398,14 @@ async function connectToDebugger(port) {
 }
 
 async function evaluate(page, expression) {
+  // Awaited preload calls can include two bounded 20s broker requests on a
+  // newly signed copy. Keep CDP alive for that native budget; individual UI
+  // readiness checks still retain their own deadlines and assertions.
   const result = await page.send('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  });
+  }, 45_000);
   if (result.exceptionDetails) {
     throw new Error(`renderer evaluation failed: ${result.exceptionDetails.text ?? 'unknown error'}${result.exceptionDetails.exception?.description ? `: ${result.exceptionDetails.exception.description}` : ''}`);
   }
@@ -633,7 +636,7 @@ async function assertBundledSidecar(page, appPath, tempRoot) {
       const value = await evaluate(page, `window.lingxi.bootstrap()`);
       return value?.connection?.status === 'connected' ? value : undefined;
     },
-    { timeoutMs: 20_000, label: 'keyless bundled bridge connection' },
+    { timeoutMs: 60_000, label: 'keyless bundled bridge connection' },
   );
   assert.equal(
     isSafeProviderCredentialSnapshot(bootstrap.providerCredentials),
@@ -746,6 +749,23 @@ async function customProviderProbe() {
       return;
     }
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    const payload = JSON.parse(body);
+    const wantsApp = payload.messages?.some(message => message.role === 'user' && JSON.stringify(message.content).includes('LOCAL_APP_PACKAGED_SMOKE'));
+    const preparationReturned = payload.messages?.some(message => message.tool_call_id === 'local-app-preparation');
+    const appReturned = payload.messages?.some(message => message.tool_call_id === 'local-app-smoke');
+    if (wantsApp && !preparationReturned && payload.tools?.some(tool => tool.function?.name === 'Bash')) {
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'local-app-preparation', type: 'function', function: { name: 'Bash', arguments: JSON.stringify({ command: "printf 'LocalApp package check\\n'" }) } }] } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+      response.end('data: [DONE]\n\n');
+      return;
+    }
+    if (wantsApp && !appReturned && payload.tools?.some(tool => tool.function?.name === 'LocalApp')) {
+      const args = { name: 'Packaged Local App', summary: 'Created through the packaged model tool', html: '<!doctype html><meta charset="utf-8"><title>Packaged Local App</title><h1>LocalApp tool connected</h1>' };
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'local-app-smoke', type: 'function', function: { name: 'LocalApp', arguments: JSON.stringify(args) } }] } }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+      response.end('data: [DONE]\n\n');
+      return;
+    }
     for (const chunk of [
       { choices: [{ index: 0, delta: { role: 'assistant', content: 'Custom provider verified.' } }] },
       { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
@@ -854,7 +874,12 @@ async function assertBottomTerminal(page) {
     return state.activeSession ?? { projectPath: state.workspace.path, sessionId: '__draft__' };
   })()`);
   await evaluate(page, `document.querySelector('[aria-label="Toggle terminal"]').click()`);
-  await waitFor(() => evaluate(page, `document.querySelector('#desktop-terminal:not([hidden]) .xterm') !== null`), { label: 'packaged xterm renderer' });
+  try {
+    await waitFor(() => evaluate(page, `document.querySelector('#desktop-terminal[data-open="true"] .xterm') !== null`), { label: 'packaged xterm renderer' });
+  } catch (error) {
+    log(`terminal failure state: ${JSON.stringify(await evaluate(page, `({ button: document.querySelector('[aria-label="Toggle terminal"]')?.outerHTML, panel: document.querySelector('#desktop-terminal')?.outerHTML, dialogs: [...document.querySelectorAll('dialog')].map(d=>({open:d.open,text:d.innerText})), body: document.body.innerText.slice(-6000) })`))}`);
+    throw error;
+  }
   const terminals = await evaluate(page, `window.lingxi.terminal.list(${JSON.stringify(scope)})`);
   assert.equal(terminals.length, 1);
   const id = terminals[0].id;
@@ -967,6 +992,55 @@ async function assertCustomProviderRequest(page, probe, sessionId) {
   assert.equal(JSON.stringify(diagnostics).includes(probe.key), false);
 }
 
+async function assertPackagedLocalApps(page, probe, sessionId, cdpPort) {
+  await setupSmokeCollectors(page, sessionId);
+  await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, {type:'set_permission_mode',mode:'bypassPermissions'})`);
+  await evaluate(page, `window.lingxi.sendPrompt(${JSON.stringify(sessionId)}, 'LOCAL_APP_PACKAGED_SMOKE: Create a simple local app using LocalApp.')`);
+  await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'turn_ended')`), { label: 'packaged LocalApp tool turn' });
+  const apps = await evaluate(page, 'window.lingxi.localApps.list()');
+  const created = apps.find(app => app.name === 'Packaged Local App');
+  assert(created, 'the real packaged model dispatcher must publish into the Desktop library');
+  const preparation = probe.requests.flatMap(request => JSON.parse(request.body).messages ?? []).find(message => message.tool_call_id === 'local-app-preparation');
+  assert(preparation, 'a real Bash preparation must precede the publication card');
+  assert.match(typeof preparation.content === 'string' ? preparation.content : JSON.stringify(preparation.content), /LocalApp package check/, 'packaged Bash preparation must actually execute successfully');
+  assert.equal(created.sourceSession.sessionId, sessionId);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-chat-card button'))`), { label: 'LocalApp chat result card' });
+  await evaluate(page, `document.querySelector('.local-app-chat-card button').click()`);
+  const target = await waitFor(async () => (await fetchJson(`http://127.0.0.1:${cdpPort}/json/list`)).find(target => target.url.startsWith(`lingxi-app://${created.id}/`)), { label: 'independent packaged LocalApp window' });
+  const guest = new CdpConnection(target.webSocketDebuggerUrl);
+  try {
+    await waitFor(() => evaluate(guest, `document.querySelector('h1')?.textContent === 'LocalApp tool connected'`), { label: 'packaged app rendered' });
+    assert.equal(await evaluate(guest, `typeof require + ':' + typeof window.lingxi`), 'undefined:undefined');
+    await evaluate(guest, `localStorage.setItem('progress','7')`);
+    await evaluate(page, `window.lingxi.localApps.stop(${JSON.stringify(created.id)})`);
+  } finally { await guest.close(); }
+  await evaluate(page, `window.lingxi.localApps.open(${JSON.stringify(created.id)})`);
+  const reopened = await waitFor(async () => (await fetchJson(`http://127.0.0.1:${cdpPort}/json/list`)).find(target => target.url.startsWith(`lingxi-app://${created.id}/`)), { label: 'reopened packaged app' });
+  const reopenedGuest = new CdpConnection(reopened.webSocketDebuggerUrl);
+  try { assert.equal(await evaluate(reopenedGuest, `localStorage.getItem('progress')`), '7'); }
+  finally { await reopenedGuest.close(); }
+  await evaluate(page, `window.lingxi.localApps.stop(${JSON.stringify(created.id)})`);
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
+  const otherSession = await waitFor(async () => {
+    const current = await evaluate(page, 'window.lingxi.bootstrap()');
+    return current.activeSession?.sessionId !== sessionId && current.activeSession?.sessionId;
+  }, { label: 'second chat for LocalApp modification' });
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
+  await evaluate(page, `Array.from(document.querySelectorAll('.local-app-tile button')).find(button => button.textContent.trim() === 'Modify')?.click()`);
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the authoring session, transcript and app draft' });
+  // These fixture sessions are not persisted in the sidebar catalog. Navigate
+  // through the real New chat action and verify the composer follows that chat.
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'New chat')?.click()`);
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.sessionId !== '${sessionId}' && !document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && !document.querySelector('.local-app-chat-card'))`), { label: 'new unrelated chat has its own transcript and draft' });
+  await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'return to application library' });
+  const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
+  const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
+  if (evidence) { mkdirSync(evidence, { recursive: true }); writeFileSync(join(evidence, 'packaged-local-app-library.png'), Buffer.from(screenshot.data, 'base64')); }
+  log('packaged LocalApp: Bash/tool dispatch, visible delivery card, Apps library, isolated window, durable state and source-chat modification passed');
+}
+
 export async function runPackagedAppSmoke(root = packageRoot, outputRoot = process.env[PACKAGE_OUTPUT_ROOT_ENV]) {
   if (process.platform !== 'darwin') {
     throw new Error(`packaged smoke verification requires macOS; received ${process.platform}`);
@@ -982,7 +1056,9 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     throw new Error(`refusing packaged smoke launch while another ${APP_NAME} instance is running: ${preexistingAppCommands.join(' | ')}`);
   }
 
-  const tempRoot = mkdtempSync(join(tmpdir(), 'lingxi-packaged-smoke-'));
+  // Keep nested supervisor Unix sockets below macOS SUN_LEN; the default
+  // per-user temp root plus this fixture hierarchy exceeds that OS limit.
+  const tempRoot = mkdtempSync(join('/tmp', 'lingxi-packaged-smoke-'));
   const tempHome = join(tempRoot, 'home');
   const tempTmp = join(tempRoot, 'tmp');
   mkdirSync(tempHome, { recursive: true, mode: 0o700 });
@@ -996,6 +1072,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const env = sanitizePackagedAppEnvironment(process.env, {
     HOME: tempHome,
     TMPDIR: tempTmp,
+    LINGXI_CONFIG_DIR: join(tempHome, ".lingxi"),
   });
 
   const leakPatterns = [
@@ -1013,6 +1090,19 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const consoleErrors = [];
   const runtimeExceptions = [];
   const logErrors = [];
+  const monitorRenderer = async target => {
+    target.on('Runtime.consoleAPICalled', params => { if (params.type === 'error') consoleErrors.push(params); });
+    target.on('Runtime.exceptionThrown', params => runtimeExceptions.push(params));
+    target.on('Log.entryAdded', params => { if (params.entry?.level === 'error') logErrors.push(params.entry); });
+    await target.send('Page.enable');
+    await target.send('Runtime.enable');
+    await target.send('Log.enable');
+  };
+  const assertNoRendererErrors = () => {
+    assert.equal(consoleErrors.length, 0, `renderer console errors detected: ${JSON.stringify(consoleErrors)}`);
+    assert.equal(runtimeExceptions.length, 0, `renderer exceptions detected: ${JSON.stringify(runtimeExceptions)}`);
+    assert.equal(logErrors.length, 0, `renderer log errors detected: ${JSON.stringify(logErrors)}`);
+  };
   try {
     const launch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
     child = launch.child;
@@ -1021,16 +1111,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     browser = debuggerConnection.browser;
     page = debuggerConnection.page;
 
-    await page.send('Page.enable');
-    await page.send('Runtime.enable');
-    await page.send('Log.enable');
-    page.on('Runtime.consoleAPICalled', (params) => {
-      if (params.type === 'error') consoleErrors.push(params);
-    });
-    page.on('Runtime.exceptionThrown', (params) => runtimeExceptions.push(params));
-    page.on('Log.entryAdded', (params) => {
-      if (params.entry?.level === 'error') logErrors.push(params.entry);
-    });
+    await monitorRenderer(page);
 
     log('checking renderer bootstrap');
     await assertRendererContract(page, leakPatterns);
@@ -1048,9 +1129,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await prepareCustomProvider(page, customProbe);
     scheduledRecords = await assertScheduledPersistenceBeforeRestart(page, `${customProbe.providerId}/smoke-model`);
 
-    assert.equal(consoleErrors.length, 0, `renderer console errors detected: ${JSON.stringify(consoleErrors)}`);
-    assert.equal(runtimeExceptions.length, 0, `renderer exceptions detected: ${JSON.stringify(runtimeExceptions)}`);
-    assert.equal(logErrors.length, 0, `renderer log errors detected: ${JSON.stringify(logErrors)}`);
+    assertNoRendererErrors();
 
     await closePackagedApp(browser, child, copiedAppBundleId);
     child = null;
@@ -1067,13 +1146,16 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     child = relaunch.child;
     output = relaunch.output;
     ({ browser, page } = await connectToDebugger(cdpPort));
+    await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords);
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
+    await assertPackagedLocalApps(page, customProbe, customSession, cdpPort);
     await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(customProbe.providerId)})`);
     const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(customProbe.providerId)})`);
     assert.equal(cleared.find((entry) => entry.providerId === customProbe.providerId)?.configured, false);
+    assertNoRendererErrors();
     await closePackagedApp(browser, child, copiedAppBundleId);
     child = null;
     await browser.close();

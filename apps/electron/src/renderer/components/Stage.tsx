@@ -6,6 +6,7 @@ import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
+import { localAppReference } from '../model/localAppReference';
 import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
 import {
   transcriptRowUuids,
@@ -728,7 +729,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           // break the sibling spacing when that status appears or disappears.
           if (item === tailThinking) return null;
           const content = (() => {
-          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
+          if (activityView && item.type === 'tool-group' && !item.tools.some(tool => localAppReference(tool) || submittedPlans.some(plan => plan.id === tool.id))) {
             return <div className="transcript-run-item" data-run-type="tool" key={item.id}><ActivityToolGroup group={item}><ToolGroup group={item} modUiSessionId={modUiSessionId} open={true} toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} /></ActivityToolGroup></div>;
           }
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;

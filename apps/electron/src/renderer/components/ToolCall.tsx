@@ -1,3 +1,4 @@
+import { LocalAppCard } from './LocalApps';
 /**
  * One tool call in the transcript.
  *
@@ -292,6 +293,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
         '--permission-danger': t.danger,
       } as CSSProperties}
     >
+      <LocalAppCard item={item} />
       {/* The call and its response share one Thought-like disclosure row. */}
       {expandable ? (
         <Disclosure

@@ -122,8 +122,10 @@ export class SettingsStore {
   }
 
   addProject(canonical: string): void {
+    const previous = this.settings;
     this.settings = withAddedProject(this.settings, canonical);
-    this.persist();
+    try { this.persist(); }
+    catch (error) { this.settings = previous; throw error; }
   }
 
   activateProject(canonical: string): void {

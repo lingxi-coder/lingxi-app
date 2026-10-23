@@ -198,10 +198,12 @@ export interface UseBridge {
    * shell's global error banner.
    */
   microphonePermission(): Promise<VoicePermissionStatus>;
-  addProject(): Promise<WorkspaceMetadata | null>;
+  addProject(purpose?: import('../../shared/projectCreation').ProjectCreationPurpose): Promise<WorkspaceMetadata | null>;
   readonly projectCreationOpen: boolean;
+  readonly projectCreationPurpose: import('../../shared/projectCreation').ProjectCreationPurpose;
   pickProjectFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
-  confirmProjectCreation(selectionId: string): Promise<void>;
+  defaultAppProjectFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
+  confirmProjectCreation(selectionId: string, directoryName?: string): Promise<void>;
   cancelProjectCreation(): void;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;

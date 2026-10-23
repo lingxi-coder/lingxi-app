@@ -87,6 +87,8 @@ pub struct BridgeArgs {
     pub list_sessions_json: bool,
     /// Read the merged workspace environment without building an engine.
     pub workspace_environment_json: bool,
+    /// Resolve product-owned directories without loading workspace settings.
+    pub product_paths_json: bool,
     /// Private catalog scope; accepted only beside `--list-sessions-json`.
     pub session_scope: Option<session::jsonl::SessionDiscoveryScope>,
     /// Explicit session grants replayed by the Desktop during a workspace remount.
@@ -153,6 +155,7 @@ impl BridgeArgs {
                 }
                 "--list-sessions-json" => out.list_sessions_json = true,
                 "--workspace-environment-json" => out.workspace_environment_json = true,
+                "--product-paths-json" => out.product_paths_json = true,
                 "--session-scope" => {
                     let value = it
                         .next()
@@ -301,12 +304,23 @@ impl BridgeArgs {
                 .as_deref()
                 .ok_or("--session-transcript-path requires --session-id")?;
             validate_selected_transcript_identity(path, id)?;
-            if out.list_sessions_json || out.workspace_environment_json {
+            if out.list_sessions_json || out.workspace_environment_json || out.product_paths_json {
                 return Err("--session-transcript-path requires a runtime launch".into());
             }
         }
         if out.workspace_environment_json && (out.list_sessions_json || out.session_id.is_some()) {
             return Err("--workspace-environment-json accepts only a workspace directory".into());
+        }
+        if out.product_paths_json {
+            let product_args = Self {
+                product_paths_json: true,
+                cwd: out.cwd.clone(),
+                help: out.help,
+                ..Self::default()
+            };
+            if out != product_args {
+                return Err("--product-paths-json accepts only a workspace directory".into());
+            }
         }
         Ok(out)
     }
@@ -1451,6 +1465,26 @@ fn initialize_live_session(
     Ok(live_session)
 }
 
+/// Resolve product directories independently of settings, policy, and credentials.
+pub fn product_paths_json(cwd: &Path) -> Result<String, String> {
+    let config_home = lingxi_config_home().ok_or("product paths require a config home")?;
+    product_paths_json_from(cwd, &config_home)
+}
+
+fn product_paths_json_from(cwd: &Path, config_home: &Path) -> Result<String, String> {
+    let config_home = if config_home.is_absolute() {
+        config_home.to_path_buf()
+    } else {
+        cwd.join(config_home)
+    };
+    serde_json::to_string(&serde_json::json!({
+        "version": 1,
+        "app_projects_root": config_home.join(".apps"),
+        "config_home": config_home,
+    }))
+    .map_err(|_| "failed to encode product paths".into())
+}
+
 /// Read settings-owned environment values before the parent spawns a runtime.
 /// This path never resolves providers, credentials, hooks, MCP, or tools.
 pub async fn workspace_environment_json(cwd: &Path) -> Result<String, String> {
@@ -2553,6 +2587,59 @@ mod tests {
         let args = BridgeArgs::parse(Vec::<String>::new()).expect("empty parses");
         assert_eq!(args, BridgeArgs::default());
         assert!(!args.help);
+    }
+
+    #[test]
+    fn product_paths_mode_rejects_runtime_and_other_discovery_flags() {
+        let args = BridgeArgs::parse(["--product-paths-json", "--cwd", "/tmp/product"])
+            .expect("product discovery accepts its directory");
+        assert!(args.product_paths_json);
+        for flags in [
+            vec!["--product-paths-json", "--workspace-environment-json"],
+            vec!["--product-paths-json", "--list-sessions-json"],
+            vec!["--product-paths-json", "--model", "unused"],
+            vec!["--product-paths-json", "--api-key-stdin"],
+            vec!["--product-paths-json", "--trusted-workspace"],
+        ] {
+            assert!(BridgeArgs::parse(flags).is_err());
+        }
+    }
+
+    #[test]
+    fn product_paths_ignore_invalid_settings_and_retain_the_product_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".another-product");
+        std::fs::create_dir(&home).unwrap();
+        let settings = home.join("settings.json");
+        std::fs::write(&settings, "invalid settings").unwrap();
+        let paths: serde_json::Value =
+            serde_json::from_str(&product_paths_json_from(root.path(), &home).unwrap()).unwrap();
+        assert_eq!(
+            paths,
+            serde_json::json!({"version": 1, "config_home": home, "app_projects_root": home.join(".apps")})
+        );
+        assert_eq!(
+            std::fs::read_to_string(settings).unwrap(),
+            "invalid settings"
+        );
+        assert!(!home.join(".apps").exists());
+    }
+
+    #[test]
+    fn product_paths_resolve_relative_overrides_against_the_discovery_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths: serde_json::Value = serde_json::from_str(
+            &product_paths_json_from(root.path(), Path::new("custom-product")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            paths["config_home"],
+            serde_json::json!(root.path().join("custom-product"))
+        );
+        assert_eq!(
+            paths["app_projects_root"],
+            serde_json::json!(root.path().join("custom-product/.apps"))
+        );
     }
 
     #[test]

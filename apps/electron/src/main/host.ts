@@ -27,6 +27,7 @@ import {
   openSync,
   readSync,
   realpathSync,
+  rmdirSync,
   writeFileSync,
 } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -43,7 +44,7 @@ import type {
 } from './bridgeTypes.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import { isSessionId } from './sessionIdentity.js';
-import { CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
+import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
@@ -400,7 +401,7 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
-  private readonly projectFolderSelections = new WeakMap<WebContents, ProjectFolderSelection>();
+  private readonly projectFolderSelections = new WeakMap<WebContents, ProjectFolderSelection & { localApp: boolean }>();
   private readonly projectFolderPickRequests = new WeakMap<WebContents, object>();
   private realtimeAudioController?: RealtimeAudioController;
   private realtimeAudioWindow?: WebContents;
@@ -700,27 +701,71 @@ export class HostController {
         return this.selectWorkspaceInternal(result.filePaths[0], true);
       });
     });
-    this.ipc.handle(CH_PROJECT_FOLDER_PICK, async (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_PROJECT_APPS_DEFAULT, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       const request = {};
       this.projectFolderPickRequests.set(event.sender, request);
-      const path = await this.directoryDialogs.pickDirectory(this.settings.getPublic().activeProject ?? '');
+      // Directory discovery does not load project or managed settings.
+      const { appProjectsRoot } = await this.sessionCatalog.productPaths();
+      this.assertSender(event);
+      if (this.projectFolderPickRequests.get(event.sender) !== request) return null;
+      const selection = { id: randomUUID(), path: appProjectsRoot, createDirectory: true as const };
+      this.projectFolderSelections.set(event.sender, { ...selection, localApp: true });
+      return selection;
+    });
+    this.ipc.handle(CH_PROJECT_FOLDER_PICK, async (event: IpcMainInvokeEvent, purpose: unknown = 'project') => {
+      this.assertSender(event);
+      if (purpose !== 'project' && purpose !== 'local-app') throw new Error('Invalid project purpose.');
+      const request = {};
+      this.projectFolderPickRequests.set(event.sender, request);
+      const defaultPath = purpose === 'local-app' ? this.projectFolderSelections.get(event.sender)?.path : undefined;
+      const path = await this.directoryDialogs.pickDirectory(defaultPath ?? this.settings.getPublic().activeProject ?? '');
       this.assertSender(event);
       if (this.projectFolderPickRequests.get(event.sender) !== request || path === undefined) return null;
       const selection = { id: randomUUID(), path: canonicalWorkspace(path) };
-      this.projectFolderSelections.set(event.sender, selection);
+      this.projectFolderSelections.set(event.sender, { ...selection, localApp: purpose === 'local-app' });
       return { ...selection };
     });
-    this.ipc.handle(CH_PROJECT_CREATE, async (event: IpcMainInvokeEvent, selectionId: unknown) => {
+    this.ipc.handle(CH_PROJECT_CREATE, async (event: IpcMainInvokeEvent, selectionId: unknown, directoryName?: unknown) => {
       this.assertSender(event);
       const selection = this.projectFolderSelections.get(event.sender);
       if (!selection || !selection.path || selection.id !== selectionId) throw new Error('Choose a source folder before creating the project.');
       return this.enqueueNavigation(async () => {
         this.assertSender(event);
         if (this.projectFolderSelections.get(event.sender) !== selection) throw new Error('The source folder selection has changed.');
-        const workspace = await this.selectWorkspaceInternal(selection.path, true);
-        if (this.projectFolderSelections.get(event.sender) === selection) this.projectFolderSelections.delete(event.sender);
-        return workspace;
+        let path = selection.path;
+        let created: { dev: bigint; ino: bigint } | undefined;
+        if (selection.createDirectory) {
+          if (typeof directoryName !== 'string' || !directoryName.trim()
+            || /[\\/\0]/.test(directoryName) || directoryName.trim() === '.' || directoryName.trim() === '..') {
+            throw new Error('Enter a project name without directory separators.');
+          }
+          mkdirSync(selection.path, { recursive: true, mode: 0o700 });
+          path = join(selection.path, directoryName.trim());
+          try {
+            mkdirSync(path, { mode: 0o700 });
+            created = lstatSync(path, { bigint: true });
+          }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('A folder with this project name already exists. Choose another name or select the existing folder.');
+            throw error;
+          }
+        } else if (directoryName !== undefined) throw new Error('An existing folder uses its directory name.');
+        try {
+          const workspace = await this.selectWorkspaceInternal(path, true, !selection.localApp);
+          if (this.projectFolderSelections.get(event.sender) === selection) this.projectFolderSelections.delete(event.sender);
+          return workspace;
+        } catch (error) {
+          // Remove only our empty, unregistered directory. Never remove source
+          // files or a project persisted before an engine startup error.
+          if (created && !this.settings.hasProject(path)) {
+            try {
+              const current = lstatSync(path, { bigint: true });
+              if (current.isDirectory() && current.dev === created.dev && current.ino === created.ino) rmdirSync(path);
+            } catch { /* A concurrent writer owns its files. */ }
+          }
+          throw error;
+        }
       });
     });
     this.ipc.handle(CH_WORKSPACE_SET, async (event: IpcMainInvokeEvent, workspace: unknown) => {
@@ -1572,16 +1617,16 @@ export class HostController {
     return this.enqueueNavigation(() => this.selectWorkspaceInternal(input, addProject));
   }
 
-  private async selectWorkspaceInternal(input: string, addProject: boolean): Promise<WorkspaceMetadata> {
+  private async selectWorkspaceInternal(input: string, addProject: boolean, createInitialSession = true): Promise<WorkspaceMetadata> {
     const workspace = canonicalWorkspace(input);
     if (this.closingProjects.has(workspace)) throw new Error('project is closing');
     this.workspaceFiles.invalidate();
     if (addProject) {
       const wasEmpty = this.settings.getPublic().projects.length === 0;
       this.settings.addProject(workspace);
-      // Adding a project is metadata-only after the first project. The first
-      // project gets one host-owned runtime so the app has an initial session.
-      if (wasEmpty) {
+      // General project creation supplies the first draft. App creation only
+      // adds metadata; the renderer explicitly admits its one authoring chat.
+      if (wasEmpty && createInitialSession) {
         const ref = await this.bridge.newSession(workspace);
         this.settings.activateProject(workspace);
         this.settings.setActiveSessionDraft(ref);
@@ -2107,7 +2152,7 @@ export class HostController {
     if (!this.registered) return;
     for (const channel of [
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
-      CH_PROJECT_FOLDER_PICK, CH_PROJECT_CREATE,
+      CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_WORKSPACE,

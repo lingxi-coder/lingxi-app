@@ -80,6 +80,14 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to chdir into --cwd {}: {e}", cwd.display()))?;
     }
 
+    if args.product_paths_json {
+        let cwd = std::env::current_dir()
+            .map_err(|_| anyhow::anyhow!("failed to resolve product paths directory"))?;
+        let json = boot::product_paths_json(&cwd).map_err(|error| anyhow::anyhow!(error))?;
+        println!("{json}");
+        return Ok(());
+    }
+
     if args.workspace_environment_json {
         let cwd = std::env::current_dir()
             .map_err(|_| anyhow::anyhow!("failed to resolve workspace environment directory"))?;

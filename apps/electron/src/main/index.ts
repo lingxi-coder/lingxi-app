@@ -1,6 +1,5 @@
 import { LocalAppHost } from './local-apps/host.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
-import { homedir } from 'node:os';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
 import { AccountService } from './account.js';
@@ -488,21 +487,27 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } });
   host.attachGit(git);
   host.registerIpc();
-  localApps = new LocalAppHost({
-    configHome: process.env.LINGXI_CONFIG_DIR ?? join(homedir(), '.lingxi'),
-    preload: join(moduleDirectory, '../preload/localApp.cjs'),
-    nodeExecutable: process.execPath,
-    bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
-    mainWindow: getMainWindow,
-    edit: async row => {
-      const window = getMainWindow() ?? createWindow();
-      window.show(); window.focus();
-      // The renderer owns navigation and must apply the selected chat's bootstrap
-      // before placing an edit request in its session-bound composer draft.
-      window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession });
-    },
+  const productPaths = await sessionCatalog.productPaths().catch(error => {
+    diagnostics.add('warn', 'host', `local application directory unavailable: ${sanitizeDiagnostic(error)}`);
+    return undefined;
   });
-  await localApps.initialize();
+  if (productPaths) {
+    localApps = new LocalAppHost({
+      configHome: productPaths.configHome,
+      preload: join(moduleDirectory, '../preload/localApp.cjs'),
+      nodeExecutable: process.execPath,
+      bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
+      mainWindow: getMainWindow,
+      edit: async row => {
+        const window = getMainWindow() ?? createWindow();
+        window.show(); window.focus();
+        // The renderer owns navigation and must apply the selected chat's bootstrap
+        // before placing an edit request in its session-bound composer draft.
+        window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession });
+      },
+    });
+    await localApps.initialize();
+  }
   try {
     await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
   } catch (error) {

@@ -91,6 +91,97 @@ async function main() {
     await check(`!!document.querySelector('.settings-screen') && !document.querySelector('.settings-screen').closest('[inert]')`, 'Escape must close only the project dialog and restore Settings');
     await check(`window.projectCreationFixture.rendererErrors.length === 0`, 'The real App must not throw renderer errors');
 
+    await window.loadURL(url);
+    await wait(`!!document.querySelector('[aria-label="Add project"]') && !document.querySelector('[aria-label="Add project"]').closest('[inert]')`);
+    const openAppProject = async (ready = true) => {
+      await run(`document.querySelector('button[aria-label="Apps"]').click(); document.querySelector('.local-app-library-header button').click()`);
+      await wait(`!!document.querySelector('[aria-label="Create project"]')${ready ? " && !document.querySelector('form[aria-busy=true]')" : ''}`);
+    };
+    const nameApp = async (name, separator = '/') => {
+      await run(`(() => { const input=document.querySelector('[aria-label="Project name"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(name)}); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+      await wait(`document.querySelector('.create-project-folder-copy > span')?.textContent.endsWith(${JSON.stringify(separator + name)})`);
+    };
+    await run(`window.projectCreationFixture.holdDefaults=true`);
+    await openAppProject(false);
+    await wait(`window.projectCreationFixture.defaultWaiters.length > 0`);
+    await check(`!document.querySelector('.create-project-cancel').disabled`, 'A read-only default directory lookup must remain cancelable');
+    await run(`document.querySelector('.create-project-cancel').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]')`);
+    await run(`window.projectCreationFixture.holdDefaults=false; window.projectCreationFixture.defaultWaiters.splice(0).forEach(resolve => resolve())`);
+    await check(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.creates.length === 0 && window.projectCreationFixture.newSessions.length === 0`, 'A canceled lookup must not reopen the dialog or create an app');
+    await openAppProject();
+    await check(`!document.querySelector('[aria-label="Project name"]').readOnly && document.querySelector('.create-project-folder-copy > span').textContent.startsWith('/fixture/.current-product/.apps/')`, 'Apps must use the product-provided default root with a named child project');
+    await check(`window.projectCreationFixture.newSessions.length === 0 && window.projectCreationFixture.projects.length === 1`, 'Opening an app project dialog must preserve the selected repository and chat');
+    await nameApp('Canceled app');
+    await run(`document.querySelector('.create-project-cancel').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]')`);
+    await check(`window.projectCreationFixture.creates.length === 0 && window.projectCreationFixture.newSessions.length === 0`, 'Canceling app creation must add neither a project nor a chat');
+    await run(`window.projectCreationFixture.defaultError='Product directory unavailable'`);
+    await openAppProject();
+    await check(`document.querySelector('.create-project-error')?.textContent.includes('Product directory unavailable')`, 'Product directory errors must be recoverable in the project dialog');
+    await run(`window.projectCreationFixture.defaultError=''; document.querySelector('.create-project-default-folder').click()`);
+    await wait(`!document.querySelector('form[aria-busy=true]') && !document.querySelector('[aria-label="Project name"]').readOnly`);
+    await nameApp('Reading garden');
+    await screenshot('create-local-app-project');
+    await run(`document.querySelector('.create-project-submit').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 1 && document.querySelector('[contenteditable=true]')?.textContent.includes('创建一个本地应用')`);
+    await check(`window.projectCreationFixture.newSessions[0] === '/fixture/.current-product/.apps/Reading garden' && window.projectCreationFixture.projects.length === 2`, 'Confirmed app creation must create exactly one chat in its own project');
+    await openAppProject();
+    await run(`window.projectCreationFixture.nextFolder={id:'explicit-app-folder',path:'/Users/tester/Projects/Explicit app'}; document.querySelector('.create-project-add-folder').click()`);
+    await wait(`document.querySelector('[aria-label="Project name"]').value === 'Explicit app'`);
+    await check(`document.querySelector('[aria-label="Project name"]').readOnly && window.projectCreationFixture.pickerPurposes.at(-1) === 'local-app'`, 'Apps may explicitly choose an existing directory without renaming it');
+    await run(`document.querySelector('.create-project-submit').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 2`);
+    await check(`window.projectCreationFixture.newSessions[1] === '/Users/tester/Projects/Explicit app' && window.projectCreationFixture.rendererErrors.length === 0`, 'Explicit app workspaces must own their chat without renderer errors');
+    const editRequest = { id: 'a12345678901234567890', name: 'Recovered reader', sourceSession: { projectPath: '/fixture/Removed project', sessionId: '33333333-2222-4333-8444-555555555555' } };
+    const previousDraft = await run(`document.querySelector('[contenteditable=true]').textContent`);
+    await run(`window.projectCreationFixture.requestEdit(${JSON.stringify(editRequest)})`);
+    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]')`);
+    await check(`window.projectCreationFixture.newSessions.length === 2`, 'Modifying an app with a removed source must first confirm its authoring workspace');
+    await run(`document.querySelector('.create-project-cancel').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]')`);
+    await check(`window.projectCreationFixture.newSessions.length === 2 && document.querySelector('[contenteditable=true]').textContent === ${JSON.stringify(previousDraft)}`, 'Canceling source recovery must preserve the unrelated chat and its draft');
+    await run(`window.projectCreationFixture.requestEdit(${JSON.stringify(editRequest)})`);
+    await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]')`);
+    await nameApp('Recovered reader');
+    await run(`document.querySelector('.create-project-submit').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 3 && document.querySelector('[contenteditable=true]')?.textContent.includes('修改本地应用「Recovered reader」')`);
+    await check(`window.projectCreationFixture.newSessions[2] === '/fixture/.current-product/.apps/Recovered reader' && window.projectCreationFixture.rendererErrors.length === 0`, 'Recovered apps must draft only into the confirmed workspace');
+    const draftBeforeFailure = await run(`document.querySelector('[contenteditable=true]').textContent`);
+    await run(`window.projectCreationFixture.newSessionError='Fixture engine startup failed'`);
+    await openAppProject();
+    await nameApp('Retry app');
+    await run(`document.querySelector('.create-project-submit').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]') && document.querySelector('.local-app-error')?.textContent.includes('authoring chat')`);
+    await check(`document.querySelector('.local-app-error').textContent.includes('/fixture/.current-product/.apps/Retry app') && document.querySelector('.local-app-error').textContent.includes('Fixture engine startup failed') && document.querySelector('[contenteditable=true]').textContent === ${JSON.stringify(draftBeforeFailure)}`, 'Authoring startup failures must identify the saved workspace, retain the cause and preserve the previous draft');
+    await run(`window.projectCreationFixture.newSessionError=''`);
+    await openAppProject();
+    await run(`window.projectCreationFixture.nextFolder={id:'retry-workspace',path:'/fixture/.current-product/.apps/Retry app'}; document.querySelector('.create-project-add-folder').click()`);
+    await wait(`document.querySelector('[aria-label="Project name"]').value === 'Retry app' && !document.querySelector('form[aria-busy=true]')`);
+    await run(`document.querySelector('.create-project-submit').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 5 && document.querySelector('[contenteditable=true]')?.textContent.includes('创建一个本地应用')`);
+    await check(`window.projectCreationFixture.projects.filter(path => path === '/fixture/.current-product/.apps/Retry app').length === 1 && !document.querySelector('.local-app-error') && window.projectCreationFixture.rendererErrors.length === 0`, 'Retry must use the saved workspace without duplicating a project or leaking a renderer error');
+    const mixedRoot = '/fixture/Cloud\\Sync/.current-product/.apps';
+    await run(`window.projectCreationFixture.appsRoot=${JSON.stringify(mixedRoot)}`);
+    await openAppProject();
+    await nameApp('Mixed path');
+    await check(`document.querySelector('.create-project-folder-copy > span').textContent === ${JSON.stringify(mixedRoot + '/Mixed path')}`, 'POSIX directory names containing a backslash must keep their literal path');
+    await run(`window.projectCreationFixture.nextFolder={id:'literal-backslash',path:${JSON.stringify('/fixture/My\\Files')}}; document.querySelector('.create-project-add-folder').click()`);
+    await wait(`!document.querySelector('form[aria-busy=true]')`);
+    await check(`document.querySelector('[aria-label="Project name"]').value === ${JSON.stringify('My\\Files')}`, 'A POSIX backslash in the source folder name must not be treated as a separator');
+    await run(`document.querySelector('.create-project-cancel').click()`);
+    await wait(`!document.querySelector('[aria-label="Create project"]')`);
+    const windowsRoot = 'C:\\Users\\tester\\.another-product\\.apps';
+    await run(`window.lingxi.platform='win32'; window.projectCreationFixture.appsRoot=${JSON.stringify(windowsRoot)}`);
+    await openAppProject();
+    await nameApp('Windows reader', '\\');
+    await check(`document.querySelector('.create-project-folder-copy > span').textContent === ${JSON.stringify(windowsRoot + '\\Windows reader')}`, 'Windows project previews must use native directory separators');
+    await run(`window.projectCreationFixture.nextFolder={id:'windows-folder',path:${JSON.stringify('C:\\Users\\tester\\Existing app')}}; document.querySelector('.create-project-add-folder').click()`);
+    await wait(`!document.querySelector('form[aria-busy=true]')`);
+    await check(`document.querySelector('[aria-label="Project name"]').value === 'Existing app'`, 'Windows source folders must keep their final directory name');
+    await run(`document.querySelector('.create-project-cancel').click(); window.lingxi.platform='darwin'`);
+    await wait(`!document.querySelector('[aria-label="Create project"]')`);
+
     await window.loadURL(url + '?dark');
     await wait(`!!document.querySelector('[aria-label="Add project"]') && !document.querySelector('[aria-label="Add project"]').closest('[inert]')`);
     await open(); await screenshot('create-project-dark');
@@ -103,8 +194,8 @@ async function main() {
     await open();
     await check(`(() => { const d=document.querySelector('.create-project-dialog'),r=d.getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth && d.scrollWidth<=d.clientWidth; })()`, 'Narrow dialog must fit the viewport');
     await screenshot('create-project-narrow');
-    console.log(JSON.stringify({ opening: true, stagedSelection: true, cancel: true, retry: true, busy: true, sidebarRefresh: true, refreshFailure: true, settingsEntry: true, focusAndEscape: true, narrow: true }));
+    console.log(JSON.stringify({ opening: true, stagedSelection: true, cancel: true, retry: true, busy: true, sidebarRefresh: true, refreshFailure: true, settingsEntry: true, appProject: true, canceledLookup: true, sourceRecovery: true, startupRecovery: true, nativePaths: true, focusAndEscape: true, narrow: true }));
   } catch (error) { console.error(error); process.exitCode = 1; }
-  finally { window.destroy(); app.quit(); }
+  finally { window.destroy(); app.exit(process.exitCode ?? 0); }
 }
 void main().catch(error => { console.error(error); app.exit(1); });

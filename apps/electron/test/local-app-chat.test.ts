@@ -7,7 +7,6 @@ const active = { projectPath: '/project/b', sessionId: 'chat-b' };
 const app = { id: 'a12345678901234567890', name: 'Reading garden', sourceSession: source };
 function navigation(overrides: Partial<LocalAppChatNavigation> = {}): LocalAppChatNavigation {
   return {
-    activeProject: active.projectPath,
     hasProject: () => true,
     openSession: async () => true,
     addProject: async () => { throw new Error('Unexpected project picker'); },
@@ -39,8 +38,7 @@ test('Modify waits for the renderer navigation to apply the source chat before d
 test('Create without a project asks for one and establishes a new real session', async () => {
   const calls: string[] = [];
   const target = await localAppChatTarget(undefined, navigation({
-    activeProject: undefined,
-    addProject: async () => { calls.push('pick'); return { path: '/selected' }; },
+    addProject: async purpose => { assert.equal(purpose, 'local-app'); calls.push('pick'); return { path: '/selected' }; },
     newSession: async path => { calls.push(`new:${path}`); return { projectPath: path, sessionId: 'new-chat' }; },
   }), () => true);
   assert.deepEqual(calls, ['pick', 'new:/selected']);
@@ -48,15 +46,42 @@ test('Create without a project asks for one and establishes a new real session',
 });
 
 test('canceling the project picker does not create a chat or a draft', async () => {
-  assert.equal(await localAppChatTarget(undefined, navigation({ activeProject: undefined, addProject: async () => null }), () => true), undefined);
+  assert.equal(await localAppChatTarget(undefined, navigation({ addProject: async () => null }), () => true), undefined);
 });
 
-test('an app whose source project was removed gets a fresh chat without mixing another draft', async () => {
+test('Create confirms a dedicated app project even when another repository is selected', async () => {
+  const calls: string[] = [];
+  const target = await localAppChatTarget(undefined, navigation({
+    addProject: async purpose => { calls.push(`project:${purpose}`); return { path: '/product/.apps/Reading garden' }; },
+    newSession: async projectPath => { calls.push(`chat:${projectPath}`); return { projectPath, sessionId: 'app-chat' }; },
+  }), () => true);
+  assert.deepEqual(calls, ['project:local-app', 'chat:/product/.apps/Reading garden']);
+  assert.deepEqual(target, { projectPath: '/product/.apps/Reading garden', sessionId: 'app-chat' });
+});
+
+test('an app whose source project was removed confirms a workspace instead of using the active repository', async () => {
+  const selected = '/product/.apps/Recovered app';
+  let confirmations = 0;
   assert.deepEqual(await localAppChatTarget(app, navigation({
     hasProject: () => false,
     openSession: async () => { throw new Error('Removed source must not open'); },
+    addProject: async purpose => { assert.equal(purpose, 'local-app'); confirmations++; return { path: selected }; },
     newSession: async path => ({ projectPath: path, sessionId: 'fresh-chat' }),
-  }), () => true), { projectPath: active.projectPath, sessionId: 'fresh-chat' });
+  }), () => true), { projectPath: selected, sessionId: 'fresh-chat' });
+  assert.equal(confirmations, 1);
+});
+
+test('imported apps and canceled source recovery never draft into the currently selected project', async () => {
+  const imported = { id: app.id, name: app.name };
+  for (const request of [app, imported]) {
+    let confirmations = 0;
+    assert.equal(await localAppChatTarget(request, navigation({
+      hasProject: () => false,
+      addProject: async () => { confirmations++; return null; },
+      newSession: async () => { throw new Error('Cancellation must not create a chat'); },
+    }), () => true), undefined);
+    assert.equal(confirmations, 1);
+  }
 });
 
 test('a removed authoring chat gets a fresh session in its project, preserving the previous chat', async () => {
@@ -66,12 +91,29 @@ test('a removed authoring chat gets a fresh session in its project, preserving t
   }), () => true), { projectPath: source.projectPath, sessionId: 'replacement-chat' });
 });
 
+test('authoring failures retain the saved workspace and cause without reviving superseded navigation', async () => {
+  await assert.rejects(localAppChatTarget(undefined, navigation({
+    addProject: async () => ({ path: '/product/.apps/Retry app' }),
+    newSession: async () => undefined,
+  }), () => true), /authoring chat.*\/product\/\.apps\/Retry app/s);
+  const cause = new Error('Engine startup failed');
+  await assert.rejects(localAppChatTarget(undefined, navigation({
+    addProject: async () => ({ path: '/product/.apps/Retry app' }),
+    newSession: async () => { throw cause; },
+  }), () => true), error => error instanceof Error && error.cause === cause
+    && error.message.includes('/product/.apps/Retry app') && error.message.includes(cause.message));
+  let current = true;
+  assert.equal(await localAppChatTarget(undefined, navigation({
+    addProject: async () => ({ path: '/selected' }),
+    newSession: async () => { current = false; return undefined; },
+  }), () => current), undefined, 'superseded navigation must remain silent');
+});
+
 test('a superseded navigation result cannot produce a draft or start another chat', async () => {
   let current = true;
   assert.equal(await localAppChatTarget(app, navigation({ openSession: async () => { current = false; return true; } }), () => current), undefined);
   current = true;
   assert.equal(await localAppChatTarget(undefined, navigation({
-    activeProject: undefined,
     addProject: async () => { current = false; return { path: '/selected' }; },
   }), () => current), undefined);
 });

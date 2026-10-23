@@ -55,7 +55,7 @@ test('Create project stages a directory, preserves cancellation, and refreshes t
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron project creation fixture timed out\n${errors.join('')}`));
-      }, 20_000);
+      }, 45_000);
       child.once('error', (error) => { clearTimeout(timeout); rejectResult(error); });
       child.once('exit', (code, signal) => {
         clearTimeout(timeout);
@@ -69,7 +69,7 @@ test('Create project stages a directory, preserves cancellation, and refreshes t
       });
     });
 
-    for (const key of ['opening', 'stagedSelection', 'cancel', 'retry', 'busy', 'sidebarRefresh', 'refreshFailure', 'settingsEntry', 'focusAndEscape', 'narrow']) assert.equal(result[key], true, key);
+    for (const key of ['opening', 'stagedSelection', 'cancel', 'retry', 'busy', 'sidebarRefresh', 'refreshFailure', 'settingsEntry', 'appProject', 'canceledLookup', 'sourceRecovery', 'startupRecovery', 'nativePaths', 'focusAndEscape', 'narrow']) assert.equal(result[key], true, key);
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

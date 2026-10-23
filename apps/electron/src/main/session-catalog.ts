@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute } from 'node:path';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 
@@ -25,6 +26,11 @@ export interface ProjectSessionCatalogOptions {
 
 export interface ProjectSessionCatalogResult {
   sessions: ProjectSessionCatalogRow[];
+}
+
+export interface ProductPaths {
+  configHome: string;
+  appProjectsRoot: string;
 }
 
 export interface ProjectSessionCatalogRow extends SessionRowDto {
@@ -114,6 +120,21 @@ export class ProjectSessionCatalog {
   private generation = 0;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
+
+  /** Product directory discovery must work even if workspace settings are broken. */
+  async productPaths(): Promise<ProductPaths> {
+    const output = await this.runOutput(realpathSync.native(homedir()), ['--product-paths-json']);
+    let value: unknown;
+    try { value = JSON.parse(boundedOutput(output)); }
+    catch { throw new Error('invalid product paths response'); }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid product paths response');
+    const input = value as Record<string, unknown>;
+    if (input['version'] !== 1 || [input['config_home'], input['app_projects_root']].some(path =>
+      typeof path !== 'string' || !isAbsolute(path) || path.includes('\0') || path.length > 32_768)) {
+      throw new Error('invalid product paths response');
+    }
+    return { configHome: input['config_home'] as string, appProjectsRoot: input['app_projects_root'] as string };
+  }
 
   /** Read settings with the engine's merge rules before starting its process. */
   async workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {

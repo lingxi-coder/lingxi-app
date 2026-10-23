@@ -121,6 +121,7 @@ import type {
   SystemSettingsPane,
   WorkspaceFilePreview,
 } from './lingxi.js';
+import type { ProjectCreationPurpose } from '../../shared/projectCreation';
 import { saveProviderSettings } from './providerSettingsSave.js';
 import { createUiSurfaceClientId, UiSurfaceLifecycleQueue } from './uiSurfaceLifecycle.js';
 import {
@@ -204,7 +205,9 @@ export function useBridge(): UseBridge {
   const hosted = host !== undefined;
   const [loading, setLoading] = useState(hosted);
   const [projectCreationOpen, setProjectCreationOpen] = useState(false);
+  const [projectCreationPurpose, setProjectCreationPurpose] = useState<ProjectCreationPurpose>('project');
   const pendingProjectCreation = useRef<{
+    purpose: ProjectCreationPurpose;
     promise: Promise<WorkspaceMetadata | null>;
     resolve(workspace: WorkspaceMetadata | null): void;
   } | null>(null);
@@ -1517,13 +1520,17 @@ export function useBridge(): UseBridge {
     try { return await hostMicrophonePermissionReader(host)(); } catch { return 'unavailable'; }
   }, [host]);
 
-  const addProject = useCallback((): Promise<WorkspaceMetadata | null> => {
+  const addProject = useCallback((purpose: ProjectCreationPurpose = 'project'): Promise<WorkspaceMetadata | null> => {
     if (!host) return Promise.resolve(null);
     if (sessionLoadingRef.current) return Promise.reject(new Error('Wait for the session to finish opening before navigating.'));
-    if (pendingProjectCreation.current) return pendingProjectCreation.current.promise;
+    if (pendingProjectCreation.current) {
+      return pendingProjectCreation.current.purpose === purpose ? pendingProjectCreation.current.promise
+        : Promise.reject(new Error('Finish the current project dialog before creating another project.'));
+    }
     let resolve!: (workspace: WorkspaceMetadata | null) => void;
     const promise = new Promise<WorkspaceMetadata | null>((complete) => { resolve = complete; });
-    pendingProjectCreation.current = { promise, resolve };
+    pendingProjectCreation.current = { purpose, promise, resolve };
+    setProjectCreationPurpose(purpose);
     setProjectCreationOpen(true);
     return promise;
   }, [host]);
@@ -1536,15 +1543,20 @@ export function useBridge(): UseBridge {
 
   const pickProjectFolder = useCallback(async () => {
     if (!host || !pendingProjectCreation.current) throw new Error('Open Create project before choosing a folder.');
-    return host.pickProjectFolder();
+    return host.pickProjectFolder(pendingProjectCreation.current.purpose);
   }, [host]);
 
-  const confirmProjectCreation = useCallback(async (selectionId: string) => {
+  const defaultAppProjectFolder = useCallback(async () => {
+    if (!host || pendingProjectCreation.current?.purpose !== 'local-app') throw new Error('Open Create project for an app before choosing its default directory.');
+    return host.defaultAppProjectFolder();
+  }, [host]);
+
+  const confirmProjectCreation = useCallback(async (selectionId: string, directoryName?: string) => {
     const request = pendingProjectCreation.current;
     if (!host || !request) throw new Error('Open Create project before choosing a folder.');
     const operationId = beginNavigationOperation();
     try {
-      const workspace = await host.createProject(selectionId);
+      const workspace = await host.createProject(selectionId, directoryName);
       if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) {
         try {
           const snapshot = await host.bootstrap();
@@ -2411,7 +2423,9 @@ export function useBridge(): UseBridge {
     audioFinishListen,
     addProject,
     projectCreationOpen,
+    projectCreationPurpose,
     pickProjectFolder,
+    defaultAppProjectFolder,
     confirmProjectCreation,
     cancelProjectCreation,
     activateProject,

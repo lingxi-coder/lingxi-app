@@ -23,6 +23,30 @@ function fakeChild(stdoutBody: string) {
   return child;
 }
 
+test('product paths use native product discovery without merging workspace settings', async () => {
+  const configHome = join(tmpdir(), '.another-product');
+  let flags: readonly string[] | undefined;
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+    spawnProcess: ((_bin: string, args: readonly string[]) => {
+      flags = args;
+      return fakeChild(JSON.stringify({ version: 1, config_home: configHome, app_projects_root: join(configHome, '.apps') }));
+    }) as any });
+  assert.deepEqual(await catalog.productPaths(), { configHome, appProjectsRoot: join(configHome, '.apps') });
+  assert.deepEqual(flags, ['--product-paths-json']);
+});
+
+test('product directory discovery rejects malformed and nonabsolute native paths', async () => {
+  const configHome = join(tmpdir(), '.another-product');
+  const valid = { version: 1, config_home: configHome, app_projects_root: join(configHome, '.apps') };
+  for (const response of ['{', JSON.stringify({ ...valid, version: 2 }),
+    JSON.stringify({ ...valid, config_home: 'relative' }), JSON.stringify({ ...valid, app_projects_root: 'relative' }),
+    JSON.stringify({ ...valid, config_home: configHome + '\0' })]) {
+    const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+      spawnProcess: (() => fakeChild(response)) as any });
+    await assert.rejects(catalog.productPaths(), /invalid product paths response/);
+  }
+});
+
 test('project catalog uses the allowlisted environment and validates session UUIDs', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-project-'));
   let spawnedEnv: NodeJS.ProcessEnv | undefined;

@@ -88,7 +88,6 @@ export function App() {
     const navigate = async () => {
       const current = localAppBridge.current;
       const target = await localAppChatTarget(app, {
-        activeProject: current.bootstrap?.settings.activeProject,
         hasProject: path => Boolean(current.bootstrap?.settings.projects.includes(path)
           || current.bootstrap?.scheduledWorkspace === path),
         openSession: current.openSession,
@@ -538,7 +537,8 @@ export function App() {
             />
           </SettingsBackground>
         )}
-        {bridge.projectCreationOpen && <CreateProjectDialog onPickFolder={bridge.pickProjectFolder}
+        {bridge.projectCreationOpen && <CreateProjectDialog localApp={bridge.projectCreationPurpose === 'local-app'}
+          onDefaultFolder={bridge.defaultAppProjectFolder} onPickFolder={bridge.pickProjectFolder}
           onCreate={bridge.confirmProjectCreation} onClose={bridge.cancelProjectCreation} />}
         {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} initialQuery={sessionPicker.query}
           suspended={sessionPickerSuspended}

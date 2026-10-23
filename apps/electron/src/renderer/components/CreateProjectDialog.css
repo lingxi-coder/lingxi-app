@@ -50,6 +50,7 @@
 .create-project-location-select select { appearance: none; max-width: 100%; padding: 0 20px 0 0; border: 0; background: transparent; color: var(--dialog-text); font: inherit; cursor: pointer; }
 .create-project-location-select > svg { position: absolute; right: 0; pointer-events: none; color: var(--dialog-text); }
 .create-project-add-folder { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 25px; padding: 2px 11px; border: 0; border-radius: 100px; background: color-mix(in srgb, var(--dialog-text) 4.5%, var(--dialog-window)); color: var(--dialog-text); font: inherit; font-size: 14px; cursor: pointer; }
+.create-project-default-folder { padding: 0; border: 0; background: transparent; color: var(--dialog-text-2); font: inherit; font-size: 12px; cursor: pointer; }
 .create-project-selected-folder { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; color: var(--dialog-text); }
 .create-project-folder-copy { display: grid; gap: 3px; flex: 1; min-width: 0; }
 .create-project-folder-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 550; }

@@ -2,7 +2,7 @@ import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppE
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
-import { CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
+import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectCreationPurpose, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
@@ -232,8 +232,9 @@ export interface LingxiApi {
     sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
-  pickProjectFolder(): Promise<ProjectFolderSelection | null>;
-  createProject(selectionId: string): Promise<WorkspaceMetadata>;
+  pickProjectFolder(purpose?: ProjectCreationPurpose): Promise<ProjectFolderSelection | null>;
+  defaultAppProjectFolder(): Promise<ProjectFolderSelection | null>;
+  createProject(selectionId: string, directoryName?: string): Promise<WorkspaceMetadata>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
@@ -369,8 +370,9 @@ const api: LingxiApi = {
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,
   updateSettings: (patch) => ipcRenderer.invoke(CH_SETTINGS_UPDATE, patch) as Promise<PublicSettings>,
   pickWorkspace: () => ipcRenderer.invoke(CH_WORKSPACE_PICK) as Promise<WorkspaceMetadata | null>,
-  pickProjectFolder: () => ipcRenderer.invoke(CH_PROJECT_FOLDER_PICK) as Promise<ProjectFolderSelection | null>,
-  createProject: (selectionId) => ipcRenderer.invoke(CH_PROJECT_CREATE, selectionId) as Promise<WorkspaceMetadata>,
+  pickProjectFolder: (purpose) => ipcRenderer.invoke(CH_PROJECT_FOLDER_PICK, purpose) as Promise<ProjectFolderSelection | null>,
+  defaultAppProjectFolder: () => ipcRenderer.invoke(CH_PROJECT_APPS_DEFAULT) as Promise<ProjectFolderSelection | null>,
+  createProject: (selectionId, directoryName) => ipcRenderer.invoke(CH_PROJECT_CREATE, selectionId, directoryName) as Promise<WorkspaceMetadata>,
   setWorkspace: (path) => ipcRenderer.invoke(CH_WORKSPACE_SET, path) as Promise<WorkspaceMetadata>,
   removeProject: (path) => ipcRenderer.invoke(CH_PROJECT_REMOVE, path) as Promise<BootstrapState>,
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,

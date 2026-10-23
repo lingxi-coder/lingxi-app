@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
-import { CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation';
+import type { ProjectSessionCatalog } from '../src/main/session-catalog';
+import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation';
 
 function fixture(t: TestContext, existing = false) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'lingxi-create-project-')));
@@ -23,17 +24,20 @@ function fixture(t: TestContext, existing = false) {
   const ipc = { handle: (channel: string, handler: (...args: any[]) => any) => handlers.set(channel, handler), removeHandler: (channel: string) => handlers.delete(channel) };
   let picked: string | undefined = path;
   const dialogs = { pickDirectory: async () => picked, trustDirectory: async () => true };
-  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any,
+  const configHome = join(root, '.another-product');
+  const catalog = { productPaths: async () => ({ configHome, appProjectsRoot: join(configHome, '.apps') }) };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as ProjectSessionCatalog, ipc as any,
     undefined, undefined, undefined, undefined, dialogs);
   const sender = new EventEmitter() as any;
   sender.mainFrame = { url: 'app://desktop/index.html' }; sender.isDestroyed = () => false; sender.send = () => {};
   host.registerWindow(sender, sender.mainFrame.url); host.registerIpc();
   const event = { sender, senderFrame: sender.mainFrame };
   t.after(() => { host.dispose(); rmSync(root, { recursive: true, force: true }); });
-  return { path, other, settings, previous, calls, host, dialogs, event, handlers,
+  return { path, other, settings, previous, calls, host, dialogs, event, handlers, configHome, catalog,
     setPicked: (value?: string) => { picked = value; },
-    pick: () => handlers.get(CH_PROJECT_FOLDER_PICK)!(event),
-    create: (id: unknown, source = event) => handlers.get(CH_PROJECT_CREATE)!(source, id) };
+    pick: (purpose = 'project') => handlers.get(CH_PROJECT_FOLDER_PICK)!(event, purpose),
+    defaults: () => handlers.get(CH_PROJECT_APPS_DEFAULT)!(event),
+    create: (id: unknown, source = event, name?: unknown) => handlers.get(CH_PROJECT_CREATE)!(source, id, name) };
 }
 
 test('choosing or cancelling a source folder leaves the project list and session untouched', async t => {
@@ -92,4 +96,99 @@ test('a removed folder is revalidated before any project or session is created',
   rmSync(h.path, { recursive: true });
   await assert.rejects(h.create(selection.id), /ENOENT|directory/);
   assert.deepEqual(h.settings.getPublic().projects, []); assert.deepEqual(h.calls, []);
+});
+
+test('app projects use the Harness product config directory without creating files while staged', async t => {
+  const h = fixture(t, true), before = h.settings.getPublic();
+  const selection = await h.defaults();
+  assert.equal(selection.path, join(h.configHome, '.apps'));
+  assert.equal(selection.createDirectory, true);
+  assert.equal(existsSync(h.configHome), false);
+  assert.deepEqual(h.settings.getPublic(), before);
+  assert.deepEqual(h.calls, []);
+  const workspace = await h.create(selection.id, h.event, ' Reading garden ');
+  assert.equal(workspace.path, join(h.configHome, '.apps', 'Reading garden'));
+  assert.equal(existsSync(workspace.path), true);
+  assert.deepEqual(h.settings.getPublic().activeSession, h.previous);
+  assert.deepEqual(h.calls, [], 'the renderer admits exactly one new authoring chat after confirmation');
+  await assert.rejects(h.create(selection.id, h.event, 'Other'), /Choose a source folder/);
+});
+
+test('a first app project adds its workspace without spawning a duplicate initial session', async t => {
+  const h = fixture(t), selection = await h.defaults();
+  const workspace = await h.create(selection.id, h.event, 'First app');
+  assert.equal(h.settings.getPublic().activeProject, workspace.path);
+  assert.equal(h.settings.getPublic().activeSession, undefined);
+  assert.deepEqual(h.calls, []);
+});
+
+test('new app directory names cannot traverse the product root or overwrite an existing folder', async t => {
+  const h = fixture(t), selection = await h.defaults();
+  for (const name of ['', '  ', '.', '..', '../escape', 'a/b', 'a\\b', '\0']) {
+    await assert.rejects(h.create(selection.id, h.event, name), /project name/);
+  }
+  assert.equal(existsSync(h.configHome), false, 'invalid names must not create the root');
+  const existing = join(selection.path, 'Existing');
+  mkdirSync(existing, { recursive: true });
+  writeFileSync(join(existing, 'keep.txt'), 'existing source');
+  await assert.rejects(h.create(selection.id, h.event, 'Existing'), /already exists/);
+  assert.equal(readFileSync(join(existing, 'keep.txt'), 'utf8'), 'existing source');
+  assert.deepEqual(h.settings.getPublic().projects, []);
+});
+
+test('an app can explicitly select an existing source folder and skip the initial draft', async t => {
+  const h = fixture(t), defaults = await h.defaults();
+  let suggested: string | undefined;
+  h.dialogs.pickDirectory = async (...args: string[]) => { suggested = args[0]; return h.path; };
+  const selection = await h.pick('local-app');
+  assert.equal(suggested, defaults.path);
+  await h.create(selection.id);
+  assert.deepEqual(h.settings.getPublic().projects, [h.path]);
+  assert.deepEqual(h.calls, []);
+});
+
+test('an app configuration lookup failure does not fall back to a hardcoded product directory', async t => {
+  const h = fixture(t);
+  h.catalog.productPaths = async () => { throw new Error('Product settings unavailable'); };
+  await assert.rejects(h.defaults(), /Product settings unavailable/);
+  assert.deepEqual(h.settings.getPublic().projects, []);
+  assert.equal(existsSync(h.configHome), false);
+});
+
+test('failed project persistence removes only the newly created empty directory and allows retry', async t => {
+  const h = fixture(t, true), before = h.settings.getPublic(), selection = await h.defaults();
+  rmSync(h.settings.settingsPath); mkdirSync(h.settings.settingsPath);
+  await assert.rejects(h.create(selection.id, h.event, 'Retry app'));
+  assert.deepEqual(h.settings.getPublic(), before);
+  assert.equal(existsSync(join(selection.path, 'Retry app')), false);
+  rmdirSync(h.settings.settingsPath);
+  const workspace = await h.create(selection.id, h.event, 'Retry app');
+  assert.equal(workspace.path, join(selection.path, 'Retry app'));
+  assert.deepEqual(h.settings.getPublic().activeSession, h.previous);
+});
+
+test('failed project registration never removes a replacement directory at the same path', async t => {
+  const h = fixture(t, true), selection = await h.defaults();
+  const path = join(selection.path, 'Concurrent app'), moved = path + '-moved';
+  h.settings.addProject = () => {
+    renameSync(path, moved);
+    mkdirSync(path);
+    throw new Error('Registration failed after a concurrent rename');
+  };
+  await assert.rejects(h.create(selection.id, h.event, 'Concurrent app'), /Registration failed/);
+  assert.equal(existsSync(path), true, 'the replacement directory belongs to its concurrent creator');
+  assert.equal(existsSync(moved), true);
+  assert.deepEqual(h.settings.getPublic().activeSession, h.previous);
+});
+
+test('a late default directory lookup cannot replace an explicit source folder', async t => {
+  const h = fixture(t);
+  let finish!: (paths: { configHome: string; appProjectsRoot: string }) => void;
+  h.catalog.productPaths = () => new Promise(resolve => { finish = resolve; });
+  const delayed = h.defaults();
+  const selected = await h.pick('local-app');
+  finish({ configHome: h.configHome, appProjectsRoot: join(h.configHome, '.apps') });
+  assert.equal(await delayed, null);
+  const workspace = await h.create(selected.id);
+  assert.equal(workspace.path, h.path);
 });

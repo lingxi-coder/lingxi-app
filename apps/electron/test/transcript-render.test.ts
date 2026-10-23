@@ -764,12 +764,12 @@ test('the inline permission card keeps the request hierarchy and actions', () =>
   );
 
   assert.match(html, /aria-labelledby="lingxi-permission-heading"/);
-  assert.match(html, /<h2[^>]*id="lingxi-permission-heading"[^>]*>Permission request<\/h2>/);
-  assert.match(html, /<h3[^>]*id="lingxi-permission-title"[^>]*>Allow WebFetch\?<\/h3>/);
+  assert.match(html, /<h2[^>]*id="lingxi-permission-heading"[^>]*>Allow WebFetch\?<\/h2>/);
+  assert.doesNotMatch(html, /<h3|permission-prompt-request-card|permission-prompt-request-heading/);
   assert.match(html, /class="inline-interaction-header"/);
   assert.match(html, /class="inline-interaction-body"/);
   assert.doesNotMatch(html, /class="desktop-dialog-overlay"/);
-  assert.match(html, /class="permission-prompt-request-card"/);
+  assert.match(html, /id="lingxi-permission-detail"[^>]*tabindex="0"/);
   assert.match(html, /id="lingxi-permission-risk"/);
   assert.doesNotMatch(html, />Requested input</);
   assert.match(

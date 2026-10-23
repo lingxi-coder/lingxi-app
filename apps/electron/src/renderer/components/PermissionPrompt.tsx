@@ -81,8 +81,6 @@ export function permissionDetail(toolInputJson: string): string {
 interface PermissionDescription {
   title: string;
   summary: string;
-  detailLabel: string;
-  detailCaption: string;
   detail: string;
 }
 
@@ -93,9 +91,7 @@ function describe(request: PermissionRequest): PermissionDescription {
     case 'tool_use_confirm':
       return {
         title: `Allow ${kind.tool_name}?`,
-        summary: `LingXi wants to use ${kind.tool_name}. Review the requested input before continuing.`,
-        detailLabel: 'Requested action',
-        detailCaption: kind.tool_name,
+        summary: 'Review the action before allowing access.',
         // The FULL redacted payload — never a preview, and never a single
         // probed key. This dialog is a security decision, so showing MORE is
         // the safe failure mode; see `permissionDetail`.
@@ -105,16 +101,12 @@ function describe(request: PermissionRequest): PermissionDescription {
       return {
         title: 'Exit plan mode and proceed?',
         summary: 'LingXi wants to leave plan mode and begin working from this plan.',
-        detailLabel: 'Plan to execute',
-        detailCaption: 'May run commands or modify files',
         detail: kind.plan,
       };
     case 'bypass_permissions_mode':
       return {
         title: 'Enable bypass-permissions mode?',
         summary: 'LingXi will be able to act without asking for further confirmation.',
-        detailLabel: 'Permission scope',
-        detailCaption: 'Commands, files, and connected services',
         detail: 'The agent will act without asking for further confirmation.',
       };
     default:
@@ -122,8 +114,6 @@ function describe(request: PermissionRequest): PermissionDescription {
       return {
         title: 'Permission requested',
         summary: 'LingXi needs your approval before it can continue.',
-        detailLabel: 'Requested action',
-        detailCaption: 'Current session',
         detail: '',
       };
   }
@@ -155,9 +145,9 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
   if (!request) return null;
 
   const description = describe(request);
-  const { title, summary, detailLabel, detailCaption, detail } = description;
+  const { title, summary, detail } = description;
   const worker = request.worker;
-  const showPersistentRule = !request.suppress_always_allow_rule && !request.auto_mode_prompt;
+  const showPersistentRule = allowPersistentRules && !request.suppress_always_allow_rule && !request.auto_mode_prompt;
   const showAutoMode = Boolean(request.auto_mode_prompt && !request.suppress_always_allow_rule);
   const elevatedRisk = request.kind.type === 'bypass_permissions_mode';
   const riskCopy = elevatedRisk
@@ -165,7 +155,7 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
     : showAutoMode
       ? 'Auto mode can approve future actions without asking. Review the requested scope carefully.'
       : showPersistentRule
-        ? '“Allow matching actions” saves a rule for this workspace. Use it only when you trust future matching requests.'
+        ? 'Allow matching actions also allows future matching requests in this workspace.'
         : 'This decision applies only to the current request.';
 
   const dialogVariables = {
@@ -198,51 +188,27 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
     >
       <header className="inline-interaction-header">
         <span className="inline-interaction-heading-icon" aria-hidden="true">
-          <Icon name={elevatedRisk ? 'shieldAlert' : 'hand'} size={19} stroke={1.7} />
+          <Icon name={requestIcon(request)} size={19} stroke={1.7} />
         </span>
-        <h2 id="lingxi-permission-heading">Permission request</h2>
-        <button
-          type="button"
-          className="inline-interaction-close"
-          aria-label="Deny permission request"
-          title="Deny"
-          onClick={() => onDeny(request.request_id)}
-        >
-          <Icon name="x" size={17} stroke={1.8} />
-        </button>
+        <h2 id="lingxi-permission-heading">{title}</h2>
+        {worker && (
+          <span className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
+            <span style={{ background: worker.color || t.text3 }} />
+            {worker.name}
+            {worker.team ? ` · ${worker.team}` : ''}
+          </span>
+        )}
       </header>
 
       <div className="inline-interaction-body">
-        <h3 id="lingxi-permission-title" className="permission-prompt-title">{title}</h3>
         <p id="lingxi-permission-summary" className="permission-prompt-summary">{summary}</p>
-
-        <div className="permission-prompt-request-card">
-          <div className="permission-prompt-request-heading">
-            <span className="permission-prompt-request-icon" aria-hidden="true">
-              <Icon name={requestIcon(request)} size={20} stroke={1.7} />
-            </span>
-            <span className="permission-prompt-request-copy">
-              <strong>{detailLabel}</strong>
-              <small>{detailCaption}</small>
-            </span>
-            {worker && (
-              <span className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
-                <span style={{ background: worker.color || t.text3 }} />
-                {worker.name}
-                {worker.team ? ` · ${worker.team}` : ''}
-              </span>
-            )}
+        {detail && (
+          <div id="lingxi-permission-detail" className="permission-prompt-detail mono" role="region" aria-label="Requested action" tabIndex={0}>
+            {detail}
           </div>
-
-          {detail && (
-            <div id="lingxi-permission-detail" className="permission-prompt-detail mono">
-              {detail}
-            </div>
-          )}
-        </div>
+        )}
 
         <p id="lingxi-permission-risk" className="permission-prompt-risk">
-          <Icon name="info" size={16} stroke={1.7} />
           <span>{riskCopy}</span>
         </p>
       </div>

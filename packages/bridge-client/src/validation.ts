@@ -1145,6 +1145,17 @@ export function validateClientEvent(value: unknown): ClientEvent {
   const input = object(value, 'client event');
   const type = string(input['type'], 'client event type');
   switch (type) {
+    case 'workspace_changed': {
+      exactKeys(input, ['type', 'state'], 'workspace event');
+      const state = object(input['state'], 'workspace state');
+      exactKeys(state, ['session_id', 'cwd', 'project_root', 'additional_directories', 'transcript_path'], 'workspace state');
+      string(state['session_id'], 'workspace session id');
+      string(state['cwd'], 'workspace cwd');
+      string(state['project_root'], 'workspace project root');
+      stringArray(state['additional_directories'], 'workspace directories');
+      string(state['transcript_path'], 'workspace transcript path');
+      return input as ClientEvent;
+    }
     case 'session_storage_state':
       exactKeys(input, ['type', 'disk_full'], 'session storage state');
       return { type, disk_full: boolean(input['disk_full'], 'disk full') };
@@ -1427,13 +1438,16 @@ export function validateClientEvent(value: unknown): ClientEvent {
       if (!Array.isArray(input['sessions'])) throw new Error('invalid sessions');
       for (const row of input['sessions']) {
         const item = object(row, 'session row');
-        exactKeys(item, ['uuid', 'mode', 'title', 'modified_rfc3339', 'message_count', 'path'], 'session row');
+        exactKeys(item, ['uuid', 'mode', 'title', 'modified_rfc3339', 'message_count', 'path', 'workspace_path'], 'session row');
         string(item['uuid'], 'session row uuid');
         sessionMode(item['mode'], 'session row mode');
         string(item['title'], 'session row title');
         string(item['modified_rfc3339'], 'session row modified_rfc3339');
         integer(item['message_count'], 'session row message_count');
         string(item['path'], 'session row path');
+        if (item['workspace_path'] !== undefined && item['workspace_path'] !== null) {
+          string(item['workspace_path'], 'session workspace path');
+        }
       }
       return input as ClientEvent;
     case 'realtime_audio_event':

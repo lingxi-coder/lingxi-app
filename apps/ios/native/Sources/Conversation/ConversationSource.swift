@@ -119,6 +119,8 @@ protocol ConversationSource: AnyObject {
     /// on the listener and populates `model.engineSessions`. A no-op on the mock
     /// (which keeps the canned drawer lists). Called when the drawer opens so the
     /// history is fresh.
+    func changeWorkspace(_ path: String, expectedSessionID: String)
+    func addWorkspaceDirectory(_ path: String, expectedSessionID: String)
     func listSessions()
     /// Resume a prior session by its engine UUID (submit
     /// `ClientCommand.resumeSession`). The engine confirms with `SessionResumed`;
@@ -182,6 +184,9 @@ protocol ConversationSource: AnyObject {
 /// hooks are no-ops by default; the engine source may override foregrounding to
 /// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
+    func changeWorkspace(_ path: String, expectedSessionID: String) { model.error = ConversationError(kind: .host, message: "Workspace navigation is unavailable") }
+    func addWorkspaceDirectory(_ path: String, expectedSessionID: String) { model.error = ConversationError(kind: .host, message: "Workspace navigation is unavailable") }
+
     func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {}
     func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {}
     var sessionMode: SessionMode { .code }

@@ -147,7 +147,7 @@ final class ProjectWorkspaceSynchronizer: @unchecked Sendable {
 
         do {
             let externalRoot = try requireCanonicalDirectory(resolved.url)
-            let internalRoot = snapshot.workspace.hostURL
+            let internalRoot = snapshot.sourceWorkspace.hostURL
             let internalFiles = try scanDirectory(root: internalRoot, enforceWorkspaceSafety: true)
             let baseline = try repository.readBaseline(projectId: projectId)
             var nextBaseline = baseline.files

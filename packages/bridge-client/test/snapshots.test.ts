@@ -1133,6 +1133,13 @@ function validateEvent(name: string, v: unknown): void {
     case 'system_notice':
       assert.ok(isString(o['message']) && isBool(o['is_error']));
       break;
+    case 'workspace_changed': {
+      const state = rec(o['state']);
+      assert.ok(isString(state['session_id']) && isString(state['cwd']) && isString(state['project_root']));
+      assert.ok(Array.isArray(state['additional_directories']) && state['additional_directories'].every(isString));
+      assert.ok(isString(state['transcript_path']));
+      break;
+    }
     case 'session_storage_state':
       assert.ok(isBool(o['disk_full']));
       break;

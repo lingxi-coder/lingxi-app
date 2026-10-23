@@ -160,7 +160,7 @@ final class CronRepositoryTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let handle = try buildIosCronStore(appSandboxRoot: directory.path, projectCwd: nil)
+        let handle = try buildIosCronStore(appSandboxRoot: directory.path, managedRoot: directory.appendingPathComponent("runtime", isDirectory: true).path, projectCwd: nil)
         try await handle.setMigrationDefaults(model: "provider/model", reasoningJson: "{\"type\":\"automatic\"}")
         var configuration = CronAutomation()
         configuration.model = "provider/model"

@@ -4,23 +4,24 @@ import XCTest
 @testable import LingxiCode
 
 final class RuntimeIntegrationTests: XCTestCase {
-    func testDefaultWorkspaceRetainsValidPersistedIdentity() throws {
-        let suite = "runtime-integration-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let id = "12345678-1234-4ABC-8DEF-1234567890AB"
-        defaults.set(id, forKey: LXISHDefaultWorkspace.defaultsKey)
-        XCTAssertEqual(LXISHDefaultWorkspace.stableID(defaults: defaults), id.lowercased())
+    func testWorkspaceMountIdentityIsIndependentOfProjectsAndPreferences() {
+        XCTAssertEqual(LXISHDefaultWorkspace.stableID(), "projects")
+        XCTAssertEqual(LXISHDefaultWorkspace.stableID(), LXISHDefaultWorkspace.stableID())
+        XCTAssertEqual(LXISHDefaultWorkspace.guestHome, LXISHGuestPaths.workspaceRoot)
     }
 
-    func testInvalidWorkspaceIdentityIsReplacedOnce() throws {
-        let suite = "runtime-integration-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set("invalid", forKey: LXISHDefaultWorkspace.defaultsKey)
-        let id = LXISHDefaultWorkspace.stableID(defaults: defaults)
-        XCTAssertNotNil(UUID(uuidString: id))
-        XCTAssertEqual(LXISHDefaultWorkspace.stableID(defaults: defaults), id)
+    func testUserStorageNormalizesContainerAliasesBeforeDerivingProjects() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let actual = root.appendingPathComponent("actual", isDirectory: true)
+        let alias = root.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createDirectory(at: actual, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: actual)
+        let paths = MobileUserStorage.directories(managedRoot: alias.appendingPathComponent("runtime").path)
+        XCTAssertTrue(paths.projects.hasPrefix(actual.resolvingSymlinksInPath().path + "/"))
+        let repository = ProjectRepository(projectsRoot: URL(fileURLWithPath: paths.projects), userHome: URL(fileURLWithPath: paths.home))
+        let created = try repository.createInternal(name: "Container alias")
+        XCTAssertEqual(repository.load().projects.map(\.id), [created.id])
     }
 
     func testExplicitResourceOverridesWinOverManagedResources() throws {

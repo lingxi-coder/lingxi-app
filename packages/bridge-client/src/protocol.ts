@@ -1269,6 +1269,17 @@ export interface SessionRowDto {
   message_count: number;
   mode: SessionModeDto;
   path: string;
+  /** Lossless workspace hint from the transcript loader. */
+  workspace_path?: string | null;
+}
+
+/** Logical session directory state shared with the mobile runtime. */
+export interface WorkspaceStateDto {
+  session_id: string;
+  cwd: string;
+  project_root: string;
+  additional_directories: string[];
+  transcript_path: string;
 }
 
 /** One live agent instance attached to the active session. */
@@ -1638,6 +1649,7 @@ export type ClientEvent =
   | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: (string | null)[] }
   | { type: 'system_notice'; message: string; is_error: boolean }
   | { type: 'session_storage_state'; disk_full: boolean }
+  | { type: 'workspace_changed'; state: WorkspaceStateDto }
   | { type: 'ui_log'; plugin: string; text: string }
   | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
   | { type: 'ui_status'; plugin: string; text: string | null }

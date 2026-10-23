@@ -11,6 +11,24 @@
 ///
 /// The inference cannot be repaired in place: `LingxiCode` is not
 /// derivable from `mobile-linux/ios-ish`. It has to be told.
+fn user_storage_config(root: &std::path::Path) -> super::IosMobileLinuxConfigFfi {
+    let managed = root.join("runtime");
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(managed.display().to_string()).unwrap();
+    paths.prepare().unwrap();
+    super::IosMobileLinuxConfigFfi {
+        mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        managed_root: managed.display().to_string(),
+        workspace_host_path: paths.projects,
+        stable_workspace_id: "projects".into(),
+        abi: "arm64".into(),
+        rootfs_version: "test".into(),
+        archive_sha256: None,
+        authorization_file: None,
+        app_sandbox_root: root.display().to_string(),
+    }
+}
+
 #[test]
 fn the_runtime_sandbox_root_is_the_engine_data_root_not_the_container() {
     // The literal shapes both sides produce on device, from
@@ -475,60 +493,53 @@ fn standalone_mobile_linux_runtime_applies_workspace_boundary_validation() {
 }
 
 #[test]
-fn ios_project_cwd_accepts_managed_project_workspaces() {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("lingxi-ios-project-{nonce}"));
-    let project_id = "12345678-1234-4abc-8def-1234567890ab";
-    let workspace = root.join("Projects").join(project_id).join("workspace");
-    std::fs::create_dir_all(&workspace).expect("create project fixture");
-
-    let legacy = super::ios_project_cwd(root.to_str().expect("utf8"), None)
-        .expect("missing project cwd preserves the legacy sandbox root");
-    assert_eq!(legacy, root.canonicalize().expect("canonical root"));
-
-    let resolved = super::ios_project_cwd(
-        root.to_str().expect("utf8"),
-        Some(workspace.to_str().expect("utf8")),
-    )
-    .expect("managed project workspace is accepted");
+fn ios_project_cwd_uses_the_linux_user_home_and_accepts_multiple_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let managed = temp.path().join("runtime");
+    let directories =
+        harness_runtime::mobile::mobile_user_directories(managed.display().to_string()).unwrap();
+    directories.prepare().unwrap();
+    let a = std::path::Path::new(&directories.projects).join("project-a/workspace");
+    let b = std::path::Path::new(&directories.home).join("other-worktree");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
     assert_eq!(
-        resolved,
-        workspace.canonicalize().expect("canonical workspace")
+        super::ios_project_cwd(managed.to_str().unwrap(), None).unwrap(),
+        std::path::Path::new(&directories.default_cwd)
+            .canonicalize()
+            .unwrap()
     );
-
-    let malformed = root.join("Projects").join("user-name").join("workspace");
-    std::fs::create_dir_all(&malformed).expect("create malformed fixture");
-    assert!(
+    for directory in [&a, &b] {
+        assert_eq!(
+            super::ios_project_cwd(managed.to_str().unwrap(), directory.to_str()).unwrap(),
+            directory.canonicalize().unwrap()
+        );
+    }
+    assert_eq!(
         super::ios_project_cwd(
-            root.to_str().expect("utf8"),
-            Some(malformed.to_str().expect("utf8")),
+            managed.to_str().unwrap(),
+            Some("/home/lingxi/other-worktree")
         )
-        .is_err(),
-        "user-controlled names must never become project directories"
+        .unwrap(),
+        b.canonicalize().unwrap()
     );
-
-    let outside = std::env::temp_dir().join(format!("lingxi-ios-outside-project-{nonce}"));
-    std::fs::create_dir_all(&outside).expect("create outside fixture");
-    assert!(
-        super::ios_project_cwd(
-            root.to_str().expect("utf8"),
-            Some(outside.to_str().expect("utf8")),
-        )
-        .is_err(),
-        "workspace must stay under the app sandbox"
-    );
+    assert!(super::ios_project_cwd(managed.to_str().unwrap(), temp.path().to_str()).is_err());
+    #[cfg(unix)]
+    {
+        let escape = std::path::Path::new(&directories.projects).join("escape");
+        std::os::unix::fs::symlink(temp.path(), &escape).unwrap();
+        assert!(super::ios_project_cwd(managed.to_str().unwrap(), escape.to_str()).is_err());
+    }
 }
 
 #[test]
 fn ios_launch_config_parses_provider_json_and_project_scope() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_id = "12345678-1234-4abc-8def-1234567890ab";
-    let workspace = temp
-        .path()
-        .join("Projects")
+    let linux = user_storage_config(temp.path());
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
+    let workspace = std::path::Path::new(&paths.projects)
         .join(project_id)
         .join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace");
@@ -548,7 +559,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
                     .to_string(),
             routing_json: Some(r#"{"default":"openai"}"#.to_string()),
         }),
-        mobile_linux: None,
+        mobile_linux: Some(linux),
         physical_memory_bytes: 7 * 1024_u64.pow(3),
         host_environment: None,
     })
@@ -580,12 +591,12 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     );
     assert_eq!(
         cfg.lingxi_home,
-        temp.path().join(branding::DOT_DIR),
-        "global state remains rooted at the sandbox"
+        std::path::PathBuf::from(paths.config_home),
+        "configuration belongs to the Linux account"
     );
     assert!(
-        cfg.mobile_shell().is_none(),
-        "iOS must not advertise Shell without a configured mobile-linux runtime"
+        cfg.mobile_shell().is_some(),
+        "the Linux profile is configured before its availability probe"
     );
     let providers = cfg.provider_profiles.expect("provider profiles");
     assert!(providers.contains_key("openai"));
@@ -608,7 +619,7 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
         provider_config: None,
-        mobile_linux: None,
+        mobile_linux: Some(user_storage_config(temp.path())),
         physical_memory_bytes: 0,
         host_environment: Some(super::IosHostEnvironmentFfi {
             os_version: "19.0".to_string(),
@@ -640,9 +651,10 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
 async fn build_ios_cron_store_round_trips_without_engine() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_id = "12345678-1234-4abc-8def-1234567890ab";
-    let workspace = temp
-        .path()
-        .join("Projects")
+    let linux = user_storage_config(temp.path());
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
+    let workspace = std::path::Path::new(&paths.projects)
         .join(project_id)
         .join("workspace");
     std::fs::create_dir_all(temp.path().join(branding::DOT_DIR)).expect("state dir");
@@ -650,6 +662,7 @@ async fn build_ios_cron_store_round_trips_without_engine() {
 
     let store = super::build_ios_cron_store(
         temp.path().to_string_lossy().into_owned(),
+        linux.managed_root,
         Some(workspace.to_string_lossy().into_owned()),
     )
     .expect("build cron store");

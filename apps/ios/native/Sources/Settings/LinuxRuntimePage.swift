@@ -65,11 +65,11 @@ private enum LinuxRuntimeBridge {
         // degenerate branch (a missing Application Support produced a
         // relative "workspaces/<id>" here, "" in the helper).
         let workspaceID = LXISHDefaultWorkspace.stableID()
-        let workspaceHostPath = LXISHDefaultWorkspace.hostPath(id: workspaceID)
+        let workspaceHostPath = LXISHDefaultWorkspace.hostPath()
         let managedRoot = LXISHDefaultWorkspace.managedRootPath()
         let authorizationFile = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
         return IosMobileLinuxConfigFfi(
-            mode: mode == .legacy ? .legacy : .mobileLinux,
+            mode: .mobileLinux,
             managedRoot: managedRoot,
             workspaceHostPath: workspaceHostPath,
             stableWorkspaceId: workspaceID,
@@ -260,9 +260,7 @@ private enum LinuxRuntimeBridge {
     ) -> LinuxRuntimeState {
         let detail = status.lastError ?? capability.reason ?? String(localized: "settings_linux_no_diagnostics")
         let summary: String
-        if mode == .legacy {
-            summary = String(localized: "settings_linux_summary_legacy_shell_stub")
-        } else if status.state == .blockedByLicense {
+        if status.state == .blockedByLicense {
             summary = String(localized: "settings_linux_summary_blocked_license")
         } else if status.state == .unsupported {
             summary = String(localized: "settings_linux_summary_ish_not_linked")
@@ -334,7 +332,7 @@ private enum LinuxRuntimeBridge {
 
     private static func simulatorState(mode: LinuxRuntimeMode, action: LinuxRuntimeAction) -> LinuxRuntimeState {
         var state = LinuxRuntimeState(selectedMode: mode)
-        state.backend = mode == .legacy ? "ios-posix" : "ios-ish"
+        state.backend = "ios-ish"
         state.rootfsState = .unsupported
         state.summary = String(localized: "settings_linux_simulator_unavailable")
         state.detail = String(localized: "settings_linux_summary_simulator_detail")
@@ -405,8 +403,6 @@ struct LinuxRuntimePage: View {
                 options: [
                     .init(value: LinuxRuntimeMode.mobileLinux.rawValue, label: "Mobile Linux",
                           sub: String(localized: "settings_linux_mobile_linux_sub")),
-                    .init(value: LinuxRuntimeMode.legacy.rawValue, label: "Legacy",
-                          sub: String(localized: "settings_linux_legacy_sub")),
                 ],
                 value: Binding(
                     get: { store.linuxRuntime.selectedMode.rawValue },

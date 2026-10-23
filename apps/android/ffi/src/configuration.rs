@@ -199,63 +199,10 @@ pub struct AndroidEngineLaunchConfigFfi {
 
 #[cfg(feature = "uniffi")]
 pub(super) fn android_project_cwd(
-    app_files_root: &str,
+    managed_root: &str,
     project_cwd: Option<&str>,
 ) -> Result<std::path::PathBuf, MobileEngineError> {
-    let app_root = std::path::Path::new(app_files_root)
-        .canonicalize()
-        .map_err(|error| {
-            MobileEngineError::Internal(format!("Android app files root is unavailable: {error}"))
-        })?;
-    let Some(project_cwd) = project_cwd else {
-        return Ok(app_root);
-    };
-    let workspace = std::path::Path::new(project_cwd)
-        .canonicalize()
-        .map_err(|error| {
-            MobileEngineError::Internal(format!(
-                "Android Project workspace is unavailable: {error}"
-            ))
-        })?;
-    let relative = workspace.strip_prefix(&app_root).map_err(|_| {
-        MobileEngineError::Internal(
-            "Android Project workspace must remain inside the app files directory".to_string(),
-        )
-    })?;
-    let components: Vec<_> = relative
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect();
-    let is_managed_project = components.len() == 3
-        && components[0] == "projects"
-        && is_lowercase_uuid(components[1])
-        && components[2] == "workspace";
-    let is_scheduled_workspace = components == ["scheduled", "workspace"];
-    let valid = (is_managed_project || is_scheduled_workspace) && workspace.is_dir();
-    if !valid {
-        return Err(MobileEngineError::Internal(
-            "Android conversation workspace must match \
-             filesDir/projects/<lowercase UUID>/workspace or \
-             filesDir/scheduled/workspace"
-                .to_string(),
-        ));
-    }
-    Ok(workspace)
-}
-
-#[cfg(feature = "uniffi")]
-pub(super) fn is_lowercase_uuid(value: &str) -> bool {
-    if value.len() != 36 || value != value.to_ascii_lowercase() {
-        return false;
-    }
-    value.chars().enumerate().all(|(index, character)| {
-        if matches!(index, 8 | 13 | 18 | 23) {
-            character == '-'
-        } else {
-            character.is_ascii_hexdigit()
-        }
-    })
+    let directories = harness_runtime::mobile::mobile_user_directories(managed_root.to_string())?;
+    directories.prepare()?;
+    directories.resolve_cwd(project_cwd).map(|(host, _)| host)
 }

@@ -41,12 +41,24 @@ data class ProjectRecord(
         } else {
             ProjectSyncState.ChangesPending
         },
+    val directory: String = "${MobileLinuxGuestPaths.workspace("projects")}/$id/workspace",
+    val activeDirectory: String = directory,
+    val additionalDirectories: List<String> = emptyList(),
+)
+
+data class SessionWorkspaceState(
+    val sessionId: String,
+    val cwd: String,
+    val projectRoot: String,
+    val additionalDirectories: List<String>,
+    val transcriptPath: String,
 )
 
 data class ProjectWorkspace(
     val projectId: String,
     val hostPath: String,
-    val guestPath: String = MobileLinuxGuestPaths.workspace(projectId),
+    val guestPath: String = "${MobileLinuxGuestPaths.workspace("projects")}/$projectId/workspace",
+    val additionalDirectories: List<String> = emptyList(),
 ) {
     val hostDirectory: File get() = File(hostPath)
 }
@@ -60,6 +72,9 @@ data class ProjectSessionSummary(
     val mode: SessionMode = SessionMode.Code,
     val isArchived: Boolean = false,
     val pendingCatalogConfirmation: Boolean = false,
+    val workspaceDirectory: String? = null,
+    val originalProjectDirectory: String? = null,
+    val transcriptPath: String? = null,
 )
 
 data class ProjectSyncFile(
@@ -84,6 +99,7 @@ data class ProjectSnapshot(
     val record: ProjectRecord,
     val workspace: ProjectWorkspace,
     val sessions: List<ProjectSessionSummary>,
+    val sourceWorkspace: ProjectWorkspace = workspace,
 )
 
 enum class ProjectOperationKind {

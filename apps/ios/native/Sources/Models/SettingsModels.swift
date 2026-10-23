@@ -231,7 +231,6 @@ struct NotifConfig: Equatable {
 }
 
 enum LinuxRuntimeMode: String, CaseIterable, Equatable {
-    case legacy = "Legacy"
     case mobileLinux = "Mobile Linux"
 }
 
@@ -289,7 +288,6 @@ struct LinuxRuntimeState: Equatable {
     var terminal = LinuxTerminalState()
 
     var badge: String {
-        if selectedMode == .legacy { return String(localized: "settings_badge_default") }
         switch rootfsState {
         case .blockedByLicense: return String(localized: "settings_linux_badge_blocked")
         case .unsupported: return String(localized: "settings_linux_badge_not_linked")

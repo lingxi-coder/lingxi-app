@@ -57,6 +57,7 @@ private struct VersionedBaseline: Codable {
 
 final class ProjectRepository: @unchecked Sendable {
     let projectsRoot: URL
+    private let userHome: URL?
     private let now: @Sendable () -> Date
     private let newId: @Sendable () -> String
     private let writer: ProjectAtomicWriting
@@ -67,9 +68,11 @@ final class ProjectRepository: @unchecked Sendable {
         projectsRoot: URL,
         now: @escaping @Sendable () -> Date = { Date() },
         newId: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
-        writer: ProjectAtomicWriting = DefaultProjectAtomicWriter()
+        writer: ProjectAtomicWriting = DefaultProjectAtomicWriter(),
+        userHome: URL? = nil
     ) {
         self.projectsRoot = projectsRoot
+        self.userHome = userHome
         self.now = now
         self.newId = newId
         self.writer = writer
@@ -79,10 +82,6 @@ final class ProjectRepository: @unchecked Sendable {
         encoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
         try? FileManager.default.createDirectory(at: projectsRoot, withIntermediateDirectories: true)
-    }
-
-    static func appManagedProjectsRoot(appSandboxRoot: URL) -> URL {
-        appSandboxRoot.appendingPathComponent("Projects", isDirectory: true)
     }
 
     func load() -> ProjectRepositoryState {
@@ -151,7 +150,8 @@ final class ProjectRepository: @unchecked Sendable {
     }
 
     func updateSessions(projectId: String?, sessions: [ProjectSessionSummary]) throws -> ProjectRepositoryState {
-        let existing = try projectId.map { try loadProject(id: $0).sessions } ?? load().globalSessions
+        let snapshot = try projectId.map { try loadProject(id: $0) }
+        let existing = snapshot?.sessions ?? load().globalSessions
         let incoming = sessions
             .filter { !$0.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .map { row in
@@ -161,6 +161,9 @@ final class ProjectRepository: @unchecked Sendable {
                 if let cached, cached.pendingCatalogConfirmation, row.messageCount < cached.messageCount {
                     return cached
                 }
+                row.workspaceDirectory = row.workspaceDirectory ?? cached?.workspaceDirectory
+                row.originalProjectDirectory = row.originalProjectDirectory ?? cached?.originalProjectDirectory
+                row.transcriptPath = row.transcriptPath ?? cached?.transcriptPath
                 row.isArchived = cached?.isArchived ?? false
                 row.pendingCatalogConfirmation = false
                 return row
@@ -170,7 +173,8 @@ final class ProjectRepository: @unchecked Sendable {
         let incomingIDs = Set(incoming.map(\.sessionId))
         // Keep unacknowledged starts and archive metadata across stale engine lists.
         let normalized = (incoming + existing.filter {
-            !incomingIDs.contains($0.sessionId) && ($0.pendingCatalogConfirmation || $0.isArchived)
+            !incomingIDs.contains($0.sessionId) && ($0.pendingCatalogConfirmation || $0.isArchived ||
+                (snapshot != nil && $0.workspaceDirectory != nil && $0.workspaceDirectory != snapshot?.record.activeDirectory))
         }).sorted { $0.updatedAt > $1.updatedAt }
         if let projectId {
             try validateProjectID(projectId)
@@ -208,7 +212,10 @@ final class ProjectRepository: @unchecked Sendable {
             mode: existing?.mode ?? mode,
             isArchived: existing?.isArchived ?? false,
             pendingCatalogConfirmation: (existing?.pendingCatalogConfirmation ?? true) ||
-                initialMessageCount > (existing?.messageCount ?? 0)
+                initialMessageCount > (existing?.messageCount ?? 0),
+            workspaceDirectory: existing?.workspaceDirectory ?? snapshot?.record.activeDirectory,
+            originalProjectDirectory: existing?.originalProjectDirectory ?? snapshot?.record.activeDirectory,
+            transcriptPath: existing?.transcriptPath
         )
         let updated = ([started] + sessions.filter { $0.sessionId != canonicalID })
         if let projectId {
@@ -301,6 +308,49 @@ final class ProjectRepository: @unchecked Sendable {
         try loadProject(id: projectId).workspace
     }
 
+    func recordWorkspace(projectId: String, state: SessionWorkspaceState) throws -> ProjectRepositoryState {
+        let snapshot = try loadProject(id: projectId)
+        _ = try workspaceForDirectory(projectId: projectId, guestPath: state.cwd)
+        for directory in state.additionalDirectories { _ = try workspaceForDirectory(projectId: projectId, guestPath: directory, requireExisting: false) }
+        var record = snapshot.record
+        record.activeDirectory = state.cwd
+        record.additionalDirectories = (record.additionalDirectories + state.additionalDirectories + [state.cwd])
+            .filter { $0 != record.directory }.uniqued()
+        try writeProject(record)
+        try writeSessions(projectId: projectId, sessions: snapshot.sessions.map { row in
+            guard row.sessionId == state.sessionId else { return row }
+            var row = row
+            row.workspaceDirectory = state.cwd
+            row.originalProjectDirectory = state.projectRoot
+            row.transcriptPath = state.transcriptPath
+            return row
+        })
+        return load()
+    }
+
+    private func workspaceForDirectory(projectId: String, guestPath: String, requireExisting: Bool = true) throws -> ProjectWorkspace {
+        let projectsGuest = LXISHGuestPaths.workspace("projects")
+        let homeGuest = LXISHGuestPaths.home
+        guard (guestPath == homeGuest || guestPath.hasPrefix(homeGuest + "/")),
+              !guestPath.split(separator: "/").contains(where: { $0 == ".." || $0 == "." })
+        else { throw ProjectRepositoryError.escapedWorkspace }
+        let root: URL
+        let relative: String
+        if guestPath == projectsGuest || guestPath.hasPrefix(projectsGuest + "/") {
+            root = projectsRoot
+            relative = String(guestPath.dropFirst(projectsGuest.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else {
+            guard let userHome else { throw ProjectRepositoryError.escapedWorkspace }
+            root = userHome
+            relative = String(guestPath.dropFirst(homeGuest.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        let canonicalRoot = try requireCanonicalDirectory(root)
+        let requested = root.appendingPathComponent(relative, isDirectory: true)
+        let directory = requireExisting ? try requireCanonicalDirectory(requested) : requested.resolvingSymlinksInPath().standardizedFileURL
+        guard directory == canonicalRoot || directory.path.hasPrefix(canonicalRoot.path + "/") else { throw ProjectRepositoryError.escapedWorkspace }
+        return ProjectWorkspace(projectId: projectId, hostURL: directory, guestPath: guestPath)
+    }
+
     func project(projectId: String) throws -> ProjectSnapshot {
         try loadProject(id: projectId)
     }
@@ -357,16 +407,17 @@ final class ProjectRepository: @unchecked Sendable {
         let record = try decode(ProjectRecord.self, from: directory.appendingPathComponent(projectManifestFileName))
         guard record.id == projectId else { throw ProjectRepositoryError.manifestMismatch }
         let workspaceURL = directory.appendingPathComponent(projectWorkspaceDirectoryName, isDirectory: true)
-        if !FileManager.default.fileExists(atPath: workspaceURL.path) {
-            try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        if (try? workspaceURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            throw ProjectRepositoryError.escapedWorkspace
         }
-        let canonicalWorkspace = try requireCanonicalDirectory(workspaceURL)
+        let canonicalWorkspace = workspaceURL.resolvingSymlinksInPath().standardizedFileURL
         guard canonicalWorkspace.deletingLastPathComponent() == canonicalDir else {
             throw ProjectRepositoryError.escapedWorkspace
         }
         return ProjectSnapshot(
             record: record,
-            workspace: ProjectWorkspace(projectId: projectId, hostURL: canonicalWorkspace),
+            workspace: try workspaceForDirectory(projectId: projectId, guestPath: record.activeDirectory, requireExisting: false),
+            sourceWorkspace: ProjectWorkspace(projectId: projectId, hostURL: canonicalWorkspace),
             sessions: readSessions(at: directory.appendingPathComponent(projectSessionIndexFileName))
         )
     }
@@ -544,12 +595,12 @@ private extension Array where Element: Hashable {
 extension ProjectRecord {
     func with(
         updatedAt: Date? = nil,
-        lastActiveSessionId: String? = nil,
+        lastActiveSessionId: String?? = nil,
         syncState: ProjectSyncState? = nil
     ) -> ProjectRecord {
         var copy = self
         if let updatedAt { copy.updatedAt = updatedAt }
-        copy.lastActiveSessionId = lastActiveSessionId
+        if let lastActiveSessionId { copy.lastActiveSessionId = lastActiveSessionId }
         if let syncState { copy.syncState = syncState }
         return copy
     }

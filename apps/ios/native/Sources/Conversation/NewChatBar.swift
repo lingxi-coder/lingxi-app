@@ -68,9 +68,34 @@ struct WorkspacePickerSheet: View {
     let activeScope: ConversationScope
     let onSelect: (ConversationScope) -> Void
 
+    var directories: [String] = []
+    var activeDirectory: String?
+    var onPickDirectory: (String) -> Void = { _ in }
+    var onAddDirectory: (String) -> Void = { _ in }
+    @State private var addingDirectory = false
+    @State private var directoryInput = ""
+
     var body: some View {
         NavigationStack {
             List {
+                if !directories.isEmpty {
+                    Section("workspace_linked_directories") {
+                        ForEach(Array(Set(directories)).sorted(), id: \.self) { path in
+                            Button {
+                                onPickDirectory(path)
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Text(path).font(.system(.caption, design: .monospaced)).foregroundStyle(t.text)
+                                    Spacer()
+                                    if path == activeDirectory { Image(systemName: "checkmark").foregroundStyle(t.accent) }
+                                }
+                            }
+                        }
+                        Button("workspace_add_directory", systemImage: "folder.badge.plus") { addingDirectory = true }
+                    }
+                }
+
                 row(scope: .global, title: String(localized: "common_global"), subtitle: nil)
                 ForEach(projects) { project in
                     row(
@@ -87,6 +112,13 @@ struct WorkspacePickerSheet: View {
                     Button("common_close") { dismiss() }
                 }
             }
+        }
+        .alert("workspace_add_directory", isPresented: $addingDirectory) {
+            TextField("~/lingxi/my-worktree", text: $directoryInput)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("workspace_confirm_add") { onAddDirectory(directoryInput.trimmingCharacters(in: .whitespacesAndNewlines)); dismiss() }
+                .disabled(directoryInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("common_cancel", role: .cancel) {}
         }
         .presentationDetents([.medium, .large])
         .accessibilityIdentifier("newchat.workspace-picker")

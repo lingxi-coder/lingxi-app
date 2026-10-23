@@ -1,6 +1,5 @@
 package com.lingxi.code
 
-import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import com.lingxi.code.conversation.blocksEngineReconnect
 
 import android.content.pm.PackageManager
@@ -95,6 +94,7 @@ import com.lingxi.code.apps.MarketAppPage
 import com.lingxi.code.apps.chatAppKey
 import com.lingxi.code.apps.myApps
 import com.lingxi.code.conversation.LocalAppCardLinks
+import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.CatalogModelDetails
@@ -297,7 +297,7 @@ fun RootScreen(
     val projectScopeSignature = remember(projectState.activeProjectId, projectState.projects) {
         buildString {
             append(projectState.activeProjectId.orEmpty())
-            projectState.projects.forEach { append('|').append(it.record.id) }
+            projectState.projects.forEach { append('|').append(it.record.id).append('@').append(it.record.activeDirectory) }
         }
     }
     LaunchedEffect(projectState.loading, projectScopeSignature) {
@@ -430,14 +430,8 @@ fun RootScreen(
     }
 
     fun resolveLinkedScope(key: String?): ConversationScope? {
-        val direct = conversationScopeFromKey(key)
-        if (direct != null && (direct !is ConversationScope.Project || projectSnapshotForScope(direct) != null)) return direct
-        if (key == null) return null
-        return projectState.projects.firstOrNull { project ->
-            val canonical = runCatching { java.io.File(project.workspace.hostPath).canonicalPath }.getOrNull() ?: return@firstOrNull false
-            val hash = java.security.MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-            key == "project.$hash"
-        }?.let { ConversationScope.Project(it.record.id) }
+        val scope = conversationScopeFromKey(key) ?: return null
+        return scope.takeIf { it !is ConversationScope.Project || projectSnapshotForScope(it) != null }
     }
 
     fun workspaceForScope(scope: ConversationScope) = when (scope) {
@@ -445,7 +439,7 @@ fun RootScreen(
         ConversationScope.Scheduled -> com.lingxi.code.project.ProjectWorkspace(
             projectId = "b51bca68-b85f-4caa-8881-07dd33eba24d",
             hostPath = com.lingxi.code.cron.CronScope.global(appContext).workspacePath,
-            guestPath = MobileLinuxGuestPaths.workspace("global"),
+            guestPath = com.lingxi.code.project.MobileUserStorage.directories(appContext).scheduledGuestCwd,
         )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
     }
@@ -1169,7 +1163,10 @@ fun RootScreen(
         val target = persistedSessionTarget(
             sessionId = savedSessionId,
             catalogRow = savedSessionId?.let {
-                restorableSession(sourceScope, it, activeSessionMode)
+                val project = projectSnapshotForScope(sourceScope)
+                restorableSession(sourceScope, it, activeSessionMode).takeIf { _ ->
+                    project == null || project.sessions.any { row -> canonicalSessionId(row.sessionId) == canonicalSessionId(it) && row.workspaceDirectory == project.record.activeDirectory }
+                }
             },
         )
         switchEngineScope(
@@ -1205,11 +1202,9 @@ fun RootScreen(
             val scopedLastActiveSessionId = scopeStore.read(
                 ConversationScope.Project(project.record.id).sessionStateKey(activeSessionMode),
             )?.lastActiveSessionId
-            val legacyLastActiveSessionId = project.record.lastActiveSessionId
-                .takeIf { activeSessionMode == SessionMode.Code }
-            val lastSummary = (scopedLastActiveSessionId ?: legacyLastActiveSessionId)
+            val lastSummary = scopedLastActiveSessionId
                 ?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
-                ?.takeIf { it.mode == activeSessionMode }
+                ?.takeIf { it.mode == activeSessionMode && it.workspaceDirectory == project.record.activeDirectory }
             val last = lastSummary?.let {
                 SessionRef(id = it.sessionId, title = it.title)
             }
@@ -1243,6 +1238,16 @@ fun RootScreen(
                     active.sessionStateKey(activeSessionMode),
                     state.session.id,
                 )
+            }
+        }
+    }
+
+    LaunchedEffect(currentEngineSource, sourceProjectId) {
+        val projectId = currentEngineSource.recoverySpec?.projectId ?: return@LaunchedEffect
+        currentEngineSource.workspaceState.collect { workspace ->
+            if (workspace != null) {
+                runCatching { projectStore.recordWorkspace(projectId, workspace) }
+                    .onFailure { chatViewModel.reportHostError(it.message.orEmpty()) }
             }
         }
     }
@@ -1302,6 +1307,14 @@ fun RootScreen(
                     mode = activeSessionMode,
                     initialMessageCount = 1,
                 )
+                // The first prompt can follow /cd, before there was any row
+                // for WorkspaceChanged to annotate. Preserve the engine's
+                // original root and exact transcript instead of guessing them.
+                currentEngineSource.workspaceState.value?.takeIf {
+                    canonicalSessionId(it.sessionId) == canonicalSessionId(state.session.id)
+                }?.let { workspace ->
+                    sourceProjectId?.let { projectStore.recordWorkspace(it, workspace) }
+                }
             }.onFailure {
                 chatViewModel.reportHostError(resources.getString(R.string.session_index_save_new_failed_fmt, it.message.orEmpty()))
             }
@@ -1426,6 +1439,11 @@ fun RootScreen(
             return@LaunchedEffect
         }
         if (sessionId == state.session.id || sessionId == "new") {
+            restoredModeSessionKey = restoreKey
+            return@LaunchedEffect
+        }
+        val project = projectSnapshotForScope(sourceScope)
+        if (project != null && project.sessions.none { canonicalSessionId(it.sessionId) == canonicalSessionId(sessionId) && it.workspaceDirectory == project.record.activeDirectory }) {
             restoredModeSessionKey = restoreKey
             return@LaunchedEffect
         }
@@ -2412,10 +2430,31 @@ fun RootScreen(
             )
         }
         if (workspacePickerOpen) {
+            val pickerSource = remember { currentEngineSource }
+            val pickerSessionId = remember { pickerSource.workspaceState.value?.sessionId.orEmpty() }
             WorkspacePickerSheet(
                 projects = drawerProductionData.projects.orEmpty(),
                 currentScope = newChatScope,
                 onDismiss = { workspacePickerOpen = false },
+                directories = projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.record
+                    ?.let { listOf(it.directory) + it.additionalDirectories }.orEmpty(),
+                activeDirectory = projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.record?.activeDirectory,
+                onPickDirectory = { path ->
+                    workspacePickerOpen = false
+                    scope.launch { runCatching {
+                        check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
+                        pickerSource.changeWorkspace(path, pickerSessionId)
+                    }
+                        .onFailure { chatViewModel.reportHostError(it.message.orEmpty()) } }
+                },
+                onAddDirectory = { path ->
+                    workspacePickerOpen = false
+                    scope.launch { runCatching {
+                        check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
+                        pickerSource.addWorkspaceDirectory(path, pickerSessionId)
+                    }
+                        .onFailure { chatViewModel.reportHostError(it.message.orEmpty()) } }
+                },
                 onPick = { target ->
                     workspacePickerOpen = false
                     if (target != newChatScope) startNewSessionIn(target, activeSessionMode, carryDraft = true)

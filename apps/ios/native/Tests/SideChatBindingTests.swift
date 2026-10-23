@@ -19,7 +19,7 @@ final class SideChatBindingTests: XCTestCase {
             listener: NoopEventListener(), audio: IOSAudioServiceCallbackAdapter.shared,
             camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(),
             clipboard: ClipboardImpl(), permissions: NoopPermissionSink(),
-            mobileLinux: nil, secureStorage: nil, deviceControl: nil)
+            mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: root), secureStorage: nil, deviceControl: nil)
         let info = try await createIosSideChat(
             engine: engine, requestId: UUID().uuidString, initialInput: nil,
             listener: NoopEventListener(), permissions: NoopPermissionSink())

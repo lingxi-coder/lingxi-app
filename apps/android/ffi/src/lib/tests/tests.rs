@@ -318,60 +318,45 @@ fn android_git_gate_is_all_three_conjuncts() {
 }
 
 #[test]
-fn android_project_cwd_accepts_managed_project_workspaces() {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("lingxi-android-project-{nonce}"));
-    let project_id = "12345678-1234-4abc-8def-1234567890ab";
-    let workspace = root.join("projects").join(project_id).join("workspace");
-    std::fs::create_dir_all(&workspace).expect("create project fixture");
-
-    let legacy = super::android_project_cwd(root.to_str().expect("utf8"), None)
-        .expect("missing project cwd preserves the legacy app root");
-    assert_eq!(legacy, root.canonicalize().expect("canonical root"));
-
-    let resolved = super::android_project_cwd(
-        root.to_str().expect("utf8"),
-        Some(workspace.to_str().expect("utf8")),
-    )
-    .expect("managed project workspace is accepted");
+fn android_project_cwd_uses_the_linux_user_home_and_accepts_multiple_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let managed = temp.path().join("runtime");
+    let directories =
+        harness_runtime::mobile::mobile_user_directories(managed.display().to_string()).unwrap();
+    directories.prepare().unwrap();
+    let a = std::path::Path::new(&directories.projects).join("project-a/workspace");
+    let b = std::path::Path::new(&directories.home).join("other-worktree");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
     assert_eq!(
-        resolved,
-        workspace.canonicalize().expect("canonical workspace")
+        super::android_project_cwd(managed.to_str().unwrap(), None).unwrap(),
+        std::path::Path::new(&directories.default_cwd)
+            .canonicalize()
+            .unwrap()
     );
-
-    let malformed = root.join("projects").join("user-name").join("workspace");
-    std::fs::create_dir_all(&malformed).expect("create malformed fixture");
-    assert!(
+    for directory in [&a, &b] {
+        assert_eq!(
+            super::android_project_cwd(managed.to_str().unwrap(), directory.to_str()).unwrap(),
+            directory.canonicalize().unwrap()
+        );
+    }
+    assert_eq!(
         super::android_project_cwd(
-            root.to_str().expect("utf8"),
-            Some(malformed.to_str().expect("utf8")),
+            managed.to_str().unwrap(),
+            Some("/home/lingxi/other-worktree")
         )
-        .is_err(),
-        "user-controlled names must never become project directories"
+        .unwrap(),
+        b.canonicalize().unwrap()
     );
-
-    let outside = std::env::temp_dir().join(format!("lingxi-outside-project-{nonce}"));
-    std::fs::create_dir_all(&outside).expect("create outside fixture");
-    assert!(
-        super::android_project_cwd(
-            root.to_str().expect("utf8"),
-            Some(outside.to_str().expect("utf8")),
-        )
-        .is_err(),
-        "workspaces outside filesDir must fail closed"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-    let _ = std::fs::remove_dir_all(outside);
+    assert!(super::android_project_cwd(managed.to_str().unwrap(), temp.path().to_str()).is_err());
+    #[cfg(unix)]
+    {
+        let escape = std::path::Path::new(&directories.projects).join("escape");
+        std::os::unix::fs::symlink(temp.path(), &escape).unwrap();
+        assert!(super::android_project_cwd(managed.to_str().unwrap(), escape.to_str()).is_err());
+    }
 }
 
-/// P4-T10: the FFI → `MobileGitToolCtx` mapping yields `enabled = false`
-/// when `enable_git` is false even if the other gate inputs (workspace +
-/// CA store) are satisfied, and regardless of a present credential provider.
-/// Pure-fn level (mirrors the body of [`build_android_engine`]'s git mapping).
 #[test]
 fn ffi_mapping_disabled_when_enable_git_false() {
     use super::android_git_gate;

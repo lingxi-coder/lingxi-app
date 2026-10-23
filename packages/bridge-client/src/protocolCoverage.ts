@@ -150,6 +150,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   assistant_transcript_row_uuids: true,
   system_notice: true,
   session_storage_state: true,
+  workspace_changed: true,
   ui_log: true,
   ui_toast: true,
   ui_status: true,

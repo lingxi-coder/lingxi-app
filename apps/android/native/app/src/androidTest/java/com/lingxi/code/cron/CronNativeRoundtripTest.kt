@@ -33,16 +33,16 @@ class CronNativeRoundtripTest {
             val config = CronAutomation.defaults("provider/model").change("name", "Daily brief")
                 .withReasoning(ReasoningSelectionDto.Level("high"))
                 .change("notificationPolicy", "failed").change("runMode", "task_session")
-            val store = buildAndroidCronStore(root.path, null)
+            val store = buildAndroidCronStore(root.path, File(root, "runtime").path, null)
             val created = try {
                 store.setMigrationDefaults("provider/model", """{"type":"automatic"}""")
                 val task = store.createConfigured("0 9 * * *", "Summarize changes", true, config.json)
                 assertEquals("provider/model", CronAutomation.from(task).model)
                 store.updateAutomation(task.id, config.change("status", "paused").json)
             } finally { store.destroy() }
-            assertTrue(File(root, "scheduled/workspace/.lingxi/scheduled_tasks.json").isFile)
+            assertTrue(File(root, "runtime/persistent/lingxi/lingxi/scheduled/.lingxi/scheduled_tasks.json").isFile)
             assertFalse(File(root, ".lingxi/scheduled_tasks.json").exists())
-            val rebuilt = buildAndroidCronStore(root.path, null)
+            val rebuilt = buildAndroidCronStore(root.path, File(root, "runtime").path, null)
             try {
                 val task = rebuilt.list().single()
                 assertEquals(created.id, task.id)
@@ -65,7 +65,9 @@ class CronNativeRoundtripTest {
     fun managedNoProjectSessionRestoresAcrossEngineRebuild(): Unit = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(context.cacheDir, "cron-session-${UUID.randomUUID()}").apply { mkdirs() }
-        val workspace = File(root, "scheduled/workspace").apply { mkdirs() }
+        val runtime = com.lingxi.code.mobileWorkspaceTestConfiguration(root)
+        val paths = com.lingxi.code.bindings.runtime.mobileUserDirectories(runtime.managedRoot)
+        val workspace = File(paths.scheduledCwd).apply { mkdirs() }
         val id = UUID.randomUUID().toString()
         try {
             repeat(2) { pass ->
@@ -76,7 +78,7 @@ class CronNativeRoundtripTest {
                         apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),
-                        mobileLinux = null,
+                        mobileLinux = runtime,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
                         override suspend fun onEvent(event: ClientEvent) {

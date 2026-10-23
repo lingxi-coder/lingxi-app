@@ -168,6 +168,7 @@ final class EngineConversationSource: ConversationSource {
     private enum SessionTransitionSubmission {
         case command(ClientCommand)
         case resumeEmpty(sessionID: String, title: String)
+        case resumeSelected(sessionID: String, transcriptPath: String)
     }
 
     private var pendingSessionTransition: PendingSessionTransition?
@@ -353,6 +354,9 @@ final class EngineConversationSource: ConversationSource {
         switch submission {
         case let .command(command):
             try await submitCommand(command)
+        case let .resumeSelected(sessionID, transcriptPath):
+            let handle = try await ensureHandle()
+            try await handle.resumeWorkspaceSession(sessionId: sessionID, transcriptPath: transcriptPath)
         case let .resumeEmpty(sessionID, title):
             if let testEmptySessionResumer {
                 try await testEmptySessionResumer(sessionID, title)
@@ -1823,6 +1827,8 @@ final class EngineConversationSource: ConversationSource {
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
             hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
         )
+        let additionalDirectories = config.additionalWorkspaceDirectories
+        let userHome = MobileUserStorage.directories().home
         let handleBuilder = self.handleBuilder
         handleBuildAttemptID &+= 1
         let attemptID = handleBuildAttemptID
@@ -1842,7 +1848,6 @@ final class EngineConversationSource: ConversationSource {
                 let thread = Thread {
                     autoreleasepool {
                         continuation.resume(with: Result {
-                            try SandboxSessionCatalog.prepare(appRoot: launchConfig.appSandboxRoot)
                             return try handleBuilder(launchConfig, listener, audio, permissionSink)
                         })
                     }
@@ -1851,6 +1856,14 @@ final class EngineConversationSource: ConversationSource {
                 thread.qualityOfService = .userInitiated
                 thread.stackSize = 8 * 1024 * 1024
                 thread.start()
+            }
+            let owner = await handle.workspaceState().sessionId
+            for directory in additionalDirectories where directory == LXISHGuestPaths.home || directory.hasPrefix(LXISHGuestPaths.home + "/") {
+                let native = URL(fileURLWithPath: userHome).appendingPathComponent(String(directory.dropFirst(LXISHGuestPaths.home.count + 1)))
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: native.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                    try await handle.addWorkspaceDirectory(path: directory, expectedSessionId: owner)
+                }
             }
             // Bootstrap listings are part of construction: never publish a
             // handle that failed halfway through initialization.
@@ -1880,6 +1893,9 @@ final class EngineConversationSource: ConversationSource {
             let builtHandle = try await buildTask.value
             if handleBuildAttemptID == attemptID {
                 handle = builtHandle
+                let workspace = await builtHandle.workspaceState()
+                model.workspaceState = SessionWorkspaceState(sessionId: workspace.sessionId, cwd: workspace.cwd,
+                    projectRoot: workspace.projectRoot, additionalDirectories: workspace.additionalDirectories, transcriptPath: workspace.transcriptPath)
                 refreshAudioSessionContext()
                 VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
                 LocalApps.chat.attach(builtHandle.localAppHost())
@@ -4008,6 +4024,11 @@ final class EngineConversationSource: ConversationSource {
             model.effectiveTypescriptLspMode = effective
             model.typescriptLspAvailable = available
 
+        case let .workspaceChanged(state):
+            model.workspaceState = SessionWorkspaceState(sessionId: state.sessionId, cwd: state.cwd,
+                projectRoot: state.projectRoot, additionalDirectories: state.additionalDirectories,
+                transcriptPath: state.transcriptPath)
+
         case let .sessionList(sessions):
             // Out-of-band session catalog: map each lowered `SessionRowDto`
             // to the UI model (uuid/title/count + RFC 3339 → relative time).
@@ -4019,7 +4040,8 @@ final class EngineConversationSource: ConversationSource {
                               mode: SessionMode(dto: $0.mode),
                               messageCount: Int($0.messageCount),
                               modifiedAt: RelativeTime.parse($0.modifiedRfc3339),
-                              relativeTime: RelativeTime.format($0.modifiedRfc3339))
+                              relativeTime: RelativeTime.format($0.modifiedRfc3339),
+                              transcriptPath: $0.path, workspaceDirectory: $0.workspacePath)
             }
             // Publish the authoritative rows before flipping the loaded
             // bit. `ConversationProjectBridge` persists on the loaded
@@ -5514,6 +5536,28 @@ final class EngineConversationSource: ConversationSource {
     /// example when SwiftUI restarts a lifecycle task after dismissing an
     /// overlay). Process restoration still re-requests the active id when the
     /// model has no committed transcript to display.
+    func changeWorkspace(_ path: String, expectedSessionID: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let handle = try await ensureHandle()
+                try await handle.changeWorkspace(path: path, expectedSessionId: expectedSessionID)
+                listSessions()
+            } catch { fail(.host, error.localizedDescription) }
+        }
+    }
+
+    func addWorkspaceDirectory(_ path: String, expectedSessionID: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let handle = try await ensureHandle()
+                try await handle.addWorkspaceDirectory(path: path, expectedSessionId: expectedSessionID)
+                listSessions()
+            } catch { fail(.host, error.localizedDescription) }
+        }
+    }
+
     func resumeSession(_ uuid: String, emptySessionTitle: String?) {
         guard !isSideChat else { return }
         guard !uuid.isEmpty,
@@ -5536,6 +5580,8 @@ final class EngineConversationSource: ConversationSource {
         let submission: SessionTransitionSubmission
         if let emptySessionTitle {
             submission = .resumeEmpty(sessionID: uuid, title: emptySessionTitle)
+        } else if let path = model.engineSessions.first(where: { $0.id == uuid })?.transcriptPath {
+            submission = .resumeSelected(sessionID: uuid, transcriptPath: path)
         } else {
             submission = .command(.resumeSession(sessionId: uuid, cwd: nil))
         }

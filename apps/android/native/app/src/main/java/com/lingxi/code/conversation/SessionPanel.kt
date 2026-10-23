@@ -10,6 +10,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Modifier
@@ -201,8 +203,31 @@ internal fun WorkspacePickerSheet(
     currentScope: ConversationScope,
     onDismiss: () -> Unit,
     onPick: (ConversationScope) -> Unit,
+    directories: List<String> = emptyList(),
+    activeDirectory: String? = null,
+    onPickDirectory: (String) -> Unit = {},
+    onAddDirectory: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
+    val addingDirectory = remember { mutableStateOf(false) }
+    val directoryInput = remember { mutableStateOf("") }
+    if (addingDirectory.value) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { addingDirectory.value = false },
+            title = { Text(stringResource(R.string.workspace_add_directory)) },
+            text = { androidx.compose.material3.OutlinedTextField(
+                value = directoryInput.value, onValueChange = { directoryInput.value = it }, singleLine = true,
+                placeholder = { Text("~/lingxi/my-worktree") },
+            ) },
+            confirmButton = { androidx.compose.material3.TextButton(
+                enabled = directoryInput.value.isNotBlank(),
+                onClick = { onAddDirectory(directoryInput.value.trim()); addingDirectory.value = false },
+            ) { Text(stringResource(R.string.workspace_confirm_add)) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { addingDirectory.value = false }) {
+                Text(stringResource(R.string.common_cancel))
+            } },
+        )
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -223,6 +248,18 @@ internal fun WorkspacePickerSheet(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(bottom = 14.dp),
             )
+            if (directories.isNotEmpty()) {
+                Text(stringResource(R.string.workspace_linked_directories), color = t.text, modifier = Modifier.padding(bottom = 8.dp))
+                SettingsSection {
+                    directories.distinct().forEach { path ->
+                        SettingsRow(label = path.substringAfterLast('/').ifBlank { path }, sub = path,
+                            icon = LXIconName.Folder, value = if (path == activeDirectory) "✓" else null,
+                            chevron = false, onTap = { onPickDirectory(path) })
+                    }
+                    SettingsRow(label = stringResource(R.string.workspace_add_directory), icon = LXIconName.Folder,
+                        isLast = true, chevron = false, onTap = { addingDirectory.value = true })
+                }
+            }
             SettingsSection {
                 SettingsRow(
                     label = stringResource(R.string.common_global),

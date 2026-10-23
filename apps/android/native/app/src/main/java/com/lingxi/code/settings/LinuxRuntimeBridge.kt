@@ -27,8 +27,6 @@ import java.util.UUID
 import org.json.JSONObject
 
 object LinuxRuntimeBridge {
-    private const val WORKSPACE_PREFERENCES = "lingxi_mobile_linux"
-    private const val DEFAULT_WORKSPACE_ID_KEY = "default_workspace_id"
     @Volatile
     private var cachedRuntime: Pair<String, AndroidMobileLinuxRuntimeHandle>? = null
     // Packaged assets are immutable for the APK lifetime; event polling must
@@ -36,30 +34,12 @@ object LinuxRuntimeBridge {
     @Volatile
     private var cachedBundledIdentity: Pair<String, RootfsArtifactIdentity>? = null
 
-    private fun managedRoot(context: Context): String =
+    fun managedRoot(context: Context): String =
         File(context.applicationContext.filesDir, "mobile-linux/android-proot").absolutePath
 
     private fun appSandboxRoot(context: Context): String =
         context.applicationContext.filesDir.canonicalFile.absolutePath
 
-    private fun workspaceHostPath(context: Context, workspaceID: String): String =
-        File(context.applicationContext.filesDir, "workspaces/$workspaceID")
-            .also { it.mkdirs() }
-            .absolutePath
-
-    private fun stableWorkspaceId(context: Context): String {
-        val preferences = context.applicationContext.getSharedPreferences(
-            WORKSPACE_PREFERENCES,
-            Context.MODE_PRIVATE,
-        )
-        val persisted = preferences.getString(DEFAULT_WORKSPACE_ID_KEY, null)
-        if (persisted != null && runCatching { UUID.fromString(persisted) }.isSuccess) {
-            return persisted.lowercase()
-        }
-        val generated = UUID.randomUUID().toString().lowercase()
-        preferences.edit().putString(DEFAULT_WORKSPACE_ID_KEY, generated).apply()
-        return generated
-    }
 
     private fun abi(): String = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"
 
@@ -68,8 +48,8 @@ object LinuxRuntimeBridge {
         mode: LinuxRuntimeMode,
         workspace: ProjectWorkspace? = null,
     ): AndroidMobileLinuxConfigFfi {
-        val workspaceID = workspace?.projectId ?: stableWorkspaceId(context)
-        val hostPath = workspace?.hostPath ?: workspaceHostPath(context, workspaceID)
+        val paths = com.lingxi.code.project.MobileUserStorage.directories(context)
+        val hostPath = paths.projects
         val hostDirectory = File(hostPath)
         check(hostDirectory.isDirectory || hostDirectory.mkdirs()) {
             "Android PRoot workspace is unavailable: $hostPath"
@@ -80,7 +60,7 @@ object LinuxRuntimeBridge {
             managedRoot = managedRoot(context),
             appSandboxRoot = appSandboxRoot(context),
             workspaceHostPath = hostPath,
-            stableWorkspaceId = workspaceID,
+            stableWorkspaceId = "projects",
             abi = selectedAbi,
             rootfsIdentity = identity,
             mode = mode,

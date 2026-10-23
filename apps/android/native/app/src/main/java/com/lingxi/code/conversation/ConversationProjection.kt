@@ -103,7 +103,7 @@ fun reduceSessionEvent(
                     modifiedRfc3339 = dto.modifiedRfc3339,
                     nowEpochSeconds = nowEpochSeconds,
                     strings = strings,
-                )
+                ).copy(transcriptPath = dto.path, workspaceDirectory = dto.workspacePath)
             },
         )
         else -> prev

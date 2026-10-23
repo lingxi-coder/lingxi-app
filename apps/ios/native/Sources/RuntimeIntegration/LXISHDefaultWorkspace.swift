@@ -2,22 +2,10 @@ import Foundation
 
 // Product preferences and storage layout remain owned by the application.
 enum LXISHDefaultWorkspace {
-    static let defaultsKey = "lingxi.mobile-linux.workspace.default.id"
-
-    /// `~/lingxi` is mounted by the runtime unconditionally (the persistent home
-    /// layer) and is always writable, so it is a valid cwd even with no project.
     static let guestHome = LXISHGuestPaths.workspaceRoot
 
-    static func stableID(defaults: UserDefaults = .standard) -> String {
-        if let persisted = defaults.string(forKey: defaultsKey),
-           UUID(uuidString: persisted) != nil
-        {
-            return persisted.lowercased()
-        }
-        let generated = UUID().uuidString.lowercased()
-        defaults.set(generated, forKey: defaultsKey)
-        return generated
-    }
+    // Mount identity belongs to the runtime, independently of selected projects.
+    static func stableID() -> String { "projects" }
 
     /// One derivation of the Application Support base for both paths below.
     /// Two sibling copies of this guard were how the managed root and the
@@ -27,14 +15,8 @@ enum LXISHDefaultWorkspace {
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
     }
 
-    static func hostPath(id: String? = nil) -> String {
-        let workspaceID = id ?? stableID()
-        guard let support = supportDirectory else {
-            return ""
-        }
-        let url = support
-            .appendingPathComponent("workspaces", isDirectory: true)
-            .appendingPathComponent(workspaceID, isDirectory: true)
+    static func hostPath() -> String {
+        let url = MobileUserStorage.projectsURL
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url.path
     }

@@ -22,7 +22,7 @@ struct CronScope: Identifiable, Hashable, Codable, Sendable {
             projectID: nil,
             projectName: "None",
             projectCwd: nil,
-            guestWorkspacePath: URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("scheduled/workspace", isDirectory: true).path
+            guestWorkspacePath: MobileUserStorage.directories().scheduledGuestCwd
         )
     }
 }

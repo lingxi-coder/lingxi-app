@@ -242,7 +242,7 @@ internal class SafProjectSynchronizer(
                 recoverExternalTransactions(treeUri)
             }
             val external = scanExternal(treeUri)
-            val internal = scanInternal(snapshot.workspace.hostDirectory)
+            val internal = scanInternal(snapshot.sourceWorkspace.hostDirectory)
             val baseline = repository.readBaseline(projectId)
             val conflicts = mutableListOf<ProjectSyncConflict>()
             val nextBaseline = baseline.files.toMutableMap()
@@ -278,7 +278,7 @@ internal class SafProjectSynchronizer(
                         val source = checkNotNull(externalFile)
                         copyExternalToInternal(
                             source = source,
-                            workspace = snapshot.workspace.hostDirectory,
+                            workspace = snapshot.sourceWorkspace.hostDirectory,
                             relativePath = path,
                         )
                         nextBaseline[path] = ProjectSyncFile(path, source.sha256, source.sizeBytes)
@@ -291,7 +291,7 @@ internal class SafProjectSynchronizer(
                             treeUri = treeUri,
                             relativePath = path,
                             source = source,
-                            workspaceRoot = snapshot.workspace.hostDirectory,
+                            workspaceRoot = snapshot.sourceWorkspace.hostDirectory,
                         )
                         nextBaseline[path] = ProjectSyncFile(path, source.sha256, source.sizeBytes)
                         copied++

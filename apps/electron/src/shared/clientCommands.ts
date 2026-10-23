@@ -137,6 +137,8 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   assistant_transcript_row_uuids: 'exposed',
   system_notice: 'exposed',
   session_storage_state: 'exposed',
+  // Mobile SDK notification; Desktop uses correlated directory controls.
+  workspace_changed: 'not_applicable',
   ui_log: 'exposed',
   ui_toast: 'exposed',
   ui_status: 'exposed',

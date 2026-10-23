@@ -87,6 +87,7 @@ test('the allowlists are the exposed subset of the exhaustive desktop dispositio
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.resume_workflow, 'not_applicable');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.turn_recovery_state, 'degraded');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.terminal_api_error, 'host_private');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.workspace_changed, 'not_applicable');
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.ui_render, 'not_applicable');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_control_result, 'host_private');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_invalidate, 'host_private');

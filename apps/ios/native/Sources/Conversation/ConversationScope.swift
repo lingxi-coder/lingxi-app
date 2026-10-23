@@ -29,6 +29,7 @@ enum ConversationScope: Equatable, Hashable, Sendable {
     case global
     case scheduled
     case project(String)
+    case remote(hostID: String, sessionID: String)
 
     /// The legacy optional-projectID spelling (`nil` == global).
     init(projectID: String?) {
@@ -59,6 +60,7 @@ enum ConversationScope: Equatable, Hashable, Sendable {
         case .global: "global"
         case .scheduled: "scheduled"
         case let .project(id): "project.\(id)"
+        case let .remote(hostID, sessionID): "remote.\(hostID).\(sessionID)"
         }
     }
 
@@ -71,6 +73,7 @@ enum ConversationScope: Equatable, Hashable, Sendable {
         case .global: "global"
         case .scheduled: "scheduled"
         case let .project(id): id.lowercased()
+        case let .remote(hostID, sessionID): "remote.\(hostID).\(sessionID)"
         }
     }
 }

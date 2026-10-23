@@ -172,6 +172,7 @@ struct RootView: View {
     @State private var externalEngineReady = false
     @State private var externalActionApproval: LingxiAppAction?
     @State private var approvedExternalActions: [LingxiAppAction] = []
+    @State private var remoteDestination: RemoteControlDestination?
     @State private var externalImport: CanonicalDeepLink?
     @State private var externalLinkError: String?
     @State private var externalAsyncRouteID = UUID()
@@ -438,11 +439,13 @@ struct RootView: View {
             #if canImport(harness_runtimeFFI)
                 // Keep one root-mounted native sheet presenter so permission
                 // requests work over both the chat and any active SwiftUI sheet.
-                EnginePermissionPromptHost(
-                    model: source.model,
-                    onApprove: { source.approvePermission($0, $1) },
-                    onDeny: { source.denyPermission($0) }
-                )
+                if remoteDestination == nil {
+                    EnginePermissionPromptHost(
+                        model: source.model,
+                        onApprove: { source.approvePermission($0, $1) },
+                        onDeny: { source.denyPermission($0) }
+                    )
+                }
             #endif
           }
           .onAppear { workspaceWidth = geometry.size.width }
@@ -656,6 +659,12 @@ struct RootView: View {
 
     private func withPresentations(_ content: some View) -> some View {
         content
+            .fullScreenCover(item: $remoteDestination) { destination in
+                #if canImport(harness_runtimeFFI)
+                RemoteControlView(destination: destination, openAccount: { navigation.showSettings(.account) })
+                    .id(destination.id)
+                #endif
+            }
             .sheet(item: $externalImport, onDismiss: retryDeferredAppActions) { target in
                 DeepLinkImportPreview(target: target)
             }
@@ -788,6 +797,10 @@ struct RootView: View {
             account: account,
             openSettings: { navigation.showSettings() },
             openAccount: { navigation.showSettings(.account) },
+            openRemoteControl: {
+                navigation.closeSidebar()
+                remoteDestination = RemoteControlDestination()
+            },
             openTerminal: openCurrentWorkspaceTerminal,
             openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
             openProjects: { navigation.openProjects() },
@@ -923,6 +936,8 @@ struct RootView: View {
     /// The workspace's display name for the top bar and the new-chat strip.
     private var currentWorkspaceName: String {
         switch activeScope {
+        case .remote:
+            return String(localized: "remote_title")
         case .global:
             return String(localized: "common_global")
         case .scheduled:
@@ -1247,6 +1262,13 @@ struct RootView: View {
         let projectCwd: String?
         let project: ProjectSnapshot?
         switch scope {
+        case let .remote(hostID, sessionID):
+            #if canImport(harness_runtimeFFI)
+            return RemoteConversationSource(hostID: hostID, sessionID: sessionID,
+                uid: FirebaseAccount.shared.user?.uid ?? "")
+            #else
+            return MockConversationSource()
+            #endif
         case .global, .project:
             project = scope.projectID.flatMap { id in
                 projectStore.projects.first(where: { $0.record.id == id })
@@ -1952,6 +1974,12 @@ struct RootView: View {
     /// (including the cases that never touch session selection).
     @discardableResult
     private func applyAppAction(_ action: LingxiAppAction, approvedDraftChange: Bool = false) -> Bool {
+        // A remote overlay preserves the local source and draft. It also works
+        // when the local engine has not booted or is waiting for an answer.
+        if case let .canonical(target) = action, target.parts.first == "remote" {
+            guard app.setupDone else { return false }
+            return applyCanonicalLink(target)
+        }
         guard app.setupDone, externalEngineReady, !projectSwitching, !source.model.sessionTransitionPending,
               !navigation.settingsOpen, externalImport == nil, externalActionApproval == nil else { return false }
         if !approvedDraftChange && !approvedExternalActions.contains(action) && (!draft.isEmpty || hasUnsavedConversationMedia || (hasUnsavedTerminalInput && navigation.path.contains(where: { if case .terminal = $0 { return true }; return false })) || cronRepository.hasUnsavedChanges) {
@@ -1987,6 +2015,7 @@ struct RootView: View {
                 targetScope = activeScope
             }
             switch targetScope {
+            case .remote: return true
             case .global, .scheduled:
                 break
             case let .project(projectID):
@@ -2023,6 +2052,11 @@ struct RootView: View {
 
     private func applyCanonicalLink(_ target: CanonicalDeepLink) -> Bool {
         let parts = target.parts
+        if parts.count == 3, parts[0] == "remote" {
+            navigation.closeSidebar()
+            remoteDestination = RemoteControlDestination(hostID: parts[1], sessionID: parts[2])
+            return true
+        }
         let id = parts.last ?? ""
         var requestedScope = activeScope
         if let workspace = target.params["workspace"] {

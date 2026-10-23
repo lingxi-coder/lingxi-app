@@ -38,6 +38,7 @@ final class EngineConversationSource: ConversationSource {
     let model: ConversationModel
     let sessionMode: SessionMode
 
+    private let isRemoteProjection: Bool
     private let config: EngineConfig
     private let handleBuilder: HandleBuilder
     private let permissionModeRepository: PermissionModeConfigurationRepository
@@ -196,11 +197,13 @@ final class EngineConversationSource: ConversationSource {
         config: EngineConfig,
         handleBuilder: @escaping HandleBuilder = EngineConversationSource.buildDefaultHandle,
         permissionModeRepository: PermissionModeConfigurationRepository? = nil,
-        memoryOnly: Bool = false
+        memoryOnly: Bool = false,
+        remoteProjection: Bool = false
     ) {
+        self.isRemoteProjection = remoteProjection
         self.config = config
         sessionMode = config.sessionMode
-        self.durableTurns = memoryOnly ? nil : DurableConversationTurnClientStore(config: config)
+        self.durableTurns = (memoryOnly || remoteProjection) ? nil : DurableConversationTurnClientStore(config: config)
         self.handleBuilder = handleBuilder
         self.permissionModeRepository = permissionModeRepository
             ?? PermissionModeConfigurationRepository()
@@ -211,7 +214,7 @@ final class EngineConversationSource: ConversationSource {
         self.model = ConversationModel(
             messages: [],
             model: MockData.models.first(where: { $0.id == config.model })
-                ?? MockData.models[0], persistDisclosures: !memoryOnly)
+                ?? MockData.models[0], persistDisclosures: !(memoryOnly || remoteProjection))
         // Out-of-band model state: the configured id (empty ⇒ engine default,
         // filled by the first `ModelList`). Never a branded mock id here.
         self.model.activeModelId = config.model
@@ -225,6 +228,100 @@ final class EngineConversationSource: ConversationSource {
         Task { @MainActor in
             IOSAudioProviderService.shared.clearSessionContext(ownerID: ownerID)
             IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
+        }
+    }
+
+    // The remote source owns transport and commands. These methods share only
+    // the existing transcript reducer; they never construct a local engine.
+    func replaceRemoteTranscript(_ messages: [MessageDto], sessionID: String) {
+        precondition(isRemoteProjection)
+        resetTranscriptForSessionSwitch(isNew: true)
+        let restored = Self.restoredTranscript(from: messages, sessionID: sessionID)
+        model.messages = restored.messages
+        model.items = restored.items
+        model.messageDetails = restored.details
+        model.transcriptUUIDToolIDs = restored.transcriptUUIDToolIDs
+        model.activeSessionId = sessionID
+        model.providerConfigured = true
+        model.isNew = false
+        model.pendingPermissions = []
+    }
+
+    func appendRemotePrompt(turnID: UInt64, text: String, images: [MessageImage], origin: String) {
+        precondition(isRemoteProjection)
+        let id = Self.stableUUID("remote|\(model.activeSessionId)|prompt|\(turnID)")
+        guard !model.messages.contains(where: { $0.id == id }) else { return }
+        appendMessage(Message(id: id, role: .user, tag: origin, text: text, images: images))
+        model.isNew = false
+    }
+
+    func applyRemoteEvent(_ event: ClientEvent) {
+        precondition(isRemoteProjection)
+        // Desktop lifecycle is already represented by the snapshot. Never let
+        // its local session IDs/configuration drive the phone's engine.
+        switch event {
+        case .sessionStarted, .sessionResumed, .sessionEnded, .turnRecoveryState:
+            return
+        case let .slashCommandResult(turnID, display, isError):
+            // Configuration commands can finish while a different desktop turn
+            // still runs. Their output must not settle that turn's run/pointers.
+            let id = "remote-command-\(turnID.map(String.init) ?? Self.stableUUID(display.displayText).uuidString)"
+            if !model.items.contains(where: { $0.id == id }) {
+                model.items.append(.commandOutput(ConversationCommandOutput(
+                    id: id, command: "/", text: display.displayText, isError: isError)))
+            }
+            return
+        default: break
+        }
+        apply(event)
+    }
+
+    func reconcileRemoteState(_ update: RemoteSessionUpdateFfi) {
+        precondition(isRemoteProjection)
+        model.pendingPermissions = update.pending.permissions.map { request in
+            var request = request
+            request.suppressAlwaysAllowRule = true
+            request.autoModePrompt = nil
+            return PendingPermission(request: request)
+        }
+        model.pendingQuestions = update.pending.questions.map(Self.pendingQuestion(from:))
+        if let controls = update.controls {
+            model.activeModelId = controls.qualifiedModel
+            applyControlsSnapshot(controls)
+            model.permissionOptions.removeAll { $0.id == "bypassPermissions" }
+        }
+        model.streaming = update.turn.running
+        model.isNew = false
+        if !update.turn.running {
+            if activeRunItemIndex != nil { finishActiveRun(.completed) }
+            clearTurnPointers()
+            model.isCancelling = false
+        } else if currentTurnId == nil, let id = update.turn.turnId {
+            currentTurnId = id
+            activeTurnEpoch = sessionEpoch
+            model.activeTurnToken = ConversationTurnToken(clientTurnId: id, sessionEpoch: sessionEpoch)
+        }
+    }
+
+    func hydrateRemoteImage(reference: String, mediaType: String, bytes: Data) {
+        precondition(isRemoteProjection)
+        let url = "data:\(mediaType);base64,\(bytes.base64EncodedString())"
+        for index in model.messages.indices {
+            let old = model.messages[index]
+            guard old.images.contains(where: { $0.url == reference }) else { continue }
+            let images = old.images.map { image in
+                image.url == reference ? MessageImage(id: image.id, mediaType: mediaType, url: url) : image
+            }
+            var replacement = Message(id: old.id, role: old.role, tag: old.tag, text: old.text, images: images)
+            replacement.transcriptUUID = old.transcriptUUID
+            replacement.sentAtMs = old.sentAtMs
+            replacement.loopWakeupStreak = old.loopWakeupStreak
+            replacement.loopFoldedItemIDs = old.loopFoldedItemIDs
+            replacement.visualizationContext = old.visualizationContext
+            model.messages[index] = replacement
+            if let item = model.items.firstIndex(where: { if case let .message(m) = $0 { return m.id == old.id }; return false }) {
+                model.items[item] = .message(replacement)
+            }
         }
     }
 
@@ -1792,6 +1889,7 @@ final class EngineConversationSource: ConversationSource {
     /// Build the engine handle once (lazily). Registers the listener so the
     /// adapter can stream events the moment the first turn runs.
     private func ensureHandle() async throws -> MobileEngineHandle {
+        guard !isRemoteProjection else { throw RemoteFfiError.NotConnected }
         if let handle { return handle }
         if let handleBuildTask {
             return try await handleBuildTask.value

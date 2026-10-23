@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -566,18 +567,18 @@ private fun UserMessageActions(message: Message) {
             Text(clock, color = t.text3, fontSize = 11.sp,
                 modifier = Modifier.testTag("conversation.message.user.time"))
         }
-        androidx.compose.material3.TextButton(
+        IconButton(
             onClick = {
                 clipboard.setText(AnnotatedString(message.text))
                 copied = true
                 copyRevision++
             },
-            modifier = Modifier.testTag("conversation.message.user.copy"),
+            // Keep the metadata row compact; Compose expands the touch target.
+            modifier = Modifier.size(28.dp).testTag("conversation.message.user.copy"),
         ) {
             LXIcon(if (copied) LXIconName.Check else LXIconName.Copy,
-                size = 13.dp, color = t.text3, contentDescription = null)
-            Text(stringResource(if (copied) R.string.chat_message_copied else R.string.chat_message_copy),
-                color = t.text3, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp))
+                size = 13.dp, color = t.text3,
+                contentDescription = stringResource(if (copied) R.string.chat_message_copied else R.string.chat_message_copy))
         }
     }
 }

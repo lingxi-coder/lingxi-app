@@ -9,22 +9,23 @@ class TranscriptSpacingTest {
     private val user = ChatRenderItem.Message(Message(Role.User, "Question", id = "user"))
     private val reply = ChatRenderItem.Message(Message(Role.Ai, "Reply", id = "reply"))
 
-    @Test fun messageAndTurnBoundariesMatchDesktop() {
+    @Test fun messageAndTurnBoundariesMatchCompactIosSpacing() {
         assertEquals(0, transcriptSpacingBefore(null, user))
-        assertEquals(24, transcriptSpacingBefore(reply, reply))
-        assertEquals(32, transcriptSpacingBefore(user, reply))
-        assertEquals(32, transcriptSpacingBefore(reply, user))
-        assertEquals(32, transcriptSpacingBefore(user, ChatRenderItem.StreamingIndicator))
-        assertEquals(12, transcriptSpacingBefore(reply, ChatRenderItem.StreamingIndicator))
+        assertEquals(12, transcriptSpacingBefore(reply, reply))
+        assertEquals(16, transcriptSpacingBefore(user, user))
+        assertEquals(16, transcriptSpacingBefore(user, reply))
+        assertEquals(16, transcriptSpacingBefore(reply, user))
+        assertEquals(16, transcriptSpacingBefore(user, ChatRenderItem.StreamingIndicator))
+        assertEquals(8, transcriptSpacingBefore(reply, ChatRenderItem.StreamingIndicator))
     }
 
     @Test fun toolsKeepCompactSpacingAcrossExecutionStates() {
         val tools = ChatRenderItem.Tools(listOf(ToolCallUi(id = "read", tool = "Read", status = AgentToolStatus.Running)))
         val completed = ChatRenderItem.Tools(tools.calls.map { it.copy(status = AgentToolStatus.Completed) })
-        assertEquals(32, transcriptSpacingBefore(user, tools))
-        assertEquals(32, transcriptSpacingBefore(tools, user))
-        assertEquals(12, transcriptSpacingBefore(reply, tools))
-        assertEquals(12, transcriptSpacingBefore(tools, reply))
+        assertEquals(16, transcriptSpacingBefore(user, tools))
+        assertEquals(16, transcriptSpacingBefore(tools, user))
+        assertEquals(8, transcriptSpacingBefore(reply, tools))
+        assertEquals(8, transcriptSpacingBefore(tools, reply))
         assertEquals(transcriptSpacingBefore(reply, tools), transcriptSpacingBefore(reply, completed))
         assertEquals(transcriptSpacingBefore(tools, ChatRenderItem.StreamingIndicator),
             transcriptSpacingBefore(completed, ChatRenderItem.StreamingIndicator))

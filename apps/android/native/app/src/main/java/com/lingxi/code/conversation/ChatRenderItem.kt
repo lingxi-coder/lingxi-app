@@ -210,7 +210,7 @@ internal fun agentRunForBottomPanel(state: ChatState): AgentRunState? {
 /** The one blocking question presented by the native sheet; later requests queue. */
 internal fun pendingQuestionForSheet(state: ChatState) = state.pendingQuestions.firstOrNull()
 
-/** Space row boundaries independently of live tool state and streamed text. */
+/** Match iOS's compact row boundaries independently of activity and streamed text. */
 internal fun transcriptSpacingBefore(previous: ChatRenderItem?, current: ChatRenderItem): Int {
     if (previous == null || previous == ChatRenderItem.Empty || current == ChatRenderItem.Empty) return 0
     fun ChatRenderItem.isUser(): Boolean = when (this) {
@@ -219,7 +219,7 @@ internal fun transcriptSpacingBefore(previous: ChatRenderItem?, current: ChatRen
         else -> false
     }
     fun ChatRenderItem.isActivity(): Boolean = this is ChatRenderItem.Tools || this == ChatRenderItem.StreamingIndicator
-    if (previous.isUser() || current.isUser()) return 32
-    if (previous.isActivity() || current.isActivity()) return 12
-    return 24
+    if (previous.isUser() || current.isUser()) return 16
+    if (previous.isActivity() || current.isActivity()) return 8
+    return 12
 }

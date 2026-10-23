@@ -35,9 +35,11 @@ final class ProjectStore {
         publish(executionDomain.sync { repository.load() })
     }
 
-    convenience init(appSandboxRoot: URL) {
+    convenience init(managedRoot: String) {
+        let paths = MobileUserStorage.directories(managedRoot: managedRoot)
         let repository = ProjectRepository(
-            projectsRoot: ProjectRepository.appManagedProjectsRoot(appSandboxRoot: appSandboxRoot)
+            projectsRoot: URL(fileURLWithPath: paths.projects, isDirectory: true),
+            userHome: URL(fileURLWithPath: paths.home, isDirectory: true)
         )
         let synchronizer = ProjectWorkspaceSynchronizer(repository: repository)
         self.init(repository: repository, synchronizer: synchronizer)
@@ -126,6 +128,13 @@ final class ProjectStore {
     }
 
     func publishActive(_ persisted: ProjectRepositoryState) {
+        publish(persisted, preservingConflicts: true)
+    }
+
+    func recordWorkspace(projectId: String, state: SessionWorkspaceState) async throws {
+        let persisted = try await executionDomain.async { [repository] in
+            try repository.recordWorkspace(projectId: projectId, state: state)
+        }
         publish(persisted, preservingConflicts: true)
     }
 

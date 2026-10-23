@@ -197,7 +197,7 @@ import XCTest
                     providerProfilesJson: snapshot.providerProfilesJSON,
                     routingJson: snapshot.routingJSON
                 ),
-                mobileLinux: nil,
+                mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
                 hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )
@@ -312,7 +312,7 @@ import XCTest
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
-                    mobileLinux: nil,
+                    mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                     secureStorage: nil,
                     deviceControl: nil)
             } catch {
@@ -388,12 +388,13 @@ import XCTest
                 .appendingPathComponent("uuid-" + UUID().uuidString.prefix(6), isDirectory: true)
             try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: sandbox) }
-            let cwd = sandbox.resolvingSymlinksInPath().path
-            // Mirrors the session store's ASCII project directory naming for
-            // this short fixture path; no engine or transcript state is mocked.
-            XCTAssertLessThan(cwd.count, 200)
+            let runtime = try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox)
+            let paths = try mobileUserDirectories(managedRoot: runtime.managedRoot)
+            let cwd = paths.defaultGuestCwd
+            // Real transcripts are bucketed by the stable Linux cwd.
             let projectName = String(cwd.map { $0.isASCII && $0.isLetter || $0.isASCII && $0.isNumber ? $0 : "-" })
-            let directory = sandbox.appendingPathComponent(".lingxi/projects/\(projectName)", isDirectory: true)
+            let directory = URL(fileURLWithPath: paths.configHome, isDirectory: true)
+                .appendingPathComponent("projects/\(projectName)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let sessionID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
             let userUUID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
@@ -417,7 +418,7 @@ import XCTest
                 apiBase: "https://api.anthropic.com", apiKey: "", model: "claude-sonnet-4-20250514",
                 appSandboxRoot: sandbox.path, listener: listener, audio: audio,
                 camera: CameraImpl(), share: ShareImpl(), notifications: NotificationImpl(),
-                clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: nil,
+                clipboard: ClipboardImpl(), permissions: NoopPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                 secureStorage: nil, deviceControl: nil)
             try await handle.submit(command: .resumeSession(sessionId: sessionID, cwd: nil))
             var restoredMessages: [MessageDto]?
@@ -468,7 +469,7 @@ import XCTest
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
-                    mobileLinux: nil,
+                    mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
                     secureStorage: nil,
                     deviceControl: nil)
             } catch {

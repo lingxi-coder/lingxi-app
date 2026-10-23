@@ -81,6 +81,8 @@ object ConversationNotificationRoute {
                 recoverySpec?.let { spec ->
                     putExtra(ConversationTurnService.EXTRA_PROJECT_ID, spec.projectId)
                     putExtra(ConversationTurnService.EXTRA_HOST_PATH, spec.hostPath)
+                    putExtra(ConversationTurnService.EXTRA_GUEST_PATH, spec.guestPath)
+                    putExtra(ConversationTurnService.EXTRA_ADDITIONAL_DIRECTORIES, spec.additionalDirectories.toTypedArray())
                     putExtra(ConversationTurnService.EXTRA_SESSION_MODE, spec.sessionMode.wireValue)
                     putExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
                     putExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY, spec.workspaceKey)

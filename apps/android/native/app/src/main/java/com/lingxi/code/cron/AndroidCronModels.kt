@@ -23,8 +23,8 @@ data class CronScope(
             scopeId = GLOBAL_CRON_SCOPE_ID,
             projectId = null,
             projectName = context.applicationContext.getString(R.string.common_none),
-            workspacePath = java.io.File(context.applicationContext.filesDir, "scheduled/workspace").apply { mkdirs() }.canonicalPath,
-            guestPath = MobileLinuxGuestPaths.workspace("global"),
+            workspacePath = com.lingxi.code.project.MobileUserStorage.directories(context).scheduledCwd,
+            guestPath = com.lingxi.code.project.MobileUserStorage.directories(context).scheduledGuestCwd,
         )
     }
 }

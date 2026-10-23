@@ -108,9 +108,8 @@ extension TerminalRuntimeDescriptor {
         // terminal falls back to the runtime's own persistent workspace — the
         // same one Settings uses — instead of refusing to start. A fresh UUID
         // here would have minted a throwaway workspace on every launch.
-        let projectId = project?.record.id ?? LXISHDefaultWorkspace.stableID()
-        let workspaceHostPath = project?.workspace.hostURL.path
-            ?? LXISHDefaultWorkspace.hostPath(id: projectId)
+        let workspaceID = LXISHDefaultWorkspace.stableID()
+        let workspaceHostPath = LXISHDefaultWorkspace.hostPath()
         let workspaceGuestPath = project?.workspace.guestPath
             ?? LXISHDefaultWorkspace.guestHome
         // Same directory the Linux runtime page installs into. The old fallback
@@ -129,10 +128,10 @@ extension TerminalRuntimeDescriptor {
         let managedRoot = LXISHDefaultWorkspace.managedRootPath()
 
         let config = TerminalRuntimeConfig(
-            mode: linuxRuntime.selectedMode == .legacy ? .legacy : .mobileLinux,
+            mode: .mobileLinux,
             managedRoot: managedRoot,
             workspaceHostPath: workspaceHostPath,
-            stableWorkspaceId: projectId,
+            stableWorkspaceId: workspaceID,
             abi: "arm64",
             rootfsVersion: manifest.rootfsVersion,
             archiveSha256: manifest.archiveSha256,
@@ -190,7 +189,8 @@ extension TerminalRuntimeDescriptor {
     }
 
     private static func inferPurpose(for guestPath: String) -> TerminalMountPurpose {
-        if guestPath.hasPrefix(LXISHGuestPaths.workspaceRoot + "/") { return .workspace }
+        if guestPath == LXISHGuestPaths.workspace("projects") { return .workspace }
+        if guestPath == LXISHGuestPaths.home { return .shared }
         if guestPath.contains("/memory") { return .memory }
         if guestPath.contains("/skills") { return .skills }
         if guestPath.contains("/tmp") { return .temp }
@@ -230,13 +230,8 @@ extension TerminalRuntimeDescriptor {
 
         switch requestedCwd {
         case let .guestPath(path):
-            // Historical tool cards can contain the former project prefix.
-            // Translate the stored route once; only the current path is sent
-            // to the runtime, whose namespace has no legacy alias.
-            let currentPath = path == "/workspace" ? LXISHGuestPaths.workspaceRoot
-                : path.hasPrefix("/workspace/") ? LXISHGuestPaths.workspaceRoot + String(path.dropFirst("/workspace".count)) : path
-            let normalized = normalizeGuestPath(currentPath)
-            guard isWithinWorkspace(normalized, workspaceGuestPath: workspaceGuestPath) else {
+            let normalized = normalizeGuestPath(path)
+            guard isWithinWorkspace(normalized, workspaceGuestPath: LXISHGuestPaths.home) else {
                 return (nil, String(localized: "terminal_cwd_outside_workspace \(path)"))
             }
             return (normalized, nil)

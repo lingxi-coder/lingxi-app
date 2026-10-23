@@ -46,6 +46,7 @@ uniffi = [
 audio-provider = { path = "../../audio-provider" }
 core = { workspace = true }
 mobile-linux-api.workspace = true
+mobile-linux-core.workspace = true
 harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
 skill = { workspace = true }
 branding.workspace = true

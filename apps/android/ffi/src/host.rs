@@ -17,7 +17,7 @@ use super::callbacks::{
 use super::configuration::AndroidEngineLaunchConfigFfi;
 #[cfg(feature = "uniffi")]
 use super::configuration::{
-    AndroidGitConfigFfi, AndroidMobileLinuxConfigFfi, AndroidShellConfigFfi, android_project_cwd,
+    android_project_cwd, AndroidGitConfigFfi, AndroidMobileLinuxConfigFfi, AndroidShellConfigFfi,
 };
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 use super::linux_runtime::prepared_android_mobile_linux_runtime;
@@ -79,21 +79,24 @@ pub struct PlatformImpls {
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn build_android_cron_store(
     app_files_root: String,
+    managed_root: String,
     project_cwd: Option<String>,
 ) -> Result<Arc<MobileCronStoreHandle>, MobileEngineError> {
     use platform_posix_minimal::{PosixClock, PosixFileSystem};
 
+    let directories = harness_runtime::mobile::mobile_user_directories(managed_root.clone())?;
+    directories.prepare()?;
     let scheduled_cwd;
     let project_cwd = match project_cwd {
         Some(path) => Some(path),
         None => {
-            scheduled_cwd = std::path::Path::new(&app_files_root).join("scheduled/workspace");
+            scheduled_cwd = std::path::PathBuf::from(&directories.scheduled_cwd);
             std::fs::create_dir_all(&scheduled_cwd)
                 .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
             Some(scheduled_cwd.to_string_lossy().into_owned())
         }
     };
-    let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
+    let cwd = android_project_cwd(&managed_root, project_cwd.as_deref())?;
     let app_root = std::path::Path::new(&app_files_root)
         .canonicalize()
         .map_err(|error| {
@@ -129,7 +132,7 @@ pub fn build_mobile_engine(
     #[cfg(target_os = "android")]
     {
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};
-        let cfg = MobileConfig {
+        let mut cfg = MobileConfig {
             build_info: harness_runtime::mobile::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -156,6 +159,32 @@ pub fn build_mobile_engine(
         let mobile_linux_config = impls.mobile_linux.as_ref().ok_or_else(|| {
             MobileEngineError::Internal("Android PRoot runtime is required".into())
         })?;
+        if !matches!(
+            mobile_linux_config.mode,
+            super::linux_types::MobileLinuxRuntimeModeFfi::MobileLinux
+        ) {
+            return Err(MobileEngineError::Internal(
+                "Android conversations require Mobile Linux".into(),
+            ));
+        }
+        let directories = harness_runtime::mobile::mobile_user_directories(
+            mobile_linux_config.managed_root.clone(),
+        )?;
+        directories.prepare()?;
+        directories.validate_projects_mount(
+            mobile_linux_config
+                .workspace_host_path
+                .as_deref()
+                .unwrap_or(""),
+            mobile_linux_config
+                .stable_workspace_id
+                .as_deref()
+                .unwrap_or(""),
+        )?;
+        let (cwd, logical_cwd) = directories.resolve_cwd(None)?;
+        cfg.cwd = cwd;
+        cfg.logical_cwd = Some(logical_cwd);
+        cfg.lingxi_home = std::path::PathBuf::from(&directories.config_home);
         let mobile_linux = prepared_android_mobile_linux_runtime(mobile_linux_config)
             .map_err(MobileEngineError::Internal)?;
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
@@ -301,13 +330,31 @@ pub fn build_android_engine(
             device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
         // Git key paths remain anchored to the app-private files root.
         let app_files_root_str = app_files_root.clone();
-        let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
+        let linux = mobile_linux.as_ref().ok_or_else(|| {
+            MobileEngineError::Internal("Android requires its Linux runtime user storage".into())
+        })?;
+        if !matches!(
+            linux.mode,
+            super::linux_types::MobileLinuxRuntimeModeFfi::MobileLinux
+        ) {
+            return Err(MobileEngineError::Internal(
+                "Android conversations require Mobile Linux".into(),
+            ));
+        }
+        let directories =
+            harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+        directories.prepare()?;
+        directories.validate_projects_mount(
+            linux.workspace_host_path.as_deref().unwrap_or(""),
+            linux.stable_workspace_id.as_deref().unwrap_or(""),
+        )?;
+        let (cwd, logical_cwd) = directories.resolve_cwd(project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
             startup_catalog: app_version.as_ref().map(|version| {
                 harness_runtime::StartupCatalog::new(
                     harness_runtime::CatalogPlatform::Android,
                     version,
-                    &std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
+                    &std::path::PathBuf::from(&directories.config_home),
                 )
             }),
             build_info: harness_runtime::mobile::BuildInfo::new(
@@ -315,7 +362,8 @@ pub fn build_android_engine(
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
             ),
             cwd,
-            lingxi_home: std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
+            logical_cwd: Some(logical_cwd),
+            lingxi_home: std::path::PathBuf::from(&directories.config_home),
             session_mode: match session_mode {
                 SessionModeDto::Chat => MobileSessionMode::Chat,
                 SessionModeDto::Code => MobileSessionMode::Code,

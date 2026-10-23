@@ -14,6 +14,7 @@ actor FfiCronStoreProvider: CronStoreProviding {
         if let cached = stores[scope.scopeID] { return cached }
         let handle = try buildIosCronStore(
             appSandboxRoot: appSandboxRoot,
+            managedRoot: LXISHDefaultWorkspace.managedRootPath(),
             projectCwd: scope.projectCwd
         )
         let (model, reasoning) = await defaults()
@@ -180,11 +181,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         let (snapshot, runtime) = await MainActor.run {
             (launchSnapshot(), terminalConfig(scope))
         }
-        var cronRuntime = runtime
-        if task != nil && scope.projectID == nil {
-            cronRuntime?.workspaceHostPath = URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("scheduled/workspace", isDirectory: true).path
-            cronRuntime?.stableWorkspaceId = "scheduled"
-        }
+        let cronRuntime = runtime
         let listener = CronEngineListener()
         let permissionSink = CronPermissionSink()
         let provider = IosProviderConfigFfi(
@@ -199,7 +196,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             sessionMode: .code,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             appSandboxRoot: appSandboxRoot,
-            projectCwd: scope.projectCwd ?? (task == nil ? nil : URL(fileURLWithPath: appSandboxRoot).appendingPathComponent("scheduled/workspace", isDirectory: true).path),
+            projectCwd: scope.projectCwd ?? (task == nil ? nil : MobileUserStorage.directories().scheduledCwd),
             providerConfig: provider,
             mobileLinux: cronRuntime.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)

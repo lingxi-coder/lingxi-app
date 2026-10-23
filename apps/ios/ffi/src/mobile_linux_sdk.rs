@@ -39,7 +39,7 @@ pub struct IosIshRuntimeConfig {
 
 impl IosIshRuntimeConfig {
     fn lingxi_root(&self) -> PathBuf {
-        self.app_sandbox_root.join(LINGXI_DOT_DIR)
+        mobile_linux_api::guest_paths::home_host_path(&self.managed_root).join(LINGXI_DOT_DIR)
     }
     fn workspace_guest_path(&self) -> String {
         mobile_linux_api::guest_paths::workspace(&self.stable_workspace_id)
@@ -291,10 +291,12 @@ fn validate_mount(
         ));
     }
 
+    let persistent_workspace =
+        mobile_linux_core::is_persistent_user_workspace(&managed_root, mount);
     if host_path == app_root
         || host_path == managed_root
         || host_path == lingxi_root
-        || host_path.starts_with(&managed_root)
+        || (host_path.starts_with(&managed_root) && !persistent_workspace)
         || managed_root.starts_with(&host_path)
         || host_path.starts_with(&lingxi_root)
         || lingxi_root.starts_with(&host_path)
@@ -379,7 +381,7 @@ fn normalize_host_path(path: &Path, field: &str) -> Result<PathBuf, MobileLinuxE
             Component::ParentDir => {
                 return Err(MobileLinuxError::InvalidRequest(format!(
                     "{field} may not contain parent traversal"
-                )))
+                )));
             }
             Component::CurDir => {}
             Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
@@ -415,7 +417,7 @@ fn normalize_host_path(path: &Path, field: &str) -> Result<PathBuf, MobileLinuxE
             Err(error) => {
                 return Err(MobileLinuxError::InvalidRequest(format!(
                     "{field} cannot be resolved safely: {error}"
-                )))
+                )));
             }
         }
     }

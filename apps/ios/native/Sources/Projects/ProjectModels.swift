@@ -44,6 +44,9 @@ struct ProjectRecord: Identifiable, Codable, Equatable, Sendable {
     var lastSyncAt: Date? = nil
     var lastActiveSessionId: String? = nil
     var syncState: ProjectSyncState
+    var directory: String
+    var activeDirectory: String
+    var additionalDirectories: [String]
 
     init(
         id: String,
@@ -54,9 +57,15 @@ struct ProjectRecord: Identifiable, Codable, Equatable, Sendable {
         sourceBookmark: ProjectExternalBookmark? = nil,
         lastSyncAt: Date? = nil,
         lastActiveSessionId: String? = nil,
-        syncState: ProjectSyncState? = nil
+        syncState: ProjectSyncState? = nil,
+        directory: String? = nil,
+        activeDirectory: String? = nil,
+        additionalDirectories: [String] = []
     ) {
         self.id = id
+        self.directory = directory ?? "\(LXISHGuestPaths.workspace("projects"))/\(id)/workspace"
+        self.activeDirectory = activeDirectory ?? self.directory
+        self.additionalDirectories = additionalDirectories
         self.name = name
         self.storageKind = storageKind
         self.createdAt = createdAt
@@ -68,15 +77,23 @@ struct ProjectRecord: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+struct SessionWorkspaceState: Codable, Equatable, Sendable {
+    let sessionId: String
+    let cwd: String
+    let projectRoot: String
+    let additionalDirectories: [String]
+    let transcriptPath: String
+}
+
 struct ProjectWorkspace: Equatable, Sendable {
     let projectId: String
     let hostURL: URL
     let guestPath: String
 
-    init(projectId: String, hostURL: URL) {
+    init(projectId: String, hostURL: URL, guestPath: String? = nil) {
         self.projectId = projectId
         self.hostURL = hostURL
-        self.guestPath = LXISHGuestPaths.workspace(projectId)
+        self.guestPath = guestPath ?? "\(LXISHGuestPaths.workspace("projects"))/\(projectId)/workspace"
     }
 }
 
@@ -89,6 +106,9 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
     var mode: SessionMode
     var isArchived: Bool
     var pendingCatalogConfirmation: Bool
+    var workspaceDirectory: String?
+    var originalProjectDirectory: String?
+    var transcriptPath: String?
 
     init(
         sessionId: String,
@@ -98,7 +118,10 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         updatedAt: Date,
         mode: SessionMode = .code,
         isArchived: Bool = false,
-        pendingCatalogConfirmation: Bool = false
+        pendingCatalogConfirmation: Bool = false,
+        workspaceDirectory: String? = nil,
+        originalProjectDirectory: String? = nil,
+        transcriptPath: String? = nil
     ) {
         self.sessionId = sessionId
         self.title = title
@@ -108,6 +131,9 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         self.mode = mode
         self.isArchived = isArchived
         self.pendingCatalogConfirmation = pendingCatalogConfirmation
+        self.workspaceDirectory = workspaceDirectory
+        self.originalProjectDirectory = originalProjectDirectory
+        self.transcriptPath = transcriptPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -119,6 +145,7 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         case mode
         case isArchived
         case pendingCatalogConfirmation
+        case workspaceDirectory, originalProjectDirectory, transcriptPath
     }
 
     init(from decoder: any Decoder) throws {
@@ -128,9 +155,12 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         messageCount = try container.decode(Int.self, forKey: .messageCount)
         relativeTime = try container.decode(String.self, forKey: .relativeTime)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
-        mode = try container.decodeIfPresent(SessionMode.self, forKey: .mode) ?? .code
-        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
-        pendingCatalogConfirmation = try container.decodeIfPresent(Bool.self, forKey: .pendingCatalogConfirmation) ?? false
+        mode = try container.decode(SessionMode.self, forKey: .mode)
+        isArchived = try container.decode(Bool.self, forKey: .isArchived)
+        pendingCatalogConfirmation = try container.decode(Bool.self, forKey: .pendingCatalogConfirmation)
+        workspaceDirectory = try container.decodeIfPresent(String.self, forKey: .workspaceDirectory)
+        originalProjectDirectory = try container.decodeIfPresent(String.self, forKey: .originalProjectDirectory)
+        transcriptPath = try container.decodeIfPresent(String.self, forKey: .transcriptPath)
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -143,6 +173,9 @@ struct ProjectSessionSummary: Identifiable, Codable, Equatable, Sendable {
         try container.encode(mode, forKey: .mode)
         try container.encode(isArchived, forKey: .isArchived)
         try container.encode(pendingCatalogConfirmation, forKey: .pendingCatalogConfirmation)
+        try container.encodeIfPresent(workspaceDirectory, forKey: .workspaceDirectory)
+        try container.encodeIfPresent(originalProjectDirectory, forKey: .originalProjectDirectory)
+        try container.encodeIfPresent(transcriptPath, forKey: .transcriptPath)
     }
 
     var id: String { sessionId }
@@ -172,7 +205,15 @@ struct ProjectSyncConflict: Identifiable, Equatable, Sendable {
 struct ProjectSnapshot: Identifiable, Equatable, Sendable {
     var record: ProjectRecord
     var workspace: ProjectWorkspace
+    var sourceWorkspace: ProjectWorkspace
     var sessions: [ProjectSessionSummary]
+
+    init(record: ProjectRecord, workspace: ProjectWorkspace, sourceWorkspace: ProjectWorkspace? = nil, sessions: [ProjectSessionSummary]) {
+        self.record = record
+        self.workspace = workspace
+        self.sourceWorkspace = sourceWorkspace ?? workspace
+        self.sessions = sessions
+    }
 
     var id: String { record.id }
 }

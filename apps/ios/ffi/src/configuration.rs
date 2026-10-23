@@ -10,7 +10,7 @@ use harness_runtime::mobile::{MobileConfig, MobileEngineError, MobileSessionMode
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IosMobileLinuxConfigFfi {
-    /// Legacy unavailable stub vs mobile-linux backend selection.
+    /// Conversations require the mobile-linux backend.
     pub mode: MobileLinuxRuntimeModeFfi,
     /// App-private root where rootfs state is managed.
     pub managed_root: String,
@@ -29,8 +29,8 @@ pub struct IosMobileLinuxConfigFfi {
     /// only when its digest matches the build-pinned
     /// `LINGXI_MOBILE_LINUX_AUTHORIZATION_SHA256`.
     pub authorization_file: Option<String>,
-    /// The engine's data root — the SAME directory the engine receives as its
-    /// `app_sandbox_root` and hangs `.lingxi`, `apps/`, and `Projects/` off.
+    /// The native engine sandbox root, also used to protect native credentials.
+    /// Conversation files live in the Linux account under `managed_root`.
     ///
     /// It must be supplied, never derived. This field replaced an inference
     /// that read the root out of `managed_root` by cutting at
@@ -74,9 +74,8 @@ pub struct IosEngineLaunchConfigFfi {
     pub session_mode: SessionModeDto,
     pub vision_delegation_enabled: bool,
     pub app_sandbox_root: String,
-    /// Optional managed Project workspace. When present it must resolve to
-    /// `<app_sandbox_root>/(P|p)rojects/<lowercase UUID>/workspace`; global
-    /// `.lingxi` state continues to live under `app_sandbox_root`.
+    /// Optional cwd inside the Linux user HOME, in guest or native coordinates.
+    /// Global configuration and transcripts use that same persistent account.
     pub project_cwd: Option<String>,
     pub provider_config: Option<IosProviderConfigFfi>,
     pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
@@ -171,84 +170,37 @@ pub(super) fn mobile_linux_authorization_verified(path: Option<&String>) -> bool
 }
 
 #[cfg(feature = "uniffi")]
-pub(super) fn default_workspace_host_path(app_sandbox_root: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(app_sandbox_root)
-        .join("workspaces")
-        .join("default")
-}
-
-#[cfg(feature = "uniffi")]
-pub(super) fn is_lowercase_uuid(value: &str) -> bool {
-    if value.len() != 36 || value != value.to_ascii_lowercase() {
-        return false;
-    }
-    value.chars().enumerate().all(|(index, character)| {
-        if matches!(index, 8 | 13 | 18 | 23) {
-            character == '-'
-        } else {
-            character.is_ascii_hexdigit()
-        }
-    })
-}
-
-#[cfg(feature = "uniffi")]
 pub(super) fn ios_project_cwd(
-    app_sandbox_root: &str,
+    managed_root: &str,
     project_cwd: Option<&str>,
 ) -> Result<std::path::PathBuf, MobileEngineError> {
-    let app_root = std::path::Path::new(app_sandbox_root)
-        .canonicalize()
-        .map_err(|error| {
-            MobileEngineError::Internal(format!("iOS app sandbox root is unavailable: {error}"))
-        })?;
-    let Some(project_cwd) = project_cwd else {
-        return Ok(app_root);
-    };
-    let workspace = std::path::Path::new(project_cwd)
-        .canonicalize()
-        .map_err(|error| {
-            MobileEngineError::Internal(format!("iOS Project workspace is unavailable: {error}"))
-        })?;
-    let relative = workspace.strip_prefix(&app_root).map_err(|_| {
-        MobileEngineError::Internal(
-            "iOS Project workspace must remain inside the app sandbox".to_string(),
-        )
-    })?;
-    let components: Vec<_> = relative
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect();
-    let is_managed_project = components.len() == 3
-        && matches!(components[0], "Projects" | "projects")
-        && is_lowercase_uuid(components[1])
-        && components[2] == "workspace";
-    let is_scheduled_workspace = components == ["scheduled", "workspace"];
-    let valid = (is_managed_project || is_scheduled_workspace) && workspace.is_dir();
-    if !valid {
-        return Err(MobileEngineError::Internal(
-            "iOS conversation workspace must match \
-             appSandboxRoot/Projects/<lowercase UUID>/workspace or \
-             appSandboxRoot/scheduled/workspace"
-                .to_string(),
-        ));
-    }
-    Ok(workspace)
+    let directories = harness_runtime::mobile::mobile_user_directories(managed_root.to_string())?;
+    directories.prepare()?;
+    directories.resolve_cwd(project_cwd).map(|(host, _)| host)
 }
 
 #[cfg(feature = "uniffi")]
 pub(super) fn ios_mobile_config_from_launch_config(
     config: &IosEngineLaunchConfigFfi,
 ) -> Result<MobileConfig, MobileEngineError> {
-    let cwd = ios_project_cwd(&config.app_sandbox_root, config.project_cwd.as_deref())?;
+    let linux = config.mobile_linux.as_ref().ok_or_else(|| {
+        MobileEngineError::Internal("iOS requires its Linux runtime user storage".into())
+    })?;
+    if !matches!(linux.mode, MobileLinuxRuntimeModeFfi::MobileLinux) {
+        return Err(MobileEngineError::Internal(
+            "iOS conversations require Mobile Linux".into(),
+        ));
+    }
+    let directories = harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+    directories.prepare()?;
+    directories.validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
+    let (cwd, logical_cwd) = directories.resolve_cwd(config.project_cwd.as_deref())?;
     let mut cfg = MobileConfig {
         startup_catalog: config.app_version.as_ref().map(|version| {
             harness_runtime::StartupCatalog::new(
                 harness_runtime::CatalogPlatform::Ios,
                 version,
-                &std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
+                &std::path::PathBuf::from(&directories.config_home),
             )
         }),
         build_info: harness_runtime::mobile::BuildInfo::new(
@@ -256,7 +208,8 @@ pub(super) fn ios_mobile_config_from_launch_config(
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
         ),
         cwd,
-        lingxi_home: std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
+        logical_cwd: Some(logical_cwd),
+        lingxi_home: std::path::PathBuf::from(&directories.config_home),
         session_mode: match config.session_mode {
             SessionModeDto::Chat => MobileSessionMode::Chat,
             SessionModeDto::Code => MobileSessionMode::Code,
@@ -347,11 +300,7 @@ pub(super) fn validate_mobile_linux_workspace_config(
     app_sandbox_root: &str,
     config: &IosMobileLinuxConfigFfi,
 ) -> Result<(std::path::PathBuf, String), MobileLinuxOperationFfiError> {
-    let workspace_host_path = if config.workspace_host_path.trim().is_empty() {
-        default_workspace_host_path(app_sandbox_root)
-    } else {
-        std::path::PathBuf::from(&config.workspace_host_path)
-    };
+    let workspace_host_path = std::path::PathBuf::from(&config.workspace_host_path);
     let workspace_host_path =
         resolve_mobile_linux_security_path(&workspace_host_path, "workspace_host_path")?;
     let sandbox_root = resolve_mobile_linux_security_path(
@@ -362,11 +311,22 @@ pub(super) fn validate_mobile_linux_workspace_config(
         std::path::Path::new(&config.managed_root),
         "managed_root",
     )?;
-    let lingxi_root =
-        resolve_mobile_linux_security_path(&sandbox_root.join(branding::DOT_DIR), ".lingxi root")?;
+    let lingxi_root = resolve_mobile_linux_security_path(
+        &mobile_linux_api::guest_paths::home_host_path(&managed_root).join(branding::DOT_DIR),
+        ".lingxi root",
+    )?;
 
+    let persistent_workspace = mobile_linux_core::is_persistent_user_workspace(
+        &managed_root,
+        &mobile_linux_api::MountSpec {
+            host_path: workspace_host_path.clone(),
+            guest_path: mobile_linux_api::guest_paths::workspace(&config.stable_workspace_id),
+            read_only: false,
+            purpose: mobile_linux_api::MountPurpose::Workspace,
+        },
+    );
     if workspace_host_path == sandbox_root
-        || workspace_host_path.starts_with(&managed_root)
+        || (workspace_host_path.starts_with(&managed_root) && !persistent_workspace)
         || managed_root.starts_with(&workspace_host_path)
         || workspace_host_path.starts_with(&lingxi_root)
         || lingxi_root.starts_with(&workspace_host_path)
@@ -383,11 +343,7 @@ pub(super) fn validate_mobile_linux_workspace_config(
         });
     }
 
-    let stable_workspace_id = if config.stable_workspace_id.trim().is_empty() {
-        "default".to_string()
-    } else {
-        config.stable_workspace_id.clone()
-    };
+    let stable_workspace_id = config.stable_workspace_id.clone();
     if stable_workspace_id.is_empty()
         || !stable_workspace_id
             .chars()

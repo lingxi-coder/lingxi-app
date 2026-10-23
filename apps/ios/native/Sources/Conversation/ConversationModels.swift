@@ -514,6 +514,7 @@ final class ConversationModel: ObservableObject {
     // selected row.
     /// Real resumable sessions from the engine (`SessionList.sessions` lowered).
     /// Empty ⇒ the drawer falls back to the mock session lists.
+    @Published var workspaceState: SessionWorkspaceState?
     @Published var engineSessions: [EngineSession] = []
     /// Distinguishes an authoritative empty `SessionList` from the initial
     /// not-yet-loaded state. Project persistence must never treat the latter as

@@ -79,6 +79,7 @@ class EngineConversationSource private constructor(
     private val permissionIngress: PermissionIngress,
     private val models: MutableStateFlow<EngineModelState>,
     private val sessions: MutableStateFlow<EngineSessionState>,
+    private val workspace: MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>,
     private val activeSession: MutableStateFlow<ActivatedSession?>,
     private val mcp: MutableStateFlow<List<MCPServer>>,
     private val strings: ConversationStrings,
@@ -86,8 +87,20 @@ class EngineConversationSource private constructor(
     private val durableReplayGate: DurableTurnReplayGate,
     private val autoAttachDurableTurns: Boolean,
     @Volatile private var resumeOnUiAttach: Boolean,
-    override val recoverySpec: ConversationRecoverySpec,
+    private val initialRecoverySpec: ConversationRecoverySpec,
+    private val userHomePath: String,
 ) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
+
+    override val recoverySpec: ConversationRecoverySpec
+        get() {
+            val directory = workspace.value?.cwd ?: return initialRecoverySpec
+            val home = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
+            if (directory != home && !directory.startsWith("$home/")) return initialRecoverySpec
+            val relative = directory.removePrefix(home).removePrefix("/")
+            return initialRecoverySpec.copy(hostPath = java.io.File(userHomePath, relative).absolutePath, guestPath = directory, additionalDirectories = workspace.value?.additionalDirectories.orEmpty())
+        }
+
+    override val workspaceState = workspace.asStateFlow()
 
     internal fun newSideChatSource() = SideChatSource(handle)
 
@@ -266,6 +279,16 @@ class EngineConversationSource private constructor(
         }
     }
 
+    override suspend fun changeWorkspace(path: String, expectedSessionId: String) {
+        handle.changeWorkspace(path, expectedSessionId)
+        refreshSessions()
+    }
+
+    override suspend fun addWorkspaceDirectory(path: String, expectedSessionId: String) {
+        handle.addWorkspaceDirectory(path, expectedSessionId)
+        refreshSessions()
+    }
+
     override suspend fun resumeSession(uuid: String) {
         if (uuid.isBlank()) return
         val record = durableTurns.load()
@@ -275,6 +298,11 @@ class EngineConversationSource private constructor(
         // Propagate command failures: the ViewModel must keep the composer gated
         // and surface an explicit session error instead of pretending the locally
         // selected transcript was resumed.
+        sessions.value.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(uuid) }
+            ?.transcriptPath?.let { path ->
+                handle.resumeWorkspaceSession(canonicalSessionId(uuid), path)
+                return
+            }
         handle.submit(
             ClientCommand.ResumeSession(
                 sessionId = canonicalSessionId(uuid),
@@ -509,11 +537,13 @@ class EngineConversationSource private constructor(
             replaceProcessSource: Boolean = false,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(
-                projectId = projectWorkspace?.projectId,
+                projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
                 hostPath = projectWorkspace?.hostPath,
                 sessionMode = sessionMode,
                 linuxRuntimeMode = linuxRuntimeMode,
-                workspaceKey = workspaceKey,
+                workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
+                guestPath = projectWorkspace?.guestPath,
+                additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
             )
             if (reuseProcessSource && !replaceProcessSource) {
                 when (
@@ -539,7 +569,7 @@ class EngineConversationSource private constructor(
             val strings = conversationStrings(context)
             val durableTurns = DurableConversationTurnClientStore(
                 context = context,
-                scope = workspaceKey ?: projectWorkspace?.hostPath ?: "__global__",
+                scope = recoverySpec.scopeKey,
             )
             val durableReplayGate = DurableTurnReplayGate()
             // The head parked permission request. The engine's outbound
@@ -559,6 +589,7 @@ class EngineConversationSource private constructor(
             // StateFlow via the pure `reduceSessionEvent`, so the drawer is driven
             // by real history out-of-band from the per-turn stream.
             val sessions = MutableStateFlow(EngineSessionState.loading())
+            val workspace = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null)
             // The engine's most recent active-session transition (sibling of
             // `sessions`). The first agent listing binds the cold engine's
             // owner; explicit New/Resume events subsequently replace it with
@@ -599,6 +630,13 @@ class EngineConversationSource private constructor(
                     sessions.value = reduceSessionEvent(sessions.value, event, strings = sessionCatalogStrings(context))
                     activeSession.update { current ->
                         reduceActivatedSession(current, event, sessionMode, strings)
+                    }
+                    if (event is ClientEvent.WorkspaceChanged) {
+                        val value = event.state
+                        workspace.value = com.lingxi.code.project.SessionWorkspaceState(
+                            value.sessionId, value.cwd, value.projectRoot,
+                            value.additionalDirectories, value.transcriptPath,
+                        )
                     }
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
@@ -660,6 +698,24 @@ class EngineConversationSource private constructor(
                     context.getString(R.string.chat_engine_build_failed),
                 )
             }
+            val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
+                val owner = handle.workspaceState().sessionId
+                val home = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
+                val userHome = com.lingxi.code.project.MobileUserStorage.directories(context).home
+                projectWorkspace?.additionalDirectories.orEmpty().forEach { directory ->
+                    if ((directory == home || directory.startsWith("$home/")) && java.io.File(userHome, directory.removePrefix(home).removePrefix("/")).isDirectory) {
+                        handle.addWorkspaceDirectory(directory, owner)
+                    }
+                }
+            } }
+            workspaceRestore.exceptionOrNull()?.let { failure ->
+                runCatching { handle.destroy() }
+                if (reuseProcessSource) ConversationHeadlessRecovery.releaseUiReservation(recoverySpec.scopeKey)
+                eventRelay.close()
+                workflowRelay.close()
+                eventScope.cancel()
+                return UnavailableConversationSource(failure.message ?: context.getString(R.string.chat_engine_build_failed))
+            }
             // Ask the engine for its REAL catalog now that the handle exists; the
             // reply (`ModelList`) flows back through the listener above into the
             // `models` StateFlow, populating the picker with real wire ids.
@@ -671,6 +727,8 @@ class EngineConversationSource private constructor(
                 // owner. Bind it independently of optional catalog refreshes.
                 try {
                     handle.submit(ClientCommand.ListSessionAgents)
+                    val value = handle.workspaceState()
+                    workspace.value = com.lingxi.code.project.SessionWorkspaceState(value.sessionId, value.cwd, value.projectRoot, value.additionalDirectories, value.transcriptPath)
                 } catch (_: Throwable) {
                     // A later foreground execution refresh retries this query.
                 }
@@ -715,6 +773,7 @@ class EngineConversationSource private constructor(
                 permissionIngress = permissionIngress,
                 models = models,
                 sessions = sessions,
+                workspace = workspace,
                 activeSession = activeSession,
                 mcp = mcp,
                 strings = strings,
@@ -722,7 +781,8 @@ class EngineConversationSource private constructor(
                 durableReplayGate = durableReplayGate,
                 autoAttachDurableTurns = !reuseProcessSource,
                 resumeOnUiAttach = reuseProcessSource,
-                recoverySpec = recoverySpec,
+                initialRecoverySpec = recoverySpec,
+                userHomePath = com.lingxi.code.project.MobileUserStorage.directories(context).home,
             )
             ConversationHeadlessRecovery.register(recoverySpec.scopeKey, source)
             return source

@@ -1999,4 +1999,8 @@
     <string name="drawer_open_sidebar_a11y">打开侧栏</string>
     <string name="chat_message_copy">复制</string>
     <string name="chat_message_copied">已复制</string>
+    <string name="workspace_add_directory">添加工作目录</string>
+    <string name="workspace_linked_directories">项目的工作目录</string>
+    <string name="workspace_confirm_add">添加</string>
+    <string name="workspace_session_changed">会话已切换，请重新打开目录选择器</string>
 </resources>

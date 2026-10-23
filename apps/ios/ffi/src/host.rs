@@ -9,13 +9,12 @@ use super::callbacks::{
     IosLocationBridge, IosNotificationBridge, IosPermissionSinkBridge, IosSecureStorageBridge,
     IosShareBridge,
 };
-#[cfg(feature = "uniffi")]
-use super::configuration::{IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi, ios_project_cwd};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::configuration::{
-    default_workspace_host_path, ios_mobile_config_from_launch_config,
-    validate_mobile_linux_workspace_config,
+    ios_mobile_config_from_launch_config, validate_mobile_linux_workspace_config,
 };
+#[cfg(feature = "uniffi")]
+use super::configuration::{ios_project_cwd, IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::linux_runtime::ios_mobile_linux_runtime;
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
@@ -95,13 +94,28 @@ pub fn build_mobile_engine(
     #[cfg(target_os = "ios")]
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
+        let linux = impls.mobile_linux.as_ref().ok_or_else(|| {
+            MobileEngineError::Internal("iOS requires its Linux runtime user storage".into())
+        })?;
+        if !matches!(linux.mode, MobileLinuxRuntimeModeFfi::MobileLinux) {
+            return Err(MobileEngineError::Internal(
+                "iOS conversations require Mobile Linux".into(),
+            ));
+        }
+        let directories =
+            harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+        directories.prepare()?;
+        directories
+            .validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
+        let (cwd, logical_cwd) = directories.resolve_cwd(None)?;
         let cfg = MobileConfig {
             build_info: harness_runtime::mobile::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
             ),
-            cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
-            lingxi_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
+            cwd,
+            logical_cwd: Some(logical_cwd),
+            lingxi_home: std::path::PathBuf::from(&directories.config_home),
             host_environment: Some(lingxi_core::host::MobileHostEnvironment::new(
                 lingxi_core::host::MobileHostOs::Ios,
                 None,
@@ -119,14 +133,9 @@ pub fn build_mobile_engine(
             local_apps: true,
             ..MobileConfig::default()
         };
-        let (workspace_host_path, stable_workspace_id) = match impls.mobile_linux.as_ref() {
-            Some(config) => validate_mobile_linux_workspace_config(&impls.app_sandbox_root, config)
-                .map_err(|error| MobileEngineError::Internal(error.to_string()))?,
-            None => (
-                default_workspace_host_path(&impls.app_sandbox_root),
-                "default".to_string(),
-            ),
-        };
+        let (workspace_host_path, stable_workspace_id) =
+            validate_mobile_linux_workspace_config(&impls.app_sandbox_root, linux)
+                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
             app_sandbox_root: std::path::PathBuf::from(impls.app_sandbox_root),
             camera: impls.camera,
@@ -182,21 +191,24 @@ pub fn build_mobile_engine(
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn build_ios_cron_store(
     app_sandbox_root: String,
+    managed_root: String,
     project_cwd: Option<String>,
 ) -> Result<Arc<MobileCronStoreHandle>, MobileEngineError> {
     use platform_posix_minimal::{PosixClock, PosixFileSystem};
 
+    let directories = harness_runtime::mobile::mobile_user_directories(managed_root.clone())?;
+    directories.prepare()?;
     let scheduled_cwd;
     let project_cwd = match project_cwd {
         Some(path) => Some(path),
         None => {
-            scheduled_cwd = std::path::Path::new(&app_sandbox_root).join("scheduled/workspace");
+            scheduled_cwd = std::path::PathBuf::from(&directories.scheduled_cwd);
             std::fs::create_dir_all(&scheduled_cwd)
                 .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
             Some(scheduled_cwd.to_string_lossy().into_owned())
         }
     };
-    let cwd = ios_project_cwd(&app_sandbox_root, project_cwd.as_deref())?;
+    let cwd = ios_project_cwd(&managed_root, project_cwd.as_deref())?;
     let app_root = std::path::Path::new(&app_sandbox_root)
         .canonicalize()
         .map_err(|error| {
@@ -255,16 +267,12 @@ pub fn build_ios_engine_with_config(
             device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
-        let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
-            Some(mobile_linux) => {
-                validate_mobile_linux_workspace_config(&config.app_sandbox_root, mobile_linux)
-                    .map_err(|error| MobileEngineError::Internal(error.to_string()))?
-            }
-            None => (
-                default_workspace_host_path(&config.app_sandbox_root),
-                "default".to_string(),
-            ),
-        };
+        let linux = config.mobile_linux.as_ref().ok_or_else(|| {
+            MobileEngineError::Internal("iOS requires its Linux runtime user storage".into())
+        })?;
+        let (workspace_host_path, stable_workspace_id) =
+            validate_mobile_linux_workspace_config(&config.app_sandbox_root, linux)
+                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
             app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
             camera: Arc::new(IosCameraBridge { inner: camera }),

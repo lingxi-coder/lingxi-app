@@ -46,7 +46,10 @@ class CronNativeExecutionTest {
         withTimeout(180_000) {
             val context = InstrumentationRegistry.getInstrumentation().targetContext
             val root = File(context.cacheDir, "cron-execution-${UUID.randomUUID()}").apply { mkdirs() }
-            val workspace = File(root, "scheduled/workspace").apply { mkdirs() }
+            val managedRoot = File(root, "runtime")
+            val paths = mobileUserDirectories(managedRoot.path)
+            val workspace = File(paths.scheduledCwd).apply { mkdirs() }
+            val runtimeConfig = com.lingxi.code.mobileWorkspaceTestConfiguration(root)
             val server = LoopbackAnthropicServer()
             val events = Channel<ClientEvent>(Channel.UNLIMITED)
             try {
@@ -56,7 +59,7 @@ class CronNativeExecutionTest {
                         apiBase = server.baseUrl, apiKey = "test-only-local", model = "anthropic/claude-sonnet-4-6", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":["anthropic"]}"""),
-                        mobileLinux = null,
+                        mobileLinux = runtimeConfig,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
                         override suspend fun onEvent(event: ClientEvent) {
@@ -69,7 +72,7 @@ class CronNativeExecutionTest {
                     permissions = object : AndroidPermissionSink { override suspend fun onRequest(request: PermissionRequest) { error("Scheduled fixture must not request permission") } },
                     computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = null, deviceControl = null)
 
-                val store = buildAndroidCronStore(root.path, null)
+                val store = buildAndroidCronStore(root.path, managedRoot.path, null)
                 try {
                     suspend fun controls(): ConversationControlsDto {
                         while (events.tryReceive().getOrNull() != null) { /* discard older snapshots */ }

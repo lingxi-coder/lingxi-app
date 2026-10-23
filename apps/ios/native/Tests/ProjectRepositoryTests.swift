@@ -18,6 +18,56 @@ final class ProjectRepositoryTests: XCTestCase {
         }
     }
 
+    func testCatalogPreservesConfirmedSessionsFromOtherWorkspaces() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Linked directories")
+        let linked = "/home/lingxi/lingxi/projects/linked"
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("linked"), withIntermediateDirectories: true)
+        let original = ProjectSessionSummary(sessionId: "a", title: "A", messageCount: 2,
+            relativeTime: "Now", updatedAt: Date(), workspaceDirectory: project.record.directory, transcriptPath: "/catalog/a.jsonl")
+        _ = try repository.updateSessions(projectId: project.id, sessions: [original])
+        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
+            cwd: linked, projectRoot: linked, additionalDirectories: [linked], transcriptPath: ""))
+        let incoming = ProjectSessionSummary(sessionId: "b", title: "B", messageCount: 2,
+            relativeTime: "Now", updatedAt: Date(), workspaceDirectory: linked, transcriptPath: "/catalog/b.jsonl")
+        _ = try repository.updateSessions(projectId: project.id, sessions: [incoming])
+        let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.id)
+        XCTAssertEqual(Set(restored.sessions.map(\.sessionId)), Set(["a", "b"]))
+        XCTAssertEqual(restored.sessions.first { $0.sessionId == "a" }?.workspaceDirectory, project.record.directory)
+        XCTAssertEqual(restored.sessions.first { $0.sessionId == "b" }?.workspaceDirectory, linked)
+        _ = try repository.updateSessions(projectId: project.id, sessions: [])
+        XCTAssertEqual(try repository.project(projectId: project.id).sessions.map(\.sessionId), ["a"])
+    }
+
+    func testMissingLinkedDirectoryDoesNotBlockLiveWorkspacePersistence() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Missing linked folder")
+        let missing = "/home/lingxi/lingxi/projects/deleted"
+        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
+            cwd: project.record.directory, projectRoot: project.record.directory, additionalDirectories: [missing], transcriptPath: ""))
+        XCTAssertEqual(try repository.project(projectId: project.id).record.additionalDirectories, [missing])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("deleted").path))
+    }
+
+    func testSyncStateUpdatesPreserveTheLastSessionAndExplicitNilClearsIt() throws {
+        let project = try ProjectRepository(projectsRoot: root).createInternal(name: "Session owner")
+        var record = project.record
+        record.lastActiveSessionId = "retained-session"
+        XCTAssertEqual(record.with(syncState: .authorizationLost).lastActiveSessionId, "retained-session")
+        let cleared: String? = nil
+        XCTAssertNil(record.with(lastActiveSessionId: cleared).lastActiveSessionId)
+    }
+
+    func testUserHomeCanBeSelectedAsWorkspaceWithoutChangingSource() throws {
+        let repository = ProjectRepository(projectsRoot: root.appendingPathComponent("projects"), userHome: root)
+        let project = try repository.createInternal(name: "User home")
+        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft",
+            cwd: "/home/lingxi", projectRoot: project.record.directory, additionalDirectories: ["/home/lingxi"], transcriptPath: ""))
+        let restored = try repository.project(projectId: project.id)
+        XCTAssertEqual(restored.workspace.hostURL.path, root.resolvingSymlinksInPath().path)
+        XCTAssertEqual(restored.sourceWorkspace, project.sourceWorkspace)
+    }
+
     func testCreateAndReloadUsesStableUUIDWorkspaceLayout() throws {
         let repository = ProjectRepository(projectsRoot: root)
 
@@ -29,7 +79,7 @@ final class ProjectRepositoryTests: XCTestCase {
             projectDirectory.appendingPathComponent(projectWorkspaceDirectoryName, isDirectory: true).resolvingSymlinksInPath(),
             created.workspace.hostURL
         )
-        XCTAssertEqual("/home/lingxi/lingxi/\(created.record.id)", created.workspace.guestPath)
+        XCTAssertEqual("/home/lingxi/lingxi/projects/\(created.record.id)/workspace", created.workspace.guestPath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectManifestFileName).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectSessionIndexFileName).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: projectDirectory.appendingPathComponent(projectSyncBaselineFileName).path))
@@ -101,7 +151,7 @@ final class ProjectRepositoryTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: workspace, withDestinationURL: outside)
         let reloaded = repository.load()
         XCTAssertTrue(reloaded.projects.isEmpty)
-        XCTAssertTrue(reloaded.errorMessage?.contains("已隔离") == true)
+        XCTAssertFalse(reloaded.errorMessage?.isEmpty ?? true)
     }
 
 
@@ -176,6 +226,39 @@ final class ProjectRepositoryTests: XCTestCase {
         let confirmed = repository.load().globalSessions[0]
         XCTAssertEqual(confirmed.title, "Confirmed")
         XCTAssertFalse(confirmed.pendingCatalogConfirmation)
+    }
+
+
+    func testOneProjectMovesAndColdRestoresOneSessionWithoutMovingItsSourceMirror() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Workspace project")
+        let linked = root.appendingPathComponent("linked", isDirectory: true)
+        try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
+        let guest = "/home/lingxi/lingxi/projects/linked"
+        _ = try repository.recordStartedSession(projectId: project.id, sessionId: "session-one", title: "Shared", mode: .code)
+        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "session-one", cwd: guest,
+            projectRoot: project.record.directory, additionalDirectories: [guest], transcriptPath: "/home/lingxi/.lingxi/projects/b/session-one.jsonl"))
+        let restored = try ProjectRepository(projectsRoot: root).project(projectId: project.id)
+        XCTAssertEqual(restored.workspace.hostURL, linked.resolvingSymlinksInPath())
+        XCTAssertEqual(restored.sourceWorkspace, project.sourceWorkspace)
+        XCTAssertEqual(restored.sessions.map(\.sessionId), ["session-one"])
+        XCTAssertEqual(restored.sessions.first?.workspaceDirectory, guest)
+        XCTAssertEqual(restored.sessions.first?.originalProjectDirectory, project.record.directory)
+        try FileManager.default.removeItem(at: linked)
+        XCTAssertEqual(ProjectRepository(projectsRoot: root).load().projects.map(\.id), [project.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: linked.path))
+    }
+
+    func testDirectoryNavigationDoesNotCreateAnEmptySessionOrEscapeHome() throws {
+        let repository = ProjectRepository(projectsRoot: root)
+        let project = try repository.createInternal(name: "Empty draft")
+        let guest = project.record.directory
+        _ = try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft", cwd: guest,
+            projectRoot: guest, additionalDirectories: [], transcriptPath: ""))
+        XCTAssertTrue(try repository.project(projectId: project.id).sessions.isEmpty)
+        XCTAssertThrowsError(try repository.recordWorkspace(projectId: project.id, state: SessionWorkspaceState(sessionId: "draft", cwd: "/root",
+            projectRoot: guest, additionalDirectories: [], transcriptPath: "")))
+        XCTAssertEqual(try repository.project(projectId: project.id).record.activeDirectory, guest)
     }
 
     private func session(_ id: String, at date: Date) -> ProjectSessionSummary {

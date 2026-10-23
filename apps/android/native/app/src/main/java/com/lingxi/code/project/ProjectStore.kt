@@ -90,6 +90,12 @@ class ProjectStore private constructor(
         )
     }
 
+    suspend fun recordWorkspace(projectId: String, state: SessionWorkspaceState): Unit = withContext(Dispatchers.IO) {
+        repositoryMutex.withLock {
+            _state.value = repository.recordWorkspace(projectId, state)
+        }
+    }
+
     suspend fun syncEngineSessions(projectId: String?, rows: List<SessionRow>): ProjectStoreState =
         withContext(Dispatchers.IO) {
             repositoryMutex.withLock {
@@ -100,6 +106,8 @@ class ProjectStore private constructor(
                         ProjectSessionSummary(
                             sessionId = row.uuid,
                             title = row.title,
+                            transcriptPath = row.transcriptPath,
+                            workspaceDirectory = row.workspaceDirectory,
                             messageCount = row.messageCount,
                             relativeTime = row.relativeTime,
                             updatedAtEpochMillis = row.modifiedAtEpochSeconds
@@ -293,7 +301,8 @@ class ProjectStore private constructor(
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     val repository = ProjectRepository(
-                        File(appContext.filesDir, "projects"),
+                        MobileUserStorage.projects(appContext),
+                        userHome = File(MobileUserStorage.directories(appContext).home),
                         strings = projectStrings(appContext),
                     )
                     return ProjectStore(

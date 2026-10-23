@@ -50,6 +50,7 @@ struct EngineConfig {
     var providerRoutingJson: String?
     var visionDelegationEnabled: Bool
     var mobileLinux: TerminalRuntimeConfig?
+    var additionalWorkspaceDirectories: [String] = []
 
     /// Resolve the engine credentials. The API key (and optional base URL)
     /// come from the iOS Keychain FIRST (SHIP-BLOCKER #1 — a shipped app has no

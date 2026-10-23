@@ -194,6 +194,9 @@ interface ConversationSource {
      * The UI observes [EngineSessionState.phase] to distinguish loading / empty /
      * error without a mock fallback.
      */
+    val workspaceState: StateFlow<com.lingxi.code.project.SessionWorkspaceState?>
+        get() = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null).asStateFlow()
+
     val sessionState: StateFlow<EngineSessionState>
         get() = MutableStateFlow(EngineSessionState.loading()).asStateFlow()
 
@@ -203,6 +206,9 @@ interface ConversationSource {
      * [sessionState] out-of-band. Called when the drawer opens so the list is
      * fresh.
      */
+    suspend fun changeWorkspace(path: String, expectedSessionId: String) { throw UnsupportedOperationException("Workspace navigation is unavailable") }
+    suspend fun addWorkspaceDirectory(path: String, expectedSessionId: String) { throw UnsupportedOperationException("Workspace navigation is unavailable") }
+
     suspend fun refreshSessions() {}
 
     /**

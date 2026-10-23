@@ -2,6 +2,8 @@ package com.lingxi.code.project
 
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.conversation.completeSessionListCommand
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -145,6 +147,74 @@ class ProjectRepositorySessionModeTest {
         val confirmed = repository.load().globalSessions.single()
         assertEquals("Confirmed", confirmed.title)
         assertEquals(false, confirmed.pendingCatalogConfirmation)
+    }
+
+    @Test
+    fun `one project keeps its session and source while moving and cold reloading workspaces`() {
+        val root = File(temp.root, "user/projects")
+        val user = File(temp.root, "user")
+        val repository = ProjectRepository(projectsRoot = root, userHome = user)
+        val first = repository.createInternal("Workspace project")
+        val linked = File(root, "linked").apply { mkdirs() }
+        val linkedGuest = "/home/lingxi/lingxi/projects/linked"
+        repository.recordStartedSession(first.record.id, "session-one", "Shared session", SessionMode.Code)
+        repository.recordWorkspace(first.record.id, SessionWorkspaceState("session-one", linkedGuest, first.record.directory, listOf(linkedGuest), "/home/lingxi/.lingxi/projects/b/session-one.jsonl"))
+        val reloaded = ProjectRepository(projectsRoot = root, userHome = user).project(first.record.id)
+        assertEquals(linked.canonicalPath, reloaded.workspace.hostPath)
+        assertEquals(first.sourceWorkspace, reloaded.sourceWorkspace)
+        assertEquals(listOf("session-one"), reloaded.sessions.map { it.sessionId })
+        assertEquals(linkedGuest, reloaded.sessions.single().workspaceDirectory)
+        assertEquals(first.record.directory, reloaded.sessions.single().originalProjectDirectory)
+        assertEquals(listOf(linkedGuest), reloaded.workspace.additionalDirectories)
+        linked.deleteRecursively()
+        assertEquals(first.record.id, ProjectRepository(projectsRoot = root, userHome = user).load().projects.single().record.id)
+        assertFalse(linked.exists())
+    }
+
+    @Test
+    fun `directory navigation does not create a phantom session or escape the user home`() {
+        val repository = repository()
+        val project = repository.createInternal("Empty draft")
+        val linked = File(temp.root, "projects/linked").apply { mkdirs() }
+        val path = "/home/lingxi/lingxi/projects/linked"
+        repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", path, project.record.directory, listOf(path), ""))
+        assertTrue(repository.project(project.record.id).sessions.isEmpty())
+        val error = runCatching { repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", "/root", project.record.directory, emptyList(), "")) }.exceptionOrNull()
+        assertTrue(error is IllegalArgumentException)
+        assertEquals(linked.canonicalPath, repository.project(project.record.id).workspace.hostPath)
+    }
+
+    @Test
+    fun `catalog in another workspace retains confirmed sessions and their exact directory`() {
+        val repository = repository()
+        val project = repository.createInternal("Linked directories")
+        val linked = "/home/lingxi/lingxi/projects/linked"
+        File(temp.root, "projects/linked").mkdirs()
+        val original = ProjectSessionSummary("a", "A", 2, "Now", 1000L,
+            workspaceDirectory = project.record.directory, transcriptPath = "/catalog/a.jsonl")
+        repository.updateSessions(project.record.id, listOf(original))
+        repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", linked,
+            linked, listOf(linked), ""))
+        repository.updateSessions(project.record.id, listOf(ProjectSessionSummary("b", "B", 2, "Now", 1001L,
+            workspaceDirectory = linked, transcriptPath = "/catalog/b.jsonl")))
+        val restored = repository().project(project.record.id)
+        assertEquals(setOf("a", "b"), restored.sessions.map { it.sessionId }.toSet())
+        assertEquals(project.record.directory, restored.sessions.first { it.sessionId == "a" }.workspaceDirectory)
+        assertEquals(linked, restored.sessions.first { it.sessionId == "b" }.workspaceDirectory)
+        // Deletion remains authoritative for the directory actually being listed.
+        repository.updateSessions(project.record.id, emptyList())
+        assertEquals(listOf("a"), repository.project(project.record.id).sessions.map { it.sessionId })
+    }
+
+    @Test
+    fun `missing linked directory does not prevent saving the live workspace`() {
+        val repository = repository()
+        val project = repository.createInternal("Missing linked folder")
+        val missing = "/home/lingxi/lingxi/projects/deleted"
+        repository.recordWorkspace(project.record.id, SessionWorkspaceState("draft", project.record.directory,
+            project.record.directory, listOf(missing), ""))
+        assertEquals(listOf(missing), repository.project(project.record.id).record.additionalDirectories)
+        assertFalse(File(temp.root, "projects/deleted").exists())
     }
 
 }

@@ -36,7 +36,7 @@ class CronScreenUiTest {
     @Test
     fun phoneTaskCenterAndDetail(): Unit = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val store = buildAndroidCronStore(context.filesDir.path, null)
+        val store = buildAndroidCronStore(context.filesDir.path, com.lingxi.code.settings.LinuxRuntimeBridge.managedRoot(context), null)
         val name = "Daily brief · UI verification"
         val task = store.createConfigured("0 9 * * *", "Prepare a daily project briefing.", true,
             CronAutomation.defaults("provider/model").change("name", name).change("status", "paused").json)

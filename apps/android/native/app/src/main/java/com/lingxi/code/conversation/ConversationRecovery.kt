@@ -48,12 +48,14 @@ data class ConversationRecoverySpec(
     val sessionMode: SessionMode,
     val linuxRuntimeMode: LinuxRuntimeMode,
     val workspaceKey: String? = null,
+    val guestPath: String? = null,
+    val additionalDirectories: List<String> = emptyList(),
 ) {
     val scopeKey: String
         get() = "${workspaceKey ?: hostPath ?: "__global__"}#${sessionMode.wireValue}"
 
     fun projectWorkspace(): ProjectWorkspace? = hostPath?.let { path ->
-        ProjectWorkspace(projectId = projectId ?: "recovered", hostPath = path)
+        ProjectWorkspace(projectId = projectId ?: "recovered", hostPath = path, guestPath = guestPath ?: io.lingxi.mobilelinux.MobileLinuxGuestPaths.WORKSPACE_ROOT, additionalDirectories = additionalDirectories)
     }
 }
 

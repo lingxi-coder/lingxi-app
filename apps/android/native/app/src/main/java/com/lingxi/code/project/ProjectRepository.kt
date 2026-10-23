@@ -84,6 +84,7 @@ internal class ProjectRepository(
     private val newId: () -> String = { UUID.randomUUID().toString().lowercase() },
     private val writer: ProjectAtomicWriter = DefaultProjectAtomicWriter(),
     private val strings: ProjectStrings = DefaultProjectStrings,
+    private val userHome: File? = null,
 ) {
     init {
         projectsRoot.mkdirs()
@@ -202,7 +203,8 @@ internal class ProjectRepository(
         projectId: String?,
         sessions: List<ProjectSessionSummary>,
     ): ProjectStoreState {
-        val existing = projectId?.let { loadProject(it).sessions } ?: load().globalSessions
+        val snapshot = projectId?.let { loadProject(it) }
+        val existing = snapshot?.sessions ?: load().globalSessions
         val incoming = sessions.map { it.copy(sessionId = canonicalSessionId(it.sessionId)) }
             .filter { it.sessionId.isNotBlank() }
             .distinctBy { it.sessionId }
@@ -213,6 +215,9 @@ internal class ProjectRepository(
                 }
                 row.copy(
                     isArchived = cached?.isArchived ?: false,
+                    workspaceDirectory = row.workspaceDirectory ?: cached?.workspaceDirectory,
+                    originalProjectDirectory = row.originalProjectDirectory ?: cached?.originalProjectDirectory,
+                    transcriptPath = row.transcriptPath ?: cached?.transcriptPath,
                     pendingCatalogConfirmation = false,
                 )
             }
@@ -220,7 +225,8 @@ internal class ProjectRepository(
         // Retain only local rows that the file-backed engine has not acknowledged,
         // plus archived metadata; normal confirmed rows remain authoritative.
         val normalized = (incoming + existing.filter {
-            it.sessionId !in incomingIds && (it.pendingCatalogConfirmation || it.isArchived)
+            it.sessionId !in incomingIds && (it.pendingCatalogConfirmation || it.isArchived ||
+                (snapshot != null && it.workspaceDirectory != null && it.workspaceDirectory != snapshot.record.activeDirectory))
         }).sortedByDescending { it.updatedAtEpochMillis }
         if (projectId == null) {
             writeSessionFile(File(projectsRoot, GLOBAL_SESSION_INDEX_FILE), normalized)
@@ -273,6 +279,9 @@ internal class ProjectRepository(
             isArchived = existing?.isArchived ?: false,
             pendingCatalogConfirmation = (existing?.pendingCatalogConfirmation ?: true) ||
                 initialMessageCount > (existing?.messageCount ?: 0),
+            workspaceDirectory = existing?.workspaceDirectory ?: snapshot?.record?.activeDirectory,
+            originalProjectDirectory = existing?.originalProjectDirectory ?: snapshot?.record?.activeDirectory,
+            transcriptPath = existing?.transcriptPath,
         )
         val updated = listOf(started) + sessions.filterNot { it.sessionId == canonicalId }
         if (projectId == null) {
@@ -330,6 +339,40 @@ internal class ProjectRepository(
         writeJson(target, encodeBaseline(baseline), ::decodeBaseline)
     }
 
+    fun recordWorkspace(projectId: String, state: SessionWorkspaceState): ProjectStoreState {
+        val snapshot = loadProject(projectId)
+        workspaceForDirectory(projectId, state.cwd)
+        state.additionalDirectories.forEach { workspaceForDirectory(projectId, it, requireExisting = false) }
+        writeProject(snapshot.record.copy(
+            activeDirectory = state.cwd,
+            additionalDirectories = (snapshot.record.additionalDirectories + state.additionalDirectories + state.cwd)
+                .filter { it != snapshot.record.directory }.distinct(),
+        ))
+        writeSessions(projectId, snapshot.sessions.map { session ->
+            if (canonicalSessionId(session.sessionId) == canonicalSessionId(state.sessionId)) session.copy(
+                workspaceDirectory = state.cwd,
+                originalProjectDirectory = state.projectRoot,
+                transcriptPath = state.transcriptPath,
+            ) else session
+        })
+        return load()
+    }
+
+    private fun workspaceForDirectory(projectId: String, guestPath: String, requireExisting: Boolean = true): ProjectWorkspace {
+        val projectsGuest = io.lingxi.mobilelinux.MobileLinuxGuestPaths.workspace("projects")
+        val homeGuest = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
+        require((guestPath == homeGuest || guestPath.startsWith("$homeGuest/")) && guestPath.split('/').none { it == ".." || it == "." }) { "workspace must be a normalized Linux user directory" }
+        val (root, relative) = if (guestPath == projectsGuest || guestPath.startsWith("$projectsGuest/")) {
+            projectsRoot to guestPath.removePrefix(projectsGuest).removePrefix("/")
+        } else {
+            requireNotNull(userHome) { "Linux user home is not configured" } to guestPath.removePrefix(homeGuest).removePrefix("/")
+        }
+        val canonicalRoot = root.canonicalFile
+        val directory = File(root, relative).canonicalFile
+        require((!requireExisting || directory.isDirectory) && directory.toPath().startsWith(canonicalRoot.toPath())) { "workspace escaped Linux user storage or is unavailable" }
+        return ProjectWorkspace(projectId, directory.absolutePath, guestPath)
+    }
+
     fun workspace(projectId: String): ProjectWorkspace = loadProject(projectId).workspace
 
     fun project(projectId: String): ProjectSnapshot = loadProject(projectId)
@@ -345,7 +388,6 @@ internal class ProjectRepository(
         val record = decodeProject(File(dir, PROJECT_MANIFEST_FILE).readText(Charsets.UTF_8))
         require(record.id == projectId) { "project manifest id does not match directory" }
         val workspace = File(dir, PROJECT_WORKSPACE_DIR)
-        require(workspace.isDirectory || workspace.mkdirs()) { "project workspace is unavailable" }
         require(
             !Files.isSymbolicLink(workspace.toPath()) &&
                 workspace.canonicalFile.parentFile == canonicalDir,
@@ -354,7 +396,8 @@ internal class ProjectRepository(
         }
         return ProjectSnapshot(
             record = record,
-            workspace = ProjectWorkspace(projectId, workspace.canonicalPath),
+            workspace = workspaceForDirectory(projectId, record.activeDirectory, requireExisting = false).copy(additionalDirectories = record.additionalDirectories),
+            sourceWorkspace = ProjectWorkspace(projectId, workspace.canonicalPath),
             sessions = readSessions(File(dir, PROJECT_SESSION_INDEX_FILE)),
         )
     }
@@ -427,6 +470,9 @@ internal class ProjectRepository(
         .put("version", 1)
         .put("id", value.id)
         .put("name", value.name)
+        .put("directory", value.directory)
+        .put("activeDirectory", value.activeDirectory)
+        .put("additionalDirectories", JSONArray(value.additionalDirectories))
         .put("storageKind", value.storageKind.wireName)
         .put("createdAtEpochMillis", value.createdAtEpochMillis)
         .put("updatedAtEpochMillis", value.updatedAtEpochMillis)
@@ -445,6 +491,9 @@ internal class ProjectRepository(
         return ProjectRecord(
             id = id,
             name = json.getString("name").also { require(it.isNotBlank()) },
+            directory = json.getString("directory"),
+            activeDirectory = json.getString("activeDirectory"),
+            additionalDirectories = json.getJSONArray("additionalDirectories").stringList(),
             storageKind = ProjectStorageKind.fromWireName(json.getString("storageKind")),
             createdAtEpochMillis = json.getLong("createdAtEpochMillis"),
             updatedAtEpochMillis = json.getLong("updatedAtEpochMillis"),
@@ -473,6 +522,9 @@ internal class ProjectRepository(
                             .put("relativeTime", session.relativeTime)
                             .put("updatedAtEpochMillis", session.updatedAtEpochMillis)
                             .put("mode", session.mode.wireValue)
+                            .put("workspaceDirectory", session.workspaceDirectory)
+                            .put("originalProjectDirectory", session.originalProjectDirectory)
+                            .put("transcriptPath", session.transcriptPath)
                             .put("isArchived", session.isArchived)
                             .put("pendingCatalogConfirmation", session.pendingCatalogConfirmation),
                     )
@@ -490,6 +542,9 @@ internal class ProjectRepository(
                 pendingCatalogConfirmation = row.optBoolean("pendingCatalogConfirmation", false),
                 sessionId = canonicalSessionId(row.getString("sessionId")),
                 title = row.getString("title"),
+                workspaceDirectory = row.optNullableString("workspaceDirectory"),
+                originalProjectDirectory = row.optNullableString("originalProjectDirectory"),
+                transcriptPath = row.optNullableString("transcriptPath"),
                 messageCount = row.getInt("messageCount"),
                 relativeTime = row.getString("relativeTime"),
                 updatedAtEpochMillis = row.getLong("updatedAtEpochMillis"),

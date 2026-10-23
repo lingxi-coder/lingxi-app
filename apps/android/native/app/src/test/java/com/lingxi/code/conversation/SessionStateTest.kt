@@ -74,6 +74,7 @@ class SessionStateTest {
         messageCount = count.toUInt(),
         mode = mode,
         path = "/x/$uuid.jsonl",
+        workspacePath = "/home/lingxi/fixture",
     )
 
     // --- reduceSessionEvent: SessionList ----------------------------------
@@ -95,6 +96,7 @@ class SessionStateTest {
         assertEquals(listOf("u1", "u2"), next.rows.map { it.uuid })
         assertEquals(listOf("重装 LingXi", "客户邮件模板"), next.rows.map { it.title })
         assertEquals(listOf(8, 4), next.rows.map { it.messageCount })
+        assertEquals("/home/lingxi/fixture", next.rows.first().workspaceDirectory)
         // 30 minutes ago → "30 分钟前"; ~2 days ago → "2 天前".
         assertEquals("30 分钟前", next.rows[0].relativeTime)
         assertEquals("2 天前", next.rows[1].relativeTime)

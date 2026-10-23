@@ -1236,6 +1236,8 @@ class ConversationTurnService : Service() {
         internal const val EXTRA_STATUS_TEXT = "conversation_status_text"
         internal const val EXTRA_PROJECT_ID = "conversation_project_id"
         internal const val EXTRA_HOST_PATH = "conversation_host_path"
+        internal const val EXTRA_GUEST_PATH = "conversation_guest_path"
+        internal const val EXTRA_ADDITIONAL_DIRECTORIES = "conversation_additional_directories"
         internal const val EXTRA_SESSION_MODE = "conversation_session_mode"
         internal const val EXTRA_WORKSPACE_KEY = "conversation_workspace_key"
         internal const val EXTRA_LINUX_RUNTIME_MODE = "conversation_linux_runtime_mode"
@@ -1263,6 +1265,8 @@ class ConversationTurnService : Service() {
                     snapshot.recoverySpec?.let { spec ->
                         putExtra(EXTRA_PROJECT_ID, spec.projectId)
                         putExtra(EXTRA_HOST_PATH, spec.hostPath)
+                        putExtra(EXTRA_GUEST_PATH, spec.guestPath)
+                        putExtra(EXTRA_ADDITIONAL_DIRECTORIES, spec.additionalDirectories.toTypedArray())
                         putExtra(EXTRA_SESSION_MODE, spec.sessionMode.wireValue)
                         putExtra(EXTRA_LINUX_RUNTIME_MODE, spec.linuxRuntimeMode.name)
                         putExtra(EXTRA_WORKSPACE_KEY, spec.workspaceKey)
@@ -1298,6 +1302,8 @@ private fun Intent.snapshot(): ConversationBackgroundSnapshot? {
         ConversationRecoverySpec(
             projectId = getStringExtra(ConversationTurnService.EXTRA_PROJECT_ID),
             hostPath = getStringExtra(ConversationTurnService.EXTRA_HOST_PATH),
+            guestPath = getStringExtra(ConversationTurnService.EXTRA_GUEST_PATH),
+            additionalDirectories = getStringArrayExtra(ConversationTurnService.EXTRA_ADDITIONAL_DIRECTORIES)?.toList().orEmpty(),
             sessionMode = sessionMode,
             linuxRuntimeMode = runtimeMode,
             workspaceKey = getStringExtra(ConversationTurnService.EXTRA_WORKSPACE_KEY),

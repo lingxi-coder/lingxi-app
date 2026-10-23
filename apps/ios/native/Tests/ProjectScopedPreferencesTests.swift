@@ -7,7 +7,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
             ConversationModeRestorePolicy.sessionID(
                 mode: .chat,
                 scoped: nil,
-                legacyScoped: "legacy-code",
+
                 projectLastActive: "project-code"
             ),
             ""
@@ -16,23 +16,32 @@ final class ProjectScopedPreferencesTests: XCTestCase {
             ConversationModeRestorePolicy.sessionID(
                 mode: .chat,
                 scoped: "chat-session",
-                legacyScoped: "legacy-code",
+
                 projectLastActive: "project-code"
             ),
             "chat-session"
         )
     }
 
-    func testCodeRestoreKeepsLegacyFallback() {
+    func testCodeRestoreUsesCurrentProjectSession() {
         XCTAssertEqual(
             ConversationModeRestorePolicy.sessionID(
                 mode: .code,
                 scoped: nil,
-                legacyScoped: "legacy-code",
+
                 projectLastActive: "project-code"
             ),
-            "legacy-code"
+            "project-code"
         )
+    }
+
+    func testAutomaticResumeDoesNotReplaceAnEmptyDraftInAnotherDirectory() {
+        let summary = ProjectSessionSummary(sessionId: "session-a", title: "A", messageCount: 1, relativeTime: "Now", updatedAt: Date(),
+            workspaceDirectory: "/home/lingxi/a")
+        XCTAssertEqual(ConversationModeRestorePolicy.sessionID(mode: .code, scoped: "session-a", projectLastActive: "session-a",
+            activeDirectory: "/home/lingxi/b", sessions: [summary]), "")
+        XCTAssertEqual(ConversationModeRestorePolicy.sessionID(mode: .code, scoped: "session-a", projectLastActive: "session-a",
+            activeDirectory: "/home/lingxi/a", sessions: [summary]), "session-a")
     }
 
     func testDraftsAndSessionsAreIsolatedByProject() {

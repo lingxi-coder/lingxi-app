@@ -23,6 +23,7 @@ import harness_runtimeFFI
 enum ConversationSourceFactory {
     struct LaunchOptions {
         var projectCwd: String? = nil
+        var additionalWorkspaceDirectories: [String] = []
         var sessionMode: SessionMode = .code
         var providerConfigured: Bool = false
         var providerProfilesJson: String? = nil
@@ -34,6 +35,7 @@ enum ConversationSourceFactory {
 
     static func make(
         projectCwd: String? = nil,
+        additionalWorkspaceDirectories: [String] = [],
         sessionMode: SessionMode = .code,
         providerConfigured: Bool = false,
         providerProfilesJson: String? = nil,
@@ -44,6 +46,7 @@ enum ConversationSourceFactory {
     ) -> any ConversationSource {
         make(options: LaunchOptions(
             projectCwd: projectCwd,
+            additionalWorkspaceDirectories: additionalWorkspaceDirectories,
             sessionMode: sessionMode,
             providerConfigured: providerConfigured,
             providerProfilesJson: providerProfilesJson,
@@ -60,9 +63,16 @@ enum ConversationSourceFactory {
                 if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SIDE_CHAT"] == "1" {
                     // Exercise the real child-session bindings without credentials or user data.
                     let root = FileManager.default.temporaryDirectory.appendingPathComponent("side-chat-ui-\(UUID().uuidString)")
+                    let managedRoot = root.appendingPathComponent("runtime", isDirectory: true).path
+                    let paths = MobileUserStorage.directories(managedRoot: managedRoot)
+                    let runtime = TerminalRuntimeConfig(
+                        mode: .mobileLinux, managedRoot: managedRoot, workspaceHostPath: paths.projects,
+                        stableWorkspaceId: "projects", abi: "arm64", rootfsVersion: "ui-test",
+                        archiveSha256: nil, authorizationFile: nil)
                     let source = EngineConversationSource(config: EngineConfig(
                         apiBase: "https://invalid.example", apiKey: "", model: "", appSandboxRoot: root.path,
-                        projectCwd: nil, sessionMode: options.sessionMode, visionDelegationEnabled: false))
+                        projectCwd: nil, sessionMode: options.sessionMode, visionDelegationEnabled: false,
+                        mobileLinux: runtime))
                     source.model.providerConfigured = false
                     return source
                 }
@@ -89,7 +99,7 @@ enum ConversationSourceFactory {
                 // configured provider first, then the legacy Keychain model for
                 // installs that have not migrated their provider configuration.
                 let storedModel = options.defaultModelID ?? Keychain.get(.model) ?? ""
-                let config = EngineConfig.fromEnvironment(
+                var config = EngineConfig.fromEnvironment(
                     appSandboxRoot: root,
                     model: storedModel,
                     projectCwd: options.projectCwd,
@@ -98,6 +108,7 @@ enum ConversationSourceFactory {
                     providerRoutingJson: options.providerRoutingJson,
                     visionDelegationEnabled: options.visionDelegationEnabled,
                     mobileLinux: options.mobileLinux)
+                config.additionalWorkspaceDirectories = options.additionalWorkspaceDirectories
                 let source = EngineConversationSource(config: config)
                 source.model.providerConfigured = options.providerConfigured
                 return source

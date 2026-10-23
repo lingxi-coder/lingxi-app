@@ -127,6 +127,8 @@ data class SessionRow(
     val relativeTime: String,
     val mode: SessionMode = SessionMode.Code,
     val modifiedAtEpochSeconds: Long? = null,
+    val transcriptPath: String? = null,
+    val workspaceDirectory: String? = null,
 )
 
 /**

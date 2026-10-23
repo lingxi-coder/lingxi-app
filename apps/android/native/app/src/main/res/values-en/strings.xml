@@ -1999,4 +1999,8 @@
     <string name="drawer_open_sidebar_a11y">Open sidebar</string>
     <string name="chat_message_copy">Copy</string>
     <string name="chat_message_copied">Copied</string>
+    <string name="workspace_add_directory">Add directory</string>
+    <string name="workspace_linked_directories">Project directories</string>
+    <string name="workspace_confirm_add">Add</string>
+    <string name="workspace_session_changed">The session changed. Reopen the directory picker.</string>
 </resources>

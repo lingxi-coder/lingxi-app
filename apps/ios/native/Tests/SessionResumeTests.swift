@@ -1181,11 +1181,13 @@ visionDelegationEnabled: true)
                     modifiedRfc3339: "2026-08-02T08:00:00Z",
                     messageCount: 3,
                     mode: .code,
-                    path: "/tmp/retained.jsonl"
+                    path: "/tmp/retained.jsonl",
+                    workspacePath: "/home/lingxi/fixture"
                 ),
             ]))
 
             XCTAssertEqual(sessionIDsObservedWhenLoaded, [uuid()])
+            XCTAssertEqual(source.model.engineSessions.first?.workspaceDirectory, "/home/lingxi/fixture")
         }
 
         /// SessionResumed with a 2-message transcript (a user text turn + an

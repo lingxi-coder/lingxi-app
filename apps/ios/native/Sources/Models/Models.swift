@@ -563,6 +563,9 @@ struct EngineSession: Identifiable, Equatable {
     /// A `SessionRef` for ChatView's title bar (so a resumed session shows its
     /// real title even though the transcript itself is an engine follow-up).
     var ref: SessionRef { SessionRef(id: id, title: title) }
+    var transcriptPath: String? = nil
+    var workspaceDirectory: String? = nil
+
 }
 
 /// Formats an RFC 3339 timestamp into a short, relative Chinese "time ago"

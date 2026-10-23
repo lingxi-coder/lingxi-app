@@ -116,6 +116,7 @@ internal class MobileCronEngineGateway(context: Context) : CronEngineGateway {
     ): T {
         val store = buildAndroidCronStore(
             appFilesRoot = appContext.filesDir.absolutePath,
+            managedRoot = com.lingxi.code.settings.LinuxRuntimeBridge.managedRoot(appContext),
             projectCwd = scope.projectId?.let { scope.workspacePath },
         )
         return try {

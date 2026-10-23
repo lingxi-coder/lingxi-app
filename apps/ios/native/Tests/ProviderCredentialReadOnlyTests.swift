@@ -67,7 +67,7 @@ final class ProviderCredentialReadOnlyTests: XCTestCase {
             appSandboxRoot: sandbox.path, listener: listener,
             audio: IOSAudioServiceCallbackAdapter.shared, camera: CameraImpl(), share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),
-            permissions: CredentialReadOnlyPermissionSink(), mobileLinux: nil,
+            permissions: CredentialReadOnlyPermissionSink(), mobileLinux: try mobileWorkspaceTestConfiguration(sandboxRoot: sandbox),
             secureStorage: SecureStorageImpl(backend: backend), deviceControl: nil
         )
         repository.configure(submitCommand: { command in

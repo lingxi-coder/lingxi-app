@@ -102,35 +102,48 @@ export class LocalAppHost {
     }
     if (action === 'logs') return { action, id, logs: this.runtime.logs(id) };
     if (action === 'open' || action === 'start') { await this.open(id, false, false, signal); return { action, id, phase: this.runtime.status(await this.store.get(id)).phase }; }
-    if (action === 'stop') { this.cancelOpening(id); await this.runtime.stop(id); this.windows.get(id)?.close(); }
-    else if (action === 'restart' || action === 'repair') {
-      this.cancelOpening(id);
+    if (action === 'stop') {
+      const opening = this.cancelOpening(id);
       await this.runtime.stop(id);
-      await this.opening.get(id)?.promise.catch(() => undefined);
+      await opening;
+      this.windows.get(id)?.close();
+    } else if (action === 'restart' || action === 'repair') {
+      const opening = this.cancelOpening(id);
+      await this.runtime.stop(id);
+      await opening;
       await this.open(id, action === 'repair', true);
     } else if (action === 'background') {
       if (typeof input.enabled !== 'boolean') throw new Error('Invalid background preference');
       await this.runtime.exclusive(id, async () => { const row = await this.store.get(id); row.background = input.enabled as boolean; await this.store.save(row); });
-      if (!input.enabled && !this.windows.has(id)) await this.runtime.stop(id);
+      if (!input.enabled && !this.windows.has(id) && !this.opening.has(id)) await this.runtime.stop(id);
     } else if (action === 'revoke') {
-      this.cancelOpening(id);
+      const opening = this.cancelOpening(id);
       this.launchGrants.delete(id);
-      await this.runtime.stop(id); this.windows.get(id)?.close();
+      await this.runtime.stop(id);
+      await opening;
+      this.windows.get(id)?.close();
       await this.runtime.exclusive(id, async () => { const row = await this.store.get(id); row.grants = []; await this.store.save(row); await fs.rm(join(this.store.directory(id), 'file-grants.json'), { force: true }); });
     } else if (action === 'remove') {
       const parent = this.options.mainWindow();
       const options = { type: 'question' as const, message: `Delete ${(await this.store.get(id)).name}?`, detail: 'This removes the application and its saved data.', buttons: ['Cancel', 'Delete'], defaultId: 0, cancelId: 0 };
       const choice = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
       if (choice.response !== 1) return;
-      this.cancelOpening(id);
+      const opening = this.cancelOpening(id);
       this.windows.get(id)?.destroy();
       await this.runtime.remove(id);
+      await opening;
       await session.fromPartition(`persist:local-app-${id}`).clearStorageData();
     } else if (action === 'edit') await this.options.edit(await this.store.get(id));
     else throw new Error('Unknown Local App action');
     this.changed(); return { action, id };
   }
-  private cancelOpening(id: string): void { this.opening.get(id)?.controller.abort(); }
+  private cancelOpening(id: string): Promise<void> {
+    const opening = this.opening.get(id);
+    opening?.controller.abort();
+    // Callers must also wait for open() to release its promise and cleanup, so
+    // the next Open cannot join an operation that has already been canceled.
+    return opening?.promise.then(() => undefined, () => undefined) ?? Promise.resolve();
+  }
   private async authorize(id: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     const row = await this.store.get(id);
@@ -161,18 +174,18 @@ export class LocalAppHost {
     const previousInvocation = this.runtime.invocationId(id);
     const operation = { controller, promise: this.openOnce(id, controller.signal, repair, restart) };
     this.opening.set(id, operation);
-    try { await operation.promise; }
-    catch (error) {
+    operation.promise = operation.promise.catch(async error => {
       if (!this.shuttingDown && ['running', 'starting', 'installing', 'building'].includes(this.runtime.phase(id))) {
         const ownsNewRun = this.runtime.invocationId(id) !== previousInvocation;
         const orphanedForeground = !this.windows.has(id) && !(await this.store.get(id)).background;
         if (ownsNewRun || orphanedForeground) await this.runtime.stop(id);
       }
       throw error;
-    } finally {
+    }).finally(() => {
       signal?.removeEventListener('abort', cancel);
       if (this.opening.get(id) === operation) this.opening.delete(id);
-    }
+    });
+    await operation.promise;
   }
   private async openOnce(id: string, signal: AbortSignal, repair: boolean, restart: boolean): Promise<void> {
     const row = await this.store.get(id);
@@ -183,14 +196,21 @@ export class LocalAppHost {
     if (this.runtime.revision(id) !== row.revision) await this.runtime.stop(id);
     signal.throwIfAborted();
     await this.runtime.start(id, repair, signal);
-    signal.throwIfAborted();
+    const invocation = this.runtime.invocationId(id);
+    const assertRunning = () => {
+      signal.throwIfAborted();
+      if (this.runtime.invocationId(id) !== invocation) throw new Error('Application changed while opening');
+      const current = this.runtime.status(row);
+      if (current.phase !== 'running') throw new Error(current.error ?? 'Application stopped while opening');
+    };
+    assertRunning();
     this.launchGrants.set(id, (await this.store.get(id)).grants.filter(cap => this.runtime.manifest(id)?.capabilities?.includes(cap)));
     await this.configureSession(id);
     await this.clearCodeCache(id);
-    signal.throwIfAborted();
+    assertRunning();
     const entryUrl = appEntryUrl(id, this.runtime.manifest(id)!.entry);
     if (existing && !existing.isDestroyed()) {
-      await existing.loadURL(entryUrl); existing.show(); existing.focus(); return;
+      await existing.loadURL(entryUrl); assertRunning(); existing.show(); existing.focus(); return;
     }
     const window = new BrowserWindow({ width: 1080, height: 760, minWidth: 360, minHeight: 320, title: row.name, show: false,
       webPreferences: { partition: `persist:local-app-${id}`, preload: this.options.preload, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, navigateOnDragDrop: false } });
@@ -203,7 +223,7 @@ export class LocalAppHost {
       if (this.windows.get(id) === window) this.windows.delete(id);
       if (!this.shuttingDown) void this.store.get(id).then(row => !row.background && !this.windows.has(id) && !this.opening.has(id) ? this.runtime.stop(id) : undefined).catch(() => undefined);
     });
-    try { await window.loadURL(entryUrl); window.show(); }
+    try { await window.loadURL(entryUrl); assertRunning(); window.show(); }
     catch (error) { window.destroy(); await this.runtime.stop(id); throw error; }
   }
   private async external(raw: string): Promise<void> { try { const url = new URL(raw); if (['https:', 'http:', 'mailto:'].includes(url.protocol)) await shell.openExternal(url.toString()); } catch { /* invalid URL */ } }

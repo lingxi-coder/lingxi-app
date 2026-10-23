@@ -73,6 +73,77 @@ async function main() {
     if (cancel) await host.open(first.id);
     window = guest()!;
   }
+  const holdCodeCache = (id: string) => {
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    (host as any).clearCodeCache = async (appId: string) => {
+      if (appId === id && first) { first = false; enter(); await gate; }
+      await originalClear(appId);
+    };
+    return { entered, release, restore: () => { release(); (host as any).clearCodeCache = originalClear; } };
+  };
+  // A completed Stop/Revoke must release the canceled opening before a caller
+  // can immediately open again. Rejoining its aborted promise loses the reopen.
+  for (const action of ['stop', 'revoke']) {
+    await host.request({ action: 'background', id: first.id, enabled: false });
+    window.close(); await until(async () => host.runtime.phase(first.id) === 'stopped');
+    const cache = holdCodeCache(first.id);
+    try {
+      const canceled = assert.rejects(host.open(first.id), /abort|cancel/i);
+      await cache.entered;
+      const reopened = host.request({ action, id: first.id }).then(() => host.open(first.id)).then(() => ({ error: undefined }), error => ({ error }));
+      await until(async () => host.runtime.phase(first.id) === 'stopped');
+      await delay(0); cache.release();
+      await canceled;
+      const result = await reopened;
+      assert.equal(result.error, undefined, `${action} must settle the old opening before an immediate reopen`);
+      assert.equal(host.runtime.phase(first.id), 'running');
+      window = guest()!;
+      assert.match(await window.webContents.executeJavaScript(`document.querySelector('h1').textContent`), /v2/);
+    } finally { cache.restore(); }
+  }
+  // Cancellation can already be cleaning up when Stop arrives. Its completion
+  // must include that cleanup, not only the rejected window-loading promise.
+  window.close(); await until(async () => host.runtime.phase(first.id) === 'stopped');
+  const cleanupCache = holdCodeCache(first.id);
+  const originalStop = host.runtime.stop.bind(host.runtime);
+  let enterCleanup!: () => void, finishCleanup!: () => void;
+  const cleanupStarted = new Promise<void>(resolve => { enterCleanup = resolve; });
+  const cleanupGate = new Promise<void>(resolve => { finishCleanup = resolve; });
+  let holdCleanup = true;
+  host.runtime.stop = async id => {
+    if (id === first.id && holdCleanup) { holdCleanup = false; enterCleanup(); await cleanupGate; }
+    await originalStop(id);
+  };
+  try {
+    const abort = new AbortController();
+    const canceled = assert.rejects(host.open(first.id, false, false, abort.signal), /abort|cancel/i);
+    await cleanupCache.entered;
+    abort.abort(); cleanupCache.release(); await cleanupStarted;
+    const reopened = host.request({ action: 'stop', id: first.id }).then(() => host.open(first.id)).then(() => ({ error: undefined }), error => ({ error }));
+    await until(async () => host.runtime.phase(first.id) === 'stopped');
+    await delay(0); finishCleanup(); await canceled;
+    assert.equal((await reopened).error, undefined, 'Stop must drain canceled opening cleanup before the next Open');
+    assert.equal(host.runtime.phase(first.id), 'running');
+    window = guest()!;
+  } finally { finishCleanup(); cleanupCache.restore(); host.runtime.stop = originalStop; }
+  // Disabling background work while a foreground reopen is loading must not
+  // stop the runtime that will serve its new independent window.
+  await host.request({ action: 'background', id: first.id, enabled: true });
+  window.close(); await until(async () => !guest());
+  const foregroundCache = holdCodeCache(first.id);
+  try {
+    const reopened = host.open(first.id);
+    await foregroundCache.entered;
+    await host.request({ action: 'background', id: first.id, enabled: false });
+    foregroundCache.release(); await reopened;
+    assert.equal(host.runtime.phase(first.id), 'running', 'a pending foreground reopen is not background work');
+    window = guest()!;
+    assert.match(await window.webContents.executeJavaScript(`document.querySelector('h1').textContent`), /v2/);
+    assert.equal(await window.webContents.executeJavaScript(`localStorage.count`), '7');
+  } finally { foregroundCache.restore(); }
   await host.request({ action: 'background', id: first.id, enabled: false });
   assert.match(await window.webContents.executeJavaScript(`document.querySelector('h1').textContent`), /v2/);
   const evidence = process.env.LINGXI_LOCAL_APP_EVIDENCE;
@@ -114,6 +185,17 @@ async function main() {
   assert.equal(await serverWindow.webContents.executeJavaScript(`new Promise(async (resolve,reject)=>{const socket=new WebSocket(await window.localApp.serviceSocketUrl('api','/live')); let message;socket.onmessage=e=>{message=e.data;socket.close()};socket.onclose=()=>resolve(message);socket.onerror=reject;})`), 'socket ready');
   await fetch(host.runtime.service(backend.id, 'api')!.url + '/exit');
   await until(async () => host.runtime.phase(backend.id) === 'failed');
+  const failedOpenCache = holdCodeCache(backend.id);
+  try {
+    const reopening = host.open(backend.id).then(() => undefined, error => error);
+    await failedOpenCache.entered;
+    await fetch(host.runtime.service(backend.id, 'api')!.url + '/exit');
+    await until(async () => host.runtime.phase(backend.id) === 'failed');
+    failedOpenCache.release();
+    const error = await reopening;
+    assert.ok(error, 'a backend failure while preparing the window must reject the reopen');
+    assert.match(error.message, /api exited \(7\)/);
+  } finally { failedOpenCache.restore(); }
   await host.open(backend.id);
   assert.equal(host.runtime.phase(backend.id), 'running');
   const backendUrl = host.runtime.service(backend.id, 'api')!.url;

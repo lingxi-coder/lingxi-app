@@ -42,6 +42,20 @@ final class MockConversationSource: ConversationSource {
             askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource(sessionMode: sessionMode)
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] == "1" {
+                var prompt = Message(
+                    role: .user,
+                    text: "# Inline visualization\n\n" + String(repeating: "A compact interactive animation with a penguin riding a bicycle. ", count: 16)
+                )
+                prompt.sentAtMs = 1_792_706_220_000
+                var interrupted = Message(role: .user, text: "[Request interrupted by user]")
+                interrupted.sentAtMs = 1_792_706_340_000
+                source.model.messages = [prompt, interrupted]
+                source.model.items = [.message(prompt), .message(interrupted)]
+                source.model.isNew = false
+                source.model.activeSessionId = "ui-compact-transcript"
+                return source
+            }
             source.cannedReplyDelay = holdTurn ? 30 : 1.1
             let terminalToolStatus: ConversationToolStatus = cancelledRun ? .cancelled : .completed
             let terminalShellStatus: ConversationShellStatus = cancelledRun ? .cancelled : .completed

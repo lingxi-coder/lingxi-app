@@ -16,6 +16,39 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
+    func testCompactTranscriptSpacingAndIconOnlyCopy() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] = "1"
+        for theme in ["light", "dark"] {
+            app.launchArguments = ["-AppleLanguages", "(en)", "-theme", theme]
+            app.launch()
+            let copies = app.buttons.matching(identifier: "conversation.message.user.copy")
+            let copy = copies.element(boundBy: 1)
+            XCTAssertTrue(copy.waitForExistence(timeout: 10), app.debugDescription)
+            let interrupted = app.staticTexts["[Request interrupted by user]"]
+            // Text is inset 12pt; the accessible copy target extends 8pt below
+            // the compact footer so its visual gap stays distinct from hit padding.
+            let footerBottom = copies.element(boundBy: 0).frame.maxY - 8
+            XCTAssertEqual(interrupted.frame.minY - 12 - footerBottom, 16, accuracy: 1)
+            XCTAssertTrue(copy.isHittable)
+            XCTAssertFalse(copy.staticTexts["Copy"].exists)
+            XCTAssertEqual(copy.frame.height, 44, accuracy: 1)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Compact-transcript-\(theme)"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            copy.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).tap()
+            // Inspect immediately: the native success feedback lasts 1.5s.
+            XCTAssertEqual(copy.label, "Copied")
+            XCTAssertFalse(copy.staticTexts["Copied"].exists)
+            let feedback = XCTAttachment(screenshot: app.screenshot())
+            feedback.name = "Compact-transcript-copied-\(theme)"
+            feedback.lifetime = .keepAlways
+            add(feedback)
+            app.terminate()
+        }
+    }
+
     func testSideChatOpensWithComposerAndPreservesDrafts() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_SIDE_CHAT"] = "1"

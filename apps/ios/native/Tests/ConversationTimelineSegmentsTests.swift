@@ -8,18 +8,18 @@ import SwiftUI
 /// `ForEach` id, SwiftUI tears the row down and rebuilds it, which moves the
 /// scroll position under the reader.
 final class ConversationTimelineSegmentsTests: XCTestCase {
-    func testSpacingMatchesDesktopAndThinkingVisibilityDoesNotChangeLayout() {
+    func testCompactSpacingAndThinkingVisibilityDoesNotChangeLayout() {
         let user = Message(role: .user, text: "Question")
         let assistant = Message(role: .ai, text: "Reply")
         let groups = [user, assistant, Message(role: .ai, text: "Follow-up")].enumerated().map { index, message in
             ConversationTimelineGroup(id: "message-\(index)", runID: nil, rows: [.message(message)], status: nil)
         }
         let hidden = ConversationTimelineView.projectedSegmentSpacings(groups: groups, showThinking: false)
-        XCTAssertEqual(hidden, [0, 32, 24, 12])
+        XCTAssertEqual(hidden, [0, 16, 12, 8])
         XCTAssertEqual(hidden, ConversationTimelineView.projectedSegmentSpacings(groups: groups, streaming: true))
         let withTools = groups + [toolGroup([trace("t1")])]
-        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: withTools), [0, 32, 24, 12, 12])
-        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0, 32])
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: withTools), [0, 16, 12, 8, 8])
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentSpacings(groups: [groups[0]]), [0, 16])
     }
 
     @MainActor

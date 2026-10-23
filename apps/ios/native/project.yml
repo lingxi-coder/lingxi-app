@@ -254,7 +254,19 @@ targets:
         script: |
           set -euo pipefail
           export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
-          FIXTURE_PYTHON="${LINGXI_PYTHON3:-python3}"
+          FIXTURE_PYTHON="${LINGXI_PYTHON3:-}"
+          if [[ -z "${FIXTURE_PYTHON}" ]]; then
+            for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+              if command -v "${candidate}" >/dev/null && "${candidate}" -c 'import tomllib' >/dev/null 2>&1; then
+                FIXTURE_PYTHON="${candidate}"
+                break
+              fi
+            done
+          fi
+          if [[ -z "${FIXTURE_PYTHON}" ]]; then
+            echo "Harness fixture staging requires Python 3.11+; install it or set LINGXI_PYTHON3" >&2
+            exit 1
+          fi
           "${FIXTURE_PYTHON}" "${SRCROOT}/scripts/stage-protocol-fixtures.py" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessProtocolFixtures"
     dependencies:
       - target: LingxiCode

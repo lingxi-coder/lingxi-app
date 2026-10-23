@@ -1144,15 +1144,13 @@ private struct UserMessageActions: View {
                 copied = true
                 copyRevision += 1
             } label: {
-                HStack(spacing: 4) {
-                    LXIcon(name: copied ? .check : .copy, size: 13, color: t.text3)
-                    Text(String(localized: copied ? "chat_message_copied" : "chat_message_copy"))
-                }
-                .frame(minHeight: 44)
-                .contentShape(.rect)
+                LXIcon(name: copied ? .check : .copy, size: 13, color: t.text3)
+                    .frame(width: 28, height: 28)
+                    // Keep a 44pt hit region without a tall metadata row.
+                    .contentShape(.rect.inset(by: -8))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("chat_message_copy")
+            .accessibilityLabel(Text(String(localized: copied ? "chat_message_copied" : "chat_message_copy")))
             .accessibilityIdentifier("conversation.message.user.copy")
         }
         .font(.system(size: 11))

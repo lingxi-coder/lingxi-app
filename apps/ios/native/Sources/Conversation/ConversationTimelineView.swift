@@ -36,11 +36,11 @@ struct ConversationTimelineView: View {
         .scrollTargetLayout()
     }
 
-    /// Match desktop grouping without depending on live activity visibility.
+    /// Keep related rows close on iPhone without depending on activity visibility.
     private static func spacing(before: Segment, current: Segment) -> CGFloat {
-        if before.isUser || current.isUser { return 32 }
-        if before.isActivity || current.isActivity { return 12 }
-        return 24
+        if before.isUser || current.isUser { return 16 }
+        if before.isActivity || current.isActivity { return 8 }
+        return 12
     }
 
     static func projectedSegmentSpacings(

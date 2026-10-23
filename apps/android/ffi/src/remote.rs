@@ -90,12 +90,12 @@ pub enum RemoteFfiError {
     },
     /// The desktop (or the link) failed the request; `code` is the protocol's error code
     /// (`not_approved`, `not_pending`, `forbidden`, `closed`, `timeout`, ...).
-    #[error("remote error {code}: {message}")]
+    #[error("remote error {code}: {detail}")]
     Rpc {
         /// Protocol error code.
         code: String,
         /// A message safe to show.
-        message: String,
+        detail: String,
     },
     /// The Firebase ID token could not be obtained.
     #[error("token unavailable: {message}")]
@@ -120,7 +120,7 @@ pub enum RemoteFfiError {
 fn rpc_error(error: RpcError) -> RemoteFfiError {
     RemoteFfiError::Rpc {
         code: error.code.as_str().to_owned(),
-        message: display_text(&error.message, 200),
+        detail: display_text(&error.message, 200),
     }
 }
 

@@ -46,3 +46,25 @@ test('surface lifecycle serializes old-session detach before new attach and reus
     { sessionId: 'session-new', command: { type: 'ui_detach', client_id: clientId } },
   ]);
 });
+
+test('queued surface commands skip a disposed owner at dispatch time and permit an explicitly reopened owner', async () => {
+  const removed = new Set<string>();
+  const lifecycle = new UiSurfaceLifecycleQueue(sessionId => !removed.has(sessionId));
+  const firstAttach = deferred(), firstStarted = deferred();
+  const calls: Array<{ sessionId: string; type: string }> = [];
+  const host = { command: async (sessionId: string, command: AllowedClientCommand) => {
+    calls.push({ sessionId, type: command.type });
+    if (calls.length === 1) { firstStarted.resolve(); await firstAttach.promise; }
+  } };
+  const first = lifecycle.attach(host, 'A', 'window');
+  const detach = lifecycle.detach(host, 'A', 'window');
+  const obsoleteAttach = lifecycle.attach(host, 'A', 'window');
+  const next = lifecycle.attach(host, 'B', 'window');
+  await firstStarted.promise;
+  removed.add('A'); firstAttach.resolve();
+  await Promise.all([first, detach, obsoleteAttach, next]);
+  assert.deepEqual(calls, [{ sessionId: 'A', type: 'ui_attach' }, { sessionId: 'B', type: 'ui_attach' }]);
+  removed.delete('A');
+  await lifecycle.attach(host, 'A', 'window');
+  assert.deepEqual(calls.at(-1), { sessionId: 'A', type: 'ui_attach' });
+});

@@ -9,6 +9,8 @@ type UiSurfaceCommandHost = {
 export class UiSurfaceLifecycleQueue {
   private tail: Promise<void> = Promise.resolve();
 
+  constructor(private readonly canDispatch: (sessionId: string) => boolean = () => true) {}
+
   attach(host: UiSurfaceCommandHost, sessionId: string, clientId: string): Promise<void> {
     return this.enqueue(host, sessionId, { type: 'ui_attach', surface: 'desktop', client_id: clientId });
   }
@@ -22,7 +24,11 @@ export class UiSurfaceLifecycleQueue {
     sessionId: string,
     command: AllowedClientCommand,
   ): Promise<void> {
-    const operation = this.tail.catch(() => undefined).then(() => host.command(sessionId, command));
+    // A disposal can arrive while another surface operation is in flight.
+    // Connection teardown already detaches its surfaces on the server.
+    const operation = this.tail.catch(() => undefined).then(() => (
+      this.canDispatch(sessionId) ? host.command(sessionId, command) : undefined
+    ));
     this.tail = operation.catch(() => undefined);
     return operation;
   }

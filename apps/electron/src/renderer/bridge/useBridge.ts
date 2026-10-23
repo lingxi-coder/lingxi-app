@@ -189,11 +189,16 @@ function getHost(): LingxiApi | undefined {
 export function useBridge(): UseBridge {
   const hostRef = useRef(getHost());
   const host = hostRef.current;
+  const removedRuntimeIds = useRef(new Set<string>());
   const uiSurfaceClientId = useRef<string | null>(null);
   if (uiSurfaceClientId.current === null) uiSurfaceClientId.current = createUiSurfaceClientId();
   const stableUiSurfaceClientId = uiSurfaceClientId.current;
   const uiSurfaceLifecycle = useRef<UiSurfaceLifecycleQueue | null>(null);
-  if (uiSurfaceLifecycle.current === null) uiSurfaceLifecycle.current = new UiSurfaceLifecycleQueue();
+  if (uiSurfaceLifecycle.current === null) {
+    uiSurfaceLifecycle.current = new UiSurfaceLifecycleQueue((sessionId) => (
+      !removedRuntimeIds.current.has(sessionId) && runtimeStatesRef.current.has(sessionId)
+    ));
+  }
   const hosted = host !== undefined;
   const [loading, setLoading] = useState(hosted);
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -241,7 +246,6 @@ export function useBridge(): UseBridge {
   const slashCommandTerminals = useRef(new SlashCommandTerminalRegistry());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
-  const removedRuntimeIds = useRef(new Set<string>());
   const bootstrapRef = useRef<BootstrapState | null>(null);
   const pendingSessionRef = useRef<SessionRef | null>(null);
   const sessionLoadingRef = useRef(false);

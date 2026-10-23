@@ -16,6 +16,7 @@ let heldBootstrap: ((value: unknown) => void) | undefined;
 let holdBootstrap = true;
 let holdCommands = false;
 const pendingCommands: Array<(error: Error) => void> = [];
+let finishOldAttach: (() => void) | undefined;
 const commands: Array<{ sessionId: string; type: string }> = [];
 let currentFailure: string | undefined;
 (window as any).lingxi = {
@@ -26,6 +27,9 @@ let currentFailure: string | undefined;
   openSession: async (_path: string, sessionId: string) => { state = snapshot(sessionId, state.revision + 1); return state; },
   command: async (sessionId: string, command: { type: string }) => {
     commands.push({ sessionId, type: command.type });
+    if (sessionId === 'alpha' && command.type === 'ui_attach') {
+      return new Promise<void>(resolve => { finishOldAttach = resolve; });
+    }
     if (holdCommands && ['list_models', 'task_list'].includes(command.type)) {
       return new Promise<void>((_resolve, reject) => { pendingCommands.push(reject); });
     }
@@ -48,7 +52,7 @@ const connection = (sessionId: string, status: string, reason?: string) => onSta
     connection('retired-background', 'disconnected', 'session runtime disposed');
     heldBootstrap!(state);
     holdBootstrap = false;
-    await wait(() => bridge?.connected && commands.some(c => c.type === 'task_list'));
+    await wait(() => bridge?.connected && commands.some(c => c.type === 'task_list') && !!finishOldAttach);
     check(bridge.activeSession?.sessionId === 'alpha', 'Background disposal discarded the only initial snapshot');
     connection('alpha', 'connecting');
     await wait(() => !bridge.connected);
@@ -57,8 +61,10 @@ const connection = (sessionId: string, status: string, reason?: string) => onSta
     connection('alpha', 'connected');
     await wait(() => pendingCommands.length === 2 && !!heldBootstrap);
     const staleSnapshot = state;
+    const disposalCommandIndex = commands.length;
     connection('alpha', 'disconnected', 'session runtime disposed');
     await delay();
+    check(!commands.slice(disposalCommandIndex).some(c => c.sessionId === 'alpha'), 'Disposal dispatched a command to the removed owner');
     check(!bridge.activeSession, 'Disposed owner retained its active session');
     check(!bridge.bootstrap?.settings.activeSession, 'Disposed owner retained its persisted session');
     check(bridge.connection.status === 'idle', 'Disposed owner retained the bootstrap connected fallback');
@@ -73,6 +79,9 @@ const connection = (sessionId: string, status: string, reason?: string) => onSta
 
     await bridge.openSession(projectPath, 'beta');
     await wait(() => bridge.activeSession?.sessionId === 'beta' && bridge.connected);
+    finishOldAttach!();
+    await delay(); await delay();
+    check(!commands.slice(disposalCommandIndex).some(c => c.sessionId === 'alpha'), 'A queued command revived an owner after a new bootstrap');
     connection('alpha', 'disconnected', 'session runtime disposed');
     await delay();
     check(bridge.activeSession?.sessionId === 'beta' && bridge.connected, 'Background disposal cleared the current owner');

@@ -136,6 +136,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   user_transcript_row_identity: 'exposed',
   assistant_transcript_row_uuids: 'exposed',
   system_notice: 'exposed',
+  session_storage_state: 'exposed',
   ui_log: 'exposed',
   ui_toast: 'exposed',
   ui_status: 'exposed',

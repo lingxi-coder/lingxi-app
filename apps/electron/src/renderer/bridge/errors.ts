@@ -5,6 +5,12 @@ export interface ActionableError {
 
 export function classifyDesktopError(raw: string): ActionableError {
   const message = raw.trim() || 'Unknown desktop error';
+  if (/ENOSPC|No space left on device|os error 28|disk full|disk space is insufficient/i.test(message)) {
+    return {
+      title: '磁盘空间不足，任务已暂停',
+      detail: '释放磁盘空间后，点击“重试并继续”恢复当前会话。已有历史记录会保留。',
+    };
+  }
   if (/Data Protection Keychain.*unavailable|keychain access group|app signature/i.test(message)) {
     return { title: 'Secure persistence unavailable', detail: 'Allow LingXi Code to access Keychain, then reconnect the provider.' };
   }

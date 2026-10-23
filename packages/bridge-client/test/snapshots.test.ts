@@ -1133,6 +1133,9 @@ function validateEvent(name: string, v: unknown): void {
     case 'system_notice':
       assert.ok(isString(o['message']) && isBool(o['is_error']));
       break;
+    case 'session_storage_state':
+      assert.ok(isBool(o['disk_full']));
+      break;
     case 'ui_log':
       assert.ok(isString(o['plugin']) && isString(o['text']));
       break;

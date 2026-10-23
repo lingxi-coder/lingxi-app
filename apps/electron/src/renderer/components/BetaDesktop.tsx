@@ -8,6 +8,7 @@ import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
 import { SESSION_PICKER_EVENT } from '../../shared/sessionWorkspace';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
+import { SessionStorageNotice } from './SessionStorageNotice';
 import { createPortal } from 'react-dom';
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
@@ -3385,6 +3386,9 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           onClose={() => { void stopFlowMode(); }}
         />
       )}
+      {bridge.desktop.storagePaused ? <SessionStorageNotice key={activeSessionId}
+        disabled={!ready || bridge.sessionLoading || bridge.running}
+        onRetry={() => bridge.sendPrompt('继续之前因磁盘空间不足而暂停的任务，沿用此会话和已有历史。')} /> : null}
       {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={async () => { await bridge.runSlashCommand('/goal clear', []); }} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
       <div
         className="beta-composer"

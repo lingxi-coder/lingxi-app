@@ -1145,6 +1145,9 @@ export function validateClientEvent(value: unknown): ClientEvent {
   const input = object(value, 'client event');
   const type = string(input['type'], 'client event type');
   switch (type) {
+    case 'session_storage_state':
+      exactKeys(input, ['type', 'disk_full'], 'session storage state');
+      return { type, disk_full: boolean(input['disk_full'], 'disk full') };
     case 'terminal_api_error': {
       exactKeys(input, ['type', 'api_error_status', 'terminal_reason', 'stop_reason'], 'client event');
       const apiErrorStatus = input['api_error_status'] === undefined

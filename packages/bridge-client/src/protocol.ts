@@ -1637,6 +1637,7 @@ export type ClientEvent =
   | { type: 'assistant_block_identity'; block_key: number; message_uuid: string }
   | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: (string | null)[] }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | { type: 'session_storage_state'; disk_full: boolean }
   | { type: 'ui_log'; plugin: string; text: string }
   | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
   | { type: 'ui_status'; plugin: string; text: string | null }

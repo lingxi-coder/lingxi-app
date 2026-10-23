@@ -96,6 +96,7 @@ export const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'user_transcript_row_identity',
   'assistant_transcript_row_uuids',
   'system_notice',
+  'session_storage_state',
   'ui_log',
   'ui_status',
   'loop_wakeup',

@@ -54,6 +54,7 @@ export interface DesktopState {
    * other signal arrives.
    */
   readonly apiRetry: Extract<ClientEvent, { type: 'api_retry' }> | null;
+  readonly storagePaused: boolean;
 }
 
 export function emptyDesktopState(): DesktopState {
@@ -81,6 +82,7 @@ export function emptyDesktopState(): DesktopState {
     lastPermissionResolution: null,
     lastApiRetry: null,
     apiRetry: null,
+    storagePaused: false,
   };
 }
 
@@ -124,11 +126,13 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_list':
       return { ...state, sessions: mergeSessionCatalog(state.sessions, event.sessions) };
     case 'session_started':
-      return startSession({ ...state, lastCost: null, status: null, apiRetry: null }, event.session_id, event.mode);
+      return startSession({ ...state, lastCost: null, status: null, apiRetry: null, storagePaused: false }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null };
+      return { ...state, activeSessionId: event.session_id, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
     case 'session_ended':
-      return { ...state, activeSessionId: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null };
+      return { ...state, activeSessionId: null, conversationControls: null, lastCost: null, status: null, currentModelSource: null, apiRetry: null, storagePaused: false };
+    case 'session_storage_state':
+      return { ...state, storagePaused: event.disk_full };
     case 'model_list':
       return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current, currentModelSource: event.current_model_source ?? null };
     case 'provider_model_catalog':

@@ -863,8 +863,8 @@ export class SessionRuntime {
       // Status is a snapshot, not a transcript event. Keep only the newest
       // one so repeated listing refreshes cannot grow the renderer replay
       // buffer without bound or replay stale cumulative totals on reload.
-      const replay = event.type === 'status_snapshot'
-        ? this.replayEvents.filter(({ event: retained }) => retained.type !== 'status_snapshot')
+      const replay = event.type === 'status_snapshot' || event.type === 'session_storage_state'
+        ? this.replayEvents.filter(({ event: retained }) => retained.type !== event.type)
         : event.type === 'ui_status'
           ? this.replayEvents.filter(({ event: retained }) =>
               retained.type !== 'ui_status' || retained.plugin !== event.plugin)

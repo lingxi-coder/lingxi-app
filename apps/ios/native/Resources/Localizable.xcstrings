@@ -72127,6 +72127,2862 @@
           }
         }
       }
+    },
+    "remote_answered_elsewhere": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个请求已在别处处理。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這個請求已在別處處理。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This was already answered elsewhere."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このリクエストはすでに別の場所で処理されました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 요청은 이미 다른 곳에서 처리되었습니다."
+          }
+        }
+      }
+    },
+    "remote_back": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "返回"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "返回"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "戻る"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "뒤로"
+          }
+        }
+      }
+    },
+    "remote_bypass_desktop_only": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要切换到“绕过权限”模式，只能在电脑上批准。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要切換到「略過權限」模式，只能在電腦上核准。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switching to “bypass permissions” mode can only be approved on the computer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "「権限をバイパス」モードへの切り替えは、パソコンでのみ承認できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "'권한 우회' 모드로의 전환은 컴퓨터에서만 승인할 수 있습니다."
+          }
+        }
+      }
+    },
+    "remote_computer_access_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑正在请求额外的访问权限。请在电脑上处理。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦正在請求額外的存取權限。請在電腦上處理。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer is asking for more access. Handle it on the computer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンが追加のアクセス権限を求めています。パソコンで対応してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 추가 접근 권한을 요청하고 있습니다. 컴퓨터에서 처리하세요."
+          }
+        }
+      }
+    },
+    "remote_computers": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我的电脑"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我的電腦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "My computers"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "マイコンピューター"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "내 컴퓨터"
+          }
+        }
+      }
+    },
+    "remote_computers_intro": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择要连接的电脑。连接前需要在这台电脑上确认一次。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選擇要連線的電腦。首次連線需要在該電腦上確認一次。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a computer to connect to. The first time, you confirm on that computer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続するパソコンを選んでください。初回はそのパソコンで確認が必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결할 컴퓨터를 선택하세요. 처음에는 해당 컴퓨터에서 한 번 확인해야 합니다."
+          }
+        }
+      }
+    },
+    "remote_connect": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결"
+          }
+        }
+      }
+    },
+    "remote_connecting_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在连接 %1$s…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在連線到 %1$s…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting to %1$s…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s に接続しています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s에 연결하는 중…"
+          }
+        }
+      }
+    },
+    "remote_direct_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "手机与电脑直接通信"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "手機與電腦直接通訊"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone talks to the computer directly"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スマートフォンとパソコンが直接通信しています"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "휴대폰과 컴퓨터가 직접 통신합니다"
+          }
+        }
+      }
+    },
+    "remote_err_capacity": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑上同时打开的远程会话已达上限。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦上同時開啟的遠端會話已達上限。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer has reached its limit of remotely opened sessions."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンでリモートで開けるセッション数が上限に達しました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 동시에 원격으로 열 수 있는 세션 수가 한도에 도달했습니다."
+          }
+        }
+      }
+    },
+    "remote_err_forbidden": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个操作不被允许。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這個操作不被允許。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not allowed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この操作は許可されていません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 작업은 허용되지 않습니다."
+          }
+        }
+      }
+    },
+    "remote_err_generic": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "出错了，请重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "發生錯誤，請重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something went wrong. Try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "問題が発生しました。もう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "문제가 발생했습니다. 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_err_not_remote_enabled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个会话没有开启远程访问。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這個會話沒有開啟遠端存取。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote access is not on for this session."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このセッションではリモートアクセスがオンになっていません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 세션은 원격 접근이 켜져 있지 않습니다."
+          }
+        }
+      }
+    },
+    "remote_err_unknown_session": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到这个会话。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到這個會話。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That session could not be found."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "そのセッションが見つかりません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "해당 세션을 찾을 수 없습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_busy": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑正忙，请稍后再试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦忙碌中，請稍後再試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer is busy. Try again in a moment."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンがビジー状態です。少ししてからお試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 바쁩니다. 잠시 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_capacity": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台电脑的远程连接已满，请稍后再试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這台電腦的遠端連線已滿，請稍後再試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This computer has too many remote connections. Try again later."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンのリモート接続数が上限です。しばらくしてからお試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터의 원격 연결이 가득 찼습니다. 잠시 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_closed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接已关闭。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線已關閉。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection closed."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続が閉じられました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결이 닫혔습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_denied": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑上拒绝了这次连接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦上拒絕了這次連線。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection was declined on the computer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンで接続が拒否されました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 연결을 거부했습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_denied_busy": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑正在处理另一个配对请求，请稍后再试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦正在處理另一個配對請求，請稍後再試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer is handling another pairing request. Try again shortly."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンは別のペアリング要求を処理中です。少ししてからお試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 다른 페어링 요청을 처리 중입니다. 잠시 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_denied_rate_limited": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配对请求太频繁，请稍后再试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配對請求太頻繁，請稍後再試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many pairing requests. Try again later."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペアリングの要求が多すぎます。しばらくしてからお試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "페어링 요청이 너무 많습니다. 잠시 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_denied_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑上两分钟内没有响应。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦上兩分鐘內沒有回應。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody answered on the computer within two minutes."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンで2分以内に応答がありませんでした。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 2분 안에 응답이 없었습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_disabled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台电脑已关闭远程控制。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這台電腦已關閉遠端控制。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote control is turned off on this computer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンではリモート操作がオフになっています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터에서 원격 제어가 꺼져 있습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_expired": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑认为这台手机的时间有误。请校准系统时间后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦認為這支手機的時間有誤。請校正系統時間後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer thinks this phone’s clock is wrong. Set the clock correctly and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンはこのスマートフォンの時刻が正しくないと判断しました。時刻を修正してからお試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 이 휴대폰의 시간이 잘못되었다고 판단했습니다. 시간을 맞춘 뒤 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_network": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法连接到云端服务，请检查网络。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法連線到雲端服務，請檢查網路。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not reach the cloud service. Check the network."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "クラウドサービスに接続できません。ネットワークを確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "클라우드 서비스에 연결할 수 없습니다. 네트워크를 확인하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_network_denied": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账号没有权限访问远程控制数据。请重新登录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帳號沒有權限存取遠端控制資料。請重新登入。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This account may not use Remote control data. Sign in again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このアカウントはリモート操作のデータにアクセスできません。もう一度サインインしてください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 계정은 원격 제어 데이터에 접근할 수 없습니다. 다시 로그인하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_no_answer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑没有响应。请确认它在线且灵犀桌面版正在运行。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦沒有回應。請確認它在線上且靈犀桌面版正在執行。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer did not respond. Make sure it is online and LingXi is running."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンから応答がありません。オンラインで Lingxi が起動していることを確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 응답하지 않습니다. 온라인이고 Lingxi가 실행 중인지 확인하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_pairing_mismatch": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配对码与电脑上的不一致，已中止连接。可能有人在中间干扰。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配對碼與電腦上的不一致，已中止連線。可能有人從中干擾。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The pairing code does not match the computer’s, so the connection was stopped. Someone may be interfering."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペアリングコードがパソコンのものと一致しないため、接続を中止しました。第三者が干渉している可能性があります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "페어링 코드가 컴퓨터의 코드와 달라 연결을 중단했습니다. 누군가 간섭하고 있을 수 있습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_protocol": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑返回了无法理解的数据，已中止连接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦傳回了無法理解的資料，已中止連線。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer sent something that could not be understood, so the connection was stopped."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンから解釈できないデータが返されたため、接続を中止しました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 이해할 수 없는 데이터를 보내 연결을 중단했습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_rejected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电脑拒绝了这次连接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "電腦拒絕了這次連線。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The computer refused the connection."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンが接続を拒否しました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터가 연결을 거부했습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_revoked": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台电脑已不再信任这台手机。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這台電腦已不再信任這支手機。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This computer no longer trusts this phone."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンはもうこのスマートフォンを信頼していません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터가 더 이상 이 휴대폰을 신뢰하지 않습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_unknown_host": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到这台电脑的信息。请确认桌面版已开启远程控制。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到這台電腦的資訊。請確認桌面版已開啟遠端控制。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This computer’s details could not be found. Make sure Remote control is on in the desktop app."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンの情報が見つかりません。デスクトップ版でリモート操作がオンになっているか確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터의 정보를 찾을 수 없습니다. 데스크톱 앱에서 원격 제어가 켜져 있는지 확인하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_unsupported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台手机不支持远程控制所需的加密功能。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這支手機不支援遠端控制所需的加密功能。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This phone does not support the cryptography Remote control needs."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このスマートフォンはリモート操作に必要な暗号機能に対応していません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 휴대폰은 원격 제어에 필요한 암호화 기능을 지원하지 않습니다."
+          }
+        }
+      }
+    },
+    "remote_fail_upgrade": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "版本不兼容。请更新灵犀桌面版或这个 App。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "版本不相容。請更新靈犀桌面版或此 App。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Versions are incompatible. Update LingXi on the computer or this app."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "バージョンに互換性がありません。パソコンの Lingxi またはこのアプリを更新してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "버전이 호환되지 않습니다. 컴퓨터의 Lingxi 또는 이 앱을 업데이트하세요."
+          }
+        }
+      }
+    },
+    "remote_fail_verification": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法验证这台电脑的身份，已中止连接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法驗證這台電腦的身分，已中止連線。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This computer’s identity could not be verified, so the connection was stopped."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンの身元を確認できなかったため、接続を中止しました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터의 신원을 확인할 수 없어 연결을 중단했습니다."
+          }
+        }
+      }
+    },
+    "remote_forget": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "忘记此电脑"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "忘記此電腦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forget this computer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンを削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터 잊기"
+          }
+        }
+      }
+    },
+    "remote_forget_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只会在这台手机上移除配对；电脑上的设备列表需要在桌面版设置中移除。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只會在這支手機上移除配對；電腦上的裝置清單需要在桌面版設定中移除。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This only removes the pairing from this phone. Remove the device on the computer in LingXi settings."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このスマートフォンのペアリングだけを削除します。パソコン側のデバイス一覧は Lingxi の設定から削除してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 휴대폰의 페어링만 제거됩니다. 컴퓨터의 기기 목록은 Lingxi 설정에서 제거하세요."
+          }
+        }
+      }
+    },
+    "remote_hosts_error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法读取电脑列表，请检查网络后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法讀取電腦清單，請檢查網路後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not read the list of computers. Check the network and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンの一覧を読み込めませんでした。ネットワークを確認して、もう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터 목록을 읽을 수 없습니다. 네트워크를 확인하고 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_image_unusable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法使用这张图片。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法使用這張圖片。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That image could not be used."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この画像は使用できません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 이미지를 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "remote_images_only_when_idle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行中只能发送文字。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "執行中只能傳送文字。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only text can be sent while a turn is running."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "実行中はテキストのみ送信できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실행 중에는 텍스트만 보낼 수 있습니다."
+          }
+        }
+      }
+    },
+    "remote_load_older": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加载更早的消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "載入更早的訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Load earlier messages"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以前のメッセージを読み込む"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 메시지 불러오기"
+          }
+        }
+      }
+    },
+    "remote_loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "불러오는 중…"
+          }
+        }
+      }
+    },
+    "remote_loading_older": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "불러오는 중…"
+          }
+        }
+      }
+    },
+    "remote_needs_computer_access": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待电脑上的授权"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待電腦上的授權"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting on the computer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンでの許可待ち"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서의 승인 대기 중"
+          }
+        }
+      }
+    },
+    "remote_needs_permission": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待授权"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待授權"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for permission"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "許可待ち"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "권한 대기 중"
+          }
+        }
+      }
+    },
+    "remote_needs_question": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待回答"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待回答"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for an answer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "回答待ち"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "답변 대기 중"
+          }
+        }
+      }
+    },
+    "remote_no_computers": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还没有可用的电脑"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "還沒有可用的電腦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No computers yet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "利用できるパソコンがありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용할 수 있는 컴퓨터가 없습니다"
+          }
+        }
+      }
+    },
+    "remote_no_computers_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在电脑上打开灵犀桌面版，登录同一个账号，并在设置中开启“远程控制”。开启后，它会出现在这里。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在電腦上開啟靈犀桌面版，登入同一個帳號，並在設定中開啟「遠端控制」。開啟後，它會出現在這裡。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open LingXi on your computer, sign in with the same account, and turn on “Remote control” in settings. It will appear here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンで Lingxi を開き、同じアカウントでサインインして、設定で「リモート操作」をオンにします。オンにするとここに表示されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 Lingxi를 열고 같은 계정으로 로그인한 뒤 설정에서 '원격 제어'를 켜세요. 켜면 여기에 표시됩니다."
+          }
+        }
+      }
+    },
+    "remote_no_sessions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有已共享的会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "沒有已分享的會話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No shared sessions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共有されているセッションはありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유된 세션이 없습니다"
+          }
+        }
+      }
+    },
+    "remote_no_sessions_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在电脑上的灵犀里打开一个会话，并开启它的远程访问后，会显示在这里。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在電腦上的靈犀中開啟一個會話，並開啟它的遠端存取後，會顯示在這裡。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open a session in LingXi on the computer and allow remote access for it; it will show up here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンの Lingxi でセッションを開き、リモートアクセスを許可すると、ここに表示されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터의 Lingxi에서 세션을 열고 원격 접근을 허용하면 여기에 표시됩니다."
+          }
+        }
+      }
+    },
+    "remote_not_paired": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未配对"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未配對"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not paired"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未ペアリング"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "페어링 안 됨"
+          }
+        }
+      }
+    },
+    "remote_offline": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "离线"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "離線"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Offline"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オフライン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오프라인"
+          }
+        }
+      }
+    },
+    "remote_offline_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台电脑当前不在线。请确认它已开机、联网，并且灵犀桌面版正在运行且已开启“远程控制”。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這台電腦目前不在線上。請確認它已開機、已連網，且靈犀桌面版正在執行並已開啟「遠端控制」。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This computer is offline. Make sure it is on, connected, and that LingXi is running with “Remote control” turned on."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンはオフラインです。電源が入りネットワークに接続されていること、Lingxi が起動しリモート操作がオンになっていることを確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터는 현재 오프라인입니다. 전원이 켜져 있고 네트워크에 연결되어 있으며 Lingxi가 실행 중이고 '원격 제어'가 켜져 있는지 확인하세요."
+          }
+        }
+      }
+    },
+    "remote_omitted_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此处有一条内容过大，未同步到远程。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此處有一則內容過大，未同步到遠端。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An item here was too large to send."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ここに大きすぎて送信されなかった項目があります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "여기에 너무 커서 전송되지 않은 항목이 있습니다."
+          }
+        }
+      }
+    },
+    "remote_online": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在线"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "線上"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Online"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オンライン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "온라인"
+          }
+        }
+      }
+    },
+    "remote_origin_desktop": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自桌面"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "來自桌面"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "From the desktop"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デスクトップから"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "데스크톱에서"
+          }
+        }
+      }
+    },
+    "remote_origin_device_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自 %1$s"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "來自 %1$s"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "From %1$s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s から"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s에서"
+          }
+        }
+      }
+    },
+    "remote_origin_other_device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自其他设备"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "來自其他裝置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "From another device"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "別のデバイスから"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다른 기기에서"
+          }
+        }
+      }
+    },
+    "remote_origin_scheduled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "排程任務"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled task"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スケジュールタスク"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "예약 작업"
+          }
+        }
+      }
+    },
+    "remote_origin_this_device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自此设备"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "來自此裝置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "From this device"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このデバイスから"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 기기에서"
+          }
+        }
+      }
+    },
+    "remote_pair_again": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新配对"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新配對"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pair again"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "再ペアリング"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다시 페어링"
+          }
+        }
+      }
+    },
+    "remote_pair_again_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新配对会为这台手机生成新的身份，其他电脑也会要求你重新确认。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新配對會為這支手機產生新的身分，其他電腦也會要求你重新確認。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing again gives this phone a new identity, so your other computers will ask you to confirm it again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "再ペアリングするとこのスマートフォンに新しい ID が作られ、他のパソコンでも再度確認が必要になります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다시 페어링하면 이 휴대폰에 새 ID가 만들어지며 다른 컴퓨터에서도 다시 확인해야 합니다."
+          }
+        }
+      }
+    },
+    "remote_paired": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已配对"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已配對"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paired"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペアリング済み"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "페어링됨"
+          }
+        }
+      }
+    },
+    "remote_pairing_body_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 %1$s 上点击“允许”之前，请确认它显示的配对码与下面的一致。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 %1$s 上按「允許」之前，請確認它顯示的配對碼與下方一致。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Before you click “Allow” on %1$s, check that the pairing code it shows matches this one."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s で「許可」を押す前に、表示されているペアリングコードが下のものと一致することを確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s에서 '허용'을 누르기 전에 표시된 페어링 코드가 아래와 같은지 확인하세요."
+          }
+        }
+      }
+    },
+    "remote_pairing_code": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配对码"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "配對碼"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pairing code"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペアリングコード"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "페어링 코드"
+          }
+        }
+      }
+    },
+    "remote_pairing_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在电脑上确认"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請在電腦上確認"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm on your computer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンで確認してください"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서 확인하세요"
+          }
+        }
+      }
+    },
+    "remote_pairing_waiting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待电脑上的确认…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待電腦上的確認…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for confirmation on the computer…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンでの確認を待っています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터에서의 확인을 기다리는 중…"
+          }
+        }
+      }
+    },
+    "remote_reconnecting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接已断开，正在重新连接…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線已中斷，正在重新連線…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection lost. Reconnecting…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "接続が切れました。再接続しています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "연결이 끊어졌습니다. 다시 연결하는 중…"
+          }
+        }
+      }
+    },
+    "remote_retry_in_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 秒后重试"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 秒後重試"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying in %1$d s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d 秒後に再試行します"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$d초 후 다시 시도"
+          }
+        }
+      }
+    },
+    "remote_send_failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "消息未能发送，请重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "訊息未能傳送，請重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The message was not sent. Try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メッセージを送信できませんでした。もう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메시지를 보내지 못했습니다. 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "remote_session_closed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个会话已不再共享。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這個會話已不再分享。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This session is no longer shared."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このセッションは共有されなくなりました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 세션은 더 이상 공유되지 않습니다."
+          }
+        }
+      }
+    },
+    "remote_session_loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载会话…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入會話…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the session…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "セッションを読み込み中…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "세션을 불러오는 중…"
+          }
+        }
+      }
+    },
+    "remote_session_offline": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已离线，显示的是最后收到的内容。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已離線，顯示的是最後收到的內容。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Offline. Showing what was received last."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オフラインです。最後に受信した内容を表示しています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오프라인입니다. 마지막으로 받은 내용을 표시합니다."
+          }
+        }
+      }
+    },
+    "remote_sign_in": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サインイン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로그인"
+          }
+        }
+      }
+    },
+    "remote_signed_out_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录与桌面版灵犀相同的账号，才能看到你的电脑。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登入與桌面版靈犀相同的帳號，才能看到你的電腦。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with the same account as LingXi on your computer to see it here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンの Lingxi と同じアカウントでサインインすると、ここにパソコンが表示されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터의 Lingxi와 같은 계정으로 로그인하면 여기에 컴퓨터가 표시됩니다."
+          }
+        }
+      }
+    },
+    "remote_signed_out_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先登录"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請先登入"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "先にサインインしてください"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "먼저 로그인하세요"
+          }
+        }
+      }
+    },
+    "remote_status_dormant": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未打开"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未開啟"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not open"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未オープン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "열려 있지 않음"
+          }
+        }
+      }
+    },
+    "remote_status_idle": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "空闲"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "閒置"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Idle"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待機中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대기 중"
+          }
+        }
+      }
+    },
+    "remote_status_requires_action": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待你"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待你"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs you"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "対応が必要"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "확인 필요"
+          }
+        }
+      }
+    },
+    "remote_status_running": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行中"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "執行中"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "実行中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실행 중"
+          }
+        }
+      }
+    },
+    "remote_switch_computer": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "换一台电脑"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "換一台電腦"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switch computer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "別のパソコンに切り替える"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다른 컴퓨터로 전환"
+          }
+        }
+      }
+    },
+    "remote_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "远程控制"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "遠端控制"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remote control"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リモート操作"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원격 제어"
+          }
+        }
+      }
+    },
+    "remote_try_anyway": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍然尝试连接"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍然嘗試連線"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try to connect anyway"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "それでも接続を試す"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "그래도 연결 시도"
+          }
+        }
+      }
+    },
+    "remote_tunnel_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过云端中转（加密），速度较慢"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "透過雲端中繼（加密），速度較慢"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Relayed through the cloud (encrypted); slower"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "クラウド経由（暗号化）のため、速度が遅くなります"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "클라우드를 거쳐(암호화) 속도가 느릴 수 있습니다"
+          }
+        }
+      }
+    },
+    "remote_untitled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未命名会话"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未命名會話"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untitled session"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無題のセッション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "제목 없는 세션"
+          }
+        }
+      }
     }
   }
 }

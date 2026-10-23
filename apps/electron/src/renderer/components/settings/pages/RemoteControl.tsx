@@ -101,7 +101,7 @@ export function RemoteControl() {
         <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: t.text }}>在手机或浏览器上接着用灵犀</h2>
         <p style={{ margin: '8px 0 0', fontSize: 12.5, lineHeight: 1.6, color: t.text3, maxWidth: 620 }}>
           手机或浏览器可以查看并操控你开启了远程控制的会话；文件和工具始终留在这台电脑上，不会上传。
-          在灵犀手机应用里，或用同一账号登录网页 /remote 即可连接。新设备第一次连接时，需要在这里输入它显示的 6 位配对码批准。
+          在灵犀手机应用里，或用同一账号登录网页 /remote 即可连接。新设备第一次连接时，请核对两端显示的 6 位配对码，再在这台电脑上点击“允许”。
           远程控制按会话开启：在会话菜单里打开，或在对话中输入 /remote-control。
         </p>
       </section>

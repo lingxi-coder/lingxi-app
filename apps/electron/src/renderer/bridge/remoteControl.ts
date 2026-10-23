@@ -96,7 +96,7 @@ export function remoteMenuLabel(enabled: boolean, availability: RemoteAvailabili
   return availability.available ? '开启远程控制' : `开启远程控制（${availability.reason ?? '暂不可用'}）`;
 }
 
-export const REMOTE_CONNECT_HINT = '在手机的灵犀应用里，或用同一账号登录网页 /remote 即可连接；新设备需要在这台电脑上输入 6 位配对码批准。';
+export const REMOTE_CONNECT_HINT = '在手机的灵犀应用里，或用同一账号登录网页 /remote 即可连接；新设备需要在这台电脑上核对 6 位配对码，再点击“允许”。';
 
 export interface RemoteToggleOutcome {
   readonly message: string;

@@ -20,10 +20,11 @@
 | WebRTC 其他媒体边界 | 限制性 NAT、TCP/TLS、手机互通、长期刷新、热状态与能耗尚无完整证据 | 逐项实施和验证，区分共享测试与真实设备结果 |
 | 版本化模型目录四端刷新 | 四端实现与启动缓存验收完成；本页最新记录补齐 Android 实体手机和 Flare 签名 iPhone 的首次获取、重启及配置保留验证 | 保留发行渠道、逐模型推理及其他平台验收边界，不把目录刷新通过扩大为全部运行时通过 |
 | iOS 旧会话恢复与 Side Chat | 2026-10-22 已重新构建最新 main `406879ed2`、Harness `5a2de5b1` 的签名包并通过旧会话链接／普通重启、硬件键盘、独立草稿、隐藏重开、模型隔离及结束生命周期 | 本批当前 main 签名真机验收完成；后续源码、屏幕键盘触控与发行渠道不继承本结果 |
-| 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
+| 深链接发行验收 | AASA 源站与 Apple CDN 当前字节一致、Direct 关联预检通过；Play 正式证书未取得，Windows/Linux 实机仍开放；用户要求先跳过 iPhone 测试 | 取得真实 Play App Signing 公共证书后继续；iOS Universal Link 保留未验收 |
 | 移动 Crashlytics | 2026-10-22 iOS 真机未捕获 NSException 云端入库并解析到 Swift 源码行；Android NDK 测试库云端入库并解析到 C 源码行 | 本批接入链路通过；首次 Swift SIGTRAP 对照未观察到云端事件，单独保留未通过记录，不扩大为所有原生信号／Rust／第三方库覆盖 |
 | Desktop production 凭据稳定性 | 2026-10-22 Flare production 签名包完成 3 次正常启动、15 次页面刷新、18 次真实 Broker 取钥及 localhost 鉴权请求；测试密钥删除、隔离进程清理通过 | 已关闭本批稳定性项；不扩大为真实云端 provider 质量、长期运行或跨机器 Keychain 验收 |
-| 其他验收边界 | macOS 公证/跨机器 Gatekeeper、长期稳定性等没有因 main 合并自动完成 | 只在对应环境与实际操作完成后关闭 |
+| Android 剩余组件 | Samsung SM-S9310 上同一 instrumentation 进程完整 10 项通过；修复测试宿主与弹窗释放顺序，provider 字节保留 | 本批组件验收关闭；不扩大为新 Harness JNI 全量或发行验证 |
+| 其他验收边界 | macOS 当前仅 Apple Development 身份，Gatekeeper 拒绝且无公证票据；跨机器与长期稳定性未验收 | 需 Flare Developer ID Application 身份及 notarytool 配置后才能完成公证 |
 
 Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 503 未配置”报告已被后续 Firebase 部署替代；本轮实际读取当前市场 `/api/v1/health` 与 `/api/v1/capabilities`，均为 JSON / HTTP 200，可关闭那条旧阻塞。模型公共 API 实际返回 46 个提供商、1327 个模型，未登录管理接口返回 401；这证明后台可用，不代表四端启动刷新已经实现。生产服务变更和证书发布须保留具体可审内容与相应授权。
 
@@ -181,3 +182,16 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - 恢复不带诊断环境的正常 App，进程 PID 12684 存活；provider-settings 文件逐字节相同、当前会话选择和既有 Firebase debug 偏好值未改变。该 debug 偏好在本轮前已存在，未为取日志而持久化新覆盖。原始文件与私有备份仅保留于本地证据目录。
 - 旧 SIGTRAP 的 Apple IPS 与旧 dSYM 匹配，原 SDK Mach handler 已运行；用户批准的原时间窗查询仍无该事件。由于原发送过程缺少完整传输证据，历史报告的丢失原因仍不能确定。本批关闭 Swift trap 当前链路与符号化验收，不能宣称已修复一个已证实的 Firebase SDK 缺陷。Firebase App ID 已注册正确，同一 App 的 NSException 及本次 Swift 事件均进入云端。
 - 本地证据：`mobile-crashlytics-20261022/sigtrap-followup-20261022/` 内的原始 Mach 报告、Apple IPS、云端精确事件、构建／签名／符号上传与 `acceptance-summary.json`。源码语法与 diff 检查通过。canonical 的其他 session 正持续修改 Electron／bridge 文件，发布前另取当前 26 文件快照，未复制或重置其工作。WebRTC、Chat、Computer Use 继续排除。
+
+
+## 2026-10-22（America/Los_Angeles）：Android 剩余 10 项组件验收与发行预检
+
+- **组件验收通过**：Samsung SM-S9310 / Android 16 解锁后，同一 instrumentation 进程完整执行 `IosChatParityUiTest` 3 项与 `VisualizationCardUiTest` 7 项，`OK (10 tests)`，耗时 18.08 秒。包含大字体／上下文工具栏、Agents/Plan 入口、Skill 折叠、WebView 聚焦展开、失败重试、首次会话等待、引擎切换、晚到 ticket 释放，以及真实 Rust host 渲染的绿色像素检查。保留全部原断言，没有通过拆分后只报告成功子集。
+- **测试宿主修复**：批量执行停在 AndroidX `InstrumentationActivityInvoker.EmptyActivity`；迁移 v2 与逐进程隔离都不足以消除卡住。采用 Compose 官方支持的自定义 Activity launcher，直接创建 ComponentActivity，并在 finally 中先释放根 Compose 内容，再结束 Activity，限时 10 秒验证 DESTROYED。中间版本的 10 项实际跑完，但两个含弹窗的用例销毁失败；补齐内容释放后完整批次通过。测试窗口使用 KEEP_SCREEN_ON，销毁时自动释放，不改变系统锁屏设置。所有修改仅在 androidTest，不添加旧版本兼容层或修改生产 Activity。
+- **受测来源**：Product Android Kotlin/test 源码来自 `0acaa8ce6797b33c0afe02cefc2c86204012a3b0` 加上述三个测试文件；发布前快进整合 `612783f9e9fc39ecb51d229feb74e959c4f3e08d`，确认 Android 源码无变化。复用既有 JNI / 绑定组合，其 native Harness 来源是 `1edfd6e2365618052a2bb7096ae1b1dc0430a775`；不把本次组件验收说成当前 main 新 Harness pin 已重新构建 JNI 或全量通过。固定 mobile-linux SDK 为 `6b033d41a2b6b736fda1e8f996f55a4b20bd885d`。
+- **构建及数据保护**：主 APK 与完整测试 APK 配对构建通过，均以 Samsung 既有 Firebase Debug 身份更新，没有卸载或清除数据。先前精简测试 APK 缺少类、旧主 APK 导致 NoSuchMethodError、锁屏和旧 Python 3.9 缺少 tomllib 的原始失败均保留；使用 Python 3.13 后构建。缺失的 rootfs 生成资产仅从保留 APK 恢复，native manifest / SDK source 字节及两 ABI pinned archive 的大小、SHA-256 全部核对，最终严格 APK 验证通过。provider-settings 在升级及最终测试后逐字节不变；测试完成返回原 AGAI 前台，未停止或改动其进程。
+- **深链接预检**：AASA 源站与 Apple CDN 均 HTTP 200 / application/json，SHA-256 同为 `3c21133af4749d31c59b33d95a0e85654b344b9084042cab9325a248da2c937d`；当前签名 iOS App 实际 entitlement 为 `AZ4AX7J833.com.lingxi.code`、`applinks:lingxios.net`。Direct 公开证书预检通过；Play 正式 App Signing 公共证书仍缺失，未猜测或替换正式关联。用户随后明确要求跳过 iPhone 测试，未执行 Notes/Safari 点击或宣称 Universal Link 真机通过；Windows/Linux 仍未实测。
+- **macOS 公证阻断**：当前 production 包为 Flare Apple Development 签名，Hardened Runtime 已启用；只有一份可用 Apple Development 身份，没有 Developer ID Application。实际 `spctl --assess` 退出码 3 / rejected，`stapler validate` 退出码 65 / 无 ticket。需提供 Developer ID 身份和 notarytool Keychain profile 才能上传公证；没有降低 Gatekeeper、重签现有交付包或把开发签名记为公证成功。
+- **证据**：`.buildcache/remaining-task-takeover-20261019/release-acceptance-20261022/` 中 `android-components-dispose-host.log`、`android-components-dispose-host-exit.json`、`android-dispose-host-build.log`、`android-app-build-r2.log`、`visualization-native-render.png`、`current-status.json`、关联和公证预检记录。主 APK SHA-256 `da57fa084cf65c6d62b79a9baa2eff53b86fef17b9666d4549630667e55b5866`；最终测试 APK 哈希以本地 current-status 的 `testApkSha256` 为准。只删除已复核无占用的本任务 iOS 编译中间缓存，保留签名 App、dSYM、源码与证据。Remote 由专门 session 继续；WebRTC、Chat、Computer Use 和 iPhone 测试保持排除。
+
+测试 API 依据：[Compose v2 迁移](https://developer.android.com/develop/ui/compose/testing/migrate-v2)、[官方自定义 Activity launcher 扩展点](https://github.com/androidx/androidx/blob/androidx-main/compose/ui/ui-test-junit4/src/androidMain/kotlin/androidx/compose/ui/test/junit4/v2/AndroidComposeTestRule.android.kt)。

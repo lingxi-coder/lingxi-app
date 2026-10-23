@@ -8,7 +8,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
+import com.lingxi.code.testing.createComponentComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
@@ -24,7 +24,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class IosChatParityUiTest {
-    @get:Rule val rule = createComposeRule()
+    @get:Rule val rule = createComponentComposeRule()
 
     @Test fun contextUsageDoesNotSplitTheInputToolbar() {
         rule.setContent {

@@ -14,7 +14,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.junit4.createComposeRule
+import com.lingxi.code.testing.createComponentComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
@@ -43,7 +43,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VisualizationCardUiTest {
-    @get:Rule val rule = createComposeRule()
+    @get:Rule val rule = createComponentComposeRule()
 
     @Test fun focusedWidgetExpandsInLazyColumnWithoutDetachingItsInlineHost() {
         val host = ShellHost()

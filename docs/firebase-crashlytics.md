@@ -122,6 +122,58 @@ adb -s <serial> shell am instrument -w -r \
 应核对 SDK 的上传成功日志以及 Firebase 控制台中该 UUID 对应的事件；本地崩溃文件和
 编译成功不代表云端已收到报告。`verification_id` 仅由显式测试添加。
 
+### Android NDK 真机验证
+
+`captureNativeFatalCrash` 也默认跳过，仅在上述项目 opt-in 参数存在时执行。
+先运行 `scripts/build-crashlytics-test-library.sh`，再构建 `assemblePlayDebugAndroidTest`。
+脚本使用本机 NDK 29 为 ARM64 编译带 DWARF、GNU build ID 和 16 KiB 对齐的测试库，
+仅放入测试 APK 的 assets；不进入主 App。使用与设备主 App 相同的既有 Debug 签名，
+不要为解决签名不一致而卸载主 App 或清除数据。
+
+显式选择 `CrashlyticsDeviceTest#captureNativeFatalCrash` 并传入新的 `verificationId`；
+测试拒绝已有待发送报告，加载测试库后执行一次有意的 SIGSEGV。随后使用上述
+`sendCapturedReport` 一次性发送，并正常重新打开主 App。用官方 Firebase CLI 上传
+`app/build/crashlytics-verification/arm64-v8a` 中的匹配符号：
+
+```sh
+firebase crashlytics:symbols:upload --app <当前 Play Debug Firebase app ID> \
+  app/build/crashlytics-verification/arm64-v8a
+```
+
+验收要求云端测试 UUID、FATAL、函数名和 C 源码行同时匹配。测试库通过不代表每个
+Rust 或第三方库的堆栈均已覆盖；生产 JNI 仍必须保留并上传各自精确匹配的符号。
+
+### iOS 显式验证入口
+
+仅 DEBUG 构建包含 `CrashlyticsDeviceVerification`。使用不附加调试器的设备启动入口，
+同时传入 `LINGXI_CRASHLYTICS_PROJECT=lingxi-5e4b2`、新的
+`LINGXI_CRASHLYTICS_VERIFICATION_ID=<UUID>` 和 `LINGXI_CRASHLYTICS_PHASE=capture`。
+缺少任一有效参数或自动采集已打开时不执行。capture 拒绝已有待发送报告，同一 UUID
+不能重复触发；SDK 初始化后有界等待，再产生未捕获的测试 NSException。
+
+重启时保留相同项目和 UUID，改为 `LINGXI_CRASHLYTICS_PHASE=send`，仅在本地
+capture-ready 回执和前次崩溃状态均匹配时调用一次性发送。回执位于
+`Library/Caches/CrashlyticsDeviceVerification/receipt.json`。SDK 12.19.2 在等待 Debug
+采集同意时会延后自定义字段写入，因此不能只依赖云端 verification_id；发送前保留
+原始捕获目录，以其精确 SDK session ID、时间和匹配 dSYM 交叉核对云端事件。
+完成后不带这些环境变量正常启动，不改变持续采集开关。
+
+2026-10-22（America/Los_Angeles）补充验收：
+
+- Samsung SM-S9310 的原生测试库事件 `2278137104560685610` 已在 Android 云端入库，
+  问题 ID `b944655aca5f522a545072b293497e69`；测试 UUID 精确匹配，崩溃线程解析为
+  `CrashlyticsNdkVerificationLeaf`、`crashlytics_verification.c:6`。测试库 GNU build ID 为
+  `fc6d919af9bc6e0c2a21ae765852b26be95a316a`，本地 addr2line 与云端一致。
+- iPhone 11 / iOS 18.6.2、StoreDebug 2.4.1 / 8721 的未捕获 NSException 已云端入库，
+  问题 ID `925eb6051ce7dd7c5069d43d8d07482d`，事件
+  `152959a7ac6c491e97551c2dd841af8e_2278143465221146841` 与发送前原始 SDK session ID
+  精确一致；云端解析到 `CrashlyticsDeviceVerification.swift:51`，匹配 debug dylib dSYM
+  UUID `0E02F537-EB9C-3B90-B76E-97F121A3E638`。此前 Swift SIGTRAP 对照尚未在云端
+  观察到，不将其记为通过，也不据此声称所有原生信号均已验证。
+- 两端 Debug 自动采集保持关闭，provider 配置字节保留；未上传业务会话、提示词或凭据。
+  原始证据、匹配符号和回执保留在
+  `.buildcache/remaining-task-takeover-20261019/mobile-crashlytics-20261022/`。
+
 ## 当前验收记录
 
 2026-10-16（America/Los_Angeles）：

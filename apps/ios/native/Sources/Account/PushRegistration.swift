@@ -52,6 +52,7 @@ final class PushRegistration: NSObject, MessagingDelegate {
 
     func signedOut() {
         UIApplication.shared.unregisterForRemoteNotifications()
+        Messaging.messaging().apnsToken = nil
         Messaging.messaging().isAutoInitEnabled = false
         clearDeliveredNotifications()
         refresh()
@@ -62,12 +63,16 @@ final class PushRegistration: NSObject, MessagingDelegate {
         let uid = Auth.auth().currentUser?.uid
         if uid != nil {
             Messaging.messaging().isAutoInitEnabled = true
-            if !UIApplication.shared.isRegisteredForRemoteNotifications {
+            // APNs can deliver a token before UIApplication updates its flag.
+            // Re-registering from that callback cancels the binding upload forever.
+            if Self.needsAPNsRegistration(hasToken: Messaging.messaging().apnsToken != nil,
+                                           systemRegistered: UIApplication.shared.isRegisteredForRemoteNotifications) {
                 UIApplication.shared.registerForRemoteNotifications()
             }
         } else {
             Messaging.messaging().isAutoInitEnabled = false
             UIApplication.shared.unregisterForRemoteNotifications()
+            Messaging.messaging().apnsToken = nil
         }
         identity.revision += 1
         self.identity = identity
@@ -167,5 +172,9 @@ final class PushRegistration: NSObject, MessagingDelegate {
             registration.refresh()
         }
     }
+    static func needsAPNsRegistration(hasToken: Bool, systemRegistered: Bool) -> Bool {
+        !hasToken && !systemRegistered
+    }
+
     private enum SyncError: Error { case rejected, storage }
 }

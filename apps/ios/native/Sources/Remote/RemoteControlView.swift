@@ -78,6 +78,10 @@ struct RemoteControlView: View {
         }
         .task(id: FirebaseAccount.shared.user?.uid) {
             let uid = FirebaseAccount.shared.user?.uid
+            // Full-screen UIKit capture hides this navigation stack and starts
+            // its task again on return. Reset routes only for an account change,
+            // so the session and its captured draft survive the camera.
+            guard configuredUID != uid else { return }
             path = []
             configuredUID = nil
             await manager.configure(uid: uid)

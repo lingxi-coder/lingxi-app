@@ -158,6 +158,8 @@ fun ChatScreen(
     onOpenPermissionSettings: () -> Unit = {},
     /** Settings/credential state displayed alongside each provider section. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    /** Remote choices are validated by the host, independently of local credentials. */
+    remoteModelSelection: Boolean = false,
     /** Opens the matching provider editor, or the provider list for null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     /** Missing Direct-build Computer Use prerequisites, or null when ready/unavailable. */
@@ -439,6 +441,7 @@ fun ChatScreen(
                 modelSetupRequired = modelSetupRequired,
                 onOpenModelSettings = onOpenModelSettings,
                 modelProviderStatuses = modelProviderStatuses,
+                remoteModelSelection = remoteModelSelection,
                 onOpenProviderSettings = onOpenProviderSettings,
                 onStop = onStop,
                 onDiscardRecovery = onDiscardRecoveredTurn,

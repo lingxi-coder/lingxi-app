@@ -226,6 +226,7 @@ internal fun RemoteSessionScreen(
             onSendPreflight = { text, _ -> chat.admitComposerSend(text, attachments.isNotEmpty()) },
             onNewChat = {},
             onSelectModel = chat::selectModel,
+            remoteModelSelection = true,
             onSelectReasoning = chat::selectReasoning,
             isDark = isDark,
             showTopBar = false,

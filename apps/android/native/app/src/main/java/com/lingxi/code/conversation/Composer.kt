@@ -141,6 +141,7 @@ fun Composer(
     onOpenModelSettings: () -> Unit = {},
     /** Current settings/credential state keyed by the engine provider profile. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    remoteModelSelection: Boolean = false,
     /** Opens a specific provider editor, or the provider list when id is null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     /** Fired by the Stop button to cancel the in-flight turn. */
@@ -446,6 +447,7 @@ fun Composer(
                         ModelChip(
                             model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
                             onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                            remoteModelSelection = remoteModelSelection,
                             onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
                             reasoning = reasoning, onReasoningChange = onReasoningChange,
                             compact = compactModel,
@@ -545,6 +547,7 @@ private fun ModelChip(
     modelSetupRequired: Boolean,
     onOpenModelSettings: () -> Unit,
     providerStatuses: List<ModelProviderStatus>,
+    remoteModelSelection: Boolean,
     onOpenProviderSettings: (String?) -> Unit,
     onModelChange: (ModelOption) -> Unit,
     reasoning: ReasoningControl?,
@@ -661,6 +664,7 @@ private fun ModelChip(
                         model = m,
                         active = m.id == model.id,
                         providerStatuses = providerStatuses,
+                        remoteModelSelection = remoteModelSelection,
                         onShowDetails = { selectedDetails = it },
                         onSelected = {
                             open = false
@@ -698,20 +702,23 @@ private fun ModelChip(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
                     )
-                    Dot(color = providerColor, size = 6.dp)
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        text = providerLabel,
-                        color = providerColor,
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    if (!remoteModelSelection) {
+                        Dot(color = providerColor, size = 6.dp)
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = providerLabel,
+                            color = providerColor,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 }
                 group.models.forEach { m ->
                     ModelPickerRow(
                         model = m,
                         active = m.id == model.id,
                         providerStatuses = providerStatuses,
+                        remoteModelSelection = remoteModelSelection,
                         onShowDetails = { selectedDetails = it },
                         onSelected = {
                             open = false
@@ -756,13 +763,14 @@ private fun ModelPickerRow(
     model: ModelOption,
     active: Boolean,
     providerStatuses: List<ModelProviderStatus>,
+    remoteModelSelection: Boolean,
     onShowDetails: (CatalogModelDetails) -> Unit,
     onSelected: () -> Unit,
     onOpenProviderSettings: (String?) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val providerStatus = EngineModelCatalog.providerStatus(model.providerId, providerStatuses)
-    val canSelect = providerStatus?.canSelect == true
+    val canSelect = modelPickerCanSelect(remoteModelSelection, providerStatus)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -885,3 +893,7 @@ private fun Dot(color: Color, size: androidx.compose.ui.unit.Dp) {
             .background(color),
     )
 }
+
+/** Remote model commands are validated by the desktop that supplied the catalog. */
+internal fun modelPickerCanSelect(remote: Boolean, provider: ModelProviderStatus?): Boolean =
+    remote || provider?.canSelect == true

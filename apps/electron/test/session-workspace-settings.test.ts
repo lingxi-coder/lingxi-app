@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 
 import { SettingsStore } from '../src/main/settings';
+import { parseSettings, publicSettings } from '../src/main/host-utils';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const otherId = '22222222-3333-4444-8555-666666666666';
@@ -87,4 +88,77 @@ test('a failed relocation write preserves the previous file, memory, pin and vol
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
   assert.equal(f.settings.getSessionModel(f.ref), 'anthropic/selected-model');
   assert.equal(f.settings.getSessionModel(f.moved), undefined);
+});
+
+test('selected transcript context survives relocation and reload without entering public identity or settings', (t) => {
+  const f = settingsFixture(t), selected = {
+    catalogProjectPath: f.old, scope: 'all' as const, transcriptPath: join(f.old, 'selected-copy', `${sessionId}.jsonl`),
+  };
+  f.settings.relocateSession(f.ref, f.old, selected);
+  const copied = f.settings.getSessionTranscriptSelection(f.ref)!;
+  copied.transcriptPath = '/cannot-mutate-the-store';
+  f.settings.relocateSession(f.ref, f.target);
+  const saved = new SettingsStore(f.userData);
+  assert.equal(saved.getSessionTranscriptSelection(f.ref), undefined);
+  assert.deepEqual(saved.getSessionTranscriptSelection(f.moved), { ...f.moved, ...selected });
+  assert.deepEqual(saved.getPublic().activeSession, f.moved);
+  assert.equal('sessionTranscriptSelections' in saved.getPublic(), false);
+  saved.relocateSession(f.ref, f.target);
+  assert.deepEqual(saved.getSessionTranscriptSelection(f.moved), { ...f.moved, ...selected },
+    'an old alias must not discard the destination owner\'s remembered transcript');
+});
+
+test('native relocation replaces the selected source and removal only clears its owning project', (t) => {
+  const f = settingsFixture(t), other = { projectPath: f.target, sessionId: otherId };
+  const selected = { catalogProjectPath: f.old, scope: 'repository' as const, transcriptPath: join(f.old, `${sessionId}.jsonl`) };
+  const otherSelected = { catalogProjectPath: f.old, scope: 'all' as const, transcriptPath: join(f.target, `${otherId}.jsonl`) };
+  f.settings.relocateSession(f.ref, f.old, selected);
+  f.settings.relocateSession(other, f.target, otherSelected);
+  const relocated = { catalogProjectPath: f.target, scope: 'current' as const, transcriptPath: join(f.target, `${sessionId}.jsonl`) };
+  f.settings.relocateSession(f.ref, f.target, relocated);
+  f.settings.removeProject(f.old);
+  let saved = new SettingsStore(f.userData);
+  assert.deepEqual(saved.getSessionTranscriptSelection(f.moved), { ...f.moved, ...relocated });
+  assert.deepEqual(saved.getSessionTranscriptSelection(other), { ...other, ...otherSelected },
+    'removing the catalog context must not change another retained source selection');
+  saved.removeProject(f.target);
+  saved = new SettingsStore(f.userData);
+  assert.equal(saved.getSessionTranscriptSelection(f.moved), undefined);
+  assert.equal(saved.getSessionTranscriptSelection(other), undefined);
+});
+
+test('empty native drafts clear a remembered source without making the draft durable', (t) => {
+  const f = settingsFixture(t);
+  f.settings.relocateSession(f.ref, f.old, { catalogProjectPath: f.old, scope: 'all', transcriptPath: join(f.old, `${sessionId}.jsonl`) });
+  f.settings.setActiveSession(undefined);
+  f.settings.setActiveSessionDraft(f.ref);
+  f.settings.relocateSession(f.ref, f.target, null);
+  const saved = new SettingsStore(f.userData);
+  assert.equal(saved.getPublic().activeSession, undefined);
+  assert.equal(saved.getSessionTranscriptSelection(f.moved), undefined);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.moved);
+});
+
+test('a failed selection write preserves both remembered transcript and navigation atomically', (t) => {
+  const f = settingsFixture(t), selected = { catalogProjectPath: f.old, scope: 'all' as const, transcriptPath: join(f.old, `${sessionId}.jsonl`) };
+  f.settings.relocateSession(f.ref, f.old, selected);
+  const bytes = readFileSync(f.settings.settingsPath, 'utf8');
+  mkdirSync(`${f.settings.settingsPath}.tmp`);
+  assert.throws(() => f.settings.relocateSession(f.ref, f.target, { ...selected, transcriptPath: join(f.target, `${sessionId}.jsonl`) }), /EISDIR|illegal operation|directory/i);
+  assert.deepEqual(f.settings.getPublic().activeSession, f.ref);
+  assert.deepEqual(f.settings.getSessionTranscriptSelection(f.ref), { ...f.ref, ...selected });
+  assert.equal(f.settings.getSessionTranscriptSelection(f.moved), undefined);
+  assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+});
+
+test('saved selections require a recorded owner, valid UUID and matching absolute source, and remain private', () => {
+  const valid = { projectPath: '/project', sessionId, catalogProjectPath: '/catalog-context', scope: 'all', transcriptPath: `/selected/${sessionId}.jsonl` };
+  const parsed = parseSettings({ version: 1, projects: ['/project'], sessionTranscriptSelections: [
+    { ...valid, transcriptPath: '/wrong-file.jsonl' }, { ...valid, projectPath: '/untrusted' },
+    { ...valid, catalogProjectPath: 'relative' }, { ...valid, transcriptPath: `relative/${sessionId}.jsonl` },
+    { ...valid, scope: 'invalid' }, { ...valid, transcriptPath: `/bad\0/${sessionId}.jsonl` },
+    { ...valid, sessionId: 'invalid' }, valid,
+  ] });
+  assert.deepEqual(parsed.sessionTranscriptSelections, [valid]);
+  assert.equal('sessionTranscriptSelections' in publicSettings(parsed), false);
 });

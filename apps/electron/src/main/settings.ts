@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 import { isSessionId } from './sessionIdentity.js';
 
@@ -22,6 +22,7 @@ import {
   type PersistedSettings,
   type PublicSettings,
   type SessionRef,
+  type SessionTranscriptSelection,
 } from './host-utils.js';
 
 export class SettingsStore {
@@ -71,6 +72,9 @@ export class SettingsStore {
       if (managed.activeSession) settings.activeSession = managed.activeSession;
       settings.pinnedSessions.push(...managed.pinnedSessions);
       settings.archivedSessions = [...(settings.archivedSessions ?? []), ...(managed.archivedSessions ?? [])];
+      if (managed.sessionTranscriptSelections?.length) settings.sessionTranscriptSelections = [
+        ...(settings.sessionTranscriptSelections ?? []), ...managed.sessionTranscriptSelections,
+      ];
       if (settings.apiBaseUrl) {
         try { settings.apiBaseUrl = validateApiBaseUrl(settings.apiBaseUrl); }
         catch { delete settings.apiBaseUrl; }
@@ -166,7 +170,12 @@ export class SettingsStore {
   }
 
   /** Move host metadata with the transcript's stable UUID in one settings write. */
-  relocateSession(ref: SessionRef, projectPath: string): void {
+  relocateSession(ref: SessionRef, projectPath: string, selection?: Omit<SessionTranscriptSelection, keyof SessionRef> | null): void {
+    if (selection && (!isAbsolute(selection.catalogProjectPath) || selection.catalogProjectPath.length > 32_768
+      || selection.catalogProjectPath.includes('\0') || !isAbsolute(selection.transcriptPath)
+      || selection.transcriptPath.length > 32_768 || selection.transcriptPath.includes('\0')
+      || basename(selection.transcriptPath).toLowerCase() !== `${ref.sessionId.toLowerCase()}.jsonl`
+      || !['current', 'repository', 'all'].includes(selection.scope))) throw new Error('invalid session transcript selection');
     const previous = this.settings;
     const previousDraft = this.volatileActiveSession;
     const moved = { projectPath, sessionId: ref.sessionId };
@@ -180,6 +189,14 @@ export class SettingsStore {
     next.pinnedSessions = next.pinnedSessions.map(relocate);
     next.archivedSessions = next.archivedSessions?.map(relocate);
     next.sessionModels = next.sessionModels?.map(relocate);
+    const remembered = previous.sessionTranscriptSelections?.find(matches)
+      ?? previous.sessionTranscriptSelections?.find((entry) => entry.projectPath === projectPath && entry.sessionId === ref.sessionId);
+    const selected = selection === undefined ? remembered : selection;
+    if (previous.sessionTranscriptSelections || selected) {
+      next.sessionTranscriptSelections = (previous.sessionTranscriptSelections ?? []).filter((entry) => !matches(entry)
+        && !(entry.projectPath === projectPath && entry.sessionId === ref.sessionId));
+      if (selected) next.sessionTranscriptSelections.push({ ...selected, ...moved });
+    }
     if (next.sidebar && ref.projectPath !== projectPath) {
       const orders = { ...next.sidebar.manualSessionOrder };
       const oldOrder = orders[ref.projectPath] ?? [];
@@ -200,6 +217,11 @@ export class SettingsStore {
       this.volatileActiveSession = previousDraft;
       throw error;
     }
+  }
+
+  getSessionTranscriptSelection(ref: SessionRef): SessionTranscriptSelection | undefined {
+    const selected = this.settings.sessionTranscriptSelections?.find((entry) => entry.projectPath === ref.projectPath && entry.sessionId === ref.sessionId);
+    return selected ? { ...selected } : undefined;
   }
 
   /** Validate host capacity before asking the engine to migrate files. */

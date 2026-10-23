@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { SETTINGS_VERSION } from '../shared/settings.js';
@@ -16,6 +16,7 @@ import { parseVoicePreferences } from '../shared/voicePreferences.js';
 import type { VoicePreferences } from '../shared/voicePreferences.js';
 import { parseNotificationPreferences } from '../shared/notificationPreferences.js';
 import type { NotificationPreferences } from '../shared/notificationPreferences.js';
+import type { SessionCatalogScope } from '../shared/sessionWorkspace.js';
 
 export { SETTINGS_VERSION } from '../shared/settings.js';
 export type {
@@ -76,6 +77,13 @@ export interface TrustRecord {
   trustedAt: string;
 }
 
+/** Host-private source selection; a UUID alone cannot distinguish transcript copies. */
+export interface SessionTranscriptSelection extends SessionRef {
+  catalogProjectPath: string;
+  scope: SessionCatalogScope;
+  transcriptPath: string;
+}
+
 export interface PersistedSettings {
   archivedSessions?: import('../shared/settings.js').ArchivedSessionRecord[];
   version: typeof SETTINGS_VERSION;
@@ -88,6 +96,7 @@ export interface PersistedSettings {
   model?: string;
   /** Explicit model selections are scoped to their owning session. */
   sessionModels?: Array<SessionRef & { model: string }>;
+  sessionTranscriptSelections?: SessionTranscriptSelection[];
   /** Last user-selected permission mode on this device. */
   lastPermissionMode?: PermissionModeId;
   /** Last user-selected fast-mode state on this device. */
@@ -236,6 +245,25 @@ export function parseSettings(value: unknown): PersistedSettings {
     if (projectPath && sessionId && settings.projects.includes(projectPath) && SESSION_ID_PATTERN.test(sessionId)) {
       settings.activeSession = { projectPath, sessionId };
     }
+  }
+
+  if (Array.isArray(value['sessionTranscriptSelections'])) {
+    const selections = new Map<string, SessionTranscriptSelection>();
+    for (const item of value['sessionTranscriptSelections']) {
+      if (!isPlainObject(item)) continue;
+      const projectPath = boundedString(item['projectPath'], 32_768);
+      const sessionId = boundedString(item['sessionId'], 64)?.toLowerCase();
+      const catalogProjectPath = boundedString(item['catalogProjectPath'], 32_768);
+      const transcriptPath = boundedString(item['transcriptPath'], 32_768);
+      const scope = item['scope'];
+      if (!projectPath || !settings.projects.includes(projectPath) || !sessionId || !SESSION_ID_PATTERN.test(sessionId)
+        || !catalogProjectPath || !isAbsolute(catalogProjectPath) || catalogProjectPath.includes('\0')
+        || !transcriptPath || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+        || basename(transcriptPath).toLowerCase() !== `${sessionId}.jsonl`
+        || (scope !== 'current' && scope !== 'repository' && scope !== 'all')) continue;
+      selections.set(`${projectPath}\0${sessionId}`, { projectPath, sessionId, catalogProjectPath, scope, transcriptPath });
+    }
+    settings.sessionTranscriptSelections = [...selections.values()];
   }
 
   if (Array.isArray(value['archivedSessions'])) {
@@ -443,6 +471,9 @@ export function withoutProject(settings: PersistedSettings, projectPath: string)
     pinnedSessions: settings.pinnedSessions
       .filter((session) => session.projectPath !== projectPath)
       .map((session) => ({ ...session })),
+    ...(settings.sessionTranscriptSelections ? {
+      sessionTranscriptSelections: settings.sessionTranscriptSelections.filter((selection) => selection.projectPath !== projectPath),
+    } : {}),
     ...(settings.sidebar ? {
       sidebar: {
         ...settings.sidebar,

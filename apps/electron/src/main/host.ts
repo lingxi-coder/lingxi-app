@@ -1844,7 +1844,9 @@ export class HostController {
         const after = await runtime.getWorkspaceState();
         const target = canonicalWorkspace(result.cwd);
         if (this.isProjectClosing(target)) throw new Error('project is closing');
-        this.settings.relocateSession(ref, target);
+        this.settings.relocateSession(ref, target, after.has_conversation === false || !after.transcript_path ? null : {
+          catalogProjectPath: target, scope: 'current', transcriptPath: after.transcript_path,
+        });
         committed = true;
         if (after.initial_project_root) this.bridge.setSessionProjectRoot(sessionId, after.initial_project_root);
         if (after.prompt_directories) this.bridge.setSessionPromptDirectories(sessionId, after.prompt_directories);
@@ -1890,14 +1892,20 @@ export class HostController {
 
   private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
-    ref = { ...ref, sessionId: ref.sessionId.toLowerCase() };
     const project = this.requireProject(ref.projectPath);
+    ref = { projectPath: project, sessionId: ref.sessionId.toLowerCase() };
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     const existing = this.bridge.get(ref.sessionId);
+    const remembered = !selection && !existing ? this.settings.getSessionTranscriptSelection(ref) : undefined;
+    const catalogProject = remembered?.catalogProjectPath ?? project;
+    // Current aliases and scoped picker copies deliberately differ from UUID
+    // resolution. A cold engine must use the last acknowledged exact source.
+    if (remembered) selection = { scope: remembered.scope, transcriptPath: remembered.transcriptPath };
     let source = existing?.projectPath ?? project;
-    const session = selection ? await this.sessionCatalog.select(project, ref.sessionId, selection) : existing
+    const session = selection ? await this.sessionCatalog.select(catalogProject, ref.sessionId, selection) : existing
       ? await this.assertSessionBelongsToProject({ projectPath: source, sessionId: ref.sessionId })
       : await this.sessionCatalog.find(project, ref.sessionId);
+    if (remembered && !session) throw new Error('The saved session selection is unavailable. Refresh the session list and choose a transcript.');
     if ((!existing || selection) && !session) throw new Error('session does not belong to this project');
     if (selection?.transcriptPath !== undefined && session?.path !== selection.transcriptPath) throw new Error('This session selection has changed. Refresh the session list and try again.');
     if (selection && (!session?.path || !isAbsolute(session.path))) throw new Error('invalid selected transcript path');
@@ -1928,7 +1936,9 @@ export class HostController {
         true, selection ? session?.path : undefined);
       // Persist navigation after a matching engine acknowledgement.
       const wasArchived = this.settings.isSessionArchived(canonical) || this.settings.isSessionArchived(ref);
-      this.settings.relocateSession({ projectPath: project, sessionId: ref.sessionId }, source);
+      this.settings.relocateSession({ projectPath: project, sessionId: ref.sessionId }, source, selection ? {
+        catalogProjectPath: catalogProject, scope: selection.scope, transcriptPath: session!.path,
+      } : undefined);
       if (wasArchived) this.settings.setSessionArchived(canonical, false);
       if (wasArchived) await this.loadProjectSessions(source);
       return this.bootstrap();

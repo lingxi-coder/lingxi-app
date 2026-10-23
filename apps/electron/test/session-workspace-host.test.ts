@@ -202,6 +202,9 @@ test('/cd remounts the same UUID in its new cwd and carries pin, model, order an
   assert.deepEqual(saved.getPublic().activeSession, moved);
   assert.equal(saved.getPublic().pinnedSessions[0]?.projectPath, f.target);
   assert.equal(saved.getSessionModel(moved), 'anthropic/session-model');
+  assert.deepEqual(saved.getSessionTranscriptSelection(moved), {
+    ...moved, catalogProjectPath: f.target, scope: 'current', transcriptPath: f.row(f.target).path,
+  });
   assert.deepEqual(saved.getPublic().sidebar?.manualSessionOrder, { [f.source]: [otherId], [f.target]: [sessionId] });
   assert.equal(f.original.releases, 1);
 });
@@ -564,6 +567,104 @@ test('canceling trust for a selected copy leaves the currently open copy in plac
   assert.deepEqual(f.calls.close, []); assert.deepEqual(f.calls.open, []);
   assert.equal(f.runtimes.get(sessionId), f.original);
   assert.equal(readFileSync(f.settings.settingsPath, 'utf8'), bytes);
+});
+
+for (const coldStart of [false, true]) {
+  test(`an exact selected transcript survives ${coldStart ? 'a full settings and host reload' : 'eviction and ordinary sidebar reopen'}`, async (t) => {
+    const f = hostFixture(t);
+    const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
+    f.catalog.select = async (path, id, selection) => {
+      f.calls.select.push({ ref: { projectPath: path, sessionId: id }, selection });
+      return selected;
+    };
+    await f.host.openSessionAndActivate(f.ref, { scope: 'all', transcriptPath: selected.path });
+    f.runtimes.clear();
+    f.calls.openArguments.length = 0;
+    f.calls.find.length = 0;
+    f.calls.select.length = 0;
+    const settings = coldStart ? new SettingsStore(f.userData) : f.settings;
+    const host = coldStart ? new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
+      { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs) : f.host;
+    if (coldStart) {
+      (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+      t.after(() => host.dispose());
+      await host.restoreProjectSession(f.source, settings.getPublic().activeSession);
+    } else await host.openSessionAndActivate(f.ref);
+    assert.equal(f.calls.openArguments[0]?.[4], selected.path,
+      'a plain UUID resume must not replace the exact picker selection after its engine is gone');
+    assert.deepEqual(f.calls.find, []);
+    assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'all', transcriptPath: selected.path } }]);
+    assert.deepEqual(settings.getPublic().activeSession, f.ref, 'transcript selection must not change SessionRef identity');
+  });
+}
+
+test('a missing saved selected transcript cannot silently resume another copy after cold start', async (t) => {
+  const f = hostFixture(t);
+  const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
+  f.catalog.select = async () => selected;
+  await f.host.openSessionAndActivate(f.ref, { scope: 'all', transcriptPath: selected.path });
+  f.runtimes.clear();
+  f.calls.openArguments.length = 0;
+  f.calls.find.length = 0;
+  f.catalog.select = async () => undefined;
+  const settings = new SettingsStore(f.userData);
+  const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
+    { handle() {}, removeHandler() {} } as any);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  t.after(() => host.dispose());
+  await assert.rejects(host.restoreProjectSession(f.source, settings.getPublic().activeSession), /session.*(changed|project)|selection/i);
+  assert.deepEqual(f.calls.openArguments, []);
+  assert.deepEqual(f.calls.find, [], 'the UUID resolver has a different copy and must never be used as a fallback');
+  assert.deepEqual(settings.getPublic().activeSession, f.ref);
+});
+
+test('a cold public open through a symlink revalidates the canonical owner\'s saved transcript', { skip: process.platform === 'win32' }, async (t) => {
+  const f = hostFixture(t), alias = join(f.root, 'project-alias');
+  symlinkSync(f.source, alias, 'dir');
+  const selected = { ...f.row(f.source), path: join(f.source, 'selected-copy', `${sessionId}.jsonl`) };
+  f.catalog.select = async (path, id, selection) => {
+    f.calls.select.push({ ref: { projectPath: path, sessionId: id }, selection });
+    return selected;
+  };
+  await f.host.openSessionAndActivate(f.ref, { scope: 'all', transcriptPath: selected.path });
+  f.runtimes.clear();
+  f.calls.select.length = 0;
+  f.calls.find.length = 0;
+  f.calls.openArguments.length = 0;
+  const settings = new SettingsStore(f.userData);
+  const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
+    { handle() {}, removeHandler() {} } as any);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  t.after(() => host.dispose());
+  await host.openSessionAndActivate({ projectPath: alias, sessionId });
+  assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'all', transcriptPath: selected.path } }]);
+  assert.deepEqual(f.calls.find, [], 'the raw alias must not miss the canonical source selection and enter UUID lookup');
+  assert.equal(f.calls.openArguments[0]?.[4], selected.path);
+  assert.deepEqual(settings.getPublic().activeSession, f.ref);
+});
+
+test('cold restore revalidates the original picker scope after the selected source moves navigation to another directory', async (t) => {
+  const f = hostFixture(t), moved = { projectPath: f.target, sessionId }, selected = f.row(f.target);
+  f.catalog.select = async (path, id, selection) => {
+    f.calls.select.push({ ref: { projectPath: path, sessionId: id }, selection });
+    assert.equal(path, f.source, 're-query the original alias/picker context, not the new launch directory');
+    return selected;
+  };
+  await f.host.openSessionAndActivate(f.ref, { scope: 'repository', transcriptPath: selected.path });
+  f.runtimes.clear();
+  f.calls.select.length = 0;
+  f.calls.openArguments.length = 0;
+  f.settings.removeProject(f.source);
+  const settings = new SettingsStore(f.userData);
+  const host = new HostController(settings, f.bridge as any, new DiagnosticBuffer(), f.catalog as any,
+    { handle() {}, removeHandler() {} } as any, undefined, undefined, undefined, undefined, f.dialogs);
+  (host as any).bootstrap = () => ({ activeSession: settings.getPublic().activeSession });
+  t.after(() => host.dispose());
+  await host.restoreProjectSession(f.target, settings.getPublic().activeSession);
+  assert.deepEqual(f.calls.select, [{ ref: f.ref, selection: { scope: 'repository', transcriptPath: selected.path } }]);
+  assert.equal(f.calls.openArguments[0]?.[4], selected.path);
+  assert.deepEqual(settings.getPublic().activeSession, moved);
+  assert.equal(settings.hasProject(f.source), false, 'read-only discovery context does not re-trust or register the removed directory');
 });
 
 

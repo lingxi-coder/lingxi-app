@@ -17,5 +17,8 @@ enum CrashReporting {
         #else
         reporter.setCustomValue("store", forKey: "distribution")
         #endif
+        #if DEBUG
+        CrashlyticsDeviceVerification.runIfRequested()
+        #endif
     }
 }

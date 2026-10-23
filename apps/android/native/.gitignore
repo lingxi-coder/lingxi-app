@@ -32,3 +32,4 @@ captures/
 # Local Firebase project debug signing key; never commit private signing material.
 .signing/
 app/libs/*.aar
+app/src/androidTest/assets/crashlytics/

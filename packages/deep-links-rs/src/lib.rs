@@ -27,6 +27,7 @@ fn valid_route(route: &str) -> bool {
         ["cron", "job" | "run", _] => true,
         ["runtime", "agent" | "task" | "plan" | "review" | "activity", _] => true,
         ["import", "mcp" | "plugin" | "skill" | "provider"] => true,
+        ["remote", _, _] => true,
         _ => false,
     }
 }

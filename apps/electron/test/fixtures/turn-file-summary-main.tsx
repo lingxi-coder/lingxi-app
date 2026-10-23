@@ -34,6 +34,9 @@ function Fixture() {
   } as UseBridge;
   return <Theme.Provider value={t}><div style={{ display: 'flex', position: 'relative', height: '100vh', overflow: 'hidden', background: t.transcriptBg }}>
     <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+      <header className="desktop-topbar" style={{ flexShrink: 0 }}>
+        <div id="runtime-inspector-topbar-controls" className="no-drag runtime-inspector-topbar-controls" />
+      </header>
       <Stage sessionKey="turn-review-fixture" liveItems={[{ type: 'meta', id: 'turn-1', dur: '', tokens: '', files }]}
         onReviewFiles={(id, changes, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files: changes, path })} />
     </main>

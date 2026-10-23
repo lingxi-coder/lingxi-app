@@ -28,6 +28,8 @@ async function main() {
     const js = (expression) => wc.executeJavaScript(expression);
     const click = async (selector) => { await js(`document.querySelector(${JSON.stringify(selector)}).click()`); await delay(40); };
     const pointerClick = async (selector) => {
+      await js(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })`);
+      await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
       const point = await js(`(() => {
         const button = document.querySelector(${JSON.stringify(selector)});
         const rect = button.getBoundingClientRect();

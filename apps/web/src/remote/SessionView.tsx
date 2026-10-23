@@ -41,7 +41,7 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
   const scroller = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<FileReceipt[]>([]);
   const stickToBottom = useRef(true);
-  useEffect(() => setAttachments([]), [sessionId]);
+  useEffect(() => setAttachments([]), [client, sessionId]);
 
   useEffect(() => {
     controller.activate();

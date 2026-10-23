@@ -51,11 +51,14 @@ export class RemoteFileStore {
         offset = received;
       };
       let done = false;
-      const release = async (): Promise<void> => {
+      const release = async (discard = false): Promise<void> => {
         if (done) return;
         done = true;
         try { if (handle) await checkpoint(); } finally {
-          try { await handle?.close(); } finally { this.active.delete(dir); }
+          try {
+            await handle?.close();
+            if (discard && !receipt) await rm(dir, { recursive: true, force: true });
+          } finally { this.active.delete(dir); }
         }
       };
       return {
@@ -84,19 +87,19 @@ export class RemoteFileStore {
           const path = join(dir, 'data.part');
           const hash = await digest(path);
           if (hash !== offer.sha256) {
-            await release();
-            await rm(dir, { recursive: true, force: true });
+            await release(true);
             throw new Error('file checksum mismatch');
           }
           authorize();
           await rename(path, join(dir, 'data'));
           const result: FileReceipt = { ...offer, ref: offer.transfer_id };
           await atomicJson(dir, 'receipt.json', result);
+          receipt = result;
           await release();
           return result;
         },
         close: release,
-        cancel: async () => { await release(); if (!receipt) await rm(dir, { recursive: true, force: true }); },
+        cancel: async () => { await release(true); },
       };
     } catch (error) {
       await handle?.close().catch(() => undefined);

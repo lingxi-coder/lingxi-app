@@ -1238,13 +1238,6 @@ impl RemoteFileFfi {
 fn file_error(message: String) -> RemoteFfiError {
     RemoteFfiError::InvalidArgument { message }
 }
-struct FileTaskGuard(Arc<FileTask>);
-impl Drop for FileTaskGuard {
-    fn drop(&mut self) {
-        self.0.active.store(false, Ordering::Release);
-        self.0.cancel.cancel();
-    }
-}
 
 struct Core {
     runtime: tokio::runtime::Handle,
@@ -1334,7 +1327,7 @@ impl AndroidRemoteControlClient {
             .map(|a| a.connection.clone())
             .ok_or(RemoteFfiError::NotConnected)
     }
-    fn begin_file_task(&self, id: &str) -> Result<FileTaskGuard, RemoteFfiError> {
+    fn begin_file_task(&self, id: &str) -> Result<Arc<FileTask>, RemoteFfiError> {
         let mut tasks = self.core.file_tasks.lock().expect("file tasks");
         if tasks
             .values()
@@ -1353,7 +1346,7 @@ impl AndroidRemoteControlClient {
         let task = Arc::new(FileTask::default());
         task.active.store(true, Ordering::Release);
         tasks.insert(id.to_owned(), task.clone());
-        Ok(FileTaskGuard(task))
+        Ok(task)
     }
 
     /// Must be called inside a Tokio runtime.
@@ -1727,14 +1720,18 @@ impl AndroidRemoteControlClient {
         name: String,
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
         let task = self.begin_file_task(&path)?;
-        let offer = remote_control_client::files::prepare(
-            session_id,
-            path.into(),
-            name,
-            task.0.cancel.clone(),
-        )
-        .await
-        .map_err(file_error)?;
+        let offer = task
+            .run(
+                &self.core.runtime,
+                remote_control_client::files::prepare(
+                    session_id,
+                    path.into(),
+                    name,
+                    task.cancel.clone(),
+                ),
+            )
+            .await
+            .map_err(file_error)?;
         Ok(FileReceipt {
             offer,
             r#ref: String::new(),
@@ -1749,12 +1746,15 @@ impl AndroidRemoteControlClient {
     ) -> Result<RemoteFileFfi, RemoteFfiError> {
         let connection = self.file_connection()?;
         let task = self.begin_file_task(&file.transfer_id)?;
-        remote_control_client::files::upload(
-            connection,
-            file.offer(),
-            path.into(),
-            task.0.cancel.clone(),
-            task.0.progress.clone(),
+        task.run(
+            &self.core.runtime,
+            remote_control_client::files::upload(
+                connection,
+                file.offer(),
+                path.into(),
+                task.cancel.clone(),
+                task.progress.clone(),
+            ),
         )
         .await
         .map(Into::into)
@@ -1779,7 +1779,7 @@ impl AndroidRemoteControlClient {
                 .map_err(|e| file_error(e.to_string()))?;
         for file in &files {
             file.offer.validate().map_err(file_error)?;
-            if file.r#ref != file.offer.transfer_id {
+            if file.r#ref != file.offer.transfer_id || file.offer.session_id != session_id {
                 return Err(file_error("invalid published file reference".into()));
             }
         }
@@ -1794,15 +1794,18 @@ impl AndroidRemoteControlClient {
         let connection = self.file_connection()?;
         let task = self.begin_file_task(&file.transfer_id)?;
         let file_ref = file.file_ref.clone();
-        remote_control_client::files::download(
-            connection,
-            FileReceipt {
-                offer: file.offer(),
-                r#ref: file_ref,
-            },
-            path.into(),
-            task.0.cancel.clone(),
-            task.0.progress.clone(),
+        task.run(
+            &self.core.runtime,
+            remote_control_client::files::download(
+                connection,
+                FileReceipt {
+                    offer: file.offer(),
+                    r#ref: file_ref,
+                },
+                path.into(),
+                task.cancel.clone(),
+                task.progress.clone(),
+            ),
         )
         .await
         .map(Into::into)

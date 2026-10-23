@@ -218,7 +218,8 @@ function send(conn: string, data: ArrayBuffer, lane?: 'files'): void {
   try {
     channel.send(data);
   } catch (error) {
-    failPeer(peer, `send failed: ${describe(error)}`);
+    if (lane === 'files') channel.close();
+    else failPeer(peer, `send failed: ${describe(error)}`);
     return;
   }
   if (!(lane === 'files' ? peer.filePaused : peer.paused) && channel.bufferedAmount > DATA_CHANNEL_BUFFER_HIGH_BYTES) {

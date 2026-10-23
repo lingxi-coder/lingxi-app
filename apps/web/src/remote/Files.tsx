@@ -15,36 +15,51 @@ export function Files({ client, session, locale, disabled, onAttach }: {
   const [busy, setBusy] = useState(false);
   const abort = useRef<AbortController>();
   const input = useRef<HTMLInputElement>(null);
-  const active = useRef(true);
+  const generation = useRef(0);
+  useEffect(() => { setFiles([]); setSelected(undefined); }, [client, session]);
   useEffect(() => {
-    active.current = true;
-    if (!disabled) void client.listFiles(session).then(setFiles).catch(() => undefined);
-    return () => { active.current = false; abort.current?.abort(); };
+    const mine = ++generation.current;
+    setBusy(false);
+    if (!disabled) void client.listFiles(session).then(result => {
+      if (generation.current === mine) setFiles(result);
+    }).catch(() => undefined);
+    return () => { ++generation.current; abort.current?.abort(); abort.current = undefined; };
   }, [client, session, disabled]);
-  const report = (offset: number, size: number): void => {
-    if (active.current) setProgress(`${size ? Math.floor(offset / size * 100) : 100}% · ${offset.toLocaleString()} / ${size.toLocaleString()} B`);
+  const start = () => {
+    if (disabled || abort.current) return;
+    const controller = new AbortController(); abort.current = controller;
+    const mine = generation.current;
+    const current = () => generation.current === mine && abort.current === controller;
+    setBusy(true); setProblem('');
+    return {
+      controller, current,
+      report: (offset: number, size: number) => {
+        if (current() && !controller.signal.aborted) setProgress(`${size ? Math.floor(offset / size * 100) : 100}% · ${offset.toLocaleString()} / ${size.toLocaleString()} B`);
+      },
+      finish: () => { if (current()) { setBusy(false); abort.current = undefined; } },
+    };
   };
   const upload = async (file: File): Promise<void> => {
-    setBusy(true); setProblem(''); setProgress(zh ? '校验文件…' : 'Hashing file…'); setSelected(file);
-    const controller = new AbortController(); abort.current = controller;
+    const operation = start(); if (!operation) return;
+    setProgress(zh ? '校验文件…' : 'Hashing file…'); setSelected(file);
     try {
-      const result = await client.uploadFile(session, file, report, controller.signal);
-      if (!active.current) return;
+      const result = await client.uploadFile(session, file, operation.report, operation.controller.signal);
+      if (!operation.current() || operation.controller.signal.aborted) return;
       setFiles(current => [...current.filter(f => f.ref !== result.ref), result]); setSelected(undefined); onAttach(result);
-    } catch (error) { if (active.current) setProblem(error instanceof Error ? error.message : String(error)); }
-    finally { if (active.current) { setBusy(false); abort.current = undefined; } }
+    } catch (error) { if (operation.current()) setProblem(error instanceof Error ? error.message : String(error)); }
+    finally { operation.finish(); }
   };
   const download = async (file: FileReceipt): Promise<void> => {
-    setBusy(true); setProblem(''); setProgress('');
-    const controller = new AbortController(); abort.current = controller;
+    const operation = start(); if (!operation) return;
+    setProgress('');
     try {
-      const blob = await client.downloadFile(file, report, controller.signal);
-      if (!active.current) return;
+      const blob = await client.downloadFile(file, operation.report, operation.controller.signal);
+      if (!operation.current() || operation.controller.signal.aborted) return;
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a'); link.href = url; link.download = file.name; link.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (error) { if (active.current) setProblem(error instanceof Error ? error.message : String(error)); }
-    finally { if (active.current) { setBusy(false); abort.current = undefined; } }
+    } catch (error) { if (operation.current()) setProblem(error instanceof Error ? error.message : String(error)); }
+    finally { operation.finish(); }
   };
   return <details className="rc-files">
     <summary>{zh ? '文件' : 'Files'} ({files.length})</summary>

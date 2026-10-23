@@ -148,7 +148,20 @@ async function main(): Promise<void> {
   });
   await run(`window.viewer.finishFile('one', '${'34'.repeat(16)}')`);
   await until(async () => (await status('one')).received.length === 2, 'control messages during file transfer');
-  bulk.close();
+  // A DataChannel.send exception must close only the failed file lane.
+  await rtcWindow!.webContents.executeJavaScript(`(() => {
+    const original = RTCDataChannel.prototype.send;
+    RTCDataChannel.prototype.send = function(data) {
+      if (this.label === 'lingxi-files') {
+        RTCDataChannel.prototype.send = original;
+        throw new Error('injected file send failure');
+      }
+      return original.call(this, data);
+    };
+  })()`);
+  link.files!.sendFragment(new Uint8Array([1]));
+  await until(() => !link.files!.connected, 'file send failure closes the file lane');
+  assert.equal(bulk.closedSignal.aborted, true);
   await transport.send(pattern('fedcba9876543210', SIZE));
   await until(async () => (await status('one')).received.length === 3, 'control after closing only the file lane');
   assert.equal(link.connected, true);

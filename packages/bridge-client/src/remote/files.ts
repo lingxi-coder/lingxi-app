@@ -98,37 +98,50 @@ interface Sending {
   fail?: (error: Error) => void;
   drain?: () => void;
 }
-/** One connection, bidirectional, bounded to four active sends and 256 KiB of
+/** One connection, bidirectional, bounded to four active sends and 1 MiB of
  * queued ingress. Applications authorize an offer before calling receive(). */
 export class FileChannel {
   private readonly sending = new Map<string, Sending>();
   private readonly sinks = new Map<string, FileSink>();
+  private readonly commits = new Map<string, Promise<FileReceipt>>();
   private incoming = Promise.resolve();
   private queued = 0;
   private closed: Error | undefined;
+  private readonly shutdown = new AbortController();
+  get closedSignal(): AbortSignal { return this.shutdown.signal; }
   constructor(private readonly link: FragmentLink) {
     link.onFragment(frame => this.ingress(frame));
     link.onClose(reason => this.close(new Error(`file channel closed: ${reason}`)));
   }
   receive(id: string, sink: FileSink): void {
     if (this.closed) throw this.closed;
-    if (!ID.test(id) || this.sinks.has(id) || this.sinks.size >= FILE_MAX_ACTIVE) throw new Error('file receiver busy');
+    if (!ID.test(id) || this.sinks.has(id) || this.sending.has(id) || this.commits.has(id) || this.sinks.size >= FILE_MAX_ACTIVE) throw new Error('file receiver busy');
     this.sinks.set(id, sink);
   }
-  async commit(id: string): Promise<FileReceipt> {
-    await this.incoming;
-    if (this.closed) throw this.closed;
-    const sink = this.sinks.get(id);
-    if (!sink) throw new Error('unknown transfer');
-    try { return await sink.finish(); }
-    finally {
-      this.sinks.delete(id);
-      await sink.close().catch(() => undefined);
-    }
+  commit(id: string): Promise<FileReceipt> {
+    const pending = this.commits.get(id);
+    if (pending) return pending;
+    const commit = this.incoming.then(async () => {
+      if (this.closed) throw this.closed;
+      const sink = this.sinks.get(id);
+      if (!sink) throw new Error('unknown transfer');
+      try { return await sink.finish(); }
+      finally {
+        this.sinks.delete(id);
+        await sink.close().catch(() => undefined);
+      }
+    });
+    // Only this sink waits for its hash/rename. Other transfers must continue
+    // receiving and acknowledging while a large file is being verified.
+    this.commits.set(id, commit);
+    void commit.finally(() => this.commits.delete(id)).catch(() => undefined);
+    return commit;
   }
   /** Network interruption releases the handle while retaining durable progress. */
   async detach(id: string): Promise<void> {
+    const committing = this.commits.get(id);
     const detach = this.incoming.then(async () => {
+      await committing?.catch(() => undefined);
       const sink = this.sinks.get(id);
       this.sinks.delete(id);
       await sink?.close();
@@ -138,7 +151,9 @@ export class FileChannel {
   }
   async cancel(id: string): Promise<void> {
     // Queue cancellation behind writes already accepted from this channel.
+    const committing = this.commits.get(id);
     const cancel = this.incoming.then(async () => {
+      await committing?.catch(() => undefined);
       const sink = this.sinks.get(id);
       this.sinks.delete(id);
       await sink?.cancel();
@@ -150,14 +165,17 @@ export class FileChannel {
     validateFileOffer(offer);
     if (source.size !== offer.size) throw new Error('file size changed');
     if (this.closed) throw this.closed;
-    if (this.sending.has(offer.transfer_id) || this.sending.size >= FILE_MAX_ACTIVE) throw new Error('file sender busy');
+    if (this.sending.has(offer.transfer_id) || this.sinks.has(offer.transfer_id) || this.commits.has(offer.transfer_id) || this.sending.size >= FILE_MAX_ACTIVE) throw new Error('file sender busy');
     const s: Sending = { ack: 0, sent: 0 };
     this.sending.set(offer.transfer_id, s);
+    let offered = false;
+    const wait = <T>(promise: Promise<T>): Promise<T> => withAbort(withAbort(promise, this.closedSignal), signal);
     try {
       signal?.throwIfAborted();
       const chunkBytes = Math.min(FILE_CHUNK_BYTES, (this.link.maxFragmentBytes ?? FILE_FRAME_BYTES) - FILE_HEADER_BYTES);
       if (chunkBytes < 1) throw new Error('negotiated file message size is too small');
-      const { offset } = await control.offer(offer);
+      offered = true;
+      const { offset } = await wait(control.offer(offer));
       if (this.closed) throw this.closed;
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > offer.size) throw new Error('invalid checkpoint');
       s.ack = offset; s.sent = offset;
@@ -168,30 +186,32 @@ export class FileChannel {
           signal?.throwIfAborted();
           if (this.closed) throw this.closed;
           const length = Math.min(chunkBytes, end - s.sent);
-          const bytes = await source.read(s.sent, length);
+          const bytes = await wait(source.read(s.sent, length));
           if (bytes.length !== length) throw new Error('file changed while reading');
-          await withAbort(this.link.whenWritable?.() ?? Promise.resolve(), signal);
+          await wait(this.link.whenWritable?.() ?? Promise.resolve());
           signal?.throwIfAborted();
           if (this.closed) throw this.closed;
           const start = s.sent;
           s.sent += length; // ACK may arrive synchronously from an in-memory link.
-          this.link.sendFragment(encodeFileFrame(s.sent === end ? 2 : 0, offer.transfer_id, start, bytes));
+          try { this.link.sendFragment(encodeFileFrame(s.sent === end ? 2 : 0, offer.transfer_id, start, bytes)); }
+          catch (error) { s.sent = start; throw error; }
         }
         await this.waitAck(s, end, signal);
         progress?.(s.ack, offer.size);
       }
       signal?.throwIfAborted();
-      const receipt = await control.commit(offer.transfer_id);
+      const receipt = await wait(control.commit(offer.transfer_id));
       if (JSON.stringify(validateFileOffer(receipt)) !== JSON.stringify(validateFileOffer(offer)) || receipt.ref !== offer.transfer_id) throw new Error('invalid file receipt');
       return receipt;
     } catch (error) {
-      if (signal?.aborted) {
+      if (offered && !this.closed) {
+        // Any local failure must release its remote registration before retry.
         // Drain already-sent frames on the ordered file lane before removing
         // the receiver over the independent control lane.
         if (s.sent > s.ack && !this.closed) {
           try {
             await new Promise<void>((resolve, reject) => {
-              const timer = setTimeout(() => reject(new Error('file cancellation drain timed out')), FILE_ACK_TIMEOUT_MS);
+              const timer = setTimeout(() => done(new Error('file cancellation drain timed out')), FILE_ACK_TIMEOUT_MS);
               const done = (error?: Error): void => { clearTimeout(timer); s.drain = undefined; s.fail = undefined; error ? reject(error) : resolve(); };
               s.drain = () => done(); s.fail = done;
               try { this.link.sendFragment(encodeFileFrame(3, offer.transfer_id, s.sent)); }
@@ -199,7 +219,7 @@ export class FileChannel {
             });
           } catch { this.close(new Error('file cancellation drain failed')); }
         }
-        await control.cancel(offer.transfer_id).catch(() => undefined);
+        if (!this.closed) await control.cancel(offer.transfer_id).catch(() => this.close(new Error('file cleanup failed')));
       }
       throw error;
     } finally {
@@ -241,7 +261,10 @@ export class FileChannel {
         return;
       }
       this.queued += frame.length;
-      if (this.queued > (FILE_WINDOW_BYTES + FILE_HEADER_BYTES * 16) * FILE_MAX_ACTIVE) throw new Error('file receive window exceeded');
+      // Each full window can be followed by one cancellation barrier before
+      // storage catches up. Reserve that header so valid concurrent cancels do
+      // not exceed the receive bound when all four windows are queued.
+      if (this.queued > (FILE_WINDOW_BYTES + FILE_HEADER_BYTES * 17) * FILE_MAX_ACTIVE) throw new Error('file receive window exceeded');
       this.incoming = this.incoming.then(async () => {
         if (this.closed) return;
         const sink = this.sinks.get(message.id);
@@ -259,10 +282,12 @@ export class FileChannel {
   close(error = new Error('file channel closed')): void {
     if (this.closed) return;
     this.closed = error;
+    this.shutdown.abort(error);
     this.link.close('file_channel_closed');
     for (const s of this.sending.values()) s.fail?.(error);
     // In-flight writes finish before handles are closed and checkpoints retained.
     void this.incoming.then(async () => {
+      await Promise.allSettled([...this.commits.values()]);
       for (const sink of this.sinks.values()) await sink.close().catch(() => undefined);
       this.sinks.clear();
     });
@@ -272,7 +297,10 @@ function asError(error: unknown): Error { return error instanceof Error ? error 
 
 function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(new Error('file transfer cancelled'));
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    return Promise.reject(signal.reason ?? new Error('file transfer cancelled'));
+  }
   return new Promise((resolve, reject) => {
     const abort = (): void => { signal.removeEventListener('abort', abort); reject(new Error('file transfer cancelled')); };
     signal.addEventListener('abort', abort, { once: true });

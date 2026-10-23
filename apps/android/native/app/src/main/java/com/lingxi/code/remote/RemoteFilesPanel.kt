@@ -55,7 +55,7 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
     var total by remember(key) { mutableStateOf(0UL) }
     var committed by remember(key) { mutableStateOf(0UL) }
     var problem by remember(key) { mutableStateOf<String?>(null) }
-    var importing by remember(key) { mutableStateOf<Job?>(null) }
+    var operation by remember(key) { mutableStateOf<Job?>(null) }
     var pendingDownload by remember(key) { mutableStateOf<RemoteFileFfi?>(null) }
     val root = remember(key) {
         val hash = MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString("") { "%02x".format(it) }
@@ -66,11 +66,11 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
         val selected = source ?: return
         busy = true; problem = null; committed = 0UL
         try {
-            val client = client()
             transfer = selected.absolutePath
-            val file = prepared ?: client.prepareFile(sessionId, selected.absolutePath, selected.name).also { prepared = it }
+            val file = prepared ?: client().prepareFile(sessionId, selected.absolutePath, selected.name).also { prepared = it }
             transfer = file.transferId; total = file.size
-            val receipt = client.uploadFile(file, selected.absolutePath)
+            val receipt = client().uploadFile(file, selected.absolutePath)
+            client() // Recheck the account/host after suspension before publishing UI state.
             files = files.filterNot { it.transferId == receipt.transferId } + receipt
             source = null; prepared = null
             withContext(Dispatchers.IO) { selected.parentFile?.deleteRecursively() }
@@ -81,8 +81,9 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val file = pendingDownload
         pendingDownload = null
-        if (uri != null && file != null) scope.launch {
-            busy = true; problem = null; committed = 0UL; total = file.size; transfer = file.transferId
+        if (uri == null || file == null) busy = false
+        else operation = scope.launch {
+            problem = null; committed = 0UL; total = file.size; transfer = file.transferId
             try {
                 val output = withContext(Dispatchers.IO) {
                     check(file.transferId.matches(Regex("[0-9a-f]{32}")))
@@ -93,7 +94,15 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openOutputStream(uri, "wt").use { target ->
                         checkNotNull(target) { "Cannot open destination" }
-                        output.inputStream().use { it.copyTo(target, 64 * 1024) }
+                        output.inputStream().use { input ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                coroutineContext.ensureActive()
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                target.write(buffer, 0, count)
+                            }
+                        }
                     }
                 }
             } catch (error: CancellationException) { throw error }
@@ -102,8 +111,11 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
         }
     }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) importing = scope.launch {
-            busy = true; problem = null
+        if (uri == null) busy = false
+        else operation = scope.launch {
+            problem = null
+            var staging: File? = null
+            var retained = false
             try {
                 val imported = withContext(Dispatchers.IO) {
                     val name = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -111,6 +123,7 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
                     } ?: "file"
                     require(name.isNotBlank() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\'))
                     val directory = File(root, UUID.randomUUID().toString()).apply { check(mkdirs()) }
+                    staging = directory
                     val result = File(directory, name)
                     context.contentResolver.openInputStream(uri).use { input ->
                         checkNotNull(input) { "Cannot open selected file" }
@@ -126,10 +139,15 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
                     }
                     result
                 }
-                source = imported; prepared = null; upload()
+                client()
+                source?.parentFile?.deleteRecursively()
+                source = imported; prepared = null; retained = true; upload()
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { problem = error.message }
-            finally { busy = false }
+            finally {
+                if (!retained) staging?.deleteRecursively()
+                busy = false
+            }
         }
     }
     LaunchedEffect(key, available) { if (available) runCatching { client().listFiles(sessionId) }.onSuccess { files = it } }
@@ -141,9 +159,9 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
         TextButton(onClick = { expanded = !expanded }) { Text(stringResource(R.string.remote_files)) }
         if (expanded) {
             Row {
-                TextButton(enabled = available && !busy, onClick = { picker.launch(arrayOf("*/*")) }) { Text(stringResource(R.string.remote_file_upload)) }
-                if (source != null && !busy) TextButton(enabled = available, onClick = { scope.launch { upload() } }) { Text(stringResource(R.string.common_retry)) }
-                if (busy) TextButton(onClick = { val id = transfer; if (id != null) scope.launch { client().cancelFile(id) } else importing?.cancel() }) { Text(stringResource(R.string.remote_file_cancel)) }
+                TextButton(enabled = available && !busy, onClick = { if (!busy) { busy = true; picker.launch(arrayOf("*/*")) } }) { Text(stringResource(R.string.remote_file_upload)) }
+                if (source != null && !busy) TextButton(enabled = available, onClick = { if (!busy) { busy = true; operation = scope.launch { upload() } } }) { Text(stringResource(R.string.common_retry)) }
+                if (busy) TextButton(onClick = { operation?.cancel() }) { Text(stringResource(R.string.remote_file_cancel)) }
             }
             if (busy) {
                 LinearProgressIndicator(progress = { if (total > 0UL) (committed.toDouble() / total.toDouble()).toFloat() else 0f })
@@ -152,10 +170,16 @@ private fun RemoteFilesContent(manager: RemoteControlManager, hostId: String, se
             problem?.let { Text(it) }
             files.forEach { file -> Row {
                 Text(file.name, modifier = Modifier.weight(1f), maxLines = 1)
-                TextButton(enabled = available && !busy, onClick = { scope.launch {
-                    runCatching { client().sendPromptWithFiles(sessionId, file.name, emptyList(), listOf(file.fileRef)) }.onFailure { problem = it.message }
+                TextButton(enabled = available && !busy, onClick = { if (!busy) {
+                    busy = true
+                    operation = scope.launch {
+                        try { client().sendPromptWithFiles(sessionId, file.name, emptyList(), listOf(file.fileRef)) }
+                        catch (error: CancellationException) { throw error }
+                        catch (error: Exception) { problem = error.message }
+                        finally { busy = false }
+                    }
                 } }) { Text(stringResource(R.string.remote_file_attach)) }
-                TextButton(enabled = available && !busy, onClick = { pendingDownload = file; save.launch(file.name) }) { Text(stringResource(R.string.remote_file_download)) }
+                TextButton(enabled = available && !busy, onClick = { if (!busy) { busy = true; pendingDownload = file; save.launch(file.name) } }) { Text(stringResource(R.string.remote_file_download)) }
             } }
             if (!available) Text(stringResource(R.string.remote_file_requires_webrtc))
         }

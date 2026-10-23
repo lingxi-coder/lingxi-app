@@ -558,7 +558,7 @@ impl ViewerConnection {
     }
 
     /// Independent binary file transport, available only on an approved direct connection.
-    pub fn file_lane(&self) -> Result<Arc<crate::files::FileLane>, String> {
+    pub fn file_transport(&self) -> Result<(Arc<crate::files::FileLane>, RpcPeer), String> {
         let live = self
             .inner
             .core
@@ -571,9 +571,10 @@ impl ViewerConnection {
         if !data.ready || data.kind != Some(TransportKind::Webrtc) {
             return Err("files require WebRTC".into());
         }
-        data.files
-            .clone()
-            .ok_or_else(|| "file channel unavailable".into())
+        Ok((
+            data.files.clone().ok_or("file channel unavailable")?,
+            data.rpc.clone().ok_or("control channel unavailable")?,
+        ))
     }
 
     /// Send a request on the ready link. Fails with `closed` when there is none.

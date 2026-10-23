@@ -191,3 +191,86 @@ test('checksum rejection releases gateway registration so the same transfer can 
     assert.equal((await a.send(info, pattern(info.size), control)).sha256, info.sha256);
   } finally { a.close(); b.close(); f.gateway.dispose(); }
 }));
+
+test('source read failure drains and releases the upload so its id can retry', async () => withStore(async store => {
+  const { a, b, al, bl } = pair(); const info = await offer(FILE_CHUNK_BYTES * 2);
+  const control = {
+    offer: async (o: FileOffer) => { const sink = await store.accept('owner', o, authorize); b.receive(o.transfer_id, sink); return { offset: sink.offset }; },
+    commit: (id: string) => b.commit(id), cancel: (id: string) => b.cancel(id),
+  };
+  try {
+    await assert.rejects(a.send(info, { size: info.size, read: async (at, length) => {
+      if (at > 0) throw new Error('source became unreadable');
+      return pattern(info.size).read(at, length);
+    } }, control), /unreadable/);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(al.closed, false); assert.equal(bl.closed, false);
+    assert.equal((await a.send(info, pattern(info.size), control)).sha256, info.sha256);
+  } finally { a.close(); b.close(); }
+}));
+
+test('closing a file lane waits for an in-progress commit before releasing its sink', async () => {
+  const { a, b } = pair(); const info = await offer(0);
+  let finish!: () => void; let entered!: () => void; let released = false;
+  const pending = new Promise<void>(resolve => { finish = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  b.receive(info.transfer_id, { offset: 0, write: async () => undefined,
+    finish: async () => { entered(); await pending; assert.equal(released, false); return { ...info, ref: info.transfer_id }; },
+    close: async () => { released = true; }, cancel: async () => undefined,
+  });
+  const committed = b.commit(info.transfer_id);
+  await started; b.close(); await new Promise(resolve => setImmediate(resolve));
+  const premature = released; finish();
+  await committed; a.close();
+  assert.equal(premature, false);
+  assert.equal(released, true);
+});
+
+test('cancelling an already-published sink cannot delete its receipt', async () => withStore(async store => {
+  const info = await offer(0); const sink = await store.accept('owner', info, authorize);
+  const published = await sink.finish(); await sink.cancel();
+  assert.deepEqual(await store.receipt('owner', info.session_id, info.transfer_id), published);
+}));
+
+test('verifying one large file does not block another file transfer', { timeout: 2000 }, async () => {
+  const { a, b } = pair();
+  const first = await offer(0);
+  let release!: () => void;
+  const hashing = new Promise<void>(resolve => { release = resolve; });
+  b.receive(first.transfer_id, { offset: 0, write: async () => {}, finish: async () => { await hashing; return { ...first, ref: first.transfer_id }; }, close: async () => {}, cancel: async () => {} });
+  const finishing = b.commit(first.transfer_id);
+  try {
+    const second = await offer(3, 'ee'.repeat(16));
+    let offset = 0;
+    const receipt = await a.send(second, pattern(3), {
+      offer: async () => { b.receive(second.transfer_id, { get offset() { return offset; }, write: async (_, bytes) => { offset += bytes.length; }, finish: async () => ({ ...second, ref: second.transfer_id }), close: async () => {}, cancel: async () => {} }); return { offset: 0 }; },
+      commit: id => b.commit(id), cancel: id => b.cancel(id),
+    });
+    assert.equal(receipt.size, 3);
+  } finally { release(); await finishing; a.close(); b.close(); }
+});
+
+test('four saturated windows leave room for cancellation barriers', { timeout: 4000 }, async () => {
+  const { a, b, al } = pair();
+  const controllers = Array.from({ length: 4 }, () => new AbortController());
+  let unblock!: () => void; let full!: () => void; let sent = 0;
+  const disk = new Promise<void>(resolve => { unblock = resolve; });
+  const saturated = new Promise<void>(resolve => { full = resolve; });
+  const send = al.sendFragment.bind(al);
+  al.sendFragment = bytes => { send(bytes); if ((bytes[0] === 0 || bytes[0] === 2) && ++sent === 64) full(); };
+  const infos = await Promise.all(controllers.map((_, index) => offer(FILE_CHUNK_BYTES * 16, String(index + 1).repeat(32))));
+  const transfers = infos.map((info, index) => a.send(info, pattern(info.size), {
+    offer: async () => {
+      let offset = 0;
+      b.receive(info.transfer_id, { get offset() { return offset; }, write: async (_, bytes) => { await disk; offset += bytes.length; }, finish: async () => ({ ...info, ref: info.transfer_id }), close: async () => {}, cancel: async () => {} });
+      return { offset: 0 };
+    }, commit: id => b.commit(id), cancel: id => b.cancel(id),
+  }, undefined, controllers[index]!.signal));
+  const cancelled = Promise.all(transfers.map(transfer => assert.rejects(transfer, /cancel|abort/i)));
+  try {
+    await saturated;
+    controllers.forEach(controller => controller.abort());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(al.closed, false, 'flush barriers must fit alongside four complete windows');
+  } finally { unblock(); await cancelled; a.close(); b.close(); }
+});

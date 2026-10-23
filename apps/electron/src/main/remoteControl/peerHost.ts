@@ -333,6 +333,7 @@ class LinkImpl implements PeerLink {
   close(reason: string, tellPage = true): void {
     if (this.closed) return;
     this.closed = true;
+    this.connected = false;
     this.closeReason = reason;
     this.files?.close(reason, false);
     if (!this.lane) this.host.release(this.connId, tellPage);

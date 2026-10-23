@@ -375,3 +375,20 @@ test('messages from the page: errors are shortened, states and candidates are fr
   assert.deepEqual(parsePageToMain({ t: 'drain', conn: A }), { t: 'drain', conn: A });
   assert.equal(parsePageToMain({ t: 'drain', conn: 'x' }), undefined);
 });
+
+test('closing the file lane updates availability and preserves the control peer', async () => {
+  const t = setup();
+  await answered(t);
+  const control = t.host.link(A);
+  const files = control.files!;
+  const port = t.windows[0]!.port;
+  port.say({ t: 'state', conn: A, state: 'connected' });
+  port.say({ t: 'state', conn: A, state: 'connected', lane: 'files' });
+  assert.equal(files.connected, true);
+  files.close('test');
+  assert.equal(files.connected, false);
+  assert.equal(control.connected, true);
+  assert.equal(t.host.connectionCount, 1);
+  control.sendFragment(new Uint8Array([1]));
+  t.host.dispose();
+});

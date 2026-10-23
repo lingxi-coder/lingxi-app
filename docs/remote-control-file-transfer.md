@@ -94,14 +94,28 @@ concurrent control traffic. Native Rust wire vector includes an offset above
 4 GiB and matches TypeScript. These are not physical-device acceptance or a
 multi-gigabyte throughput measurement.
 
-The feature-enabled Rust suite passed 108 tests; a subsequent additional native
-barrier test passed with all six library tests (109 tests across the combined
-runs). The 14 dedicated file tests and real Electron transport/OPFS test pass,
-including cancellation in both directions, retry using the same transfer ID,
-uncommitted-tail discard, negotiated small messages, disk failure, and ownership.
-Existing host (89) and web (43) regression tests pass. Swift and Kotlin bindings
-were regenerated from the pinned dependency. Android Kotlin compilation and
-RemoteControlManager tests pass.
+The review regression suite passes 111 feature-enabled Rust tests, 19 dedicated
+file tests, 132 web tests, and 321 desktop tests (3 pre-existing opt-in tests are
+skipped). The real Electron transport/OPFS test also passes, including an injected
+file-channel send failure while the control channel remains usable. Swift and
+Kotlin public FFI signatures are unchanged by these repairs.
+
+Review repairs include:
+
+- FFI cancellation now requests cooperative cleanup without dropping the native
+  worker; its transfer registration stays reserved until drain/cleanup finishes.
+- Control RPC and binary traffic are pinned to the same connection attempt.
+- Source-read failures clean up remote receivers after draining outstanding data.
+- Downloads reserve their ID before touching partial storage and keep it reserved
+  through final verification; a rejected duplicate cannot detach another receiver.
+- Commit and close wait for the same sink, while other file transfers continue
+  during hashing. Cancelling a published sink preserves its final receipt/data.
+- Worker crashes and file-channel closure promptly stop browser download waits;
+  verification is cancellable, and failed workers cannot hang cleanup.
+- File-lane errors close only that lane and clear its availability flag. Four
+  saturated receive windows reserve space for their cancellation barriers.
+- UI operations reject stale callbacks, recheck account/host after hashing, and
+  cancel local copy jobs. Failed imports remove their temporary cache files.
 
 Native builds passed for the selected validation configurations:
 

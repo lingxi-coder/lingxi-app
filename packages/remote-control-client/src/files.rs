@@ -16,6 +16,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -85,6 +86,7 @@ pub struct FileLane {
     closed: CancellationToken,
     acks: Mutex<HashMap<String, Arc<Ack>>>,
     downloads: Mutex<HashMap<String, Arc<Mutex<Download>>>>,
+    registrations: Mutex<HashMap<String, bool>>,
 }
 impl FileLane {
     /// Start draining an independent file peer.
@@ -95,6 +97,7 @@ impl FileLane {
             closed: CancellationToken::new(),
             acks: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
+            registrations: Mutex::new(HashMap::new()),
         });
         let weak = Arc::downgrade(&lane);
         tokio::spawn(async move {
@@ -129,6 +132,18 @@ impl FileLane {
         } else {
             Ok(())
         }
+    }
+    fn reserve(self: &Arc<Self>, id: &str, download: bool) -> Result<Registration, String> {
+        let mut entries = self.registrations.lock().expect("registrations");
+        if entries.contains_key(id) || entries.values().filter(|&&v| v == download).count() >= 4 {
+            return Err("file transfer busy".into());
+        }
+        entries.insert(id.to_owned(), download);
+        Ok(Registration {
+            lane: self.clone(),
+            id: id.to_owned(),
+            download,
+        })
     }
     /// Close this lane and wake pending senders.
     pub fn close(&self) {
@@ -205,6 +220,11 @@ impl Drop for Registration {
         } else {
             self.lane.acks.lock().expect("acks").remove(&self.id);
         }
+        self.lane
+            .registrations
+            .lock()
+            .expect("registrations")
+            .remove(&self.id);
     }
 }
 impl Drop for FileLane {
@@ -332,7 +352,7 @@ pub async fn upload(
     progress: Arc<AtomicU64>,
 ) -> Result<FileReceipt, String> {
     offer.validate()?;
-    let lane = connection.file_lane()?;
+    let (lane, rpc) = connection.file_transport()?;
     lane.check()?;
     let (tx, mut rx) = watch::channel(0);
     let ack = Arc::new(Ack {
@@ -340,18 +360,11 @@ pub async fn upload(
         drained: watch::channel(0).0,
         sent: AtomicU64::new(0),
     });
-    {
-        let mut acks = lane.acks.lock().expect("acks");
-        if acks.len() >= 4 || acks.contains_key(&offer.transfer_id) {
-            return Err("file sender busy".into());
-        }
-        acks.insert(offer.transfer_id.clone(), ack.clone());
-    }
-    let _registration = Registration {
-        lane: lane.clone(),
-        id: offer.transfer_id.clone(),
-        download: false,
-    };
+    let _registration = lane.reserve(&offer.transfer_id, false)?;
+    lane.acks
+        .lock()
+        .expect("acks")
+        .insert(offer.transfer_id.clone(), ack.clone());
     let chunk_bytes = lane
         .sender
         .max_frame_bytes()
@@ -360,7 +373,7 @@ pub async fn upload(
         .filter(|n| *n > 0)
         .ok_or("negotiated message size too small")?;
     let result = async {
-        let value = connection
+        let value = rpc
             .request(
                 "file.offer",
                 Some(serde_json::to_value(&offer).map_err(err)?),
@@ -377,11 +390,11 @@ pub async fn upload(
         ack.sent.store(offset, Ordering::Release);
         ack.committed.send_replace(offset);
         progress.store(offset, Ordering::Release);
-        let mut file = File::open(&path).map_err(err)?;
-        if file.metadata().map_err(err)?.len() != offer.size {
+        let mut file = tokio::fs::File::open(&path).await.map_err(err)?;
+        if file.metadata().await.map_err(err)?.len() != offer.size {
             return Err("file size changed".into());
         }
-        file.seek(SeekFrom::Start(offset)).map_err(err)?;
+        file.seek(SeekFrom::Start(offset)).await.map_err(err)?;
         let mut sent = offset;
         while sent < offer.size {
             let end = (sent + chunk_bytes as u64 * 16).min(offer.size);
@@ -391,7 +404,7 @@ pub async fn upload(
                 }
                 lane.check()?;
                 let mut bytes = vec![0; ((end - sent) as usize).min(chunk_bytes)];
-                file.read_exact(&mut bytes).map_err(err)?;
+                file.read_exact(&mut bytes).await.map_err(err)?;
                 let kind = if sent + bytes.len() as u64 == end {
                     2
                 } else {
@@ -402,7 +415,11 @@ pub async fn upload(
                 ack.sent.store(sent, Ordering::Release);
                 // Do not drop a partially-completed send on user cancellation:
                 // the barrier must count exactly the frames handed to SCTP.
-                if let Err(error) = lane.sender.send(frame).await {
+                let sending = tokio::select! {
+                    _ = lane.closed.cancelled() => Err("file channel closed".into()),
+                    result = tokio::time::timeout(Duration::from_secs(60), lane.sender.send(frame)) => result.map_err(err).and_then(|v| v),
+                };
+                if let Err(error) = sending {
                     lane.close();
                     return Err(error);
                 }
@@ -426,7 +443,7 @@ pub async fn upload(
         if cancel.is_cancelled() {
             return Err("cancelled".into());
         }
-        let raw = connection
+        let raw = rpc
             .request(
                 "file.commit",
                 Some(json!({ "session_id": offer.session_id, "transfer_id": offer.transfer_id })),
@@ -441,7 +458,9 @@ pub async fn upload(
         Ok(receipt)
     }
     .await;
-    if cancel.is_cancelled() {
+    // Every failed offer must release the receiver, not just explicit cancellation.
+    // Keep the registration until all ordered frames and ACKs have drained.
+    if result.is_err() && !lane.closed.is_cancelled() {
         let sent = ack.sent.load(Ordering::Acquire);
         if sent > *rx.borrow() && !lane.closed.is_cancelled() {
             let mut drain = ack.drained.subscribe();
@@ -464,13 +483,18 @@ pub async fn upload(
                 lane.close();
             }
         }
-        let _ = connection
-            .request(
-                "file.cancel",
-                Some(json!({"session_id":offer.session_id,"transfer_id":offer.transfer_id})),
-                None,
-            )
-            .await;
+        if !lane.closed.is_cancelled()
+            && rpc
+                .request(
+                    "file.cancel",
+                    Some(json!({"session_id":offer.session_id,"transfer_id":offer.transfer_id})),
+                    Some(Duration::from_secs(75)),
+                )
+                .await
+                .is_err()
+        {
+            lane.close();
+        }
     }
     result
 }
@@ -597,45 +621,59 @@ pub async fn download(
     cancel: CancellationToken,
     progress: Arc<AtomicU64>,
 ) -> Result<FileReceipt, String> {
-    let lane = connection.file_lane()?;
+    let (lane, rpc) = connection.file_transport()?;
     lane.check()?;
-    let id = receipt.offer.transfer_id.clone();
-    let download = Arc::new(Mutex::new(Download::open(
-        receipt.offer.clone(),
-        path,
-        progress,
-        cancel.clone(),
-    )?));
-    {
-        let mut entries = lane.downloads.lock().expect("downloads");
-        if entries.len() >= 4 || entries.contains_key(&id) {
-            return Err("file receiver busy".into());
-        }
-        entries.insert(id.clone(), download.clone());
+    receipt.offer.validate()?;
+    if receipt.r#ref != receipt.offer.transfer_id {
+        return Err("invalid file receipt".into());
     }
-    let _registration = Registration {
-        lane: lane.clone(),
-        id: id.clone(),
-        download: true,
-    };
+    let id = receipt.offer.transfer_id.clone();
+    // Reserve before opening/truncating the partial file. A duplicate operation
+    // must never touch the live receiver's checkpoint or unregister its slot.
+    let _registration = lane.reserve(&id, true)?;
+    let offer = receipt.offer.clone();
+    let token = cancel.clone();
+    let download = Arc::new(Mutex::new(
+        tokio::task::spawn_blocking(move || Download::open(offer, path, progress, token))
+            .await
+            .map_err(err)??,
+    ));
+    lane.downloads
+        .lock()
+        .expect("downloads")
+        .insert(id.clone(), download.clone());
     let offset = download.lock().expect("download").offset;
     let result = tokio::select! {
-        _=cancel.cancelled()=> {
-            // The host drains its ordered file lane before acknowledging cancel.
-            let _ = connection.request("file.cancel", Some(json!({"session_id":receipt.offer.session_id,"transfer_id":id})), Some(Duration::from_secs(75))).await;
-            Err("cancelled".into())
-        },
-        _=lane.closed.cancelled()=>Err("file channel closed".into()),
-        result=connection.request("file.download",Some(json!({"session_id":receipt.offer.session_id,"transfer_id":id,"offset":offset})),Some(Duration::from_secs(24*60*60)))=>result.map_err(err),
+        _ = cancel.cancelled() => Err("cancelled".into()),
+        _ = lane.closed.cancelled() => Err("file channel closed".into()),
+        result = rpc.request("file.download", Some(json!({"session_id":receipt.offer.session_id,"transfer_id":id,"offset":offset})), Some(Duration::from_secs(24*60*60))) => result.map_err(err),
     };
-    lane.downloads.lock().expect("downloads").remove(&id);
-    if cancel.is_cancelled() {
-        tokio::task::spawn_blocking(move || download.lock().expect("download").discard())
+    if result.is_err() && !lane.closed.is_cancelled() {
+        // The host drains its file lane before acknowledging cancellation.
+        // If control cleanup fails, stop ingress before dropping the receiver.
+        if rpc
+            .request(
+                "file.cancel",
+                Some(json!({"session_id":receipt.offer.session_id,"transfer_id":id})),
+                Some(Duration::from_secs(75)),
+            )
             .await
-            .map_err(err)??;
+            .is_err()
+        {
+            lane.close();
+        }
+    }
+    if cancel.is_cancelled() {
+        if !lane.closed.is_cancelled() {
+            tokio::task::spawn_blocking(move || download.lock().expect("download").discard())
+                .await
+                .map_err(err)??;
+        }
         return Err("cancelled".into());
     }
     result?;
+    // Keep the registration through verification/publication; otherwise a retry
+    // can reopen this partial file while the previous finish still owns it.
     tokio::task::spawn_blocking(move || download.lock().expect("download").finish())
         .await
         .map_err(err)??;
@@ -645,6 +683,70 @@ pub async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn dropping_ffi_future_cancels_worker_without_dropping_cleanup() {
+        let task = Arc::new(FileTask::default());
+        task.active.store(true, Ordering::Release);
+        let running = task.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (drained, drain) = tokio::sync::oneshot::channel();
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleanup = cleaned.clone();
+        let caller = tokio::spawn(async move {
+            let cancel = running.cancel.clone();
+            running
+                .run(&tokio::runtime::Handle::current(), async move {
+                    started.send(()).unwrap();
+                    cancel.cancelled().await;
+                    drain.await.unwrap();
+                    cleanup.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .await
+        });
+        ready.await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        assert!(task.cancel.is_cancelled());
+        assert!(
+            task.active.load(Ordering::Acquire),
+            "slot must remain reserved while draining"
+        );
+        assert!(!cleaned.load(Ordering::Acquire));
+        drained.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while task.active.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(cleaned.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn reservation_rejects_duplicates_in_both_directions_until_owner_exits() {
+        struct Sender;
+        #[async_trait]
+        impl FileSender for Sender {
+            async fn send(&self, _: Vec<u8>) -> Result<(), String> {
+                Ok(())
+            }
+            fn close(&self) {}
+        }
+        let (_events, rx) = mpsc::channel(8);
+        let lane = FileLane::start(FilePeer {
+            sender: Arc::new(Sender),
+            events: rx,
+        });
+        let first = lane.reserve("id", true).unwrap();
+        assert!(lane.reserve("id", true).is_err());
+        assert!(lane.reserve("id", false).is_err());
+        drop(first);
+        let retry = lane.reserve("id", true).unwrap();
+        assert!(lane.reserve("id", true).is_err());
+        drop(retry);
+        assert!(lane.reserve("id", false).is_ok());
+    }
     #[test]
     fn frames_match_typescript_vector_and_large_offsets() {
         let bytes = encode(0, &"ab".repeat(16), 5 * 1024 * 1024 * 1024, &[0, 255]).unwrap();
@@ -785,4 +887,35 @@ pub struct FileTask {
     pub cancel: CancellationToken,
     /// Whether the platform operation is still running.
     pub active: AtomicBool,
+}
+
+impl FileTask {
+    /// Run independently of the caller's FFI future. Dropping that future requests
+    /// cooperative cancellation, while the worker retains its transfer slot until
+    /// the ordered lane and remote receiver have been drained.
+    pub async fn run<T, F>(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+        work: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    {
+        struct Finish(Arc<FileTask>);
+        impl Drop for Finish {
+            fn drop(&mut self) {
+                self.0.active.store(false, Ordering::Release);
+            }
+        }
+        let _cancel_on_drop = self.cancel.clone().drop_guard();
+        let finished = Finish(self.clone());
+        runtime
+            .spawn(async move {
+                let _finished = finished;
+                work.await
+            })
+            .await
+            .map_err(err)?
+    }
 }

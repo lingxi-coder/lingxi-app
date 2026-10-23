@@ -381,6 +381,20 @@ export class ViewerConnection {
     return a?.ready && a.kind === 'webrtc' && a.filesOpen ? a.files : undefined;
   }
 
+  /** Pin control and binary traffic to one approved connection attempt. */
+  fileSession(): { channel: FileChannel; scope: string; request: ViewerConnection['request'] } {
+    const a = this.live;
+    if (!a?.ready || a.kind !== 'webrtc' || !a.filesOpen || !a.files || !a.rpc || a.rpc.closed) {
+      throw new Error('Files require a WebRTC connection. Reconnect and retry.');
+    }
+    const rpc = a.rpc;
+    return {
+      channel: a.files,
+      scope: this.fileScope,
+      request: (method, params, options) => rpc.request(method, params, options),
+    };
+  }
+
   /** Send a request on the ready link. Rejects with `closed` when there is none. */
   request<K extends keyof ViewerRequests>(
     method: K,

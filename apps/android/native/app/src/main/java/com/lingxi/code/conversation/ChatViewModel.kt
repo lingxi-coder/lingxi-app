@@ -2608,7 +2608,7 @@ class ChatViewModel(
                     // First delta of the turn: open a new assistant message.
                     s.copy(
                         streaming = true,
-                        streamingMessage = Message(role = Role.Ai, text = event.text, transcriptUuid = pendingAssistantTranscriptUuids.firstOrNull(), transcriptAliases = pendingAssistantTranscriptUuids.toSet()),
+                        streamingMessage = Message(role = Role.Ai, text = event.text, transcriptUuid = pendingAssistantTranscriptUuids.firstOrNull(), transcriptAliases = pendingAssistantTranscriptUuids.toSet(), streamed = true),
                         agentRun = run,
                     )
                 }
@@ -2842,7 +2842,7 @@ class ChatViewModel(
                 pendingAssistantIdentity = null
                 _state.update { state ->
                     val uuids = assistantTranscriptUuidsByIdentity[identity].orEmpty().ifEmpty { pendingAssistantTranscriptUuids.toList() }
-                    val completed = (state.streamingMessage?.let { live -> message.copy(id = live.id) } ?: message)
+                    val completed = (state.streamingMessage?.let { live -> message.copy(id = live.id, streamed = true) } ?: message)
                         .copy(transcriptUuid = message.transcriptUuid ?: uuids.firstOrNull(), transcriptAliases = message.transcriptAliases + uuids)
                     pendingAssistantTranscriptUuids.clear()
                     if (identity != null) assistantRowsByIdentity[identity] = completed.id
@@ -2907,7 +2907,7 @@ class ChatViewModel(
                 )
                 _state.update { s ->
                     val completed = s.streamingMessage
-                        ?.let { live -> event.message.copy(id = live.id) }
+                        ?.let { live -> event.message.copy(id = live.id, streamed = true) }
                         ?: event.message
                     // `MessageComplete` carries the assistant's text blocks ONLY —
                     // the engine keeps this turn's ToolUse in a separate field — so

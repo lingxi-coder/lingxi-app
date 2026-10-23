@@ -172,7 +172,7 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
             canMergeTools = false
         }
     }
-    state.streamingMessage?.let { live ->
+    state.streamingMessage?.copy(streamed = true)?.let { live ->
         // A visualization splits the live message into the same rows (and
         // keys) it will have once settled, so its WebView is not remounted.
         if (live.blocks.none { it is MessageContent.Visualization }) {

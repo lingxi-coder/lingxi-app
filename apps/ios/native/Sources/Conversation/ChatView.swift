@@ -46,8 +46,7 @@ struct ChatView: View {
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     @ObservedObject private var convo: ConversationModel
 
-    @State private var followsLatestMessage = true
-    @State private var followsLatestAgentMessage = true
+    @State private var latestMessageRequestRevision: UInt64 = 0
     @State private var pendingAgentDetailID: String?
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
@@ -316,10 +315,6 @@ struct ChatView: View {
             recentModels = modelRecents.resolved(against: visibleAvailableModels)
         }
         .onChange(of: session.id) { _, _ in
-            // Re-arm following only for a real session switch. A sheet or
-            // navigation presentation may cause this view to appear again;
-            // that must not discard the user's current scroll position.
-            followsLatestMessage = true
             pendingAgentDetailID = nil
             source.selectAgent(ConversationModel.mainAgentID)
             summaryCategory = nil
@@ -453,7 +448,6 @@ struct ChatView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
             .accessibilityIdentifier("conversation.agent-detail-sheet")
-            .onAppear { followsLatestAgentMessage = true }
         }
         // The chat is the detail column of RootView's split view. Its chrome is
         // the system navigation bar so that the leading item stays the system's
@@ -655,8 +649,8 @@ struct ChatView: View {
                     }
                     .joined(separator: "|")
             ),
-            followsLatest: showsSelectedAgent ? $followsLatestAgentMessage : $followsLatestMessage,
             focused: showsSelectedAgent ? false : composerFocused,
+            latestRequestRevision: showsSelectedAgent ? 0 : latestMessageRequestRevision,
             accessibilityIdentifier: showsSelectedAgent ? "conversation.agent-message-list" : "conversation.message-list",
             maxContentWidth: 860,
             scrollScope: "\(session.id):\(showsSelectedAgent ? convo.selectedAgentID : ConversationModel.mainAgentID)",
@@ -1075,7 +1069,7 @@ struct ChatView: View {
         // Sending is an explicit re-engagement: a reader who had scrolled up to
         // re-read something must not have their own prompt land off screen. The
         // re-arm happens only after the turn was accepted.
-        followsLatestMessage = true
+        latestMessageRequestRevision &+= 1
         return true
     }
 

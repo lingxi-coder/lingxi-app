@@ -94,12 +94,18 @@ import SwiftUI
             source.applyForTesting(.turnStarted(turnId: 901))
             source.applyForTesting(.assistantBlockStart(blockKey: 17))
             source.applyForTesting(.textDelta(text: "hello".clientTextDto))
+            XCTAssertTrue(source.model.messages.last!.streamed)
             let row = source.model.messages.last!.id
             let uuid = "4a16a316-e6fe-4d5a-9a5d-a42e390990da"
             source.applyForTesting(.assistantBlockIdentity(blockKey: 17, messageUuid: uuid))
             source.applyForTesting(.textDelta(text: " world".clientTextDto))
             XCTAssertEqual(source.model.messages.last?.id, row)
             XCTAssertEqual(source.model.messages.last?.transcriptUUID, UUID(uuidString: uuid))
+            XCTAssertEqual(source.model.messages.last?.streamed, true)
+            source.applyForTesting(.turnEnded(outcome: .endTurn, stopReason: "end_turn", cost: zeroCost))
+            XCTAssertFalse(source.model.streaming)
+            XCTAssertEqual(source.model.messages.last?.id, row)
+            XCTAssertEqual(source.model.messages.last?.streamed, true)
         }
 
         func testUserPersistenceIdentityCorrelatesExactQueuedTurnTokens() async throws {

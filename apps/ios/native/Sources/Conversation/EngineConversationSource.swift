@@ -757,7 +757,9 @@ final class EngineConversationSource: ConversationSource {
         guard let streamingIndex,
               model.messages.indices.contains(streamingIndex)
         else {
-            appendMessage(message, detail: detail)
+            var liveMessage = message
+            liveMessage.streamed = true
+            appendMessage(liveMessage, detail: detail)
             self.streamingIndex = model.messages.count - 1
             self.streamingItemIndex = model.items.count - 1
             return
@@ -774,6 +776,7 @@ final class EngineConversationSource: ConversationSource {
             text: message.text
         )
         stableMessage.sentAtMs = message.sentAtMs ?? oldMessage.sentAtMs
+        stableMessage.streamed = true
         stableMessage.transcriptUUID = message.transcriptUUID ?? oldMessage.transcriptUUID
         model.withIndexRebuildSuppressed {
             model.messages[streamingIndex] = stableMessage
@@ -801,6 +804,7 @@ final class EngineConversationSource: ConversationSource {
             return
         }
         var stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
+        stableMessage.streamed = message.streamed || model.messages[messageIndex].streamed
         stableMessage.sentAtMs = message.sentAtMs ?? model.messages[messageIndex].sentAtMs
         stableMessage.transcriptUUID = message.transcriptUUID ?? model.messages[messageIndex].transcriptUUID
         stableMessage.visualization = message.visualization
@@ -4504,7 +4508,8 @@ final class EngineConversationSource: ConversationSource {
             replaceStreamingMessage(updated)
             return model.messages[i].id
         } else {
-            let opened = Message(role: .ai, text: delta)
+            var opened = Message(role: .ai, text: delta)
+            opened.streamed = true
             appendMessage(opened)
             streamingIndex = model.messages.count - 1
             streamingItemIndex = model.items.count - 1

@@ -15,11 +15,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imeNestedScroll
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -43,17 +45,27 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -79,6 +91,7 @@ import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.ModelProviderStatus
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 /**
  * The conversation surface — the Android analog of the iOS `ChatView`.
@@ -232,7 +245,10 @@ fun ChatScreen(
         )
         onAcceptVisualizationFollowup(followup)
     }
-    val listState = rememberLazyListState()
+    val listState = key(state.session.id) { rememberLazyListState() }
+    var followState by rememberSaveable(state.session.id, stateSaver = TranscriptFollowStateSaver) {
+        mutableStateOf(TranscriptFollowState())
+    }
     // The ONE ordered transcript list. Every row the LazyColumn shows comes
     // from this builder, so ordering and item keys live in a single testable
     // place (see ChatRenderItem.kt).
@@ -244,7 +260,7 @@ fun ChatScreen(
     // last row on screen always ends at the viewport edge whether or not the
     // transcript does, and a final row taller than the viewport keeps its newest
     // lines below the fold even with its top aligned.
-    val followsLatest by remember(listState, slackPx) {
+    val isAtBottom by remember(listState, slackPx) {
         derivedStateOf {
             val layout = listState.layoutInfo
             val lastVisible = layout.visibleItemsInfo.lastOrNull()
@@ -255,46 +271,92 @@ fun ChatScreen(
                 viewportEndOffset = layout.viewportEndOffset,
                 slackPx = slackPx,
                 canScrollForward = listState.canScrollForward,
+                hasBottomAnchor = true,
+                afterContentPadding = layout.afterContentPadding,
             )
         }
     }
-    // The tail of the content is a zero-height row past the last real one.
-    // Scrolling to THAT is scrolling to the true end, which a tall final row
-    // cannot provide — aligning its top still leaves its newest lines below the
-    // fold.
-    val bottomAnchor = renderItems.size
-    // An explicit re-engagement — the reader's own send, or the jump control —
-    // forces exactly one scroll to the tail. Nothing re-arms the follow on a
-    // timer: a reader who stopped scrolling is reading.
-    var jumpRequest by remember { mutableStateOf(0) }
-    val rearmTail: () -> Unit = { jumpRequest += 1 }
+    val rearmTail: () -> Unit = { followState = followState.resume() }
+    val currentBottomAnchor by rememberUpdatedState(renderItems.size)
+    val currentCanFollow by rememberUpdatedState(
+        state.sessionReady && !state.sessionTransitioning && linkedMessageUuid == null,
+    )
+    val transcriptGestures = remember(listState) {
+        object : NestedScrollConnection {
+            private var firstIndex = 0
+            private var firstOffset = 0
 
-    // Follow new output only while the reader is already at the tail. Forcing a
-    // jump from old history on every update is expensive on long transcripts and
-    // prevents the reader from reading earlier messages.
-    LaunchedEffect(
-        state.messages.size,
-        state.streamingMessage?.id,
-        state.shellTools.size,
-        state.agentRun?.revision,
-        state.streaming,
-        jumpRequest,
-    ) {
-        val requested = jumpRequest != 0
-        if (!followsLatest && !requested) return@LaunchedEffect
-        if (renderItems.isNotEmpty()) listState.scrollToItem(bottomAnchor)
-        // Consumed: the forced scroll happens once, then the measured follow
-        // takes over (it is true by now, because we just landed on the tail).
-        if (requested) jumpRequest = 0
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                firstIndex = listState.firstVisibleItemIndex
+                firstOffset = listState.firstVisibleItemScrollOffset
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                // A nested tool/terminal can consume the gesture itself. Only
+                // scrolling this transcript changes its follow intent.
+                if (source == NestedScrollSource.UserInput &&
+                    (listState.firstVisibleItemIndex != firstIndex ||
+                        listState.firstVisibleItemScrollOffset != firstOffset)
+                ) {
+                    followState = followState.userScroll(consumed.y)
+                } else if (source == NestedScrollSource.UserInput && available.y < 0 && !listState.canScrollForward) {
+                    // A user can deliberately rejoin after a collapsed row has
+                    // brought the tail into view, even with no distance left.
+                    followState = followState.userScroll(available.y)
+                }
+                return Offset.Zero
+            }
+        }
+    }
+    // Observe measured content, including same-row streaming, image/tool
+    // expansion and IME/composer resizing. Measuring a larger bottom gap must
+    // not itself detach the reader. collectLatest cancels a pending correction
+    // as soon as a touch or a scroll changes the user's intent.
+    LaunchedEffect(listState, slackPx) {
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            TranscriptViewport(
+                totalItems = layout.totalItemsCount,
+                lastVisibleIndex = layout.visibleItemsInfo.lastOrNull()?.index,
+                lastVisibleEnd = layout.visibleItemsInfo.lastOrNull()?.let { it.offset + it.size },
+                viewportStart = layout.viewportStartOffset,
+                viewportEnd = layout.viewportEndOffset,
+                afterContentPadding = layout.afterContentPadding,
+                canScrollForward = listState.canScrollForward,
+                scrolling = listState.isScrollInProgress,
+                follow = followState,
+                bottomAnchor = currentBottomAnchor,
+                canFollow = currentCanFollow,
+            )
+        }.collectLatest { viewport ->
+            followState = followState.measured(
+                atBottom = viewport.isAtBottom(slackPx),
+                scrolling = viewport.scrolling,
+            )
+            if (viewport.canFollow && followState.shouldPin(viewport.scrolling) &&
+                viewport.totalItems == viewport.bottomAnchor + 1
+            ) {
+                // The zero-height row after all real rows reaches the true end,
+                // including when the final message is taller than the viewport.
+                // Explicit send/jump also cancels an old fling; passive layout
+                // correction waits until user scrolling has finished.
+                if (viewport.canScrollForward || followState.explicitResume) {
+                    listState.scrollToItem(viewport.bottomAnchor)
+                }
+                followState = followState.resumeHandled()
+            }
+        }
     }
 
     var linkedRowHighlight by remember(state.session.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(linkedMessageUuid, state.sessionReady, state.sessionTransitioning, state.messages) {
+    LaunchedEffect(listState, linkedMessageUuid, state.sessionReady, state.sessionTransitioning, state.messages) {
         val uuid = linkedMessageUuid ?: return@LaunchedEffect
         retainedMessageAnchor = uuid
         if (!state.sessionReady || state.sessionTransitioning) return@LaunchedEffect
         val index = messageLinkRenderIndex(renderItems, state.messages, uuid)
         if (index >= 0) {
+            followState = followState.navigateToMessage()
             linkedRowHighlight = renderItems[index].key
             listState.scrollToItem(index)
         }
@@ -345,12 +407,29 @@ fun ChatScreen(
                         linkedRowHighlight = linkedRowHighlight,
                         onOpenTerminal = onOpenTerminal,
                         onToggleToolCall = onToggleToolCall,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize()
+                            .nestedScroll(transcriptGestures)
+                            .pointerInput(listState) {
+                                try {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            followState = if (event.changes.any { it.pressed }) {
+                                                followState.pointerDown()
+                                            } else {
+                                                followState.pointerUp()
+                                            }
+                                        }
+                                    }
+                                } finally {
+                                    followState = followState.pointerUp()
+                                }
+                            },
                     )
                 }
                 // The way back for a reader who scrolled up. An empty chat has
                 // nothing to jump to, even when its hero overflows a short screen.
-                if (!followsLatest && renderItems.none { it is ChatRenderItem.Empty }) {
+                if (!followState.followsLatest && !isAtBottom && renderItems.none { it is ChatRenderItem.Empty }) {
                     JumpToLatestButton(
                         onClick = rearmTail,
                         modifier = Modifier
@@ -573,6 +652,38 @@ private fun IconButton(
 /** Stable key for the zero-height row that marks the end of the transcript. */
 private const val TRANSCRIPT_BOTTOM_ANCHOR = "transcript.bottom-anchor"
 
+// LazyListState saves its reading position across Activity recreation. Save
+// the matching intent too, without restoring a stale finger/fling interaction.
+private val TranscriptFollowStateSaver = Saver<TranscriptFollowState, Boolean>(
+    save = { it.followsLatest },
+    restore = { TranscriptFollowState(followsLatest = it) },
+)
+
+private data class TranscriptViewport(
+    val totalItems: Int,
+    val lastVisibleIndex: Int?,
+    val lastVisibleEnd: Int?,
+    val viewportStart: Int,
+    val viewportEnd: Int,
+    val afterContentPadding: Int,
+    val canScrollForward: Boolean,
+    val scrolling: Boolean,
+    val follow: TranscriptFollowState,
+    val bottomAnchor: Int,
+    val canFollow: Boolean,
+) {
+    fun isAtBottom(slackPx: Int) = TranscriptFollow.isAtBottom(
+        totalItemsCount = totalItems,
+        lastVisibleIndex = lastVisibleIndex,
+        lastVisibleEndOffset = lastVisibleEnd,
+        viewportEndOffset = viewportEnd,
+        slackPx = slackPx,
+        canScrollForward = canScrollForward,
+        hasBottomAnchor = true,
+        afterContentPadding = afterContentPadding,
+    )
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageList(
@@ -607,12 +718,15 @@ private fun MessageList(
             }
         }
     }
+    // Reading history must not request control of a hidden keyboard at a list
+    // edge. Keep native drag-to-dismiss only while the keyboard is presented.
+    val keyboardVisible = WindowInsets.isImeVisible
 
     LazyColumn(
         state = listState,
         modifier = modifier
             .fillMaxWidth()
-            .imeNestedScroll(),
+            .then(if (keyboardVisible) Modifier.imeNestedScroll() else Modifier),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
             start = 16.dp, end = 16.dp, top = 18.dp, bottom = 8.dp,
         ),
@@ -635,9 +749,13 @@ private fun MessageList(
                     is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         ToolGroupView(TranscriptBlock.Tools(item.calls, item.anchor), state.expandedToolCalls, stableOnToggleToolCall)
                     }
-                    is ChatRenderItem.Message -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
+                    is ChatRenderItem.Message, is ChatRenderItem.Streaming -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         MessageBubble(
-                            message = item.message,
+                            message = when (item) {
+                                is ChatRenderItem.Message -> item.message
+                                is ChatRenderItem.Streaming -> item.message
+                                else -> error("Expected a message row")
+                            },
                             bottomSpacing = 0.dp,
                             onShare = stableOnShare,
                             onOpenLink = stableOnOpenLink,
@@ -645,14 +763,6 @@ private fun MessageList(
                             onToggleToolCall = stableOnToggleToolCall,
                         )
                     }
-                    is ChatRenderItem.Streaming -> MessageBubble(
-                        message = item.message,
-                        bottomSpacing = 0.dp,
-                        onShare = stableOnShare,
-                        onOpenLink = stableOnOpenLink,
-                        expandedToolCalls = state.expandedToolCalls,
-                        onToggleToolCall = stableOnToggleToolCall,
-                    )
                     is ChatRenderItem.AgentRun -> AgentRunTimeline(
                         state = item.run,
                         modifier = Modifier.padding(vertical = 4.dp),

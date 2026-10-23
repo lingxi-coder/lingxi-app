@@ -287,6 +287,11 @@ final class MockConversationSource: ConversationSource {
                 ),
             ]
             source.model.slashCommandsLoaded = true
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] == "1" {
+                let history = (0..<35).map { Message(role: .user, text: "Scroll history \($0)") }
+                source.model.messages = history
+                source.model.items = history.map(ConversationRenderItem.message)
+            }
             return source
         }
 
@@ -417,6 +422,13 @@ final class MockConversationSource: ConversationSource {
         nextTurnId &+= 1
         activeTurnToken = token
         model.activeTurnToken = token
+        #if DEBUG
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_TRANSCRIPT_SCROLL"] == "1",
+               text == "Stream scroll probe" {
+                streamScrollTestReply(generation: generation, token: token)
+                return token
+            }
+        #endif
         DispatchQueue.main.asyncAfter(deadline: .now() + cannedReplyDelay) { [weak self] in
             guard let self,
                   self.turnToken == generation,
@@ -443,6 +455,44 @@ final class MockConversationSource: ConversationSource {
         }
         return token
     }
+
+    #if DEBUG
+        /// Drives the real ChatView/composer with same-identity text deltas,
+        /// without depending on provider latency or accessing user sessions.
+        private func streamScrollTestReply(generation: Int, token: ConversationTurnToken) {
+            let messageID = UUID()
+            var initial = Message(id: messageID, role: .ai, text: "Scroll stream tail 0")
+            initial.streamed = true
+            model.messages.append(initial)
+            model.items.append(.message(initial))
+            Task { @MainActor [weak self] in
+                var paragraphs: [String] = []
+                for index in 1...80 {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard let self, !Task.isCancelled,
+                          self.turnToken == generation, self.activeTurnToken == token else { return }
+                    paragraphs.append("Scroll delta \(index). A streamed paragraph keeps growing in this same message.")
+                    var reply = Message(id: messageID, role: .ai,
+                        text: paragraphs.joined(separator: "\n\n") + "\n\nScroll stream tail \(index)")
+                    reply.streamed = true
+                    if let messageIndex = self.model.messages.firstIndex(where: { $0.id == messageID }) {
+                        self.model.messages[messageIndex] = reply
+                    }
+                    if let itemIndex = self.model.items.firstIndex(where: {
+                        if case let .message(message) = $0 { return message.id == messageID }
+                        return false
+                    }) {
+                        self.model.items[itemIndex] = .message(reply)
+                    }
+                }
+                guard let self, self.turnToken == generation, self.activeTurnToken == token else { return }
+                self.model.streaming = false
+                self.model.updateMainAgent(status: "idle", latestActivity: String(localized: "chat_completed"))
+                self.activeTurnToken = nil
+                self.model.activeTurnToken = nil
+            }
+        }
+    #endif
 
     @discardableResult
     func send(

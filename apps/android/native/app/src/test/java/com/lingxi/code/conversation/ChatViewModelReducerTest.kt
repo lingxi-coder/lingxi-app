@@ -1318,6 +1318,7 @@ class ChatViewModelReducerTest {
         assertTrue(s.streaming)
         assertEquals(Role.Ai, s.streamingMessage?.role)
         assertEquals("Hel", s.streamingMessage?.text)
+        assertEquals(true, s.streamingMessage?.streamed)
     }
 
     @Test
@@ -1370,6 +1371,18 @@ class ChatViewModelReducerTest {
         assertNull(state.streamingMessage)
         assertEquals(streamingId, state.messages.last().id)
         assertEquals("final", state.messages.last().text)
+        assertTrue(state.messages.last().streamed)
+    }
+
+    @Test
+    fun messageCompletePreservesStreamedDisclosureAndRestoredHistoryStaysCompact() {
+        val vm = newVm()
+        vm.reduce(ReplyEvent.Delta("draft"))
+        val streamingId = vm.state.value.streamingMessage?.id
+        vm.reduce(ReplyEvent.MessageComplete(Message(role = Role.Ai, text = "final")))
+        assertEquals(streamingId, vm.state.value.messages.last().id)
+        assertTrue(vm.state.value.messages.last().streamed)
+        assertFalse(Message(role = Role.Ai, text = "restored history").streamed)
     }
 
     @Test

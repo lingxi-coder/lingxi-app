@@ -481,6 +481,8 @@ data class Message(
     val visualizationContext: com.lingxi.code.conversation.VisualizationContextChip? = null,
     /** Who wrote a user turn the phone did not type itself (Remote Control): "来自桌面", "来自 <device>". */
     val originLabel: String? = null,
+    /** Live replies keep their open disclosure after completion, like Desktop. */
+    val streamed: Boolean = false,
 )
 
 /** A unified "session" reference used by the conversation title bar. */

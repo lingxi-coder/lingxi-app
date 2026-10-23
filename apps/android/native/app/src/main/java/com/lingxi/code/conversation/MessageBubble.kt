@@ -160,7 +160,8 @@ fun MessageBubble(
         val isCollapsible = remember(message.text) {
             AssistantMessageCollapsePolicy.shouldCollapse(message.text)
         }
-        var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
+        var expandedOverride by rememberSaveable(message.id) { mutableStateOf<Boolean?>(null) }
+        val expanded = expandedOverride ?: message.streamed
         Row(
             modifier = modifier
                 .padding(bottom = bottomSpacing)
@@ -205,7 +206,7 @@ fun MessageBubble(
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { expanded = !expanded }
+                            .clickable { expandedOverride = !expanded }
                             .testTag("conversation.message.assistant.toggle")
                             .padding(horizontal = 6.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),

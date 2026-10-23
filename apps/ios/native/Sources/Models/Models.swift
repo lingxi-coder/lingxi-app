@@ -490,6 +490,9 @@ struct Message: Identifiable, Equatable {
     var tag: String? = nil
     let text: String
     let images: [MessageImage]
+    /// Live replies stay open after completion; restored history keeps its
+    /// compact default, matching Desktop's streamed narration disclosure.
+    var streamed = false
 
     var loopWakeupStreak: UInt32? = nil
     var loopFoldedItemIDs: Set<String> = []

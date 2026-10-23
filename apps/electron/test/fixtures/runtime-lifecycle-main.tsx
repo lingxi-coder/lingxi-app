@@ -108,7 +108,18 @@ const connection = (sessionId: string, status: string, reason?: string) => onSta
     for (const reject of pendingCommands.splice(0)) reject(new Error('previous owner failed'));
     await delay(); await delay();
     check(!bridge.error, 'Previous owner metadata error painted the new session');
+
+    await wait(() => commands.some(c => c.sessionId === 'gamma' && c.type === 'ui_attach'));
+    const replacementCommandIndex = commands.length;
+    connection('gamma', 'disconnected', 'session runtime replaced');
+    await wait(() => !bridge.connected);
+    await delay(); await delay();
+    check(bridge.activeSession?.sessionId === 'gamma', 'Replacement discarded the session identity');
+    check(!commands.slice(replacementCommandIndex).some(c => c.sessionId === 'gamma' && c.type.startsWith('ui_')), 'Replacement dispatched a surface command during the runtime gap');
+    state = snapshot('gamma', state.revision + 1);
+    connection('gamma', 'connected');
+    await wait(() => bridge.connected && commands.slice(replacementCommandIndex).some(c => c.sessionId === 'gamma' && c.type === 'ui_attach'));
     root.unmount();
-    return { initializationPreserved: true, disposedOwnerCleared: true, staleBootstrapIgnored: true, staleMetadataIgnored: true, backgroundOwnerPreserved: true, currentErrorsVisible: true, navigationErrorsOwned: true };
+    return { initializationPreserved: true, disposedOwnerCleared: true, staleBootstrapIgnored: true, staleMetadataIgnored: true, backgroundOwnerPreserved: true, currentErrorsVisible: true, navigationErrorsOwned: true, replacementGapSkipped: true, replacementReattached: true };
   },
 };

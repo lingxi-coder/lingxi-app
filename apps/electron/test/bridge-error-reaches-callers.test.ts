@@ -49,34 +49,47 @@ function bridgeWithHost(host: Record<string, unknown>): UseBridge {
   return captured as unknown as UseBridge;
 }
 
-test('adding a project refreshes saved state even when initial session startup fails', async () => {
+test('adding a project refreshes saved state even when initial session startup fails', { timeout: 5_000 }, async () => {
   let refreshed = false;
   const bridge = bridgeWithHost({
-    pickWorkspace: async () => { throw new Error('engine startup failed'); },
+    createProject: async () => { throw new Error('engine startup failed'); },
     bootstrap: async () => {
       refreshed = true;
       return { revision: 1, settings: { projects: ['/saved/project'] }, runtimes: [] };
     },
   });
-  await assert.rejects(() => bridge.addProject(), /engine startup failed/);
-  assert.equal(refreshed, true);
+  const pending = bridge.addProject();
+  try {
+    await assert.rejects(() => bridge.confirmProjectCreation('selected-source'), /engine startup failed/);
+    assert.equal(refreshed, true);
+  } finally {
+    bridge.cancelProjectCreation();
+    await pending;
+  }
 });
 
-test('project recovery preserves the startup error if refreshing also fails', async () => {
+test('project recovery preserves the startup error if refreshing also fails', { timeout: 5_000 }, async () => {
   const bridge = bridgeWithHost({
-    pickWorkspace: async () => { throw new Error('engine startup failed'); },
+    createProject: async () => { throw new Error('engine startup failed'); },
     bootstrap: async () => { throw new Error('refresh failed'); },
   });
-  await assert.rejects(() => bridge.addProject(), /engine startup failed/);
+  const pending = bridge.addProject();
+  try {
+    await assert.rejects(() => bridge.confirmProjectCreation('selected-source'), /engine startup failed/);
+  } finally {
+    bridge.cancelProjectCreation();
+    await pending;
+  }
 });
 
-test('cancelling the project picker does not refresh state', async () => {
+test('cancelling the project dialog does not refresh state', { timeout: 5_000 }, async () => {
   let refreshed = false;
   const bridge = bridgeWithHost({
-    pickWorkspace: async () => null,
     bootstrap: async () => { refreshed = true; },
   });
-  assert.equal(await bridge.addProject(), null);
+  const pending = bridge.addProject();
+  bridge.cancelProjectCreation();
+  assert.equal(await pending, null);
   assert.equal(refreshed, false);
 });
 

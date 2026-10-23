@@ -197,7 +197,8 @@ export function useBridge(): UseBridge {
   const uiSurfaceLifecycle = useRef<UiSurfaceLifecycleQueue | null>(null);
   if (uiSurfaceLifecycle.current === null) {
     uiSurfaceLifecycle.current = new UiSurfaceLifecycleQueue((sessionId) => (
-      !removedRuntimeIds.current.has(sessionId) && runtimeStatesRef.current.has(sessionId)
+      !removedRuntimeIds.current.has(sessionId)
+      && runtimeStatesRef.current.get(sessionId)?.connection.status === 'connected'
     ));
   }
   const hosted = host !== undefined;

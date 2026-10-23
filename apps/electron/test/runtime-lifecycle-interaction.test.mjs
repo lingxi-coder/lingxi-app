@@ -69,7 +69,7 @@ test('runtime disposal and metadata callbacks retain their current session owner
       });
     });
 
-    for (const key of ['initializationPreserved', 'disposedOwnerCleared', 'staleBootstrapIgnored', 'staleMetadataIgnored', 'backgroundOwnerPreserved', 'currentErrorsVisible', 'navigationErrorsOwned']) assert.equal(result[key], true, key);
+    for (const key of ['initializationPreserved', 'disposedOwnerCleared', 'staleBootstrapIgnored', 'staleMetadataIgnored', 'backgroundOwnerPreserved', 'currentErrorsVisible', 'navigationErrorsOwned', 'replacementGapSkipped', 'replacementReattached']) assert.equal(result[key], true, key);
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

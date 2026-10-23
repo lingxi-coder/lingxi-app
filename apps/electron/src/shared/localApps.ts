@@ -1,9 +1,11 @@
+import type { LocalAppAgentCatalog, LocalAppAgentSettings } from './localAppAgent.js';
+import type { AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 /** Desktop Local Apps. Mobile retains its independent document-only contract. */
 export const CH_LOCAL_APPS = 'lingxi:local-apps';
 export const CH_LOCAL_APPS_CHANGED = 'lingxi:local-apps:changed';
 export const LOCAL_APP_SCHEME = 'lingxi-app';
 
-export type LocalAppCapability = 'process' | 'files' | 'clipboard' | 'notifications' | 'camera' | 'microphone';
+export type LocalAppCapability = 'process' | 'files' | 'clipboard' | 'notifications' | 'camera' | 'microphone' | 'agent';
 export interface LocalAppStep {
   /** A shell command, executed in cwd with the application's environment. */
   command: string;
@@ -28,6 +30,8 @@ export interface DesktopAppManifest {
   build?: LocalAppStep[];
   processes?: LocalAppProcess[];
   capabilities?: LocalAppCapability[];
+  /** Requested host catalog IDs. This declaration never grants tool access. */
+  agent?: { tools: string[] };
 }
 export type LocalAppPhase = 'stopped' | 'installing' | 'building' | 'starting' | 'running' | 'stopping' | 'failed';
 export interface DesktopLocalApp {
@@ -42,6 +46,8 @@ export interface DesktopLocalApp {
   sourceSession?: { projectPath: string; sessionId: string };
   background: boolean;
   grants: LocalAppCapability[];
+  /** Trusted Apps settings, never supplied by an application manifest. */
+  agent?: LocalAppAgentSettings;
   phase: LocalAppPhase;
   runningRevision?: number;
   error?: string;
@@ -52,6 +58,11 @@ export interface LocalAppEditRequest {
   name: string;
   sourcePath?: string;
   sourceSession?: DesktopLocalApp['sourceSession'];
+}
+export interface LocalAppAgentQuestion {
+  id: string;
+  appName: string;
+  request: AskUserQuestionRequestDto;
 }
 export interface LocalAppsApi {
   list(): Promise<DesktopLocalApp[]>;
@@ -64,5 +75,9 @@ export interface LocalAppsApi {
   setBackground(id: string, enabled: boolean): Promise<void>;
   revoke(id: string): Promise<void>;
   edit(id: string): Promise<void>;
+  agentCatalog(id: string): Promise<LocalAppAgentCatalog>;
+  setAgentSettings(id: string, settings: LocalAppAgentSettings): Promise<void>;
+  agentQuestions(): Promise<LocalAppAgentQuestion[]>;
+  answerAgentQuestion(id: string, answers: Record<string, string> | null): Promise<void>;
   onChanged(listener: () => void): () => void;
 }

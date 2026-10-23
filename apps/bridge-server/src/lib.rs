@@ -51,6 +51,7 @@ pub(crate) use platform_posix::PosixFileSystem as HostFileSystem;
 pub(crate) use platform_windows::WindowsFileSystem as HostFileSystem;
 
 pub mod audio_bridge;
+pub mod app_agent;
 pub mod audio_provider;
 pub mod boot;
 pub mod realtime_audio;

@@ -32,6 +32,9 @@ use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--app-agent") {
+        return bridge_server::app_agent::run().await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--audio-service-json") {
         return bridge_server::audio_provider::run().await;
     }

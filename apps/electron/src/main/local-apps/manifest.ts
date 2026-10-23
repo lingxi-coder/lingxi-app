@@ -80,7 +80,7 @@ export function parseManifest(value: unknown): DesktopAppManifest {
   }
   if (entry.type === 'server' && !processes.some(p => p.name === entry.process)) throw new Error('Entry process does not exist');
   const capabilities = new Set<LocalAppCapability>();
-  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone'];
+  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'agent'];
   if (v.capabilities !== undefined) {
     if (!Array.isArray(v.capabilities)) throw new Error('capabilities must be an array');
     for (const cap of v.capabilities) {
@@ -89,7 +89,19 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     }
   }
   const install = steps(v.install), build = steps(v.build);
+  let agent: DesktopAppManifest['agent'];
+  if (v.agent !== undefined) {
+    const a = object(v.agent);
+    if (Object.keys(a).some(key => key !== 'tools')) throw new Error('Application agent declarations only accept requested tools');
+    if (a.tools !== undefined && (!Array.isArray(a.tools) || a.tools.length > 128)) throw new Error('Application agent tools must be an array of at most 128 catalog IDs');
+    const tools = (a.tools as unknown[] | undefined ?? []).map(value => text(value, 'agent tool catalog ID', 512));
+    if (tools.some(id => !/^(builtin:|mcp:)[A-Za-z0-9_.:/-]+$/.test(id))) throw new Error('Invalid agent tool catalog ID');
+    if (new Set(tools).size !== tools.length) throw new Error('Duplicate agent tool catalog ID');
+    agent = { tools: tools.sort() };
+    capabilities.add('agent');
+  }
+  if (capabilities.has('agent') && !agent) agent = { tools: [] };
   if (install.length || build.length || processes.length) capabilities.add('process');
   return { schema: 1, name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',
-    entry, install, build, processes: sorted, capabilities: [...capabilities].sort() };
+    entry, install, build, processes: sorted, capabilities: [...capabilities].sort(), ...(agent ? { agent } : {}) };
 }

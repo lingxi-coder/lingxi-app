@@ -1,4 +1,7 @@
 import { LocalAppHost } from './local-apps/host.js';
+import { LocalAppAgentBroker } from './local-apps/agentBroker.js';
+import { LocalAppAgentExecutor } from './local-apps/agentExecutor.js';
+import { LocalAppAgentError } from './local-apps/agentPolicy.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
 import { installCrashReporting } from './crashReporting.js';
@@ -19,10 +22,12 @@ import type { SessionRef } from './bridgeTypes.js';
 import { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import {
   createMacCredentialBrokerClient,
+  readProviderEnvironmentCredential,
   resolveProviderCredential,
   SessionLaunchCache,
 } from './credential-broker.js';
-import { CodexTokenManager } from './codex-tokens.js';
+import { CodexTokenManager, codexAccessToken } from './codex-tokens.js';
+import { CODEX_PROVIDER_ID } from './codex-auth.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
@@ -494,12 +499,38 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
+    const agentRoot = join(productPaths.configHome, 'local-app-agent');
+    const agentExecutor = new LocalAppAgentExecutor({
+      configHome: productPaths.configHome,
+      root: agentRoot,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      credentials: async (providerId, refresh) => {
+        if (providerId === CODEX_PROVIDER_ID) {
+          const session = await (refresh ? codexTokens.renew() : codexTokens.current());
+          if (!session) throw new LocalAppAgentError('model_unavailable', 'Sign in to the selected Agent model in LingXi settings.');
+          return { openaiOAuth: codexAccessToken(session) };
+        }
+        const key = await resolveProviderCredential(providerId, { credentialBroker });
+        if (!key) throw new LocalAppAgentError('model_unavailable', 'Configure the selected Agent model in LingXi settings.');
+        return { providerCredentials: { [providerId]: key } };
+      },
+      credentialStatus: async providerIds => {
+        const rows = await credentialBroker?.listStatus(providerIds) ?? [];
+        const configured = new Set(rows.filter(row => row.configured).map(row => row.providerId));
+        for (const id of providerIds) if (readProviderEnvironmentCredential(id)) configured.add(id);
+        return configured;
+      },
+      permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
+      question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
+    });
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
-      mainWindow: getMainWindow,
+      mainWindow: () => getMainWindow() ?? createWindow(),
+      agentCatalog: () => agentExecutor.catalog(),
       edit: async row => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();
@@ -508,6 +539,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession });
       },
     });
+    const agentBroker = new LocalAppAgentBroker({
+      root: join(agentRoot, 'ledger'),
+      authorize: owner => localApps!.authorizeAgent(owner),
+      revalidate: (owner, authorization) => localApps!.revalidateAgent(owner, authorization),
+      execute: execution => agentExecutor.execute(execution),
+    });
+    try {
+      await agentBroker.initialize();
+      localApps.setAgentBroker(agentBroker);
+    } catch {
+      diagnostics.add('error', 'host', 'Application Agent task storage is unavailable. Existing task records were preserved.');
+    }
     await localApps.initialize();
   }
   try {

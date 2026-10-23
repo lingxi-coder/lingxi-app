@@ -168,7 +168,7 @@ export class LocalAppStore {
       const now = Date.now();
       const row: DesktopLocalApp = { id, revision, manifest, name: manifest.name, summary: manifest.summary ?? '',
         createdAt: previous?.createdAt ?? now, updatedAt: now, phase: 'stopped', background: previous?.background ?? false,
-        grants: previous?.grants ?? [], sourcePath: input.source_path ?? previous?.sourcePath,
+        grants: previous?.grants ?? [], agent: previous?.agent, sourcePath: input.source_path ?? previous?.sourcePath,
         sourceSession: input.source_session ?? previous?.sourceSession };
       await this.save(row);
       return row;

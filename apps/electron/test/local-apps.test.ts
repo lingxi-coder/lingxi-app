@@ -83,6 +83,37 @@ test('stop before queue admission cancels startup and does not publish late read
   await runtime.stop(row.id); await rejected;
   assert.equal(runtime.status(row).phase, 'stopped');
 });
+test('explicit background invocation resume restarts services without rerunning install or changing owner', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await project(store, { schema: 1, name: 'Resume', entry: { type: 'server', process: 'api' },
+    install: [{ command: `${node} -e "require('fs').appendFileSync(process.env.LOCAL_APP_DATA_DIR+'/installs','x')"` }],
+    processes: [{ name: 'api', command: `${node} server.cjs`, ready: { path: '/health', timeoutMs: 5000 } }] }, {
+    'server.cjs': "require('http').createServer((req,res)=>res.end('ready')).listen(process.env.PORT,'127.0.0.1')",
+  });
+  await runtime.start(row.id); const invocation = runtime.invocationId(row.id)!;
+  const previousUrl = runtime.service(row.id, 'api')!.url;
+  await runtime.stop(row.id); await assert.rejects(fetch(previousUrl));
+  await runtime.resume(row.id, row.revision, invocation);
+  assert.equal(runtime.invocationId(row.id), invocation);
+  assert.equal(await (await fetch(runtime.service(row.id, 'api')!.url)).text(), 'ready');
+  assert.equal(await fs.readFile(join(store.dataPath(row.id), 'installs'), 'utf8'), 'x');
+  await runtime.stop(row.id);
+  await assert.rejects(runtime.resume(row.id, row.revision, 'forged'), /invocation changed/);
+  await store.publish({ id: row.id, html: '<!doctype html>' });
+  await assert.rejects(runtime.resume(row.id, row.revision, invocation), /invocation changed/);
+});
+test('stop cancels a queued background invocation resume before services restart', async t => {
+  const { store, runtime } = await fixture(t);
+  const row = await store.publish({ name: 'Resume cancel', html: '<!doctype html>' });
+  await runtime.start(row.id); const invocation = runtime.invocationId(row.id)!; await runtime.stop(row.id);
+  let release!: () => void;
+  const gate = runtime.exclusive(row.id, () => new Promise<void>(resolve => { release = resolve; }));
+  await delay(0);
+  const resumed = assert.rejects(runtime.resume(row.id, row.revision, invocation), /cancelled/);
+  const stopped = runtime.stop(row.id); release();
+  await Promise.all([gate, resumed, stopped]);
+  assert.equal(runtime.phase(row.id), 'stopped');
+});
 test('stop cancels every queued repair before any installation side effect', async t => {
   const { store, runtime } = await fixture(t);
   const row = await project(store, { schema: 1, name: 'Queued', entry: { type: 'static', path: 'index.html' }, install: [{ command: 'echo wrong > "$LOCAL_APP_DATA_DIR/installed"' }] }, { 'index.html': '<!doctype html>' });

@@ -4,13 +4,18 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { DesktopLocalApp, LocalAppCapability } from '../../shared/localApps.js';
+import type { DesktopAppManifest, DesktopLocalApp, LocalAppCapability } from '../../shared/localApps.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, LOCAL_APP_SCHEME } from '../../shared/localApps.js';
 import { CH_LOCAL_APP_NATIVE } from '../../shared/localAppNative.js';
 import { LocalAppStore, appId, atomicJson, containedFile } from './store.js';
 import { LocalAppRuntime, type RuntimeOptions } from './runtime.js';
 import { relativePath } from './manifest.js';
 import { isAppUrl, permissionCapabilities } from './permissions.js';
+
+function appEntryUrl(id: string, entry: DesktopAppManifest['entry']): string {
+  const path = entry.type === 'server' && entry.path ? entry.path.split('/').map(encodeURIComponent).join('/') : '';
+  return new URL(`${LOCAL_APP_SCHEME}://${id}/${path}`).href;
+}
 
 export interface LocalAppHostOptions extends RuntimeOptions {
   configHome: string;
@@ -183,8 +188,9 @@ export class LocalAppHost {
     await this.configureSession(id);
     await this.clearCodeCache(id);
     signal.throwIfAborted();
+    const entryUrl = appEntryUrl(id, this.runtime.manifest(id)!.entry);
     if (existing && !existing.isDestroyed()) {
-      await existing.loadURL(`${LOCAL_APP_SCHEME}://${id}/`); existing.show(); existing.focus(); return;
+      await existing.loadURL(entryUrl); existing.show(); existing.focus(); return;
     }
     const window = new BrowserWindow({ width: 1080, height: 760, minWidth: 360, minHeight: 320, title: row.name, show: false,
       webPreferences: { partition: `persist:local-app-${id}`, preload: this.options.preload, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, navigateOnDragDrop: false } });
@@ -197,7 +203,7 @@ export class LocalAppHost {
       if (this.windows.get(id) === window) this.windows.delete(id);
       if (!this.shuttingDown) void this.store.get(id).then(row => !row.background && !this.windows.has(id) && !this.opening.has(id) ? this.runtime.stop(id) : undefined).catch(() => undefined);
     });
-    try { await window.loadURL(`${origin}/`); window.show(); }
+    try { await window.loadURL(entryUrl); window.show(); }
     catch (error) { window.destroy(); await this.runtime.stop(id); throw error; }
   }
   private async external(raw: string): Promise<void> { try { const url = new URL(raw); if (['https:', 'http:', 'mailto:'].includes(url.protocol)) await shell.openExternal(url.toString()); } catch { /* invalid URL */ } }
@@ -235,12 +241,19 @@ export class LocalAppHost {
         const workspace = this.runtime.workspace(id);
         if (!workspace || !revision || this.runtime.status(row).phase !== 'running') return new Response('Application is stopped', { status: 503 });
         const manifest = this.runtime.manifest(id)!;
+        if (manifest.entry.type === 'server' && url.pathname === '/') {
+          const landing = new URL(appEntryUrl(id, manifest.entry));
+          if (landing.pathname !== '/') {
+            landing.search = url.search;
+            return new Response(null, { status: 307, headers: { Location: landing.href, 'Cache-Control': 'no-store' } });
+          }
+        }
         let response: Response;
         const serviceRoute = /^\/__services\/([\w-]+)(\/.*)?$/.exec(url.pathname);
         if (manifest.entry.type === 'server' || serviceRoute) {
           const service = this.runtime.service(id, serviceRoute?.[1] ?? (manifest.entry.type === 'server' ? manifest.entry.process : ''));
           if (!service) return new Response('Backend is unavailable', { status: 503 });
-          const path = serviceRoute ? serviceRoute[2] ?? '/' : url.pathname === '/' && manifest.entry.type === 'server' && manifest.entry.path ? `/${manifest.entry.path}` : url.pathname;
+          const path = serviceRoute ? serviceRoute[2] ?? '/' : url.pathname;
           const target = service.url + path + url.search;
           const headers = new Headers(request.headers); headers.delete('host'); headers.delete('origin');
           response = await partition.fetch(target, { method: request.method, headers, ...(request.method !== 'GET' && request.method !== 'HEAD' ? { body: await request.arrayBuffer() } : {}), redirect: 'manual' });

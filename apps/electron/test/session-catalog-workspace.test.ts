@@ -66,6 +66,27 @@ test('cached current absence still performs exact global UUID resolution', async
   assert.equal(calls[1].at(-1), id);
 });
 
+test('catalog exact lookups normalize pasted UUIDs before cache, process and selection matching', async (t) => {
+  const project = mkdtempSync(join(tmpdir(), 'catalog-uppercase-'));
+  t.after(() => rmSync(project, { recursive: true, force: true }));
+  const uuid = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  const calls: string[][] = [];
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: ((_bin, args) => {
+    calls.push(args as string[]);
+    const spawned = child();
+    queueMicrotask(() => spawned.finish({ version: 1, sessions: [{ ...row, uuid }] }));
+    return spawned.process;
+  }) as any });
+  assert.equal((await catalog.find(project, uuid.toUpperCase()))?.uuid, uuid);
+  assert.equal(calls[0].at(-1), uuid);
+  assert.equal((await catalog.select(project, uuid.toUpperCase(), { scope: 'repository', transcriptPath: row.path }))?.uuid, uuid);
+  assert.equal(calls[1][calls[1].indexOf('--session-id') + 1], uuid);
+  await catalog.list(project);
+  const spawns = calls.length;
+  assert.equal((await catalog.find(project, uuid.toUpperCase()))?.uuid, uuid);
+  assert.equal(calls.length, spawns, 'the canonical UUID reuses the current-scope cache');
+});
+
 test('workspace environment reads engine settings without an engine or credentials', async (t) => {
   const project = mkdtempSync(join(tmpdir(), 'catalog-environment-'));
   t.after(() => rmSync(project, { recursive: true, force: true }));

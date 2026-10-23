@@ -152,6 +152,7 @@ export class ProjectSessionCatalog {
    */
   async find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    sessionId = sessionId.toLowerCase();
     const canonical = realpathSync.native(projectPath);
     const cached = this.cache.get(`${canonical}\0current`);
     // Every session open waits on this lookup. Without a fresh catalog, ask
@@ -170,6 +171,7 @@ export class ProjectSessionCatalog {
   /** A picker selection must retain its displayed scope and exact file. */
   async select(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
+    sessionId = sessionId.toLowerCase();
     const canonical = realpathSync.native(projectPath);
     const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope));
     const row = result.sessions.find((candidate) => candidate.uuid === sessionId);

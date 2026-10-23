@@ -1622,6 +1622,7 @@ export class HostController {
     const runtime = this.bridge.get(ref.sessionId);
     if (!runtime) return;
     const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
+    const launchInFlight = runtime.isStarting || ['spawning', 'restarting', 'connecting'].includes(runtime.connectionState.status);
     const assertCurrent = () => {
       const active = this.settings.getPublic().activeSession;
       if (!active || active.sessionId !== ref.sessionId || active.projectPath !== ref.projectPath
@@ -1632,9 +1633,10 @@ export class HostController {
     assertCurrent();
     await this.bridge.restart(ref, assertCurrent);
     assertCurrent();
-    if (recovering && runtime.recoveredLiveConnection) {
-      // Recovery preserves the living process. Launch-only material still
-      // needs a normal restart, whose active-work guard can safely refuse it.
+    if (recovering && (runtime.recoveredLiveConnection || launchInFlight)) {
+      // A living process or a launch begun before this configuration change
+      // may still contain the old material. Apply a normal restart after it
+      // settles, whose active-work guard can safely refuse it.
       await this.bridge.restart(ref, assertCurrent);
       assertCurrent();
     }
@@ -1839,6 +1841,7 @@ export class HostController {
 
   private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
+    ref = { ...ref, sessionId: ref.sessionId.toLowerCase() };
     const project = this.requireProject(ref.projectPath);
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     const existing = this.bridge.get(ref.sessionId);

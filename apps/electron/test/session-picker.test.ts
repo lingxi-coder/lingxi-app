@@ -36,6 +36,14 @@ test('a resume argument selects a UUID or one normalized resume title and preser
   assert.equal(resumeArgumentSessionId('', sessions), undefined);
 });
 
+test('a UUID pasted outside the loaded catalog uses the canonical engine identity', async () => {
+  const id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  assert.equal(resumeArgumentSessionId(` ${id.toUpperCase()} `), id);
+  const h = pickerHarness(id.toUpperCase());
+  await h.context.loadSessions();
+  assert.deepEqual(h.resumed, [['/current', id, { scope: 'repository' }]]);
+});
+
 test('display titles and untitled first prompts never substitute for the raw resume title', () => {
   const named = { ...row(firstId, 'Agent summary'), resume_title: '  Full custom TITLE  ' };
   const untitled = { ...row(secondId, 'Investigate the first prompt'), resume_title: undefined };

@@ -143,6 +143,49 @@ async function main() {
   await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify(manifest));
   await tool({ action: 'publish', id: backend.id, staged_path: source }); await host.open(backend.id);
 
+  // Server landing paths must retain their browser base URL. Exercise actual
+  // relative scripts/fetches, URL escaping, compression and an in-place reload.
+  const nestedSource = join(host.store.root, 'imports', 'nested-server'); await fs.mkdir(nestedSource);
+  const nestedManifest = { schema: 1, name: 'Nested backend', entry: { type: 'server', process: 'web', path: 'ui nested/识字 #?.html' },
+    processes: [{ name: 'web', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] };
+  await fs.writeFile(join(nestedSource, 'lingxi-app.json'), JSON.stringify(nestedManifest));
+  await fs.writeFile(join(nestedSource, 'server.cjs'), `const http=require('http'),zlib=require('zlib');
+    http.createServer((req,res)=>{const path=decodeURIComponent(new URL(req.url,'http://localhost').pathname);
+      let body,type;
+      if(path==='/health'){res.end('ready');return}
+      if(path==='/ui nested/识字 #?.html'&&req.method==='POST'){
+        let data='';req.on('data',chunk=>data+=chunk);req.on('end',()=>res.end(req.method+':'+data));return;
+      }
+      if(path==='/ui nested/识字 #?.html'||path==='/ui nested/'){
+        body='<!doctype html><title>Nested backend</title><h1>Loading</h1><script src="app.js"></script>';type='text/html';
+      }else if(path==='/ui nested/app.js'){
+        body='fetch("data.json").then(r=>r.json()).then(data=>document.querySelector("h1").textContent=data.message)';type='text/javascript';
+      }else if(path==='/ui nested/data.json'){
+        body=JSON.stringify({message:'Nested compressed backend works'});type='application/json';
+      }else{res.writeHead(404);res.end('wrong path: '+path);return}
+      const compressed=zlib.gzipSync(body);res.writeHead(200,{'Content-Type':type,'Content-Encoding':'gzip','Content-Length':compressed.length});res.end(compressed);
+    }).listen(process.env.PORT,'127.0.0.1');`);
+  const nested = await tool({ action: 'publish', staged_path: nestedSource });
+  await host.open(nested.id);
+  const nestedWindow = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().startsWith(`lingxi-app://${nested.id}/`))!;
+  assert.equal(new URL(nestedWindow.webContents.getURL()).pathname, '/ui%20nested/%E8%AF%86%E5%AD%97%20%23%3F.html');
+  await until(() => nestedWindow.webContents.executeJavaScript(`document.querySelector('h1')?.textContent === 'Nested compressed backend works'`));
+  const home = await nestedWindow.webContents.executeJavaScript(`fetch('/?from=home').then(async r=>({url:r.url,body:await r.text()}))`);
+  assert.equal(new URL(home.url).pathname, '/ui%20nested/%E8%AF%86%E5%AD%97%20%23%3F.html');
+  assert.equal(new URL(home.url).search, '?from=home');
+  assert.match(home.body, /<script src="app.js">/);
+  assert.equal(await nestedWindow.webContents.executeJavaScript(`fetch('/',{method:'POST',body:'saved=value'}).then(r=>r.text())`), 'POST:saved=value');
+  await nestedWindow.loadURL(`lingxi-app://${nested.id}/`);
+  await until(() => nestedWindow.webContents.executeJavaScript(`document.querySelector('h1')?.textContent === 'Nested compressed backend works'`));
+  if (evidence) await fs.writeFile(join(evidence, 'local-app-nested-server.png'), (await nestedWindow.webContents.capturePage()).toPNG());
+  nestedManifest.entry.path = 'ui nested/';
+  await fs.writeFile(join(nestedSource, 'lingxi-app.json'), JSON.stringify(nestedManifest));
+  await tool({ action: 'publish', id: nested.id, staged_path: nestedSource });
+  await host.open(nested.id);
+  assert.equal(new URL(nestedWindow.webContents.getURL()).pathname, '/ui%20nested/');
+  await until(() => nestedWindow.webContents.executeJavaScript(`document.querySelector('h1')?.textContent === 'Nested compressed backend works'`));
+  await host.request({ action: 'stop', id: nested.id });
+
   const cancelSource = join(host.store.root, 'imports', 'cancel'); await fs.mkdir(cancelSource);
   await fs.writeFile(join(cancelSource, 'index.html'), '<!doctype html>cancel');
   await fs.writeFile(join(cancelSource, 'lingxi-app.json'), JSON.stringify({ schema: 1, name: 'Canceled install', entry: { type: 'static', path: 'index.html' }, install: [{ command: `node -e "console.log('cancellable-begun');setInterval(()=>{},1000)"` }] }));

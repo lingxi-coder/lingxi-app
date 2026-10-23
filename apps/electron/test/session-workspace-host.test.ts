@@ -167,6 +167,15 @@ function hostFixture(t: TestContext) {
   return { root, source, target, userData, ref, settings, original, runtimes, grants, projectRoots, promptDirectories, calls, bridge, row, catalog, dialogs, host };
 }
 
+test('opening a pasted uppercase UUID retains the canonical runtime and persisted owner', async t => {
+  const f = hostFixture(t), id = 'abcdef12-abcd-4abc-8abc-abcdef123456';
+  f.runtimes.set(id, new WorkspaceRuntime(f.source, id));
+  const snapshot = await f.host.openSessionAndActivate({ projectPath: f.source, sessionId: id.toUpperCase() });
+  assert.equal(snapshot.activeSession?.sessionId, id);
+  assert.equal(f.calls.open.at(-1)?.ref.sessionId, id);
+  assert.equal(f.calls.find.length, 0, 'reuse the connected canonical owner instead of opening a duplicate');
+});
+
 test('/cd remounts the same UUID in its new cwd and carries pin, model, order and explicit grants', async (t) => {
   const f = hostFixture(t), moved = { projectPath: f.target, sessionId };
   f.original.directories = [f.root];

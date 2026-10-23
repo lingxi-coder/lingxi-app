@@ -15,6 +15,12 @@ const { WebSocketServer } = require('ws');
 const ref = { projectPath: '/controller-workspace', sessionId: '11111111-2222-4333-8444-555555555555' };
 const authToken = '0123456789abcdef0123456789abcdef';
 
+function deferred() {
+  let resolve!: (value: void) => void;
+  const promise = new Promise<void>(yes => { resolve = yes; });
+  return { promise, resolve };
+}
+
 function fakeProcess(pid: number) {
   return Object.assign(new EventEmitter(), {
     pid, exitCode: null as number | null, signalCode: null as string | null,
@@ -454,6 +460,54 @@ for (const failing of [false, true]) {
     assert.equal(h.runtime.hasActiveWork, false);
   });
 }
+
+test('saving launch-only material during a cold open replaces the launch that captured the old secret', async t => {
+  const { CH_PLUGIN_SECRET_SET, HostController } = await import('../src/main/host.js');
+  const { SettingsStore } = await import('../src/main/settings.js');
+  const { DiagnosticBuffer } = await import('../src/main/host-utils.js');
+  const h = await fixture(t);
+  const settings = new SettingsStore(join(h.bridgeRoot, 'overlapping-launch-settings'));
+  settings.addProject(ref.projectPath); settings.setActiveSession(ref);
+  const handles = new Map<string, (...args: any[]) => any>();
+  const ipc = { handle: (channel: string, handler: (...args: any[]) => any) => handles.set(channel, handler), removeHandler: (channel: string) => handles.delete(channel) };
+  let updated = false;
+  const broker = { setPluginSecret: async (pluginId: string, key: string) => { updated = true; return { pluginId, key, configured: true }; } };
+  const host = new HostController(settings, h.manager, new DiagnosticBuffer(), {} as any, ipc as any, undefined, broker as any);
+  h.manager.registerIpc = () => undefined;
+  const window = new EventEmitter() as any;
+  window.mainFrame = { url: 'app://desktop/index.html' }; window.isDestroyed = () => false; window.send = () => undefined;
+  host.registerWindow(window, window.mainFrame.url); host.registerIpc();
+  t.after(() => host.dispose());
+  const captured = deferred(), launchGate = deferred();
+  const launch = h.internal.opts.launchConfig;
+  const launchedMaterial: string[] = [];
+  let captures = 0;
+  h.internal.opts.launchConfig = async () => {
+    const config = { ...await launch(), pluginSecrets: { fixture: { token: updated ? 'new-material' : 'old-material' } } };
+    if (++captures === 1) { captured.resolve(undefined); await launchGate.promise; }
+    return config;
+  };
+  h.internal.spawnServer = (config: any, directory: string) => {
+    launchedMaterial.push(config.pluginSecrets.fixture.token);
+    const child = fakeProcess(999_920 + launchedMaterial.length);
+    h.writeLockfile(join(directory, `${h.port}.lock`), child.pid);
+    return child;
+  };
+  h.internal.signalChildTree = (child: ReturnType<typeof fakeProcess>) => { child.exitCode = 0; child.emit('exit', 0, null); };
+  await h.disconnect(); h.alive = false; h.child.exitCode = 1;
+  const opening = h.manager.openSession(ref, true);
+  await captured.promise;
+  const saving = handles.get(CH_PLUGIN_SECRET_SET)!({ sender: window, senderFrame: window.mainFrame }, 'fixture', 'token', 'new-material');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(updated, true);
+  launchGate.resolve(undefined);
+  await opening;
+  const result = await saving;
+  assert.deepEqual(launchedMaterial, ['old-material', 'new-material']);
+  assert.equal(result.configured, true);
+  assert.equal(result.restartRequired, undefined);
+  assert.equal(h.runtime.connectionState.status, 'connected');
+});
 
 for (const outcome of ['restart', 'background', 'fresh'] as const) {
   test(`launch-only plugin material after disconnected recovery: ${outcome}`, async (t) => {

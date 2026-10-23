@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   APP_NAME,
@@ -379,7 +379,21 @@ async function fetchJson(url) {
   return await response.json();
 }
 
-async function connectToDebugger(port) {
+export async function waitForRendererCommit(page, rendererUrl, options = {}) {
+  await page.send('Page.enable');
+  // A target can advertise its pending URL while its initial empty document
+  // is still current. Runtime.enable there can run Electron's sandbox preload
+  // before startup data exists. Read the committed frame without creating a
+  // script context, and keep all renderer errors observable after attaching.
+  return await waitFor(async () => {
+    const { frameTree } = await page.send('Page.getFrameTree');
+    const frame = frameTree?.frame;
+    return frame?.url === rendererUrl && typeof frame.loaderId === 'string' && frame.loaderId.length > 0
+      ? frame : undefined;
+  }, { timeoutMs: 15_000, label: 'committed packaged renderer document', ...options });
+}
+
+async function connectToDebugger(port, rendererUrl) {
   const version = await waitFor(
     () => fetchJson(`http://127.0.0.1:${port}/json/version`),
     { timeoutMs: 15_000, label: 'CDP version endpoint' },
@@ -387,14 +401,19 @@ async function connectToDebugger(port) {
   const targets = await waitFor(
     async () => {
       const value = await fetchJson(`http://127.0.0.1:${port}/json/list`);
-      return Array.isArray(value) && value.find((entry) => entry.type === 'page' && typeof entry.webSocketDebuggerUrl === 'string');
+      return Array.isArray(value) && value.find((entry) => entry.type === 'page'
+        && entry.url === rendererUrl && typeof entry.webSocketDebuggerUrl === 'string');
     },
     { timeoutMs: 15_000, label: 'CDP page target' },
   );
-  return {
-    browser: new CdpConnection(version.webSocketDebuggerUrl),
-    page: new CdpConnection(targets.webSocketDebuggerUrl),
-  };
+  const page = new CdpConnection(targets.webSocketDebuggerUrl);
+  try {
+    await waitForRendererCommit(page, rendererUrl);
+    return { browser: new CdpConnection(version.webSocketDebuggerUrl), page };
+  } catch (error) {
+    await page.close();
+    throw error;
+  }
 }
 
 async function evaluate(page, expression) {
@@ -1090,7 +1109,8 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const workspace = createAdversarialWorkspace(tempRoot);
   const runtimePaths = runtimePathsForHome(tempHome);
   writeJson(runtimePaths.settingsPath, createPackagedSettings({ workspace }));
-  const copiedAppPath = copyPackagedApp(appPath, join(tempRoot, 'app-copy'));
+  const copiedAppPath = realpathSync.native(copyPackagedApp(appPath, join(tempRoot, 'app-copy')));
+  const rendererUrl = pathToFileURL(join(copiedAppPath, 'Contents', 'Resources', 'app.asar', 'out', 'renderer', 'index.html')).href;
   const copiedAppBundleId = packagedAppBundleId(copiedAppPath);
   const cdpPort = await reserveLoopbackPort();
   const env = sanitizePackagedAppEnvironment(process.env, {
@@ -1118,7 +1138,6 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     target.on('Runtime.consoleAPICalled', params => { if (params.type === 'error') consoleErrors.push(params); });
     target.on('Runtime.exceptionThrown', params => runtimeExceptions.push(params));
     target.on('Log.entryAdded', params => { if (params.entry?.level === 'error') logErrors.push(params.entry); });
-    await target.send('Page.enable');
     await target.send('Runtime.enable');
     await target.send('Log.enable');
   };
@@ -1131,7 +1150,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     const launch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
     child = launch.child;
     output = launch.output;
-    const debuggerConnection = await connectToDebugger(cdpPort);
+    const debuggerConnection = await connectToDebugger(cdpPort, rendererUrl);
     browser = debuggerConnection.browser;
     page = debuggerConnection.page;
 
@@ -1169,7 +1188,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     const relaunch = spawnPackagedApp(copiedAppPath, env, cdpPort, runtimePaths.userDataDir);
     child = relaunch.child;
     output = relaunch.output;
-    ({ browser, page } = await connectToDebugger(cdpPort));
+    ({ browser, page } = await connectToDebugger(cdpPort, rendererUrl));
     await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords);

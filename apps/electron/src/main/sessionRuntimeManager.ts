@@ -262,8 +262,18 @@ export class SessionRuntimeManager {
       pending.activate ||= activate;
       return pending.promise;
     }
+    const restarting = this.restartingSessions.get(ref.sessionId);
+    if (restarting?.size) {
+      // Restart owns the complete handshake and transcript restoration. Opening
+      // the same UUID must not return early or issue a competing resume. A
+      // refused restart can leave a healthy engine, so reassess after settling.
+      return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
+        if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
+        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls);
+      });
+    }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
-    if (existing?.connectionState.status === 'connected' && !existing.isStarting) {
+    if (existing?.connectionState.status === 'connected' && !existing.isStarting && !existing.needsSessionResume) {
       if (transcriptPath) {
         this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
         existing.rememberTranscriptSelection(transcriptPath);
@@ -301,7 +311,7 @@ export class SessionRuntimeManager {
       } else {
         runtime = await this.ensure(ref, true, undefined, remountControls);
       }
-      if (!empty && !runtime.recoveredLiveConnection) await runtime.resumeOwnedSession(transcriptPath);
+      if (runtime.needsSessionResume || (!empty && !runtime.recoveredLiveConnection)) await runtime.resumeOwnedSession(transcriptPath);
       return runtime;
     } catch (error) {
       if (transcriptPath) {
@@ -417,11 +427,25 @@ export class SessionRuntimeManager {
 
   private async restartInternal(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
+    const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
+    const opening = this.openingSessions.get(ref.sessionId);
+    if (opening) {
+      if (opening.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      if (recovering) beforeRestart?.();
+      await opening.promise;
+      if (this.require(ref) !== runtime) throw new Error('session runtime was replaced while restarting');
+      if (recovering) {
+        // The open already completed transport recovery and owned restoration.
+        // Joining that recovery must not replace a still-living sidecar.
+        beforeRestart?.();
+        return;
+      }
+    }
     if (runtime.connectionState.status !== 'connected' || runtime.isStarting) {
       beforeRestart?.();
       await runtime.start();
       beforeRestart?.();
-      if (!runtime.recoveredLiveConnection) await runtime.restoreOwnedSessionIfNeeded();
+      if (!runtime.recoveredLiveConnection || runtime.needsSessionResume) await runtime.restoreOwnedSessionIfNeeded();
       return;
     }
     await runtime.restart(() => {

@@ -130,6 +130,103 @@ function resumeProof(client: WorkspaceClient, id = sessionId) {
   client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' });
 }
 
+test('a failed owned restore cannot be reused as ready and retries require full engine proof', async t => {
+  for (const firstOperation of ['open', 'restart'] as const) {
+    await t.test(firstOperation, async t => {
+      const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
+      t.after(() => manager.dispose());
+      const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure(ref, false), internal = runtime as any;
+      let requests = 0;
+      const acknowledgement = deferred<void>();
+      const client = Object.assign(new WorkspaceClient(), {
+        resumeSessionFromTranscript: async () => {
+          if (++requests === 1) throw new Error('selected transcript RPC transient failure');
+          await acknowledgement.promise;
+        },
+      });
+      Object.assign(internal, { activeWorkspace: '/project', activeWorkspaceTrusted: true, ownedTranscriptPath: '/saved/session.jsonl',
+        sessionHasHistory: firstOperation === 'restart', ensureModelProviderCredential: async () => {},
+        restoreModel: async () => {}, restorePermissionMode: async () => {}, restoreFastMode: async () => {} });
+      internal.wireClient(client, internal.generation);
+      runtime.start = async () => { internal.setState({ status: 'connected' }); };
+      runtime.restart = async () => { internal.setState({ status: 'connected' }); };
+      if (firstOperation === 'restart') internal.setState({ status: 'connected' });
+      await assert.rejects(firstOperation === 'open' ? manager.openSession(ref) : manager.restart(ref), /RPC transient failure/);
+      assert.equal(runtime.connectionState.status, 'connected');
+      assert.equal(runtime.needsSessionResume, true);
+      assert.throws(() => runtime.sendPrompt('must not overwrite unrestored history'), /Resume this chat/);
+      await assert.rejects(runtime.dispatchCommand({ type: 'list_models' }), /Resume this chat/);
+      assert.throws(() => runtime.beginWorkspaceChange(), /Resume this chat/);
+      await assert.rejects(runtime.manageCron({ action: 'list' }), /Resume this chat/);
+      await assert.rejects(runtime.runScheduledTurn('run', { automation: { model: 'test/model' } } as any), /must be resumed/);
+      // Reconnecting the same process also cannot certify the failed restore.
+      internal.liveConnectionRecovered = true;
+      let ready = false;
+      const retry = manager.openSession(ref).then(() => { ready = true; });
+      await nextTurn();
+      assert.equal(requests, 2);
+      assert.equal(ready, false);
+      resumeProof(client); await nextTurn();
+      assert.equal(ready, false, 'matching UUID/model alone do not acknowledge the selected transcript RPC');
+      acknowledgement.resolve(undefined); await retry;
+      assert.equal(runtime.needsSessionResume, false);
+      assert.equal(ready, true);
+      await runtime.dispatchCommand({ type: 'list_models' });
+    });
+  }
+});
+
+test('opening during a restart waits for its real resume without issuing a second restore', async t => {
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
+  t.after(() => manager.dispose());
+  const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure(ref, false), internal = runtime as any;
+  let requests = 0;
+  const acknowledgement = deferred<void>();
+  const client = Object.assign(new WorkspaceClient(), { resumeSessionFromTranscript: () => { requests++; return acknowledgement.promise; } });
+  Object.assign(internal, { activeWorkspace: '/project', activeWorkspaceTrusted: true, ownedTranscriptPath: '/saved/session.jsonl',
+    sessionHasHistory: true, ensureModelProviderCredential: async () => {},
+    restoreModel: async () => {}, restorePermissionMode: async () => {}, restoreFastMode: async () => {} });
+  internal.wireClient(client, internal.generation); internal.setState({ status: 'connected' });
+  runtime.restart = async guard => { guard?.(); };
+  const restarting = manager.restart(ref);
+  await nextTurn(); assert.equal(requests, 1);
+  let ready = false;
+  const opening = manager.openSession(ref).then(() => { ready = true; });
+  await nextTurn(); assert.equal(ready, false);
+  resumeProof(client); await nextTurn(); assert.equal(ready, false);
+  acknowledgement.resolve(undefined); await restarting; await opening;
+  assert.equal(requests, 1);
+  assert.equal(ready, true);
+  await assert.rejects(manager.restart(ref, () => { throw new Error('restart refused'); }), /restart refused/);
+  assert.equal(await manager.openSession(ref), runtime, 'a refused restart retains the healthy restored owner');
+});
+
+test('a restart arriving during a cold open joins its owned restore without a second resume or process', async t => {
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, trusted: true, sessionId: ref.sessionId }) });
+  t.after(() => manager.dispose());
+  const ref = { projectPath: '/project', sessionId }, runtime = await manager.ensure(ref, false), internal = runtime as any;
+  const start = deferred<void>(), acknowledgement = deferred<void>();
+  let requests = 0, restarts = 0;
+  const client = Object.assign(new WorkspaceClient(), { resumeSessionFromTranscript: () => {
+    requests++;
+    if (requests === 1) return acknowledgement.promise;
+    queueMicrotask(() => resumeProof(client));
+    return Promise.resolve();
+  } });
+  Object.assign(internal, { activeWorkspace: '/project', activeWorkspaceTrusted: true, ownedTranscriptPath: '/saved/session.jsonl',
+    sessionHasHistory: true, ensureModelProviderCredential: async () => {},
+    restoreModel: async () => {}, restorePermissionMode: async () => {}, restoreFastMode: async () => {} });
+  internal.wireClient(client, internal.generation);
+  runtime.start = async () => { await start.promise; internal.setState({ status: 'connected' }); };
+  runtime.restart = async guard => { guard?.(); restarts++; };
+  const opening = manager.openSession(ref), restarting = manager.restart(ref);
+  start.resolve(undefined); await nextTurn();
+  assert.equal(requests, 1); assert.equal(restarts, 0);
+  resumeProof(client); acknowledgement.resolve(undefined);
+  await opening; await restarting;
+  assert.equal(requests, 1); assert.equal(restarts, 0);
+});
+
 function resumeInteractions(t: TestContext, timeoutMs = 1500) {
   const f = selectedResumeRuntime(t, timeoutMs), internal = f.runtime as any;
   const scopes = new Map<number, ReturnType<typeof deferred<{ request_id: number; background_owned: boolean }>>>();

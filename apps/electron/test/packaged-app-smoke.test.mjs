@@ -13,11 +13,41 @@ import {
   isSafeProviderCredentialSnapshot,
   runtimePathsForHome,
   sanitizePackagedAppEnvironment,
+  waitForRendererCommit,
   workspaceTrustFingerprint,
 } from '../scripts/packaged-app-smoke.mjs';
 import { workspaceFingerprint as hostWorkspaceFingerprint } from '../src/main/host-utils.ts';
 
 const temporaryDirectories = [];
+
+test('packaged debugger waits for the real document commit before enabling Runtime', async () => {
+  const rendererUrl = 'file:///tmp/LingXi%20Code.app/Contents/Resources/app.asar/out/renderer/index.html';
+  const frames = [
+    { url: 'about:blank', loaderId: 'initial' },
+    { url: 'lingxi-app://other-app/', loaderId: 'guest' },
+    { url: rendererUrl, loaderId: '' },
+    { url: rendererUrl, loaderId: 'committed' },
+  ];
+  const calls = [];
+  const page = { send: async method => {
+    calls.push(method);
+    if (method === 'Page.enable') return {};
+    assert.equal(method, 'Page.getFrameTree', 'waiting must not create a JavaScript context');
+    return { frameTree: { frame: frames.shift() } };
+  } };
+  const frame = await waitForRendererCommit(page, rendererUrl, { intervalMs: 0 });
+  assert.equal(frame.loaderId, 'committed');
+  assert.equal(frames.length, 0);
+  assert.deepEqual(calls, ['Page.enable', ...Array(4).fill('Page.getFrameTree')]);
+});
+
+test('packaged debugger rejects a document that never commits the packaged renderer', async () => {
+  const page = { send: async method => method === 'Page.enable' ? {} : {
+    frameTree: { frame: { url: 'about:blank', loaderId: 'initial' } },
+  } };
+  await assert.rejects(waitForRendererCommit(page, 'file:///packaged/index.html', { timeoutMs: 0 }),
+    /committed packaged renderer document did not become ready/);
+});
 
 test('custom provider smoke requires a successful answer, not merely any terminal event', () => {
   const answer = { type: 'text_delta', text: 'Custom provider verified.' };

@@ -24,7 +24,7 @@ export function resumeArgumentRow(query: string, sessions: readonly SessionCatal
 
 export function resumeArgumentSessionId(query: string, sessions: readonly SessionCatalogRow[] = []): string | undefined {
   const argument = query.trim();
-  if (UUID.test(argument)) return argument;
+  if (UUID.test(argument)) return argument.toLowerCase();
   return resumeArgumentRow(argument, sessions)?.uuid;
 }
 

@@ -255,6 +255,7 @@ export class SessionRuntime {
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
   private pendingSessionResume: PendingSessionResume | null = null;
   private resumeOperationInProgress = false;
+  private ownedSessionResumeRequired = false;
   private sessionHasHistory = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
@@ -556,6 +557,7 @@ export class SessionRuntime {
 
   /** Fence prompts, restarts, eviction and other controls throughout host migration. */
   beginWorkspaceChange(): () => void {
+    if (this.ownedSessionResumeRequired && !this.resumeOperationInProgress) throw new Error('Resume this chat before changing its directory.');
     if (this.archiving || this.hasActiveWork || this.pendingCron.size > 0 || this.activeCronExecutions > 0 || this.isStarting) {
       throw new Error('Wait for active work and pending interactions before changing this chat’s directory.');
     }
@@ -624,12 +626,14 @@ export class SessionRuntime {
 
   async runScheduledTurn(runId: string, task: CronJobDto, beforeStart?: () => Promise<void>): Promise<string> {
     if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+    if (this.ownedSessionResumeRequired) throw new Error('interrupted: The target chat must be resumed.');
     if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
     const config = task.automation;
     if (!config?.model) throw new Error('paused: Configure a model for this task.');
     const generation = this.generation;
     while (this.turnActive || this.pendingInteractions > 0) {
       if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+      if (this.ownedSessionResumeRequired) throw new Error('interrupted: The target chat must be resumed.');
       if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
       if (this.disposed || generation !== this.generation || this.state.status !== 'connected') throw new Error('interrupted: Scheduled execution interrupted.');
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -637,11 +641,13 @@ export class SessionRuntime {
     if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
     if (this.archiving) throw new Error('paused: The target chat is being archived.');
     if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+    if (this.ownedSessionResumeRequired) throw new Error('interrupted: The target chat must be resumed.');
     const client = this.requireClient();
     const token = Symbol('scheduled hydration');
     this.pendingPromptHydrations.set(token, undefined);
     const assertPreparing = () => {
       if (this.resumeOperationInProgress) throw new Error('interrupted: The target chat is being resumed.');
+      if (this.ownedSessionResumeRequired) throw new Error('interrupted: The target chat must be resumed.');
       if (this.changingWorkspace) throw new Error('interrupted: The target chat’s directory is being changed.');
       if (this.disposed || generation !== this.generation || client !== this.client) throw new Error('interrupted: Scheduled execution interrupted.');
       if (!this.pendingPromptHydrations.has(token)) throw new Error('cancelled: Scheduled execution was cancelled before starting.');
@@ -693,6 +699,7 @@ export class SessionRuntime {
 
   private sendCronCommand(command: Extract<ClientCommand, { type: 'cron_manage' }>): Promise<CronJobDto[]> {
     if (this.resumeOperationInProgress) return Promise.reject(new Error('This chat is being resumed.'));
+    if (this.ownedSessionResumeRequired) return Promise.reject(new Error('Resume this chat before managing its scheduled tasks.'));
     if (this.changingWorkspace) return Promise.reject(new Error('This chat’s directory is being changed.'));
     const { request_id, request } = command;
     if (this.pendingCron.has(request_id)) return Promise.reject(new Error('Scheduled task request is already pending.'));
@@ -737,7 +744,23 @@ export class SessionRuntime {
   /** A same-process reconnect retains its in-memory session and background scopes. */
   get recoveredLiveConnection(): boolean { return this.liveConnectionRecovered; }
 
+  /** A connected transport alone does not prove that owned history restored. */
+  get needsSessionResume(): boolean { return this.ownedSessionResumeRequired; }
+
   get isStarting(): boolean { return this.startPromise !== null; }
+
+  /** Wait for existing lifecycle work without starting a stopped runtime. */
+  async waitForLifecycle(): Promise<void> {
+    let lifecycle: Promise<void>;
+    do {
+      if (this.disposed) throw new Error('session runtime is no longer open');
+      lifecycle = this.restartChain;
+      // A refused restart can leave the current connection usable. Its caller
+      // owns that failure; this fence only waits for lifecycle work to settle.
+      await lifecycle.catch(() => undefined);
+    } while (lifecycle !== this.restartChain);
+    if (this.disposed) throw new Error('session runtime is no longer open');
+  }
 
   get activeCredentialProviderIds(): readonly string[] {
     return [...this.activeCredentialProviders];
@@ -2351,6 +2374,7 @@ export class SessionRuntime {
     const id = validateOptionalTurnId(turnId);
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
+    if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another prompt.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
@@ -2588,6 +2612,7 @@ export class SessionRuntime {
   async dispatchCommand(command: unknown, source?: PromptSource): Promise<void> {
     if (this.changingWorkspace) throw new Error('This chat’s directory is being changed.');
     if (this.resumeOperationInProgress) throw new Error('This chat is being resumed.');
+    if (this.ownedSessionResumeRequired) throw new Error('Resume this chat before sending another command.');
     if (this.archiving) throw new Error('This chat is being archived.');
     const validated = validateClientCommand(command, this.activeWorkspace);
     if (validated.type.startsWith('side_chat_')) {
@@ -2906,6 +2931,7 @@ export class SessionRuntime {
   /** Resume the one session owned by this runtime and wait for engine proof. */
   resumeOwnedSession(transcriptPath?: string): Promise<void> {
     if (this.resumeOperationInProgress) return Promise.reject(new Error('session resume is already pending'));
+    this.ownedSessionResumeRequired = true;
     const client = this.requireClient();
     const generation = this.generation;
     const selectedPath = transcriptPath ?? this.ownedTranscriptPath;
@@ -2969,6 +2995,7 @@ export class SessionRuntime {
         await this.restoreFastMode();
       }
       assertCurrent();
+      this.ownedSessionResumeRequired = false;
     }).finally(() => {
       this.resumeOperationInProgress = false;
       this.notifyActivityChanged();
@@ -2988,7 +3015,7 @@ export class SessionRuntime {
   }
 
   async restoreOwnedSessionIfNeeded(): Promise<void> {
-    if (this.sessionHasHistory) await this.resumeOwnedSession();
+    if (this.sessionHasHistory || this.ownedSessionResumeRequired) await this.resumeOwnedSession();
   }
 
   private resolvePendingSessionResume(pending: PendingSessionResume): void {

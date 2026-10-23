@@ -74,6 +74,7 @@ export interface RemoteLease {
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
   private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly draftSessions = new Map<string, SessionRef>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
@@ -185,6 +186,7 @@ export class SessionRuntimeManager {
       || status === 'restarting'
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
+      || this.restartingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
   }
 
@@ -298,8 +300,20 @@ export class SessionRuntimeManager {
       pending.activate ||= activate;
       return pending.promise;
     }
+    const restarting = this.restartingSessions.get(ref.sessionId);
+    if (restarting?.size) {
+      // A restart owns both the handshake and transcript restoration. Reassess
+      // after it settles rather than opening a second resume on the same UUID.
+      // Retain the pending opener until it can activate its runtime: releasing
+      // the restart pin can otherwise evict this still-background session.
+      const release = this.retainBackgroundSession(ref);
+      return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
+        if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
+        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls);
+      }).finally(release);
+    }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
-    if (existing?.connectionState.status === 'connected' && !existing.isStarting) {
+    if (existing?.connectionState.status === 'connected' && !existing.isStarting && !existing.needsSessionResume) {
       if (transcriptPath) {
         this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
         existing.rememberTranscriptSelection(transcriptPath);
@@ -337,7 +351,7 @@ export class SessionRuntimeManager {
       } else {
         runtime = await this.ensure(ref, true, undefined, remountControls);
       }
-      if (!empty && !runtime.recoveredLiveConnection) await runtime.resumeOwnedSession(transcriptPath);
+      if (runtime.needsSessionResume || (!empty && !runtime.recoveredLiveConnection)) await runtime.resumeOwnedSession(transcriptPath);
       return runtime;
     } catch (error) {
       if (transcriptPath) {
@@ -473,12 +487,37 @@ export class SessionRuntimeManager {
   }
 
   async restart(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
+    const pending = this.restartingSessions.get(ref.sessionId) ?? new Set<Promise<void>>();
+    const operation = this.restartInternal(ref, beforeRestart);
+    const completion = operation.finally(() => {
+      pending.delete(completion);
+      if (pending.size === 0 && this.restartingSessions.get(ref.sessionId) === pending) this.restartingSessions.delete(ref.sessionId);
+      this.scheduleCacheTrim();
+    });
+    pending.add(completion);
+    this.restartingSessions.set(ref.sessionId, pending);
+    return completion;
+  }
+
+  private async restartInternal(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
+    const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
+    const opening = this.openingSessions.get(ref.sessionId);
+    if (opening) {
+      if (opening.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      if (recovering) beforeRestart?.();
+      await opening.promise;
+      if (this.require(ref) !== runtime) throw new Error('session runtime was replaced while restarting');
+      if (recovering) {
+        beforeRestart?.();
+        return;
+      }
+    }
     if (runtime.connectionState.status !== 'connected' || runtime.isStarting) {
       beforeRestart?.();
       await runtime.start();
       beforeRestart?.();
-      if (!runtime.recoveredLiveConnection) await runtime.restoreOwnedSessionIfNeeded();
+      if (!runtime.recoveredLiveConnection || runtime.needsSessionResume) await runtime.restoreOwnedSessionIfNeeded();
       return;
     }
     await runtime.restart(() => {
@@ -572,6 +611,7 @@ export class SessionRuntimeManager {
     this.sessionModelHints.clear();
     this.activeSessionId = null;
     this.openingSessions.clear();
+    this.restartingSessions.clear();
     this.remoteOpened.clear();
     this.runtimeCreatedListeners.clear();
     this.draftSessions.clear();
@@ -648,7 +688,19 @@ export class SessionRuntimeManager {
     });
     ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, sessionId: unknown, command: unknown) => {
       this.assertSender(event);
-      await this.requireById(sessionId).dispatchCommand(command);
+      const runtime = this.requireById(sessionId);
+      // Connectivity precedes owned transcript/control recovery. Only ordinary
+      // commands wait here; approvals, questions and cancellation must remain
+      // available while the recovery transaction waits for those interactions.
+      do {
+        const opening = this.openingSessions.get(runtime.sessionId)?.promise;
+        const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];
+        await Promise.all([opening, ...restarting, runtime.waitForLifecycle()]);
+        this.assertSender(event);
+        if (this.requireById(sessionId) !== runtime) throw new Error('session runtime was replaced');
+      } while (this.openingSessions.get(runtime.sessionId)?.promise !== undefined
+        || this.restartingSessions.has(runtime.sessionId));
+      await runtime.dispatchCommand(command);
     });
     ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
       this.assertSender(event);

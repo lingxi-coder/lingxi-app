@@ -711,6 +711,19 @@ export class SessionRuntime {
 
   get isStarting(): boolean { return this.startPromise !== null; }
 
+  /** Wait for existing lifecycle work without starting a stopped runtime. */
+  async waitForLifecycle(): Promise<void> {
+    let lifecycle: Promise<void>;
+    do {
+      if (this.disposed) throw new Error('session runtime is no longer open');
+      lifecycle = this.restartChain;
+      // A refused restart can leave the existing connection usable. Its
+      // caller owns the failure; this fence only waits for lifecycle work.
+      await lifecycle.catch(() => undefined);
+    } while (lifecycle !== this.restartChain);
+    if (this.disposed) throw new Error('session runtime is no longer open');
+  }
+
   get activeCredentialProviderIds(): readonly string[] {
     return [...this.activeCredentialProviders];
   }

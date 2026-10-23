@@ -584,7 +584,7 @@ export function useBridge(): UseBridge {
 
   const requestTaskList = useCallback(async (
     sessionId = activeSessionIdRef.current,
-    options?: { preserve?: boolean },
+    options?: { preserve?: boolean; reportError?: boolean },
   ) => {
     if (sessionLoadingRef.current || !host || !sessionId) return;
     // [Finding 5, rework round 2] A background poll (fired every 1.5s while
@@ -605,7 +605,9 @@ export function useBridge(): UseBridge {
     try {
       await host.command(sessionId, { type: 'task_list' });
     } catch (cause) {
-      capture(cause);
+      if (options?.reportError !== false && activeSessionIdRef.current === sessionId
+        && !removedRuntimeIds.current.has(sessionId)) capture(cause);
+      throw cause;
     }
   }, [capture, host, updateRuntime]);
 
@@ -616,6 +618,8 @@ export function useBridge(): UseBridge {
       return;
     }
 
+    let disposed = false;
+    let bootstrapRequest = 0;
     const offEvent = host.onEvent((envelope: SequencedRuntimeEventEnvelope<ClientEvent>) => {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
@@ -887,6 +891,7 @@ export function useBridge(): UseBridge {
         interruptConfigurationOperations(pendingConfigurationOperations.current, sessionId);
       }
       if (isRuntimeRemovedState(state)) {
+        bootstrapRequest += 1;
         removedRuntimeIds.current.add(sessionId);
         slashCommandTerminals.current.clearSession(sessionId);
         setBootstrap((previous) => {
@@ -899,7 +904,8 @@ export function useBridge(): UseBridge {
           return {
             ...previous,
             settings,
-            ...(activeSession ? { activeSession } : {}),
+            activeSession,
+            ...(previousActiveSession?.sessionId === sessionId ? { connection: { status: 'idle' as const } } : {}),
             runtimes: previous.runtimes.filter((runtime) => runtime.sessionId !== sessionId),
           };
         });
@@ -967,7 +973,9 @@ export function useBridge(): UseBridge {
       if (activeSessionIdRef.current === sessionId && state.status === 'error') setError(state.message);
       if (activeSessionIdRef.current === sessionId && state.status === 'disconnected' && state.reason && !isRuntimeReplacementState(state)) setError(state.reason);
       if (state.status === 'connected') {
+        const request = ++bootstrapRequest;
         void host.bootstrap().then((snapshot) => {
+          if (disposed || request !== bootstrapRequest || removedRuntimeIds.current.has(sessionId)) return;
           // `newSession` publishes a synthetic target while the main process
           // finishes its navigation transaction. Once the actual runtime has
           // handshaken, promote that target immediately so prompt/model/file
@@ -986,7 +994,10 @@ export function useBridge(): UseBridge {
             setSessionReady(true);
           }
           applyBootstrap(snapshot);
-        }).catch((cause) => setError(messageFrom(cause)));
+          setLoading(false);
+        }).catch((cause) => {
+          if (!disposed && request === bootstrapRequest) setError(messageFrom(cause));
+        });
       }
     });
     const offPermission = host.onPermission((envelope) => {
@@ -1024,17 +1035,28 @@ export function useBridge(): UseBridge {
       });
     });
 
+    const initialRequest = ++bootstrapRequest;
     void host.bootstrap()
       .then((snapshot) => {
-        applyBootstrap(snapshot);
+        if (disposed) return;
+        // A background runtime can retire while a reopened macOS window
+        // waits for its first credential-backed snapshot. A fresh snapshot
+        // of another owner must still initialize that renderer.
+        const initializesLiveOwner = bootstrapRef.current === null
+          && !snapshot.runtimes.some((runtime) => removedRuntimeIds.current.has(runtime.sessionId))
+          && ![snapshot.activeSession, snapshot.settings.activeSession]
+            .some((ref) => ref && removedRuntimeIds.current.has(ref.sessionId));
+        if (initialRequest === bootstrapRequest || initializesLiveOwner) applyBootstrap(snapshot);
         setLoading(false);
       })
       .catch((cause) => {
-        setError(messageFrom(cause));
+        if (disposed) return;
+        if (initialRequest === bootstrapRequest) setError(messageFrom(cause));
         setLoading(false);
       });
 
     return () => {
+      disposed = true;
       offEvent();
       slashCommandTerminals.current.clear();
       offState();
@@ -1047,13 +1069,14 @@ export function useBridge(): UseBridge {
     if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
     const trusted = bootstrap?.workspace.trusted;
     if (!trusted) return;
+    let cancelled = false;
     // A runtime answers one command at a time, and a cold session listing
     // parses every transcript of the project. Ask for it last so it never
     // holds the controls this view needs first behind it.
     void Promise.all([
       host.command(activeSessionId, { type: 'list_models' }),
       host.command(activeSessionId, { type: 'get_conversation_controls' }),
-      requestTaskList(activeSessionId),
+      requestTaskList(activeSessionId, { reportError: false }),
       host.command(activeSessionId, { type: 'list_session_agents' }),
       host.command(activeSessionId, {
         type: 'refresh_listings',
@@ -1066,7 +1089,11 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'plugin_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'hook_admin', command: { action: 'get_document' } }),
       host.command(activeSessionId, { type: 'list_sessions', limit: 100 }),
-    ]).catch((cause) => setError(messageFrom(cause)));
+    ]).catch((cause) => {
+      if (!cancelled && activeSessionIdRef.current === activeSessionId
+        && !sessionLoadingRef.current && !removedRuntimeIds.current.has(activeSessionId)) setError(messageFrom(cause));
+    });
+    return () => { cancelled = true; };
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
   const submittedSessionFor = useCallback((sessionId: string, text: string): SubmittedSession | undefined => {

@@ -57,6 +57,7 @@ const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
   private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
+  private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
   private readonly draftSessions = new Map<string, SessionRef>();
   private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
@@ -403,6 +404,18 @@ export class SessionRuntimeManager {
   }
 
   async restart(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
+    const pending = this.restartingSessions.get(ref.sessionId) ?? new Set<Promise<void>>();
+    const operation = this.restartInternal(ref, beforeRestart);
+    const completion = operation.finally(() => {
+      pending.delete(completion);
+      if (pending.size === 0 && this.restartingSessions.get(ref.sessionId) === pending) this.restartingSessions.delete(ref.sessionId);
+    });
+    pending.add(completion);
+    this.restartingSessions.set(ref.sessionId, pending);
+    return completion;
+  }
+
+  private async restartInternal(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
     if (runtime.connectionState.status !== 'connected' || runtime.isStarting) {
       beforeRestart?.();
@@ -502,6 +515,7 @@ export class SessionRuntimeManager {
     this.sessionModelHints.clear();
     this.activeSessionId = null;
     this.openingSessions.clear();
+    this.restartingSessions.clear();
     this.draftSessions.clear();
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
@@ -576,7 +590,19 @@ export class SessionRuntimeManager {
     });
     ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, sessionId: unknown, command: unknown) => {
       this.assertSender(event);
-      await this.requireById(sessionId).dispatchCommand(command);
+      const runtime = this.requireById(sessionId);
+      // The transport handshake precedes owned transcript/control recovery.
+      // Normal commands wait for that transaction; permission/cancel IPCs
+      // remain independent so recovery can finish its pending interactions.
+      do {
+        const opening = this.openingSessions.get(runtime.sessionId)?.promise;
+        const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];
+        await Promise.all([opening, ...restarting, runtime.waitForLifecycle()]);
+        this.assertSender(event);
+        if (this.requireById(sessionId) !== runtime) throw new Error('session runtime was replaced');
+      } while (this.openingSessions.get(runtime.sessionId)?.promise !== undefined
+        || this.restartingSessions.has(runtime.sessionId));
+      await runtime.dispatchCommand(command);
     });
     ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
       this.assertSender(event);

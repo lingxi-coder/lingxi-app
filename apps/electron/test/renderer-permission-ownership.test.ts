@@ -50,6 +50,7 @@ function harness() {
     ['B', runtime.emptyRuntimeState({ status: 'connected' })]]);
   const calls: Array<{ action: string; sessionId: string; requestId?: number }> = [], visibleErrors: string[] = [];
   const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() }, ...runtime, ...conversation, ...desktop, ...center, ...tracked,
+    bootstrapRequest: 0,
     useCallback: (callback: any) => callback, isPermissionRequestGone, messageFrom,
     runtimeStatesRef: { current: states }, activeSessionIdRef: { current: 'A' }, sessionLoadingRef: { current: false },
     removedRuntimeIds: { current: new Set() }, bootstrapRef: { current: null }, pendingSessionRef: { current: null },

@@ -241,6 +241,7 @@ test('the real connection-disposal handler rejects its pending configuration ope
   const call = findNode(file, (node) => ts.isCallExpression(node)
     && node.expression.getText(file) === 'host.onConnectionStateChanged') as ts.CallExpression;
   const context: any = { slashCommandTerminals: { current: new SlashCommandTerminalRegistry() },
+    bootstrapRequest: 0,
     pendingConfigurationOperations: { current: pending }, interruptConfigurationOperations,
     removedRuntimeIds: { current: new Set() }, isRuntimeRemovedState: () => true,
     setBootstrap: () => {}, setRuntimeStates: () => {}, removeRuntimeFromMaps: () => {}, completeTrackedSpeech: () => {},

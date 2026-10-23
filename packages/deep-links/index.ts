@@ -8,7 +8,7 @@ export type DeepLinkTarget = {
 export class DeepLinkError extends Error {
   constructor(public readonly code: 'invalid' | 'unsupported', message: string) { super(message); }
 }
-const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider))$/u;
+const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+)$/u;
 const parameters = new Set(['workspace', 'message', 'mode', 'scope']);
 function validatePayload(value: unknown, depth = 0): void {
   if (depth > 16) throw new DeepLinkError('invalid', 'Payload is too deeply nested');

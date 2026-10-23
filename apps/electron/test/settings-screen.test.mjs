@@ -83,7 +83,7 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
 test('all settings pages fit macOS windows and name their switches', async () => {
   for (const theme of ['light', 'dark']) {
     const states = await runScenario('macos-audit', theme);
-    assert.equal(states.length, 36);
+    assert.equal(states.length, 38);
     assert.deepEqual(states.filter(state => state.overflow || state.bottomOverflow || state.unnamedSwitches || state.placeholder), [], `${theme}: layout or accessible names`);
   }
 });

@@ -57,6 +57,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -121,6 +123,9 @@ fun Composer(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    /** Several attachments (Remote Control sends up to four); shown after [attachment]. */
+    attachments: List<ComposerAttachment> = emptyList(),
+    onRemoveAttachmentAt: (Int) -> Unit = {},
     /** The widget the next prompt follows up on, with its remove control. */
     visualizationChip: VisualizationContextChip? = null,
     onRemoveVisualizationChip: () -> Unit = {},
@@ -136,6 +141,7 @@ fun Composer(
     onOpenModelSettings: () -> Unit = {},
     /** Current settings/credential state keyed by the engine provider profile. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    remoteModelSelection: Boolean = false,
     /** Opens a specific provider editor, or the provider list when id is null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     /** Fired by the Stop button to cancel the in-flight turn. */
@@ -166,7 +172,7 @@ fun Composer(
     var suggestionRejected by remember(suggestionTurnKey) { mutableStateOf(false) }
     val visibleSuggestion = promptSuggestion?.takeIf {
         !suggestionRejected && text.isEmpty() && !isStreaming && enabled
-            && attachment == null && visualizationChip == null
+            && attachment == null && attachments.isEmpty() && visualizationChip == null
     }
     LaunchedEffect(promptSuggestion, visibleSuggestion, suggestionTurnKey) {
         if (promptSuggestion != null && !suggestionShown && !suggestionRejected) {
@@ -207,6 +213,13 @@ fun Composer(
             // shown only once a camera capture has surfaced an image.
             if (attachment != null) {
                 AttachmentThumb(attachment = attachment, onRemove = onRemoveAttachment)
+            }
+            if (attachments.isNotEmpty()) {
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    attachments.forEachIndexed { index, item ->
+                        AttachmentThumb(attachment = item, onRemove = { onRemoveAttachmentAt(index) })
+                    }
+                }
             }
             if (visualizationChip != null) {
                 VisualizationContextChipView(chip = visualizationChip, onDismiss = onRemoveVisualizationChip)
@@ -434,6 +447,7 @@ fun Composer(
                         ModelChip(
                             model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
                             onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                            remoteModelSelection = remoteModelSelection,
                             onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
                             reasoning = reasoning, onReasoningChange = onReasoningChange,
                             compact = compactModel,
@@ -533,6 +547,7 @@ private fun ModelChip(
     modelSetupRequired: Boolean,
     onOpenModelSettings: () -> Unit,
     providerStatuses: List<ModelProviderStatus>,
+    remoteModelSelection: Boolean,
     onOpenProviderSettings: (String?) -> Unit,
     onModelChange: (ModelOption) -> Unit,
     reasoning: ReasoningControl?,
@@ -649,6 +664,7 @@ private fun ModelChip(
                         model = m,
                         active = m.id == model.id,
                         providerStatuses = providerStatuses,
+                        remoteModelSelection = remoteModelSelection,
                         onShowDetails = { selectedDetails = it },
                         onSelected = {
                             open = false
@@ -686,20 +702,23 @@ private fun ModelChip(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f),
                     )
-                    Dot(color = providerColor, size = 6.dp)
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        text = providerLabel,
-                        color = providerColor,
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    if (!remoteModelSelection) {
+                        Dot(color = providerColor, size = 6.dp)
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = providerLabel,
+                            color = providerColor,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 }
                 group.models.forEach { m ->
                     ModelPickerRow(
                         model = m,
                         active = m.id == model.id,
                         providerStatuses = providerStatuses,
+                        remoteModelSelection = remoteModelSelection,
                         onShowDetails = { selectedDetails = it },
                         onSelected = {
                             open = false
@@ -744,13 +763,14 @@ private fun ModelPickerRow(
     model: ModelOption,
     active: Boolean,
     providerStatuses: List<ModelProviderStatus>,
+    remoteModelSelection: Boolean,
     onShowDetails: (CatalogModelDetails) -> Unit,
     onSelected: () -> Unit,
     onOpenProviderSettings: (String?) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val providerStatus = EngineModelCatalog.providerStatus(model.providerId, providerStatuses)
-    val canSelect = providerStatus?.canSelect == true
+    val canSelect = modelPickerCanSelect(remoteModelSelection, providerStatus)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -873,3 +893,7 @@ private fun Dot(color: Color, size: androidx.compose.ui.unit.Dp) {
             .background(color),
     )
 }
+
+/** Remote model commands are validated by the desktop that supplied the catalog. */
+internal fun modelPickerCanSelect(remote: Boolean, provider: ModelProviderStatus?): Boolean =
+    remote || provider?.canSelect == true

@@ -46,6 +46,23 @@ const DEFAULT_MAX_CACHED_RUNTIMES = 6;
 
 const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
 
+/** Runtimes that exist only because a remote viewer opened them; more than this is refused. */
+export const MAX_REMOTE_OPENED_RUNTIMES = 3;
+
+/** Remote viewers hold this many runtimes open already (`capacity` on the wire). */
+export class RemoteCapacityError extends Error {
+  constructor() {
+    super('too many sessions are open for remote viewers');
+    this.name = 'RemoteCapacityError';
+  }
+}
+
+/** A runtime kept open for a remote viewer. Releasing it lets the cache trim the runtime again. */
+export interface RemoteLease {
+  readonly runtime: SessionRuntime;
+  release(): void;
+}
+
 
 
 /**
@@ -74,6 +91,9 @@ export class SessionRuntimeManager {
   private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string }>();
   private readonly pendingEvictions = new Set<Promise<void>>();
   private readonly maxCachedRuntimes: number;
+  private readonly runtimeCreatedListeners = new Set<(runtime: SessionRuntime) => void>();
+  /** Sessions whose runtime was opened for a remote viewer and is still leased by one. */
+  private readonly remoteOpened = new Set<string>();
   private activeSessionId: string | null = null;
   private accessSequence = 0;
   private cacheTrimScheduled = false;
@@ -119,6 +139,22 @@ export class SessionRuntimeManager {
     return this.runtimes.get(sessionId);
   }
 
+  /**
+   * Be told about every runtime, now and whenever one is created (before it is
+   * started). Remote Control uses this to watch sessions it did not open.
+   */
+  onRuntimeCreated(listener: (runtime: SessionRuntime) => void): () => void {
+    this.runtimeCreatedListeners.add(listener);
+    for (const runtime of [...this.runtimes.values()]) this.announceRuntime(listener, runtime);
+    return () => { this.runtimeCreatedListeners.delete(listener); };
+  }
+
+  private announceRuntime(listener: (runtime: SessionRuntime) => void, runtime: SessionRuntime): void {
+    try { listener(runtime); } catch (error) {
+      this.opts.diagnostics?.add('warn', 'host', `runtime listener failed: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
   setSessionDirectoryGrants(sessionId: string, directories: readonly string[]): void {
     this.sessionDirectoryGrants.set(sessionId, [...directories]);
   }
@@ -150,6 +186,7 @@ export class SessionRuntimeManager {
       || status === 'restarting'
       || status === 'connecting'
       || this.openingSessions.has(runtime.sessionId)
+      || this.restartingSessions.has(runtime.sessionId)
       || this.backgroundSessionLeases.has(runtime.sessionId);
   }
 
@@ -228,6 +265,7 @@ export class SessionRuntimeManager {
     const runtime = new SessionRuntime({ ...runtimeOptions, remountControls });
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
+    for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
     for (const [webContents, origins] of this.targets) {
       if (webContents.isDestroyed()) {
         this.detachWindow(webContents);
@@ -264,13 +302,15 @@ export class SessionRuntimeManager {
     }
     const restarting = this.restartingSessions.get(ref.sessionId);
     if (restarting?.size) {
-      // Restart owns the complete handshake and transcript restoration. Opening
-      // the same UUID must not return early or issue a competing resume. A
-      // refused restart can leave a healthy engine, so reassess after settling.
+      // A restart owns both the handshake and transcript restoration. Reassess
+      // after it settles rather than opening a second resume on the same UUID.
+      // Retain the pending opener until it can activate its runtime: releasing
+      // the restart pin can otherwise evict this still-background session.
+      const release = this.retainBackgroundSession(ref);
       return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
         if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
         return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls);
-      });
+      }).finally(release);
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     if (existing?.connectionState.status === 'connected' && !existing.isStarting && !existing.needsSessionResume) {
@@ -342,6 +382,39 @@ export class SessionRuntimeManager {
       else this.backgroundSessionLeases.delete(ref.sessionId);
       this.trimCache();
     };
+  }
+
+  /**
+   * Open a session for a remote viewer, and keep it open until the lease is
+   * released. Nothing is shown on the desktop: the session is not activated.
+   * Resolves once the engine has resumed it. A session that has no runtime yet
+   * counts against {@link MAX_REMOTE_OPENED_RUNTIMES} for as long as the lease
+   * lasts (`RemoteCapacityError` beyond that); one that is already open is only
+   * kept. Take one lease per session, not one per viewer.
+   */
+  async openForRemote(ref: SessionRef, limit = MAX_REMOTE_OPENED_RUNTIMES): Promise<RemoteLease> {
+    assertSessionRef(ref);
+    this.assertProjectNotClosing(ref.projectPath);
+    const existing = this.runtimes.get(ref.sessionId);
+    if (existing && existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+    const counted = !existing && !this.openingSessions.has(ref.sessionId);
+    if (counted && this.remoteOpened.size >= limit) throw new RemoteCapacityError();
+    if (counted) this.remoteOpened.add(ref.sessionId);
+    const releaseBackground = this.retainBackgroundSession(ref);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      if (counted) this.remoteOpened.delete(ref.sessionId);
+      releaseBackground();
+    };
+    try {
+      const runtime = await this.openSession(ref, false, undefined, false);
+      return { runtime, release };
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   /** Keep an inactive runtime alive for the whole host operation, then enforce the cache bound. */
@@ -419,6 +492,7 @@ export class SessionRuntimeManager {
     const completion = operation.finally(() => {
       pending.delete(completion);
       if (pending.size === 0 && this.restartingSessions.get(ref.sessionId) === pending) this.restartingSessions.delete(ref.sessionId);
+      this.scheduleCacheTrim();
     });
     pending.add(completion);
     this.restartingSessions.set(ref.sessionId, pending);
@@ -540,6 +614,8 @@ export class SessionRuntimeManager {
     this.activeSessionId = null;
     this.openingSessions.clear();
     this.restartingSessions.clear();
+    this.remoteOpened.clear();
+    this.runtimeCreatedListeners.clear();
     this.draftSessions.clear();
     this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
@@ -615,9 +691,9 @@ export class SessionRuntimeManager {
     ipcMain.handle(CH_COMMAND, async (event: IpcMainInvokeEvent, sessionId: unknown, command: unknown) => {
       this.assertSender(event);
       const runtime = this.requireById(sessionId);
-      // The transport handshake precedes owned transcript/control recovery.
-      // Normal commands wait for that transaction; permission/cancel IPCs
-      // remain independent so recovery can finish its pending interactions.
+      // Connectivity precedes owned transcript/control recovery. Only ordinary
+      // commands wait here; approvals, questions and cancellation must remain
+      // available while the recovery transaction waits for those interactions.
       do {
         const opening = this.openingSessions.get(runtime.sessionId)?.promise;
         const restarting = this.restartingSessions.get(runtime.sessionId) ?? [];

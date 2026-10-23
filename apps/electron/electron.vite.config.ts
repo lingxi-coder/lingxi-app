@@ -26,6 +26,8 @@ export default defineConfig({
           // Inline visualization guests: a minimal bridge for the shell frame.
           visualization: resolve(__dirname, 'src/preload/visualization.ts'),
           localApp: resolve(__dirname, 'src/preload/localApp.ts'),
+          // The hidden WebRTC window of Remote Control: hands its page one MessagePort.
+          remoteRtc: resolve(__dirname, 'src/preload/remoteRtc.ts'),
         },
         output: {
           format: 'cjs',
@@ -38,7 +40,11 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/renderer/index.html') },
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          // Hidden page of Remote Control (WebRTC); never shown.
+          remoteRtc: resolve(__dirname, 'src/renderer/remote-rtc.html'),
+        },
       },
     },
     resolve: {

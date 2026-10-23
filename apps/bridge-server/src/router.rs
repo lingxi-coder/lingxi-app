@@ -230,7 +230,7 @@ impl SessionStoreContext {
             }
         }
         session::jsonl::writer::JsonlWriter::new(path, self.fs.clone())
-            .append_mobile_empty_session(session_id, &title)
+            .append_mobile_empty_session(session_id, &title, &self.current_cwd())
             .await
             .map_err(|error| format!("Cannot retain the scheduled task's chat: {error}"))
     }

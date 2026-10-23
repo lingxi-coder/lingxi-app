@@ -17,7 +17,14 @@
     "skipLibCheck": true,
     "noEmit": true,
     "types": ["vite/client", "node"],
-    "baseUrl": "."
+    "baseUrl": ".",
+    "paths": {
+      "@lingxi/bridge-client/remote": ["../../packages/bridge-client/src/remote.ts"],
+      "@lingxi/bridge-client/toolview": ["../../packages/bridge-client/src/toolview.ts"],
+      "@lingxi/bridge-client/protocol": ["../../packages/bridge-client/src/protocol.ts"],
+      "@lingxi/bridge-client": ["../../packages/bridge-client/src/protocol.ts"],
+      "@lingxi/electron/*": ["../electron/src/*"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
 }

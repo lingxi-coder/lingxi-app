@@ -6,30 +6,6 @@ import Network
 import UIKit
 import UserNotifications
 
-struct PushInstallationIdentity: Codable, Equatable {
-    let id: String
-    let secret: String
-    var revision: Int64 = 0
-    var mayBeBound = false
-
-    static func create() -> Self {
-        var generator = SystemRandomNumberGenerator()
-        let secret = (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max, using: &generator)) }.joined()
-        return Self(id: UUID().uuidString.lowercased(), secret: secret)
-    }
-}
-
-enum PushMessagePolicy {
-    static func isRemote(_ info: [AnyHashable: Any]) -> Bool {
-        info["gcm.message_id"] != nil || info["recipientUid"] != nil
-    }
-    static func accepts(_ info: [AnyHashable: Any], uid: String?, enabled: Bool, now: Date = Date()) -> Bool {
-        guard enabled, let uid, info["recipientUid"] as? String == uid,
-              let raw = info["expiresAt"] as? String, let expires = Double(raw), expires.isFinite else { return false }
-        return expires > now.timeIntervalSince1970 * 1000
-    }
-}
-
 /// Main actor ownership follows UIApplication, notification authorization, and
 /// Firebase account lifecycle. Network calls suspend; no blocking work/locks.
 @MainActor
@@ -42,6 +18,8 @@ final class PushRegistration: NSObject, MessagingDelegate {
     private let identityURL: URL
     private(set) var lastFailure: String?
     private var registeredFID: String?
+    /// The same installation identifier registered with the push service.
+    var remoteInstallationId: String? { identity?.id }
 
     private override init() {
         identityURL = URL.applicationSupportDirectory.appendingPathComponent("push-installation.json")
@@ -74,6 +52,7 @@ final class PushRegistration: NSObject, MessagingDelegate {
 
     func signedOut() {
         UIApplication.shared.unregisterForRemoteNotifications()
+        Messaging.messaging().apnsToken = nil
         Messaging.messaging().isAutoInitEnabled = false
         clearDeliveredNotifications()
         refresh()
@@ -84,12 +63,16 @@ final class PushRegistration: NSObject, MessagingDelegate {
         let uid = Auth.auth().currentUser?.uid
         if uid != nil {
             Messaging.messaging().isAutoInitEnabled = true
-            if !UIApplication.shared.isRegisteredForRemoteNotifications {
+            // APNs can deliver a token before UIApplication updates its flag.
+            // Re-registering from that callback cancels the binding upload forever.
+            if Self.needsAPNsRegistration(hasToken: Messaging.messaging().apnsToken != nil,
+                                           systemRegistered: UIApplication.shared.isRegisteredForRemoteNotifications) {
                 UIApplication.shared.registerForRemoteNotifications()
             }
         } else {
             Messaging.messaging().isAutoInitEnabled = false
             UIApplication.shared.unregisterForRemoteNotifications()
+            Messaging.messaging().apnsToken = nil
         }
         identity.revision += 1
         self.identity = identity
@@ -189,5 +172,9 @@ final class PushRegistration: NSObject, MessagingDelegate {
             registration.refresh()
         }
     }
+    static func needsAPNsRegistration(hasToken: Bool, systemRegistered: Bool) -> Bool {
+        !hasToken && !systemRegistered
+    }
+
     private enum SyncError: Error { case rejected, storage }
 }

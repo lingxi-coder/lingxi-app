@@ -102,6 +102,10 @@ pub struct BridgeArgs {
     pub session_prompt_directory: Vec<PathBuf>,
     /// `--model <id>`: the default model id (overrides the desktop default).
     pub model: Option<String>,
+    /// Host policy for permission prompts (1..=86400 seconds).
+    pub permission_timeout_secs: Option<u64>,
+    /// Host policy for questions: never, 60s, 5m, or 10m.
+    pub ask_user_question_timeout: Option<tool_ui::ask_user_question::AskUserQuestionTimeout>,
     /// Read one bounded credential line from stdin before assembling the engine.
     pub api_key_stdin: bool,
     /// Read a bounded JSON envelope containing the API key and provider keys.
@@ -248,6 +252,29 @@ impl BridgeArgs {
                         .ok_or_else(|| "--model requires a model id argument".to_string())?;
                     out.model = Some(v.as_ref().to_string());
                 }
+                "--permission-timeout-secs" => {
+                    let value = it
+                        .next()
+                        .ok_or("--permission-timeout-secs requires seconds")?;
+                    let seconds: u64 = value.as_ref().parse().map_err(|_| {
+                        "--permission-timeout-secs requires an integer from 1 to 86400"
+                    })?;
+                    if !(1..=86400).contains(&seconds) {
+                        return Err("--permission-timeout-secs must be from 1 to 86400".into());
+                    }
+                    out.permission_timeout_secs = Some(seconds);
+                }
+                "--ask-user-question-timeout" => {
+                    let value = it
+                        .next()
+                        .ok_or("--ask-user-question-timeout requires never, 60s, 5m, or 10m")?;
+                    out.ask_user_question_timeout = Some(
+                        tool_ui::ask_user_question::AskUserQuestionTimeout::from_settings_str(
+                            value.as_ref(),
+                        )
+                        .ok_or("--ask-user-question-timeout requires never, 60s, 5m, or 10m")?,
+                    );
+                }
                 "--api-key-stdin" => out.api_key_stdin = true,
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
@@ -342,6 +369,8 @@ pub fn usage() -> String {
              --cwd <DIR>      Working directory to root the engine at (default: current dir)\n    \
              --session-id <UUID>\n                              Stable session UUID (generated when omitted)\n    \
              --list-sessions-json\n                              List persisted sessions for --cwd and exit\n    \
+             --permission-timeout-secs <SECONDS>  Permission wait (1..86400)\n    \
+             --ask-user-question-timeout <never|60s|5m|10m>\n    \
              --model <ID>     Default model id (default: the desktop build default)\n    \
              --api-key-stdin  Read the API key from one line on stdin\n    \
              --credential-stdin\n    \
@@ -819,6 +848,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         let mut __desktop_config = DesktopConfig::default();
         __desktop_config.build_info = build_info;
         __desktop_config.diagnostics = None;
+        __desktop_config.permission_timeout = args
+            .permission_timeout_secs
+            .map(std::time::Duration::from_secs);
+        __desktop_config.ask_user_question_timeout_override = args.ask_user_question_timeout;
         __desktop_config.composition = None;
         __desktop_config.defer_session_start = false;
         // The desktop opens a session while its startup MCP servers connect;
@@ -2583,6 +2616,37 @@ mod tests {
     use lingxi_core::host::live_sessions::LiveSessionDir;
 
     #[test]
+    fn remote_timeout_flags_are_validated_and_reach_the_runtime() {
+        let args = BridgeArgs::parse([
+            "--permission-timeout-secs",
+            "1800",
+            "--ask-user-question-timeout",
+            "never",
+        ])
+        .unwrap();
+        let config = resolve_desktop_config(&args);
+        assert_eq!(
+            config.resolved_permission_timeout().unwrap(),
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(
+            config.ask_user_question_timeout_override,
+            Some(tool_ui::ask_user_question::AskUserQuestionTimeout::Never)
+        );
+        assert!(resolve_desktop_config(&BridgeArgs::default())
+            .permission_timeout
+            .is_none());
+        for value in ["0", "86401", "-1", "1.5", "18446744073709551616"] {
+            assert!(BridgeArgs::parse(["--permission-timeout-secs", value]).is_err());
+        }
+        for value in ["", "forever", "1800"] {
+            assert!(BridgeArgs::parse(["--ask-user-question-timeout", value]).is_err());
+        }
+        assert!(BridgeArgs::parse(["--permission-timeout-secs"]).is_err());
+        assert!(BridgeArgs::parse(["--ask-user-question-timeout"]).is_err());
+    }
+
+    #[test]
     fn parse_defaults_when_no_args() {
         let args = BridgeArgs::parse(Vec::<String>::new()).expect("empty parses");
         assert_eq!(args, BridgeArgs::default());
@@ -3531,7 +3595,12 @@ mod tests {
         let u = usage();
         assert!(u.contains("--api-key-stdin"));
         assert!(!u.contains("ANTHROPIC_API_KEY"));
-        assert!(!u.contains("sk-"), "usage must not embed a key literal");
+        // Match a key-shaped token, not the substring in --ask-user-question-timeout.
+        assert!(
+            !u.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+                .any(|token| token.starts_with("sk-")),
+            "usage must not embed a key literal"
+        );
     }
 
     #[test]

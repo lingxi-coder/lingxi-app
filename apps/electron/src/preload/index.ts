@@ -6,6 +6,20 @@ import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/appli
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectCreationPurpose, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
+import {
+  CH_REMOTE_AT_STARTUP_GET,
+  CH_REMOTE_AT_STARTUP_SET,
+  CH_REMOTE_DEVICE_REVOKE,
+  CH_REMOTE_DEVICES_LIST,
+  CH_REMOTE_ENABLED_SET,
+  CH_REMOTE_PROMPT_ECHO,
+  CH_REMOTE_SESSION_SET,
+  CH_REMOTE_SESSIONS_EVENT,
+  CH_REMOTE_SESSIONS_GET,
+  CH_REMOTE_STATUS_EVENT,
+  CH_REMOTE_STATUS_GET,
+  type RemoteControlApi,
+} from '../shared/remoteControl.js';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
 import type { GitApi } from '../shared/git.js';
@@ -213,6 +227,7 @@ export interface LingxiApi {
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
+  remoteControl: RemoteControlApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
@@ -368,6 +383,19 @@ const api: LingxiApi = {
     manage: (scopeId, request) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request }),
     openSession: (scopeId, sessionId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'open', scopeId, sessionId }),
   } satisfies ScheduledApi,
+  remoteControl: {
+    status: () => ipcRenderer.invoke(CH_REMOTE_STATUS_GET),
+    onStatus: callback => subscribe(CH_REMOTE_STATUS_EVENT, callback),
+    setEnabled: enabled => ipcRenderer.invoke(CH_REMOTE_ENABLED_SET, enabled),
+    atStartup: () => ipcRenderer.invoke(CH_REMOTE_AT_STARTUP_GET),
+    setAtStartup: enabled => ipcRenderer.invoke(CH_REMOTE_AT_STARTUP_SET, enabled),
+    devices: () => ipcRenderer.invoke(CH_REMOTE_DEVICES_LIST),
+    revokeDevice: deviceId => ipcRenderer.invoke(CH_REMOTE_DEVICE_REVOKE, deviceId),
+    sessions: () => ipcRenderer.invoke(CH_REMOTE_SESSIONS_GET),
+    setSession: (sessionId, enabled) => ipcRenderer.invoke(CH_REMOTE_SESSION_SET, sessionId, enabled),
+    onSessions: callback => subscribe(CH_REMOTE_SESSIONS_EVENT, callback),
+    onPromptEcho: callback => subscribe(CH_REMOTE_PROMPT_ECHO, callback),
+  } satisfies RemoteControlApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,

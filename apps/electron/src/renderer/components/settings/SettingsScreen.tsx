@@ -21,6 +21,7 @@ import { Permissions } from './pages/Permissions';
 import { Plugins } from './pages/Plugins';
 import { ArchivedChats } from './pages/ArchivedChats';
 import { Projects } from './pages/Projects';
+import { RemoteControl } from './pages/RemoteControl';
 import { ProviderCredentials } from './pages/ProviderCredentials';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
@@ -179,6 +180,7 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   notifications: Notifications,
   voice: Voice,
   projects: Projects,
+  'remote-control': RemoteControl,
   'archived-chats': ArchivedChats,
   diagnostics: Diagnostics,
   about: About,

@@ -8,7 +8,7 @@ import { brokerAccountSessionStore } from './account-broker-storage.js';
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { join } from 'node:path';
@@ -23,6 +23,16 @@ import {
   SessionLaunchCache,
 } from './credential-broker.js';
 import { CodexTokenManager } from './codex-tokens.js';
+import { createRemoteControl } from './remoteControl/electronBindings.js';
+import { RemotePolicy, managedSettingsDirectory } from './remoteControl/policy.js';
+import { RemoteCommands } from './remoteControl/remoteCommands.js';
+import { nativeImageCodec } from './remoteControl/nativeImageCodec.js';
+import { PushRequester, RemotePush } from './remoteControl/pushRequests.js';
+import { RemoteControlUi } from './remoteControl/rendererIpc.js';
+import { SessionGateway } from './remoteControl/sessionGateway.js';
+import { remoteControlConfig } from './remoteControl/config.js';
+import { systemClock } from '@lingxi/bridge-client/remote';
+import type { RemoteControlService } from './remoteControl/RemoteControlService.js';
 import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
@@ -74,7 +84,26 @@ let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
 let quitting = false;
 let localApps: LocalAppHost | null = null;
+let remoteControl: RemoteControlService | null = null;
+let remotePolicy: RemotePolicy | null = null;
+let remoteGateway: SessionGateway | null = null;
+let remotePush: RemotePush | null = null;
+let remoteUi: RemoteControlUi | null = null;
+let remotePolicyTimer: NodeJS.Timeout | undefined;
+/** How often the administrator's `managed-settings.json` is read again. */
+const REMOTE_POLICY_RECHECK_MS = 30_000;
 const mainWindows = new Set<BrowserWindow>();
+// On macOS the app remains alive and the bridge stays available for reopen.
+// Elsewhere it quits with its last window, unless a background app or a
+// connected phone or browser still needs it.
+function quitIfNothingNeedsTheApp(): void {
+  if (process.platform === 'darwin' || quitting) return;
+  void (async () => {
+    const background = await localApps?.hasBackgroundApps();
+    const viewers = (remoteControl?.status().connections.length ?? 0) > 0;
+    if (!background && !viewers && BrowserWindow.getAllWindows().length === 0) app.quit();
+  })().catch(error => console.error('Unable to check background applications', error));
+}
 function getMainWindow(): BrowserWindow | undefined { return [...mainWindows].find(window => !window.isDestroyed()); }
 let deepLinkProjects: () => string[] = () => [];
 let resolveDeepLinkReady: () => void;
@@ -139,6 +168,17 @@ function rendererTarget(): { url: string; load: (window: BrowserWindow) => Promi
   if (devUrl) return { url: devUrl, load: (window) => window.loadURL(devUrl) };
   const file = join(moduleDirectory, '../renderer/index.html');
   return { url: pathToFileURL(file).toString(), load: (window) => window.loadFile(file) };
+}
+
+/** The hidden page of Remote Control's WebRTC window: the dev server's in development, the built file otherwise. */
+function remoteRtcPage(): (window: BrowserWindow) => Promise<void> {
+  const devUrl = developmentRendererUrl();
+  if (devUrl) {
+    const url = new URL('remote-rtc.html', devUrl).toString();
+    return (window) => window.loadURL(url);
+  }
+  const file = join(moduleDirectory, '../renderer/remote-rtc.html');
+  return (window) => window.loadFile(file);
 }
 
 function isHttpsUrl(raw: string): boolean {
@@ -307,7 +347,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onError: (message) => diagnostics.add('warn', 'host', message),
   });
   codexTokens.start();
-  powerMonitor.on('resume', () => codexTokens.check());
+  powerMonitor.on('resume', () => {
+    codexTokens.check();
+    remoteControl?.reconnect();
+  });
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
    * service and `HostNotifier` so both get the same click behaviour: restore
@@ -326,6 +369,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier = new HostNotifier({
     show: showNotification,
     isWindowFocused: () => windowFocused,
+    // Remote Control is built after the notifier; both are looked up when used.
+    remote: (kind, sessionId) => remotePush?.notify(kind, sessionId),
+    systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
   });
   notifier.setPreferences(settings.getPublic().notifications);
   bridge = new SessionRuntimeManager({
@@ -363,7 +409,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     codexTokens,
     invalidateLaunchConfigCache: () => launchCache.invalidate(),
-    onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
+    onFirstPromptSent: (ref) => {
+      settings.setActiveSession(ref);
+      // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
+      try { remotePolicy?.sessionCreated(ref); } catch (error) { diagnostics.add('warn', 'host', `remote control: ${sanitizeDiagnostic(error)}`); }
+    },
     confirmBypassPermissions: async () => {
       // Shown ONCE per install (persisted), mirroring the oracle's
       // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
@@ -444,6 +494,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         trusted: settings.isTrustedWorkspace(workspace),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
+        remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
+          && (remotePolicy?.allows() ?? true),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         ...(openaiOAuth ? { openaiOAuth } : {}),
@@ -468,9 +520,86 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
-  host.attachAccount(new AccountService(firebaseConfig, credentialBroker
+  const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
-    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
+    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
+  host.attachAccount(account);
+  // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
+  const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
+    diagnostics.add(level, 'host', `remote control: ${message}`);
+  };
+  const policy = new RemotePolicy({
+    settings,
+    managedDirectory: managedSettingsDirectory(process.env, process.platform),
+  });
+  remotePolicy = policy;
+  const runtimes = bridge;
+  const gateway = new SessionGateway({
+    runtimes,
+    policy,
+    commands: new RemoteCommands({
+      allowAlwaysAllow: () => policy.allowAlwaysAllow(),
+      echo: (echo) => remoteUi?.echo(echo),
+      codec: nativeImageCodec,
+      clock: systemClock,
+    }),
+    titleOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.title,
+    modelOf: (ref) => settings.getSessionModel(ref),
+    clock: systemClock,
+    diagnostics: remoteDiagnostics,
+  });
+  remoteGateway = gateway;
+  remoteControl = createRemoteControl({
+    account,
+    settings,
+    gateway,
+    policyAllows: () => policy.allows(),
+    credentialBroker,
+    userData,
+    preload: join(moduleDirectory, '../preload/remoteRtc.cjs'),
+    loadPage: remoteRtcPage(),
+    parentWindow: getMainWindow,
+    diagnostics: remoteDiagnostics,
+  });
+  const service = remoteControl;
+  remotePush = new RemotePush({
+    requester: new PushRequester({
+      baseUrl: remoteControlConfig(process.env, app.isPackaged).pushApiUrl,
+      hostId: () => service.status().host_id,
+      getIdToken: (forceRefresh) => account.getIdToken(forceRefresh),
+      fetch: (url, init) => net.fetch(url, init),
+      diagnostics: remoteDiagnostics,
+    }),
+    presence: gateway,
+    active: () => service.status().state === 'online' && policy.allows(),
+    clock: systemClock,
+  });
+  remoteUi = new RemoteControlUi({
+    service,
+    settings,
+    policy,
+    gateway,
+    runtimeRef: (sessionId) => {
+      const runtime = bridge?.get(sessionId);
+      return runtime ? { projectPath: runtime.projectPath, sessionId } : undefined;
+    },
+    signedIn: () => account.snapshot().user !== null,
+    onAccountChanged: (callback) => account.onChanged(() => callback()),
+    send: (channel, payload) => host?.sendToWindows(channel, payload),
+  });
+  host.attachRemoteControl(remoteUi);
+  // The last viewer leaving a windowless app is the other moment to quit.
+  let hadViewers = false;
+  service.onStatus((status) => {
+    const has = status.connections.length > 0;
+    if (hadViewers && !has && mainWindows.size === 0) quitIfNothingNeedsTheApp();
+    hadViewers = has;
+  });
+  // A change to the administrator's veto or to the shared sessions re-evaluates whether the service runs.
+  policy.onChange(() => service.refresh());
+  remotePolicyTimer = setInterval(() => { policy.recheck(); }, REMOTE_POLICY_RECHECK_MS);
+  remotePolicyTimer.unref();
+  void remoteControl.start();
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
@@ -557,13 +686,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   window.focus();
   });
 
-  app.on('window-all-closed', () => {
-  // On macOS the app remains alive and the bridge stays available for reopen.
-  if (process.platform !== 'darwin') void (async () => {
-    const background = await localApps?.hasBackgroundApps();
-    if (!background && BrowserWindow.getAllWindows().length === 0) app.quit();
-  })().catch(error => console.error('Unable to check background applications', error));
-  });
+  app.on('window-all-closed', quitIfNothingNeedsTheApp);
 
   app.on('before-quit', (event) => {
   if (quitting) return;
@@ -583,11 +706,21 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   nativeAudio = null;
   const currentBridge = bridge;
   bridge = null;
+  const currentRemote = remoteControl;
+  remoteControl = null;
+  clearInterval(remotePolicyTimer);
+  remotePolicyTimer = undefined;
+  remoteGateway?.dispose();
+  remoteGateway = null;
+  remotePush = null;
+  remoteUi = null;
+  remotePolicy = null;
   void Promise.all([
     currentLocalApps?.dispose() ?? Promise.resolve(),
     currentGit?.dispose() ?? Promise.resolve(),
     currentTerminals?.dispose() ?? Promise.resolve(),
     currentAudio?.dispose() ?? Promise.resolve(),
     currentBridge?.dispose() ?? Promise.resolve(),
+    currentRemote?.dispose() ?? Promise.resolve(),
   ]).finally(() => app.quit());
   });

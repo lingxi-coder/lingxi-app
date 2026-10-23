@@ -2,6 +2,14 @@ import XCTest
 @testable import LingxiCode
 
 final class PushRegistrationTests: XCTestCase {
+    @MainActor
+    func testReceivedAPNsTokenDoesNotRestartRegistrationWhileSystemFlagLags() {
+        XCTAssertTrue(PushRegistration.needsAPNsRegistration(hasToken: false, systemRegistered: false))
+        XCTAssertFalse(PushRegistration.needsAPNsRegistration(hasToken: true, systemRegistered: false))
+        XCTAssertFalse(PushRegistration.needsAPNsRegistration(hasToken: true, systemRegistered: true))
+        XCTAssertFalse(PushRegistration.needsAPNsRegistration(hasToken: false, systemRegistered: true))
+    }
+
     func testInstallationIdentityRoundTripAndIndependentSecrets() throws {
         var identity = PushInstallationIdentity.create()
         identity.revision = 42

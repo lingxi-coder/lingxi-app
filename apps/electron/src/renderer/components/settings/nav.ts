@@ -28,6 +28,7 @@ export const SETTINGS_NAV: NavPage[] = [
   { id: 'voice', label: '语音', group: '个人', icon: 'mic', needsEngine: false, layered: false, searchKeys: ['voice', '语音', 'tts', 'stt', 'rate'], implemented: true },
   { id: 'archived-chats', label: '已归档会话', group: '个人', icon: 'archive', needsEngine: false, layered: false, searchKeys: ['archived', 'chats', '归档', '会话', 'restore', '恢复'], implemented: true },
   { id: 'projects', label: '项目与信任', group: '个人', icon: 'folder', needsEngine: false, layered: false, searchKeys: ['project', '项目', 'trust', '信任', 'pinned'], implemented: true },
+  { id: 'remote-control', label: '远程控制', group: '个人', icon: 'share', needsEngine: false, layered: false, searchKeys: ['remote', 'remote-control', 'rc', '远程', '远程控制', '设备', 'device', '手机', 'phone', '配对', 'pairing'], implemented: true },
 
   // Account credentials are device-local; the request-format card edits settings.routing.
   { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: false, layered: true, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain', 'defaultProtocols', '默认格式', '请求格式'], implemented: true },

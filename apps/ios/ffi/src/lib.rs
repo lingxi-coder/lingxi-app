@@ -93,6 +93,10 @@ mod linux_conversion;
 mod linux_runtime;
 mod linux_types;
 #[cfg(feature = "uniffi")]
+mod remote;
+#[cfg(feature = "uniffi")]
+pub use remote::*;
+#[cfg(feature = "uniffi")]
 pub use callbacks::CameraFfiError;
 #[cfg(feature = "uniffi")]
 pub use callbacks::CapturedImageFfi;

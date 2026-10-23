@@ -4,6 +4,8 @@ import { ApiError } from './catalog.mjs';
 
 export const REGISTRATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const DEFAULT_MESSAGE_TTL_SECONDS = 60 * 60;
+export const SELF_PUSH_LIMIT = 30;
+export const SELF_PUSH_WINDOW_MS = 10 * 60 * 1000;
 const installationId = z.uuid();
 const secret = z.string().regex(/^[a-f0-9]{64}$/);
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -24,16 +26,38 @@ const notification = z.object({
   uid: shortText(128), title: shortText(120), body: shortText(500),
   ttlSeconds: z.number().int().min(1).max(86400).default(DEFAULT_MESSAGE_TTL_SECONDS),
 }).strict();
+// Remote Control "push to my own devices". host_id is a 22-character base64url id; session_id uses
+// the desktop's session-id pattern (apps/electron/src/main/sessionIdentity.ts), which keeps the
+// collapse key under APNs' 64-byte limit.
+const selfMessage = z.object({
+  kind: z.enum(['permission', 'question', 'idle', 'task']),
+  host_id: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
+  session_id: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+  exclude_installation_ids: z.array(installationId.transform((id) => id.toLowerCase())).max(16).default([]),
+}).strict();
+// Generic text only: a self push never carries prompt, tool or project text. The wording is the
+// chat_background_* family from resources/translations (the desktop's own notifications use the same
+// strings, and a question and an idle wait read the same there). Installations store their locale:
+// zh* gets Chinese, everything else English.
+const waiting = { zh: ['灵犀正在等待你', '后台对话需要你的输入才能继续'], en: ['Lingxi is waiting for you', 'A background conversation needs your input before it can continue.'] };
+const SELF_COPY = {
+  permission: { zh: ['灵犀需要你的许可', '灵犀需要你的批准才能继续。'], en: ['Lingxi needs your permission', 'Lingxi needs your approval before it can continue.'] },
+  question: waiting, idle: waiting,
+  task: { zh: ['灵犀已完成', '后台对话已完成，点按查看结果'], en: ['Lingxi finished', 'The background conversation is complete. Tap to view it.'] },
+};
+const selfCopy = (kind, locale) => SELF_COPY[kind][/^zh(?:[-_]|$)/i.test(locale ?? '') ? 'zh' : 'en'];
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const millis = (value) => value?.toMillis?.() ?? Number.NaN;
 
-// Both collections are private to the Admin SDK. The FID claim makes an FCM registration
+// All collections are private to the Admin SDK. The FID claim makes an FCM registration
 // unique across installations; the installation secret permits offline logout
 // retries without retaining a Firebase Auth credential after sign-out.
+// pushSelfLimits holds one small rate-limit document per user for the self-push route.
 export class PushStore {
   constructor(db, clock = Date.now) { this.db = db; this.clock = clock; }
   device(id) { return this.db.doc(`pushInstallations/${id}`); }
   claim(hash) { return this.db.doc(`pushRegistrationClaims/${hash}`); }
+  limit(uid) { return this.db.doc(`pushSelfLimits/${digest(uid)}`); }
 
   async initialize(id, input) {
     installationId.parse(id);
@@ -114,6 +138,18 @@ export class PushStore {
     });
   }
 
+  // At most SELF_PUSH_LIMIT self pushes per user in any SELF_PUSH_WINDOW_MS: a sliding window of
+  // send timestamps (at most SELF_PUSH_LIMIT numbers) in one document, updated transactionally so
+  // concurrent requests cannot oversubscribe it. A refused request is not recorded.
+  async takeSelfQuota(uid) {
+    return this.db.runTransaction(async (tx) => {
+      const ref = this.limit(uid), now = this.clock();
+      const recent = ((await tx.get(ref)).data()?.sentAt ?? []).filter((at) => at > now - SELF_PUSH_WINDOW_MS);
+      if (recent.length >= SELF_PUSH_LIMIT) throw new ApiError(429, 'RATE_LIMITED');
+      tx.set(ref, { sentAt: [...recent, now], expiresAt: new Date(now + SELF_PUSH_WINDOW_MS) });
+    });
+  }
+
   async prune() {
     let deleted = 0;
     // Bound each invocation. The query is repeated because deletes shift pages.
@@ -131,26 +167,40 @@ export class PushStore {
         });
       }
     }
+    // A closed rate-limit window is worthless. Losing one that was refreshed a moment ago only
+    // resets that user's quota, so these are plain batch deletes (and not counted in `deleted`).
+    for (let page = 0; page < 20; page++) {
+      const snapshot = await this.db.collection('pushSelfLimits').where('expiresAt', '<=', new Date(this.clock())).limit(100).get();
+      if (snapshot.empty) break;
+      const batch = this.db.batch();
+      for (const doc of snapshot.docs) batch.delete(doc.ref);
+      await batch.commit();
+    }
     return { deleted };
   }
 }
 
+// Optional input: `route` (FCM data), `collapseKey` (Android collapseKey, APNs apns-collapse-id)
+// and `data` (extra string entries; the base keys always win). Without them the output is unchanged.
 export function buildPushMessage(device, input, now = Date.now()) {
   const expires = Math.min(now + input.ttlSeconds * 1000, millis(device.expiresAt));
   return {
     fid: device.fcmInstallationId,
-    data: { recipientUid: device.uid, expiresAt: String(expires), title: input.title, body: input.body },
+    data: { ...input.data, recipientUid: device.uid, expiresAt: String(expires), title: input.title, body: input.body,
+      ...(input.route ? { route: input.route } : {}) },
     // Data-only on Android so the app can reject late messages for an old user.
-    android: { priority: 'high', ttl: Math.max(0, expires - now), restrictedPackageName: device.appId },
+    android: { priority: 'high', ttl: Math.max(0, expires - now), restrictedPackageName: device.appId,
+      ...(input.collapseKey ? { collapseKey: input.collapseKey } : {}) },
     apns: {
-      headers: { 'apns-expiration': String(Math.floor(expires / 1000)), 'apns-push-type': 'alert', 'apns-priority': '10', 'apns-topic': device.appId },
+      headers: { 'apns-expiration': String(Math.floor(expires / 1000)), 'apns-push-type': 'alert', 'apns-priority': '10', 'apns-topic': device.appId,
+        ...(input.collapseKey ? { 'apns-collapse-id': input.collapseKey } : {}) },
       payload: { aps: { alert: { title: input.title, body: input.body }, sound: 'default' } },
     },
   };
 }
 
-export async function sendUserPush(store, messaging, input, clock = Date.now) {
-  const value = notification.parse(input), devices = await store.active(value.uid);
+// One FCM message per device, built by `build(device)`.
+async function deliver(store, messaging, devices, build, clock) {
   let sent = 0, failed = 0, invalidated = 0;
   for (const device of devices) {
     // Re-read immediately before sending; registration/logout may have changed
@@ -158,7 +208,7 @@ export async function sendUserPush(store, messaging, input, clock = Date.now) {
     const current = (await store.device(device.id).get()).data();
     if (current?.uid !== device.uid || current?.revision !== device.revision || millis(current.expiresAt) <= clock()) continue;
     try {
-      await messaging.send(buildPushMessage(device, value, clock())); sent++;
+      await messaging.send(build(device)); sent++;
     } catch (error) {
       failed++;
       if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error.code)) {
@@ -169,6 +219,27 @@ export async function sendUserPush(store, messaging, input, clock = Date.now) {
     }
   }
   return { sent, failed, invalidated };
+}
+
+export async function sendUserPush(store, messaging, input, clock = Date.now) {
+  const value = notification.parse(input), devices = await store.active(value.uid);
+  return deliver(store, messaging, devices, (device) => buildPushMessage(device, value, clock()), clock);
+}
+
+// POST /v1/push/self/messages: a generic, localized notification to the caller's own devices except
+// the excluded installations (the ones already showing that session). Only a request that has at
+// least one device to send to uses up quota. `skipped` counts devices not sent to (excluded, or
+// changed between lookup and send); `failed` counts provider errors.
+export async function sendSelfPush(store, messaging, uid, input, clock = Date.now) {
+  const { kind, host_id, session_id, exclude_installation_ids } = selfMessage.parse(input), excluded = new Set(exclude_installation_ids);
+  const active = await store.active(uid), devices = active.filter((device) => !excluded.has(device.id));
+  if (devices.length) await store.takeSelfQuota(uid);
+  const { sent, failed } = await deliver(store, messaging, devices, (device) => {
+    const [title, body] = selfCopy(kind, device.locale);
+    return buildPushMessage(device, { title, body, ttlSeconds: DEFAULT_MESSAGE_TTL_SECONDS, route: `remote/${host_id}/${session_id}`,
+      collapseKey: `rc:${session_id}:${kind}`, data: { kind, host_id, session_id } }, clock());
+  }, clock);
+  return { sent, skipped: active.length - sent - failed, failed };
 }
 
 export function createPushHandler({ store, messaging, verifyToken, origins = [] }) {
@@ -189,7 +260,8 @@ export function createPushHandler({ store, messaging, verifyToken, origins = [] 
       const match = /^\/v1\/push\/installations\/([a-f0-9-]{36})(\/initialize)?$/.exec(path);
       const initializing = match?.[2] === '/initialize' && request.method === 'POST';
       const admin = path === '/v1/admin/push/messages' && request.method === 'POST';
-      if (!(match && !match[2] && ['PUT', 'DELETE'].includes(request.method)) && !initializing && !admin) throw new ApiError(404, 'NOT_FOUND');
+      const self = path === '/v1/push/self/messages' && request.method === 'POST';
+      if (!(match && !match[2] && ['PUT', 'DELETE'].includes(request.method)) && !initializing && !admin && !self) throw new ApiError(404, 'NOT_FOUND');
       let user;
       if (request.method !== 'DELETE') {
         const bearer = /^Bearer (\S+)$/.exec(request.headers.get('Authorization') || '');
@@ -203,6 +275,7 @@ export function createPushHandler({ store, messaging, verifyToken, origins = [] 
       let body;
       try { body = JSON.parse(raw); } catch { throw new ApiError(400, 'INVALID_JSON'); }
       if (admin) return reply(await sendUserPush(store, messaging, body));
+      if (self) return reply(await sendSelfPush(store, messaging, user.uid, body));
       if (initializing) return reply(await store.initialize(match[1], body));
       return reply(await store.mutate(match[1], body, user?.uid));
     } catch (error) {

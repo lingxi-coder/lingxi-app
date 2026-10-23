@@ -467,7 +467,7 @@ test('workspace lease refuses foreground work, pending interactions, cron, side 
     { enter: () => { internal.activeTurn = true; }, leave: () => { internal.activeTurn = false; } },
     { enter: () => internal.gitActivity.accept({ type: 'coordinator_status', active_workers: 1 }), leave: () => internal.gitActivity.reset() },
     { enter: () => internal.pendingPermissionIds.set(1, {}), leave: () => internal.pendingPermissionIds.clear() },
-    { enter: () => internal.pendingComputerAccessIds.add(1), leave: () => internal.pendingComputerAccessIds.clear() },
+    { enter: () => internal.pendingComputerAccessIds.set(1, {}), leave: () => internal.pendingComputerAccessIds.clear() },
     { enter: () => internal.pendingAskUserQuestionIds.add(1), leave: () => internal.pendingAskUserQuestionIds.clear() },
     { enter: () => internal.pendingPromptHydrations.set(Symbol.for('test'), 1), leave: () => internal.pendingPromptHydrations.clear() },
     { enter: () => internal.pendingCron.set('test', {}), leave: () => internal.pendingCron.clear() },

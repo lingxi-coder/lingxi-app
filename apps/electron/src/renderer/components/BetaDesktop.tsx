@@ -78,6 +78,16 @@ import {
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { ALL_DESKTOP_COMMANDS } from '../bridge/desktopCommands';
 import {
+  isSessionRemote,
+  refreshRemoteControl,
+  remoteAvailability,
+  remoteControlApi,
+  remoteIndicator,
+  remoteMenuLabel,
+  toggleRemoteForSession,
+  useRemoteControl,
+} from '../bridge/remoteControl';
+import {
   desktopCommandIsShadowed,
   resolveDesktopCommand,
   type DesktopCommandContext,
@@ -226,6 +236,10 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   sortableIndex?: number;
 }) {
   const t = useT();
+  const remote = useRemoteControl();
+  const remoteApi = remoteControlApi();
+  const remoteOn = isSessionRemote(remote.sessions, session.uuid);
+  const remoteAvail = remoteAvailability(remote.status);
   const [actionsPosition, setActionsPosition] = useState<{ left: number; top: number } | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -396,10 +410,20 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
       )}
       {actionsPosition && createPortal(
         <div ref={actionsMenuRef} className="session-actions-menu" role="menu" aria-label={`Actions for ${session.title || 'Untitled session'}`}
-          style={{ left: Math.max(12, Math.min(actionsPosition.left, window.innerWidth - 220)), top: Math.max(12, Math.min(actionsPosition.top, window.innerHeight - 150)) }}>
+          style={{ left: Math.max(12, Math.min(actionsPosition.left, window.innerWidth - 220)), top: Math.max(12, Math.min(actionsPosition.top, window.innerHeight - 190)) }}>
           <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onRename(); }}><Icon name="pencil" size={16} /> Rename</button>
           <button type="button" role="menuitem" onClick={() => { closeActions(); onPin(); }}><Icon name="pin" size={16} /> {pinned ? 'Unpin' : 'Pin'}</button>
           <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onArchive(); }}><Icon name="archive" size={16} /> Archive</button>
+          {remoteApi && (
+            <button type="button" role="menuitem" data-remote-control-toggle={remoteOn ? 'on' : 'off'}
+              disabled={opening || (!remoteOn && !remoteAvail.available)}
+              onClick={() => {
+                closeActions();
+                void remoteApi.setSession(session.uuid, !remoteOn).catch(() => undefined).finally(() => void refreshRemoteControl());
+              }}>
+              <Icon name="share" size={16} /> {remoteMenuLabel(remoteOn, remoteAvail)}
+            </button>
+          )}
         </div>,
         document.body,
       )}
@@ -1370,6 +1394,8 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
   const projectPath = bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path;
+  const remoteState = useRemoteControl();
+  const remote = remoteIndicator(remoteState.sessions, bridge.activeSession?.sessionId);
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -1388,6 +1414,13 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
           <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? 'Add a project to begin'}</div>
         </div>
       </div>
+      {remote && (
+        <span className="no-drag desktop-topbar-remote" role="status" data-remote-viewers={remote.viewers}
+          aria-label={remote.viewers > 0 ? `远程控制已开启，${remote.viewers} 个设备正在查看` : '远程控制已开启'}
+          style={{ flexShrink: 0, padding: '2px 9px', borderRadius: 99, fontSize: 12, fontWeight: 500, color: t.ok, background: t.surfaceHover, whiteSpace: 'nowrap' }}>
+          {remote.text}
+        </span>
+      )}
       <button
         className="no-drag desktop-topbar-action"
         type="button"
@@ -1893,6 +1926,11 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       await bridge.refreshTasks();
     },
     showHelp: () => bridge.emitCommandOutput(renderDesktopSlashHelp(bridge.desktop.slashCommands), false, activeSessionId ?? undefined),
+    toggleRemoteControl: async (wanted) => {
+      const result = await toggleRemoteForSession(remoteControlApi(), activeSessionId, wanted);
+      void refreshRemoteControl();
+      return result;
+    },
     emit: (output, isError) => bridge.emitCommandOutput(output, isError === true, activeSessionId ?? undefined),
   }), [activeSessionId, bridge, onOpenSettings, onOpenSettingsPage, onSetTheme]);
 

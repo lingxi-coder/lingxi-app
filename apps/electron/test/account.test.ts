@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
-import { OAuthCredential } from 'firebase/auth';
+import { GoogleAuthProvider, OAuthCredential } from 'firebase/auth';
 import { AccountService, type AccountSessionStore } from '../src/main/account.ts';
 import { browserSignIn, parseBrowserCredential } from '../src/main/account-browser.ts';
 import { parseAccountCommand } from '../src/shared/account.ts';
@@ -45,6 +45,19 @@ test('restored sessions refresh once for concurrent requests and persist rotated
   assert.deepEqual(await Promise.all([service.getIdToken(), service.getIdToken()]), ['new-id', 'new-id']);
   assert.equal(requests, 1); assert.equal(JSON.parse(saved.value!).refreshToken, 'new-refresh');
 });
+test('forceRefresh skips the cached ID token, and concurrent forced calls share one request', async () => {
+  const saved = store(session()); let requests = 0;
+  const service = new AccountService(config, saved, async () => {}, mockFetch(async () => {
+    requests++;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    return Response.json({ id_token: `id-${requests}`, refresh_token: `refresh-${requests}`, user_id: 'u1', expires_in: '3600' });
+  }));
+  assert.equal(await service.getIdToken(), 'id-1');
+  assert.equal(await service.getIdToken(), 'id-1'); assert.equal(requests, 1);
+  assert.deepEqual(await Promise.all([service.getIdToken(true), service.getIdToken(true)]), ['id-2', 'id-2']);
+  assert.equal(requests, 2);
+  assert.equal(await service.getIdToken(), 'id-2');
+});
 test('revoked sessions clear local state; network failures retain recoverable sessions', async () => {
   for (const code of ['INVALID_REFRESH_TOKEN', 'NETWORK_ERROR']) {
     const saved = store(session());
@@ -75,6 +88,39 @@ test('credentials from another Firebase project are not restored', async () => {
 test('OAuth credential validation rejects wrong provider and missing tokens', () => {
   assert.throws(() => parseBrowserCredential({ providerId: 'apple.com', idToken: 'secret' }, 'google.com'));
   assert.throws(() => parseBrowserCredential({ providerId: 'google.com' }, 'google.com'));
+  assert.throws(() => parseBrowserCredential({ providerId: 'google.com', idToken: null, accessToken: null, pendingToken: null }, 'google.com'));
+  assert.throws(() => parseBrowserCredential({ providerId: 'google.com', idToken: 'secret', pendingToken: 42 }, 'google.com'));
+});
+test('Google SDK credentials with null optional fields complete desktop sign-in', { timeout: 10_000 }, async t => {
+  const credential = GoogleAuthProvider.credential('google-id', 'google-access').toJSON();
+  assert.equal(credential.pendingToken, null);
+  assert.deepEqual(parseBrowserCredential(credential, 'google.com'), {
+    providerId: 'google.com', idToken: 'google-id', accessToken: 'google-access',
+  });
+  let opened!: (url: string) => void;
+  const started = new Promise<string>(resolve => { opened = resolve; });
+  const saved = store();
+  const service = new AccountService(config, saved, async url => { opened(url); }, mockFetch((url, body) => {
+    assert.ok(url.includes('signInWithIdp'));
+    assert.equal(body.pendingToken, undefined);
+    assert.deepEqual(Object.fromEntries(new URLSearchParams(body.postBody)), {
+      providerId: 'google.com', id_token: 'google-id', access_token: 'google-access',
+    });
+    return Response.json(authResponse);
+  }));
+  t.after(() => service.dispose());
+  const pending = service.execute({ type: 'oauth', provider: 'google.com' });
+  const url = await started;
+  const response = await fetch(`${url}/complete`, {
+    method: 'POST', headers: { Origin: new URL(url).origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify(credential),
+  });
+  assert.equal(response.status, 200);
+  const state = await pending;
+  assert.equal(state.user?.uid, 'u1');
+  assert.equal(state.busy, false);
+  assert.equal(state.error, null);
+  assert.equal(JSON.parse(saved.value!).refreshToken, 'refresh-secret');
 });
 test('browser callback rejects cross-origin requests and consumes only the expected credential', async () => {
   let opened!: (url: string) => void;
@@ -169,7 +215,7 @@ test('provider popup cancellation settles the service and closes the origin-chec
   const button = { disabled: false, onclick: async () => {} };
   const status = { textContent: '' };
   // Execute the actual served handler with only the provider and DOM mocked.
-  vm.runInNewContext(script.replace(/^import .*;$/gm, ''), {
+  vm.runInNewContext(script.replace(/^const \{.*\} = await import\('\/firebase-(?:app|auth)\.js'\);$/gm, ''), {
     initializeApp: () => ({}), initializeAuth: () => ({}), inMemoryPersistence: {}, browserPopupRedirectResolver: {},
     GoogleAuthProvider: class { addScope() {} },
     document: { getElementById: (id: string) => id === 'login' ? button : status },

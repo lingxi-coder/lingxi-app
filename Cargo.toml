@@ -5,6 +5,7 @@ members = [
     "tools/ios-use",
     "tools/native-bindgen",
     "packages/config-requirements",
+    "packages/remote-control-client",
     "apps/ios/ffi",
     "apps/android/ffi",
     "apps/bridge-server",
@@ -33,6 +34,8 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi/lingxi-code"
 
 [workspace.dependencies]
+tool-ui = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "f5c0d566eff100b9554e12f2ceb98d355f3a774b" }
+lingxi-webrtc-core = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "f5c0d566eff100b9554e12f2ceb98d355f3a774b" }
 lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "ff71b2ec1139bc67cc8719d78b1735aca967bbe8" }
 http-client = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "f5c0d566eff100b9554e12f2ceb98d355f3a774b" }
 # Mobile Linux and desktop PTY use the same immutable SDK source.
@@ -282,3 +285,8 @@ split-debuginfo = "unpacked"
 
 [profile.release]
 lto = "thin"
+
+# The data-only WebRTC stack uses the same upstream patches as Harness.
+[patch.crates-io]
+webrtc = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "f5c0d566eff100b9554e12f2ceb98d355f3a774b" }
+nix = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "f5c0d566eff100b9554e12f2ceb98d355f3a774b" }

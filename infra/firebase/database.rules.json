@@ -1,1 +1,97 @@
-{ "rules": { ".read": false, ".write": false } }
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "remote-control": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren()",
+        "hosts": {
+          ".validate": "newData.hasChildren()",
+          "$host": {
+            ".validate": "$host.matches(/^[A-Za-z0-9_-]{22}$/) && newData.hasChildren(['name', 'host_key', 'last_seen'])",
+            "v": { ".validate": "newData.val() === 1" },
+            "name": { ".validate": "newData.isString() && newData.val().length <= 128" },
+            "platform": { ".validate": "newData.isString() && newData.val().length <= 32" },
+            "app_version": { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "client_protocol_version": { ".validate": "newData.isNumber()" },
+            "host_key": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{43}$/)" },
+            "online": { ".validate": "newData.isBoolean()" },
+            "last_seen": { ".validate": "newData.isNumber()" },
+            "started_at": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
+          }
+        },
+        "to_host": {
+          ".validate": "newData.hasChildren()",
+          "$host": {
+            ".validate": "$host.matches(/^[A-Za-z0-9_-]{22}$/) && newData.hasChildren()",
+            "$conn": {
+              ".validate": "$conn.matches(/^[A-Za-z0-9_-]{22}$/) && newData.hasChildren()",
+              "offer": {
+                ".validate": "newData.hasChildren(['v', 'transport', 'device', 'eph', 'nonce', 'created_at', 'sig']) && (newData.child('transport').val() !== 'webrtc' || newData.child('sdp').exists())",
+                "v": { ".validate": "newData.val() === 1" },
+                "transport": { ".validate": "newData.val() === 'webrtc' || newData.val() === 'tunnel'" },
+                "sdp": { ".validate": "newData.isString() && newData.val().length <= 16384" },
+                "device": {
+                  ".validate": "newData.hasChildren(['id', 'key', 'name', 'platform'])",
+                  "id": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{22}$/)" },
+                  "key": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{43}$/)" },
+                  "name": { ".validate": "newData.isString() && newData.val().length <= 128" },
+                  "platform": { ".validate": "newData.val() === 'web' || newData.val() === 'android' || newData.val() === 'ios'" },
+                  "app_version": { ".validate": "newData.isString() && newData.val().length <= 64" },
+                  "$other": { ".validate": false }
+                },
+                "eph": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{43}$/)" },
+                "nonce": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{22}$/)" },
+                "created_at": { ".validate": "newData.isNumber() && newData.val() <= now" },
+                "sig": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{86}$/)" },
+                "$other": { ".validate": false }
+              },
+              "up": {
+                ".validate": "newData.hasChildren()",
+                "$seq": { ".validate": "$seq.matches(/^f[0-9]{1,10}$/) && newData.isString() && newData.val().length <= 65536" }
+              },
+              "$other": { ".validate": false }
+            }
+          }
+        },
+        "to_viewer": {
+          ".validate": "newData.hasChildren()",
+          "$host": {
+            ".validate": "$host.matches(/^[A-Za-z0-9_-]{22}$/) && newData.hasChildren()",
+            "$conn": {
+              ".validate": "$conn.matches(/^[A-Za-z0-9_-]{22}$/) && newData.hasChildren()",
+              "answer": {
+                ".validate": "newData.hasChildren(['v', 'status', 'host', 'nonce', 'created_at', 'sig'])",
+                "v": { ".validate": "newData.val() === 1" },
+                "status": { ".validate": "newData.val() === 'accepted' || newData.val() === 'rejected'" },
+                "reason": { ".validate": "newData.isString() && newData.val().length <= 32" },
+                "transport": { ".validate": "newData.val() === 'webrtc' || newData.val() === 'tunnel'" },
+                "sdp": { ".validate": "newData.isString() && newData.val().length <= 16384" },
+                "host": {
+                  ".validate": "newData.hasChildren(['id', 'key'])",
+                  "id": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{22}$/)" },
+                  "key": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{43}$/)" },
+                  "$other": { ".validate": false }
+                },
+                "eph": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{43}$/)" },
+                "nonce": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{22}$/)" },
+                "created_at": { ".validate": "newData.isNumber() && newData.val() <= now" },
+                "sig": { ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{86}$/)" },
+                "$other": { ".validate": false }
+              },
+              "down": {
+                ".validate": "newData.hasChildren()",
+                "$seq": { ".validate": "$seq.matches(/^f[0-9]{1,10}$/) && newData.isString() && newData.val().length <= 65536" }
+              },
+              "$other": { ".validate": false }
+            }
+          }
+        },
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}

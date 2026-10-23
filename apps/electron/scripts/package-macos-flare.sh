@@ -35,6 +35,11 @@ unless explicit paths are supplied through:
   LINGXI_MAC_BROKER_PROVISIONING_PROFILE
   LINGXI_MAC_AUDIO_PROVISIONING_PROFILE
 
+For Electron-only changes, LINGXI_BRIDGE_SERVER_BIN may point to an existing
+portable release bridge-server built from the same Rust sources. This skips
+Cargo rebuilding; packaging still verifies its architecture and portability,
+signs the complete app, and runs static and runtime verification.
+
 Options:
   --channel CHANNEL  Credential namespace to package (default: development)
   --check            Validate signing assets without building
@@ -127,6 +132,11 @@ fi
 
 if [[ "$reuse_existing" == true && -z "$output_root" ]]; then
   fail '--reuse-existing requires --output-root'
+fi
+
+if [[ -n "${LINGXI_BRIDGE_SERVER_BIN:-}" ]]; then
+  [[ "$LINGXI_BRIDGE_SERVER_BIN" == /* ]] || fail 'LINGXI_BRIDGE_SERVER_BIN must be an absolute path'
+  [[ -f "$LINGXI_BRIDGE_SERVER_BIN" && -x "$LINGXI_BRIDGE_SERVER_BIN" ]] || fail 'LINGXI_BRIDGE_SERVER_BIN must be an existing executable'
 fi
 
 [[ "$(uname -s)" == "Darwin" ]] || fail 'macOS is required'

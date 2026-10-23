@@ -53,8 +53,11 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
     ) async {
         let userInfo = response.notification.request.content.userInfo
         if PushMessagePolicy.isRemote(userInfo) {
-            // Remote pushes open the app only; local conversation/cron payloads
-            // keep their existing routing and cannot be injected by an FCM send.
+            let action = await MainActor.run {
+                PushMessagePolicy.remoteControlAction(userInfo, uid: Auth.auth().currentUser?.uid,
+                    enabled: NotificationPreferencesStore.load().enabled)
+            }
+            if let action { await LingxiAppActionStore.shared.enqueue(action) }
             return
         }
         if let action = conversationAction(from: userInfo) {

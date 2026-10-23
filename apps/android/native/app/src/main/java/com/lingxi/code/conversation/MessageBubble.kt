@@ -541,6 +541,10 @@ private fun UserMessageActions(message: Message) {
             Text(clock, color = t.text3, fontSize = 11.sp,
                 modifier = Modifier.testTag("conversation.message.user.time"))
         }
+        message.originLabel?.let { origin ->
+            Text(origin, color = t.text3, fontSize = 11.sp,
+                modifier = Modifier.testTag("conversation.message.user.origin"))
+        }
         IconButton(
             onClick = {
                 clipboard.setText(AnnotatedString(message.text))

@@ -21,7 +21,7 @@
 | 版本化模型目录四端刷新 | 四端实现与启动缓存验收完成；本页最新记录补齐 Android 实体手机和 Flare 签名 iPhone 的首次获取、重启及配置保留验证 | 保留发行渠道、逐模型推理及其他平台验收边界，不把目录刷新通过扩大为全部运行时通过 |
 | iOS 旧会话恢复与 Side Chat | 2026-10-22 已重新构建最新 main `406879ed2`、Harness `5a2de5b1` 的签名包并通过旧会话链接／普通重启、硬件键盘、独立草稿、隐藏重开、模型隔离及结束生命周期 | 本批当前 main 签名真机验收完成；后续源码、屏幕键盘触控与发行渠道不继承本结果 |
 | 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
-| 移动 Crashlytics | Android JVM 测试云端入库已有记录；iOS 真机上报及 NDK 云端符号化未完成 | 准备匹配产物和隔离测试；云端上传遵守既有授权范围，不对正在使用的会话故意触发崩溃 |
+| 移动 Crashlytics | 2026-10-22 iOS 真机未捕获 NSException 云端入库并解析到 Swift 源码行；Android NDK 测试库云端入库并解析到 C 源码行 | 本批接入链路通过；首次 Swift SIGTRAP 对照未观察到云端事件，单独保留未通过记录，不扩大为所有原生信号／Rust／第三方库覆盖 |
 | Desktop production 凭据稳定性 | 旧任务等待 production 通道保存凭据，未完成约定的 15 次刷新、3 次启动 | 先确认当前签名通道及凭据状态；不跨通道复制密钥，不记录明文凭据 |
 | 其他验收边界 | macOS 公证/跨机器 Gatekeeper、长期稳定性等没有因 main 合并自动完成 | 只在对应环境与实际操作完成后关闭 |
 
@@ -152,3 +152,12 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - **证据和产物**：`.buildcache/remaining-task-takeover-20261019/ios-main-406879ed2-20261022/acceptance-index.json` 汇总 source、native archive 哈希、签名清单、旧会话两阶段回执和 Side Chat 回执；同目录保存原始构建日志、安装日志、升级前备份及旧 `a5b3dfac5` App/dSYM/native pair。新 App 为 `.buildcache/remaining-task-takeover-20261019/catalog-ios-xcode/Build/Products/StoreDebug-iphoneos/LingxiCode.app`，匹配 dSYM 在其旁边，已安装并留在原会话。此次无新增源码修复、无兼容层；只提交验收报告。WebRTC、其他平台、真实云端推理及发行渠道继续按既有范围排除；其他 session 未提交源码保留。
 
 - 发布前并发整合 main 的 `fd23050c0`、`34fb5bd55`、`1a2950901`（仅 6 个 Electron 文件）。已逐项核对 iOS 源码、生成输入和所有依赖未变化；本批签名包覆盖最终 main 的 iOS 代码组合，无需为桌面改动重建手机包。其他 session 的 11 个未提交路径及 staged/unstaged 状态逐项保留。
+
+## 2026-10-22：移动 Crashlytics 真机上报与原生符号化
+
+- 基于 main `45d15a7e4`，SDK、Harness 和 mobile-linux 来源不变。iOS 仅新增 DEBUG 显式诊断入口；Android 仅扩展默认跳过的 instrumentation 和测试 APK 原生 fixture，不向主 APK 添加崩溃入口。没有打开 Debug 持续采集，没有旧协议兼容层。
+- **Android 真机通过**：Samsung SM-S9310 上有意的 NDK SIGSEGV 被 SDK 捕获，既有一次性发送测试通过；Firebase 中的测试 UUID 精确匹配。问题 `b944655aca5f522a545072b293497e69`、事件 `2278137104560685610` 的崩溃线程解析到 `CrashlyticsNdkVerificationLeaf` / `crashlytics_verification.c:6`，与匹配 ELF 的 GNU build ID 和本地 addr2line 一致。测试 APK 使用该设备既有 Debug 身份签名，未卸载主 App 或清除数据。
+- **iOS 真机通过**：Flare StoreDebug 2.4.1 / 8721 签名构建、dSYM 上传及保留数据安装通过。iPhone 11 / iOS 18.6.2 的未捕获 `CrashlyticsDeviceVerification` NSException 云端入库，问题 `925eb6051ce7dd7c5069d43d8d07482d`；完整事件名中的 SDK session `152959a7ac6c491e97551c2dd841af8e` 与发送前原始捕获目录一致。云端解析到 `CrashlyticsDeviceVerification.swift:51`，匹配 debug dylib dSYM `0E02F537-EB9C-3B90-B76E-97F121A3E638`。SDK 在等待 Debug 采集同意时延迟写自定义字段，本次采用精确 SDK session ID 关联，不把本地 UUID 误写为云端已有字段。
+- **保留失败与边界**：首次 Swift SIGTRAP 有本地捕获／一次性发送回执，但未观察到云端事件；没有把它改写为通过。后续仅增加一次不同异常类型的有界对照，未大规模重采。测试库符号化不代表每个生产 Rust／第三方堆栈均已验证，也未做新的 Release 发行验收。
+- **恢复与保护**：两端原 provider 配置逐字节一致。Android 主 App 已正常重新打开；iOS 已无诊断环境正常重启，原会话选择仍在、进程存活。签名、构建日志、原始 SDK 捕获文件、云端测试事件、匹配符号和数据备份保留在 `.buildcache/remaining-task-takeover-20261019/mobile-crashlytics-20261022/`。WebRTC 继续跳过，Chat、Computer Use 与其他 session 修改不纳入。
+- Desktop production 凭据稳定性仍在本轮后续执行；不会将 development 通道的结果代替 production 验收。

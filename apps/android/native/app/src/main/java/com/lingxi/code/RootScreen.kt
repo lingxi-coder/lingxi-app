@@ -251,6 +251,8 @@ fun RootScreen(
     /** Open the scheduled-task page on a new task prefilled with the given prompt. */
     onOpenCronCreate: (prompt: String) -> Unit = { onOpenCronSettings(null) },
     onOpenTerminal: (sessionId: String, initCommand: String?) -> Unit = { _, _ -> },
+    /** Open the Remote Control screens, which the host draws above this one. */
+    onOpenRemoteControl: () -> Unit = {},
     modelSetupRequired: Boolean = false,
     // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
     // passed down so the voice-orb overlay can label itself + gate its text input.
@@ -1995,6 +1997,10 @@ fun RootScreen(
                         onOpenApp = { appId ->
                             closeDrawer()
                             runtimeAppId = appId
+                        },
+                        onOpenRemoteControl = {
+                            closeDrawer()
+                            onOpenRemoteControl()
                         },
                     )
                 }

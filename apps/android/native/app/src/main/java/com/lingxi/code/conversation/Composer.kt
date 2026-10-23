@@ -57,6 +57,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -121,6 +123,9 @@ fun Composer(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    /** Several attachments (Remote Control sends up to four); shown after [attachment]. */
+    attachments: List<ComposerAttachment> = emptyList(),
+    onRemoveAttachmentAt: (Int) -> Unit = {},
     /** The widget the next prompt follows up on, with its remove control. */
     visualizationChip: VisualizationContextChip? = null,
     onRemoveVisualizationChip: () -> Unit = {},
@@ -166,7 +171,7 @@ fun Composer(
     var suggestionRejected by remember(suggestionTurnKey) { mutableStateOf(false) }
     val visibleSuggestion = promptSuggestion?.takeIf {
         !suggestionRejected && text.isEmpty() && !isStreaming && enabled
-            && attachment == null && visualizationChip == null
+            && attachment == null && attachments.isEmpty() && visualizationChip == null
     }
     LaunchedEffect(promptSuggestion, visibleSuggestion, suggestionTurnKey) {
         if (promptSuggestion != null && !suggestionShown && !suggestionRejected) {
@@ -207,6 +212,13 @@ fun Composer(
             // shown only once a camera capture has surfaced an image.
             if (attachment != null) {
                 AttachmentThumb(attachment = attachment, onRemove = onRemoveAttachment)
+            }
+            if (attachments.isNotEmpty()) {
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    attachments.forEachIndexed { index, item ->
+                        AttachmentThumb(attachment = item, onRemove = { onRemoveAttachmentAt(index) })
+                    }
+                }
             }
             if (visualizationChip != null) {
                 VisualizationContextChipView(chip = visualizationChip, onDismiss = onRemoveVisualizationChip)

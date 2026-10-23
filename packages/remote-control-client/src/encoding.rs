@@ -1,6 +1,6 @@
 //! Byte and text helpers: strict unpadded base64url, hashing, randomness.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use ring::digest;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -19,6 +19,18 @@ pub fn b64u_decode(text: &str) -> Result<Vec<u8>, ProtocolError> {
     URL_SAFE_NO_PAD
         .decode(text.as_bytes())
         .map_err(|e| ProtocolError::new(format!("base64url: {e}")))
+}
+
+/// Encode bytes as standard padded base64 (the `ImageRefDto.base64` form).
+pub fn b64_encode(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
+}
+
+/// Decode standard padded base64.
+pub fn b64_decode(text: &str) -> Result<Vec<u8>, ProtocolError> {
+    STANDARD
+        .decode(text.as_bytes())
+        .map_err(|e| ProtocolError::new(format!("base64: {e}")))
 }
 
 /// `true` when `text` is valid unpadded base64url of exactly `byte_length` bytes.

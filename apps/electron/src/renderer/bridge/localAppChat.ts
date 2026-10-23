@@ -10,7 +10,7 @@ export interface LocalAppDraft {
 }
 export interface LocalAppChatNavigation {
   hasProject(path: string): boolean;
-  openSession(projectPath: string, sessionId: string): Promise<boolean | undefined>;
+  openSession(projectPath: string, sessionId: string): Promise<SessionRef | false | undefined>;
   addProject(purpose?: ProjectCreationPurpose): Promise<{ path?: string } | null | undefined | void>;
   newSession(projectPath: string): Promise<SessionRef | undefined | void>;
 }
@@ -28,7 +28,7 @@ export async function localAppChatTarget(
     const opened = await navigation.openSession(source.projectPath, source.sessionId);
     // A failed or superseded navigation must never draft into an unrelated chat.
     if (!isCurrent()) return;
-    if (opened) return source;
+    if (opened) return opened;
     // The application survives deletion of its authoring chat. Keep its project
     // but establish a new explicit target before adding any text.
     project = source.projectPath;

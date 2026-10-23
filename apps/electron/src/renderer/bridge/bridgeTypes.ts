@@ -213,7 +213,7 @@ export interface UseBridge {
   touchSession(projectPath: string, sessionId: string): Promise<void>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<boolean>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionRef | false>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<(ProjectSessionCatalogState & { projectPath: string }) | undefined>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
   sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;

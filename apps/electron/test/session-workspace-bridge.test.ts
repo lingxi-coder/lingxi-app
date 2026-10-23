@@ -211,10 +211,10 @@ test('all hook navigation entry points retain the pending resume owner until its
   }
   assert.equal(await context.newSession('/other'), undefined);
   assert.deepEqual(calls, [['open', '/target', 'A']]);
-  response.resolve({ revision: 5 }); await opening;
+  response.resolve({ revision: 5, activeSession: { projectPath: '/target', sessionId: 'A' } }); await opening;
   assert.equal(context.pendingSessionRef.current, null);
   assert.equal(context.sessionLoadingRef.current, false);
-  assert.deepEqual(snapshots, [{ revision: 5 }]);
+  assert.deepEqual(snapshots, [{ revision: 5, activeSession: { projectPath: '/target', sessionId: 'A' } }]);
   await context.openSession('/other', 'B');
   assert.deepEqual(calls, [['open', '/target', 'A'], ['open', '/other', 'B']]);
 });
@@ -367,7 +367,7 @@ test('preload preserves ordinary two-argument opens and transports exact picker 
 
 test('useBridge transports a picker selection while retaining the standard openSession behavior', async () => {
   const calls: unknown[] = [], snapshots: unknown[] = [];
-  const snapshot = { revision: 1 };
+  let snapshot = { revision: 1, activeSession: { projectPath: '/canonical', sessionId: 'A' } };
   const context: any = {
     useCallback: (fn: unknown) => fn,
     host: { openSession: async (...args: unknown[]) => { calls.push(args); return snapshot; } },
@@ -378,10 +378,12 @@ test('useBridge transports a picker selection while retaining the standard openS
   };
   evaluate('globalThis.open = ' + initializer(bridgeSource, 'openSession'), context);
   const selection = { scope: 'all', transcriptPath: '/other/chosen-copy.jsonl' };
-  assert.equal(await context.open('/current', 'A', selection), true);
-  assert.equal(await context.open('/current', 'B'), true);
+  assert.deepEqual({ ...await context.open('/current', 'A', selection) }, snapshot.activeSession);
+  snapshot = { revision: 2, activeSession: { projectPath: '/canonical', sessionId: 'B' } };
+  assert.deepEqual({ ...await context.open('/current', 'B') }, snapshot.activeSession);
   assert.deepEqual(calls, [['/current', 'A', selection], ['/current', 'B']]);
-  assert.deepEqual(snapshots, [snapshot, snapshot]);
+  assert.deepEqual(snapshots.map((value: any) => value.activeSession.sessionId), ['A', 'B']);
+  assert.equal(await context.open('/current', 'unrelated'), false, 'a different acknowledged UUID cannot become an authoring target');
 });
 
 test('the ordinary sidebar opens the exact transcript from its displayed Current catalog', async () => {
@@ -534,24 +536,30 @@ test('expanded session scopes do not overwrite or supersede the default sidebar 
 
 function catalogNavigationHarness() {
   const mutation = deferred<unknown>();
+  const metadataRequests: Array<{ response: ReturnType<typeof deferred<any>> }> = [];
   const requests: Array<{ projectPath: string; scope: string; response: ReturnType<typeof deferred<any>> }> = [];
   const initial = { revision: 1, settings: { projects: ['/A', '/B'] }, activeSession: { projectPath: '/A', sessionId: 'chat-A' },
     projectCatalogs: { '/A': { sessions: [{ uuid: 'chat-A' }] }, '/B': { sessions: [] } } };
   let bootstrap: any = null, runtimes = new Map(), deferCatalogUpdates = false;
   const queuedCatalogUpdates: Array<(previous: unknown) => unknown> = [];
   const context: any = {
+    bootstrap: null,
     useCallback: (fn: unknown) => fn,
     host: {
       listProjectSessions: (projectPath: string, scope: string) => {
         const response = deferred<any>(); requests.push({ projectPath, scope, response }); return response.promise;
       },
       updateSessionWorkspace: () => mutation.promise, removeProject: () => mutation.promise,
+      touchSession: () => { const response = deferred<any>(); metadataRequests.push({ response }); return response.promise; },
+      renameSession: () => { const response = deferred<any>(); metadataRequests.push({ response }); return response.promise; },
     },
     shouldApplyBootstrapSnapshot, pruneRuntimeMaps, beginProjectCatalogRequest, isLatestProjectCatalogRequest, nextOperationId,
     messageFrom: (cause: Error) => cause.message,
-    latestBootstrapRevisionRef: { current: null }, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    latestBootstrapRevisionRef: { current: null }, latestBootstrapProjectPathsRef: { current: new Set() },
+    pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
     activeSessionIdRef: { current: 'chat-A' }, navigationOperationRef: { current: 0 },
     catalogRequestGenerations: { current: new Map() }, removedRuntimeIds: { current: new Set() },
+    pendingCatalogMutations: { current: new Map() }, setCatalogMutationRevision() {},
     isCurrentNavigationOperation: (id: number) => isLatestOperation(id, context.navigationOperationRef.current),
     completeTrackedSpeech() {}, setSessionReady() {}, setPendingSession() {}, setError() {},
     capture: (cause: unknown) => { throw cause; },
@@ -559,21 +567,199 @@ function catalogNavigationHarness() {
     setBootstrap: (update: unknown) => {
       if (typeof update === 'function' && deferCatalogUpdates) { queuedCatalogUpdates.push(update as (previous: unknown) => unknown); return; }
       bootstrap = typeof update === 'function' ? update(bootstrap) : update;
+      context.bootstrap = bootstrap;
     },
   };
   for (const name of ['turnActiveRefs', 'engineTurnActiveRefs', 'slashPendingRefs', 'pendingFusionDispatches',
     'sideQuestionTurns', 'cancellingRefs', 'cancellationTasks', 'pendingTrackedTurns', 'activeTrackedTurns', 'sharedDesktopCacheRef']) {
     context[name] = { current: new Map() };
   }
-  for (const name of ['applyBootstrap', 'beginNavigationOperation', 'listProjectSessions', 'updateSessionWorkspace', 'removeProject']) {
+  for (const name of ['applyBootstrap', 'beginNavigationOperation', 'listProjectSessions', 'refreshCatalogMutation', 'reconcileCatalogMutations', 'mutateSessionCatalog', 'updateSessionWorkspace', 'removeProject', 'touchSession', 'renameSession']) {
     evaluate(`globalThis.${name} = ` + initializer(bridgeSource, name), context);
   }
   context.applyBootstrap(initial);
-  return { context, requests, mutation, initial, bootstrap: () => bootstrap,
+  return { context, requests, metadataRequests, mutation, initial, bootstrap: () => bootstrap,
     deferCatalogUpdates: () => { deferCatalogUpdates = true; },
-    flushCatalogUpdates: () => { for (const update of queuedCatalogUpdates.splice(0)) bootstrap = update(bootstrap); },
+    flushCatalogUpdates: () => {
+      for (const update of queuedCatalogUpdates.splice(0)) bootstrap = update(bootstrap);
+      context.bootstrap = bootstrap;
+    },
   };
 }
+
+for (const action of ['touchSession', 'renameSession']) {
+  test(`a queued ${action} response is refreshed when a retained project's older snapshot wins the render`, async () => {
+    const h = catalogNavigationHarness();
+    h.deferCatalogUpdates();
+    const pending = h.context[action]('/A', 'chat-A', 'Renamed');
+    h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+    await pending;
+    h.context.applyBootstrap({ ...h.initial, revision: 2,
+      projectCatalogs: { '/A': { sessions: [{ uuid: 'chat-A', title: 'Old title' }] }, '/B': { sessions: [] } } });
+    h.flushCatalogUpdates();
+    h.context.reconcileCatalogMutations();
+    assert.equal(h.requests.length, 1);
+    h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    h.flushCatalogUpdates();
+    h.context.reconcileCatalogMutations();
+    assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].title, 'Fresh title');
+    assert.equal(h.context.pendingCatalogMutations.current.size, 0);
+    assert.equal(h.requests.length, 1, 'observing the committed catalog must not trigger a refresh loop');
+  });
+
+  for (const managed of [false, true]) {
+    test(`${action} refreshes a ${managed ? 'managed' : 'retained'} directory after navigation while its write was pending`, async () => {
+      const h = catalogNavigationHarness();
+      const pending = h.context[action]('/A', 'chat-A', 'Renamed');
+      const authoritative = { ...h.initial, revision: 2,
+        settings: { projects: managed ? ['/B'] : ['/A', '/B'] },
+        ...(managed ? { scheduledWorkspace: '/A' } : {}), activeSession: { projectPath: '/B', sessionId: 'chat-B' },
+        projectCatalogs: { '/A': { sessions: [{ uuid: 'chat-A', title: 'Old title' }] }, '/B': { sessions: [] } } };
+      h.context.applyBootstrap(authoritative);
+      h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(h.requests.length, 1, 'a retained directory needs a fresh post-commit catalog');
+      h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+      await pending;
+      assert.equal(h.bootstrap().activeSession.sessionId, 'chat-B');
+      assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].title, 'Fresh title');
+    });
+  }
+
+  test(`a queued ${action} result cannot restore a directory removed by a newer bootstrap`, async () => {
+    const h = catalogNavigationHarness();
+    h.deferCatalogUpdates();
+    const pending = h.context[action]('/A', 'chat-A', 'Renamed');
+    h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old A' }] });
+    await pending;
+    const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
+    h.context.applyBootstrap(authoritative);
+    h.flushCatalogUpdates();
+    h.context.reconcileCatalogMutations();
+    assert.equal(h.bootstrap(), authoritative);
+    assert.equal(h.context.pendingCatalogMutations.current.size, 0);
+    assert.equal(h.requests.length, 0);
+  });
+
+  test(`${action} updates the requested alias and invalidates older catalog reads`, async () => {
+    const h = catalogNavigationHarness();
+    const oldList = h.context.listProjectSessions('/A');
+    const pending = h.context[action]('/A', 'chat-A', 'Renamed');
+    h.metadataRequests[0]!.response.resolve({ projectPath: '/canonical-A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+    await pending;
+    h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old title' }] });
+    await oldList;
+    assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].title, 'Fresh title');
+    assert.equal(Object.hasOwn(h.bootstrap().projectCatalogs, '/canonical-A'), false);
+  });
+
+  test(`${action} refreshes after a read started before the mutation committed`, async () => {
+    const h = catalogNavigationHarness();
+    const pending = h.context[action]('/A', 'chat-A', 'Renamed');
+    const earlyRead = h.context.listProjectSessions('/A');
+    h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old title' }] });
+    await earlyRead;
+    h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(h.requests.length, 2, 'a catalog read before commit cannot settle a later metadata write');
+    h.requests[1]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+    await pending;
+    assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].title, 'Fresh title');
+  });
+
+  test(`${action} does not refresh a removed directory when its pending write completes`, async () => {
+    const h = catalogNavigationHarness();
+    const pending = h.context[action]('/A', 'chat-A', 'Renamed');
+    const oldRead = h.context.listProjectSessions('/A');
+    const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
+    h.context.applyBootstrap(authoritative);
+    h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old A' }] });
+    await pending;
+    h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A' }] });
+    await oldRead;
+    assert.equal(h.bootstrap(), authoritative);
+    assert.equal(h.requests.length, 1);
+  });
+}
+
+test('a superseded metadata refresh retries after navigation and settles only after its catalog commits', async () => {
+  const h = catalogNavigationHarness();
+  h.deferCatalogUpdates();
+  const rename = h.context.renameSession('/A', 'chat-A', 'Renamed');
+  h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+  await rename;
+  h.context.applyBootstrap({ ...h.initial, revision: 2 });
+  h.flushCatalogUpdates();
+  h.context.reconcileCatalogMutations();
+  h.context.reconcileCatalogMutations();
+  assert.equal(h.requests.length, 1, 'repeated effects must coalesce the same pending refresh');
+  h.context.applyBootstrap({ ...h.initial, revision: 3 });
+  h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Old title' }] });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  h.context.reconcileCatalogMutations();
+  assert.equal(h.requests.length, 2, 'a discarded read must leave the mutation pending for its next committed render');
+  h.requests[1]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  h.flushCatalogUpdates();
+  h.context.reconcileCatalogMutations();
+  assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].title, 'Fresh title');
+  assert.equal(h.context.pendingCatalogMutations.current.size, 0);
+});
+
+test('a failed metadata reconciliation retires its marker and does not create a retry loop', async () => {
+  const h = catalogNavigationHarness(), errors: unknown[] = [];
+  h.context.setError = (message: string) => errors.push(message);
+  h.context.capture = (cause: unknown) => { throw cause; };
+  h.deferCatalogUpdates();
+  const rename = h.context.renameSession('/A', 'chat-A', 'Renamed');
+  h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+  await rename;
+  h.context.applyBootstrap({ ...h.initial, revision: 2 });
+  h.flushCatalogUpdates();
+  h.context.reconcileCatalogMutations();
+  h.requests[0]!.response.reject(new Error('catalog unavailable'));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  h.flushCatalogUpdates();
+  h.context.reconcileCatalogMutations();
+  assert.equal(h.context.pendingCatalogMutations.current.size, 0);
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(errors, ['catalog unavailable']);
+  assert.equal(h.bootstrap().projectCatalogs['/A'].error, 'catalog unavailable');
+});
+
+test('a failed detached sidebar touch reports its error without rejecting an unobserved promise', async () => {
+  const h = catalogNavigationHarness(), errors: unknown[] = [];
+  h.context.setError = (message: string) => errors.push(message);
+  const pending = h.context.touchSession('/A', 'chat-A');
+  h.metadataRequests[0]!.response.reject(new Error('touch unavailable'));
+  await pending;
+  assert.deepEqual(errors, ['touch unavailable']);
+  assert.equal(h.context.pendingCatalogMutations.current.size, 0);
+});
+
+test('an earlier committed render cannot acknowledge metadata after a newer bootstrap has been accepted', async () => {
+  const h = catalogNavigationHarness();
+  const rename = h.context.renameSession('/A', 'chat-A', 'Renamed');
+  h.metadataRequests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+  await rename;
+  const previousRender = h.context.bootstrap;
+  h.context.applyBootstrap({ ...h.initial, revision: 2,
+    projectCatalogs: { '/A': { sessions: [{ uuid: 'chat-A', title: 'Old title' }] }, '/B': { sessions: [] } } });
+  const nextRender = h.context.bootstrap;
+  // Passive effects from the earlier commit may flush after the host callback
+  // accepted a new revision but before React commits its queued snapshot.
+  h.context.bootstrap = previousRender;
+  h.context.reconcileCatalogMutations();
+  h.context.bootstrap = nextRender;
+  assert.equal(h.context.pendingCatalogMutations.current.size, 1);
+  assert.equal(h.requests.length, 1);
+  h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'chat-A', title: 'Fresh title' }] });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  h.context.reconcileCatalogMutations();
+  assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].title, 'Fresh title');
+  assert.equal(h.context.pendingCatalogMutations.current.size, 0);
+});
 
 test('a rejected saved directory catalog settles and a canonical response updates its requested sidebar key', async () => {
   const h = catalogNavigationHarness();

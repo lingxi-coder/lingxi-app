@@ -188,6 +188,11 @@ function getHost(): LingxiApi | undefined {
   return typeof window !== 'undefined' ? window.lingxi : undefined;
 }
 
+interface PendingCatalogMutation {
+  sessions: ProjectSessionCatalogState['sessions'];
+  refreshing: boolean;
+}
+
 export function useBridge(): UseBridge {
   const hostRef = useRef(getHost());
   const host = hostRef.current;
@@ -264,11 +269,14 @@ export function useBridge(): UseBridge {
   const pendingSessionRef = useRef<SessionRef | null>(null);
   const sessionLoadingRef = useRef(false);
   const latestBootstrapRevisionRef = useRef<number | null>(null);
+  const latestBootstrapProjectPathsRef = useRef(new Set<string>());
   const navigationOperationRef = useRef(0);
   const pinOperationRef = useRef(0);
   const restartOperationsRef = useRef(new Map<string, Promise<void>>());
   const catalogRefreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const catalogRequestGenerations = useRef(new Map<string, number>());
+  const pendingCatalogMutations = useRef(new Map<string, PendingCatalogMutation>());
+  const [catalogMutationRevision, setCatalogMutationRevision] = useState(0);
   const runtimeResourceSendSequence = useRef(0);
   const trackedTurnSequence = useRef(0);
   const pendingTrackedTurns = useRef(new Map<string, DesktopTurnToken[]>());
@@ -278,6 +286,7 @@ export function useBridge(): UseBridge {
   const pendingTrackedDispatches = useRef(new Set<string>());
 
   useEffect(() => () => {
+    pendingCatalogMutations.current.clear();
     interruptConfigurationOperations(pendingConfigurationOperations.current);
     for (const sessionId of new Set<string>([
       ...pendingTrackedTurns.current.keys(),
@@ -478,6 +487,8 @@ export function useBridge(): UseBridge {
   const applyBootstrap = useCallback((snapshot: BootstrapState): void => {
     if (!shouldApplyBootstrapSnapshot(latestBootstrapRevisionRef.current, snapshot.revision)) return;
     latestBootstrapRevisionRef.current = Number.isFinite(snapshot.revision) ? snapshot.revision : 0;
+    latestBootstrapProjectPathsRef.current = new Set(snapshot.settings.projects);
+    if (snapshot.scheduledWorkspace) latestBootstrapProjectPathsRef.current.add(snapshot.scheduledWorkspace);
     const pending = pendingSessionRef.current;
     setRuntimeStates((previous) => {
       const next = new Map(previous);
@@ -593,6 +604,74 @@ export function useBridge(): UseBridge {
     updateCatalog(catalog);
     return { ...catalog, projectPath: result.projectPath };
   }, [host]);
+
+  const refreshCatalogMutation = useCallback(async (projectPath: string, mutation: PendingCatalogMutation): Promise<void> => {
+    if (mutation.refreshing || pendingCatalogMutations.current.get(projectPath) !== mutation) return;
+    mutation.refreshing = true;
+    try {
+      const catalog = await listProjectSessions(projectPath);
+      if (catalog && pendingCatalogMutations.current.get(projectPath) === mutation) mutation.sessions = catalog.sessions;
+    } catch (cause) {
+      if (pendingCatalogMutations.current.get(projectPath) === mutation) pendingCatalogMutations.current.delete(projectPath);
+      throw cause;
+    } finally {
+      mutation.refreshing = false;
+      if (pendingCatalogMutations.current.get(projectPath) === mutation) setCatalogMutationRevision((previous) => previous + 1);
+    }
+  }, [listProjectSessions]);
+
+  const reconcileCatalogMutations = useCallback((): void => {
+    for (const [projectPath, mutation] of pendingCatalogMutations.current) {
+      if (!latestBootstrapProjectPathsRef.current.has(projectPath)
+        || (bootstrap?.revision === latestBootstrapRevisionRef.current
+          && bootstrap.projectCatalogs[projectPath]?.sessions === mutation.sessions)) {
+        pendingCatalogMutations.current.delete(projectPath);
+      } else if (!mutation.refreshing) {
+        void refreshCatalogMutation(projectPath, mutation).catch((cause) => {
+          if (latestBootstrapProjectPathsRef.current.has(projectPath)) setError(messageFrom(cause));
+        });
+      }
+    }
+  }, [bootstrap, refreshCatalogMutation]);
+
+  // State updaters can be queued past navigation. Keep completed writes until
+  // their catalog is observed in a committed render, or a fresh read replaces it.
+  useEffect(reconcileCatalogMutations, [reconcileCatalogMutations, catalogMutationRevision]);
+
+  const mutateSessionCatalog = useCallback(async (
+    projectPath: string,
+    mutate: () => ReturnType<LingxiApi['touchSession']>,
+  ): Promise<void> => {
+    const bootstrapRevision = latestBootstrapRevisionRef.current;
+    const requestKey = `current\0${projectPath}`;
+    const generation = beginProjectCatalogRequest(catalogRequestGenerations.current, requestKey);
+    const result = await mutate();
+    if (latestBootstrapRevisionRef.current !== bootstrapRevision && !latestBootstrapProjectPathsRef.current.has(projectPath)) return;
+    const catalog: ProjectSessionCatalogState = {
+      sessions: result.sessions.map((session) => ({ ...session })),
+      ...(result.error ? { error: result.error } : {}),
+    };
+    const pending = { sessions: catalog.sessions, refreshing: false };
+    pendingCatalogMutations.current.set(projectPath, pending);
+    setCatalogMutationRevision((previous) => previous + 1);
+    if (latestBootstrapRevisionRef.current !== bootstrapRevision) {
+      // Navigation may have captured this project's catalog before the write
+      // committed. Refresh retained projects, but never resurrect removed ones.
+      await refreshCatalogMutation(projectPath, pending);
+      return;
+    }
+    if (!isLatestProjectCatalogRequest(catalogRequestGenerations.current, requestKey, generation)) {
+      // A read started while the write was pending may contain the old title
+      // or order. Read again after the mutation has actually committed.
+      await refreshCatalogMutation(projectPath, pending);
+      return;
+    }
+    setBootstrap((previous) => previous && latestBootstrapRevisionRef.current === bootstrapRevision
+      && isLatestProjectCatalogRequest(catalogRequestGenerations.current, requestKey, generation) ? {
+        ...previous,
+        projectCatalogs: { ...previous.projectCatalogs, [projectPath]: catalog },
+      } : previous);
+  }, [refreshCatalogMutation]);
 
   const scheduleProjectCatalogRefresh = useCallback((sessionId: string): void => {
     const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
@@ -1676,32 +1755,18 @@ export function useBridge(): UseBridge {
   const touchSession = useCallback(async (projectPath: string, sessionId: string) => {
     if (!host) return;
     try {
-      const result = await host.touchSession(projectPath, sessionId);
-      setBootstrap((previous) => previous ? {
-        ...previous,
-        projectCatalogs: {
-          ...previous.projectCatalogs,
-          [result.projectPath]: { sessions: result.sessions.map((session) => ({ ...session })), ...(result.error ? { error: result.error } : {}) },
-        },
-      } : previous);
-    } catch (cause) { capture(cause); }
-  }, [capture, host]);
+      await mutateSessionCatalog(projectPath, () => host.touchSession(projectPath, sessionId));
+    } catch (cause) { setError(messageFrom(cause)); }
+  }, [host, mutateSessionCatalog]);
   const renameSession = useCallback(async (projectPath: string, sessionId: string, title: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
     try {
-      const result = await host.renameSession(projectPath, sessionId, title);
-      setBootstrap((previous) => previous ? {
-        ...previous,
-        projectCatalogs: {
-          ...previous.projectCatalogs,
-          [result.projectPath]: { sessions: result.sessions.map((session) => ({ ...session })), ...(result.error ? { error: result.error } : {}) },
-        },
-      } : previous);
+      await mutateSessionCatalog(projectPath, () => host.renameSession(projectPath, sessionId, title));
     } catch (cause) {
       capture(cause);
       throw cause;
     }
-  }, [capture, host]);
+  }, [capture, host, mutateSessionCatalog]);
 
   const openSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -1723,7 +1788,8 @@ export function useBridge(): UseBridge {
         setPendingSession(null);
         applyBootstrap(snapshot);
         setError(null);
-        return true;
+        const opened = snapshot.activeSession ?? snapshot.settings.activeSession;
+        return opened?.sessionId.toLowerCase() === sessionId.toLowerCase() ? { ...opened } : false;
       }
       return false;
     }

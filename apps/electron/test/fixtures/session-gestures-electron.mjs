@@ -8,7 +8,7 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: true, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
+  const window = new BrowserWindow({ show: false, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   let inputPhase = 'startup';
   let lastSentMouse = null;
   const inputTrace = [];
@@ -105,12 +105,10 @@ async function main() {
     const focusForInput = async phase => {
       inputPhase = phase;
       traceInput('focus-request');
-      if (process.platform === 'darwin') app.focus({ steal: true });
-      window.focus();
-      const deadline = Date.now() + 6000;
-      while (!window.isFocused() && Date.now() < deadline) await delay(20);
-      traceInput(window.isFocused() ? 'focus-confirmed' : 'focus-timeout');
-      if (!window.isFocused()) throw new Error(`BrowserWindow did not focus before ${phase}: ${JSON.stringify(await diagnosticSnapshot())}`);
+      // configureFixtureWindow supplies Chromium focus without sharing the
+      // system pointer, whose movements can cancel a hold or drag mid-test.
+      await wait('document.hasFocus()');
+      traceInput('emulated-focus-confirmed');
     };
     const wait = async expression => {
       const deadline = Date.now() + 6000;
@@ -253,6 +251,7 @@ async function main() {
     const cancelPoint = await point('gamma');
     await input('mouseMove', cancelPoint);
     await down(cancelPoint);
+    assert.equal(await run(`${selector('gamma')}.hasPointerCapture(window.fixturePointerId)`), true, 'native pointer down captures the actual pointer');
     await input('mouseMove', { x: cancelPoint.x + 12, y: cancelPoint.y }, { button: 'left', modifiers: ['leftButtonDown'] });
     await run(`${selector('gamma')}.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: window.fixturePointerId }))`);
     await input('mouseMove', { x: 600, y: 600 }, { button: 'left', modifiers: ['leftButtonDown'] });

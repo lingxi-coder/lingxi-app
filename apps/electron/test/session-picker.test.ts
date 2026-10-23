@@ -263,21 +263,22 @@ test('the shared dialog leaves IME Escape unconsumed and preserves ordinary Esca
     ts.forEachChild(node, walk);
   };
   walk(dialogSource); assert.ok(handler);
-  let closed = 0, prevented = 0;
+  let closed = 0, prevented = 0, stopped = 0;
   const delegated: unknown[] = [];
   const context = { onEscape: () => { closed++; }, onKeyDown: (event: unknown) => delegated.push(event) };
   evaluate('globalThis.keyDown = ' + handler.getText(dialogSource), context);
   const press = (key: string, isComposing: boolean, keyCode: number) => {
-    const event = { key, nativeEvent: { isComposing, keyCode }, preventDefault: () => { prevented++; } };
+    const event = { key, nativeEvent: { isComposing, keyCode }, preventDefault: () => { prevented++; }, stopPropagation: () => { stopped++; } };
     (context as any).keyDown(event);
     return event;
   };
   press('Escape', true, 27); press('Escape', false, 229);
-  assert.equal(closed, 0); assert.equal(prevented, 0); assert.deepEqual(delegated, []);
+  assert.equal(closed, 0); assert.equal(prevented, 0); assert.equal(stopped, 0); assert.deepEqual(delegated, []);
   press('Escape', false, 27);
-  assert.equal(closed, 1); assert.equal(prevented, 1);
+  assert.equal(closed, 1); assert.equal(prevented, 1); assert.equal(stopped, 1);
   const tab = press('Tab', false, 9);
   assert.deepEqual(delegated, [tab]);
+  assert.equal(stopped, 1);
 });
 
 test('App picker events retain the current project path, query and original focus owner', () => {

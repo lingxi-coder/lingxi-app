@@ -198,58 +198,32 @@ fun MessageBubble(
                         }
                     }
                 }
-                // Share affordance: surfaces the native chooser for this reply's
-                // text through the same ShareController the engine bridges onto
-                // `traits::SharingService` — so a bubble share and a `tool-share`
-                // invocation are the identical launch path (mirrors how the
-                // composer's camera affordance reuses CameraController).
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (isCollapsible) {
-                        val toggleLabel = stringResource(
-                            if (expanded) R.string.chat_run_collapse else R.string.chat_run_expand,
-                        )
-                        Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { expanded = !expanded }
-                                .testTag("conversation.message.assistant.toggle")
-                                .padding(horizontal = 6.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            LXIcon(
-                                name = LXIconName.Chevron,
-                        modifier = Modifier.rotate(if (expanded) 180f else 0f),
-                                size = 11.dp,
-                                color = t.accent,
-                                stroke = 2f,
-                                contentDescription = null,
-                            )
-                            Text(
-                                text = toggleLabel,
-                                color = t.accent,
-                                fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        }
-                    }
-                    Box(
+                if (isCollapsible) {
+                    val toggleLabel = stringResource(
+                        if (expanded) R.string.chat_run_collapse else R.string.chat_run_expand,
+                    )
+                    Row(
                         modifier = Modifier
-                            .size(28.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { onShare(message.text) }
-                            .testTag(UiTags.MESSAGE_SHARE),
-                        contentAlignment = Alignment.Center,
+                            .clickable { expanded = !expanded }
+                            .testTag("conversation.message.assistant.toggle")
+                            .padding(horizontal = 6.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         LXIcon(
-                            name = LXIconName.Share,
-                            size = 15.dp,
-                            color = t.text3,
-                            stroke = 1.8f,
-                            contentDescription = stringResource(R.string.chat_share_reply),
+                            name = LXIconName.Chevron,
+                            modifier = Modifier.rotate(if (expanded) 180f else 0f),
+                            size = 11.dp,
+                            color = t.accent,
+                            stroke = 2f,
+                            contentDescription = null,
+                        )
+                        Text(
+                            text = toggleLabel,
+                            color = t.accent,
+                            fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
+                            fontWeight = FontWeight.Medium,
                         )
                     }
                 }

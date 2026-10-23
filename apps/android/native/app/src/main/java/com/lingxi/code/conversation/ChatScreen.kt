@@ -630,7 +630,7 @@ private fun MessageList(
                             modifier = Modifier.fillMaxWidth().height(minOf(maxHeight, 360.dp)))
                     }
                     is ChatRenderItem.Tools -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
-                        ToolGroupView(TranscriptBlock.Tools(item.calls), state.expandedToolCalls, stableOnToggleToolCall)
+                        ToolGroupView(TranscriptBlock.Tools(item.calls, item.anchor), state.expandedToolCalls, stableOnToggleToolCall)
                     }
                     is ChatRenderItem.Message -> Column(Modifier.background(if (item.key == linkedRowHighlight) LingXiTheme.palette.accent.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent)) {
                         MessageBubble(

@@ -61,7 +61,7 @@ class TranscriptToolGroupTest {
         ))
         val groups = rows.filterIsInstance<ChatRenderItem.Tools>()
         assertEquals(listOf(listOf("a", "b"), listOf("c"), listOf("d")), groups.map { it.calls.map { call -> call.id } })
-        assertEquals("tool-group:a", groups.first().key)
+        assertEquals("tool-group:m1:1:a", groups.first().key)
         assertEquals(rows.size, rows.map { it.key }.toSet().size)
     }
 
@@ -72,6 +72,30 @@ class TranscriptToolGroupTest {
         val anchored = buildChatRenderItems(state(*messages.toTypedArray()), uuid)
         assertEquals(listOf(listOf("a"), listOf("b"), listOf("c")), anchored.filterIsInstance<ChatRenderItem.Tools>().map { it.calls.map { call -> call.id } })
         assertEquals(1, messageLinkRenderIndex(anchored, messages, uuid))
+    }
+
+    @Test fun repeatedToolIdsKeepDistinctRowsAndExpansionState() {
+        val messages = arrayOf(
+            message("m1", tool("repeated"), MessageContent.Text("Between"), tool("repeated")),
+            com.lingxi.code.model.Message(com.lingxi.code.model.Role.User, "Next", id = "user"),
+            message("m2", tool("repeated")),
+        )
+        val rows = buildChatRenderItems(state(*messages))
+        val groups = rows.filterIsInstance<ChatRenderItem.Tools>()
+        assertEquals(3, groups.size)
+        assertEquals(rows.size, rows.map { it.key }.toSet().size)
+        assertEquals(groups.map { it.key }, groups.map { TranscriptBlock.Tools(it.calls, it.anchor).id })
+        val prepended = buildChatRenderItems(state(message("older", MessageContent.Text("History")), *messages))
+        assertEquals(groups.map { it.key }, prepended.filterIsInstance<ChatRenderItem.Tools>().map { it.key })
+    }
+
+    @Test fun extendingToolGroupPreservesItsSourceAnchor() {
+        val first = message("first", tool("a"))
+        val initial = buildChatRenderItems(state(first)).filterIsInstance<ChatRenderItem.Tools>().single()
+        val extended = buildChatRenderItems(state(first, message("second", tool("b"))))
+            .filterIsInstance<ChatRenderItem.Tools>().single()
+        assertEquals(initial.key, extended.key)
+        assertEquals(listOf("a", "b"), extended.calls.map { it.id })
     }
 
     @Test fun pinnedTerminalTurnStillSeparatesAdjacentToolGroups() {

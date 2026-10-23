@@ -58,8 +58,8 @@ sealed interface ChatRenderItem {
 
     /** Consecutive tools can span provider message envelopes within a turn. */
     @Immutable
-    data class Tools(val calls: List<ToolCallUi>) : ChatRenderItem {
-        override val key get() = "tool-group:${calls.first().id}"
+    data class Tools(val calls: List<ToolCallUi>, val anchor: String = calls.first().id) : ChatRenderItem {
+        override val key get() = "tool-group:$anchor"
         override val contentType get() = "tool_group"
     }
 
@@ -110,10 +110,10 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
         }
     }
     var canMergeTools = true
-    fun appendTools(calls: List<ToolCallUi>) {
+    fun appendTools(calls: List<ToolCallUi>, anchor: String) {
         val previous = if (canMergeTools) lastOrNull() as? ChatRenderItem.Tools else null
-        if (previous == null) add(ChatRenderItem.Tools(calls))
-        else { removeAt(lastIndex); add(ChatRenderItem.Tools(previous.calls + calls)) }
+        if (previous == null) add(ChatRenderItem.Tools(calls, anchor))
+        else { removeAt(lastIndex); add(previous.copy(calls = previous.calls + calls)) }
         canMergeTools = true
     }
     val foldedMessageIds = state.messages.flatMap { it.loopFoldedItemIds }.toSet()
@@ -144,7 +144,9 @@ fun buildChatRenderItems(state: ChatState, anchoredMessageUuid: String? = null):
                             blocks = listOf(MessageContent.Tool(ToolCallUi(id = "plan:${block.id}", tool = "ExitPlanMode",
                                 planMarkdown = block.markdown, status = if (block.writing) AgentToolStatus.Running else AgentToolStatus.Unknown))))))
                     }
-                    is TranscriptBlock.Tools -> appendTools(block.calls)
+                    // Tool IDs can recur in restored provider envelopes. The source
+                    // message and block identify this row independently of that ID.
+                    is TranscriptBlock.Tools -> appendTools(block.calls, "${message.id}:$index:${block.firstToolId}")
                     is TranscriptBlock.Prose -> add(ChatRenderItem.Message(message.copy(
                         id = if (index == 0) message.id else "${message.id}:prose:$index",
                         text = block.text, blocks = listOf(MessageContent.Text(block.text)),

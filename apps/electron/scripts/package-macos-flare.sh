@@ -35,6 +35,11 @@ unless explicit paths are supplied through:
   LINGXI_MAC_BROKER_PROVISIONING_PROFILE
   LINGXI_MAC_AUDIO_PROVISIONING_PROFILE
 
+For Electron-only changes, LINGXI_BRIDGE_SERVER_BIN may point to an existing
+portable release bridge-server built from the same Rust sources. This skips
+Cargo rebuilding; packaging still verifies its architecture and portability,
+signs the complete app, and runs static and runtime verification.
+
 Options:
   --channel CHANNEL  Credential namespace to package (default: development)
   --check            Validate signing assets without building
@@ -127,6 +132,11 @@ fi
 
 if [[ "$reuse_existing" == true && -z "$output_root" ]]; then
   fail '--reuse-existing requires --output-root'
+fi
+
+if [[ -n "${LINGXI_BRIDGE_SERVER_BIN:-}" ]]; then
+  [[ "$LINGXI_BRIDGE_SERVER_BIN" == /* ]] || fail 'LINGXI_BRIDGE_SERVER_BIN must be an absolute path'
+  [[ -f "$LINGXI_BRIDGE_SERVER_BIN" && -x "$LINGXI_BRIDGE_SERVER_BIN" ]] || fail 'LINGXI_BRIDGE_SERVER_BIN must be an existing executable'
 fi
 
 [[ "$(uname -s)" == "Darwin" ]] || fail 'macOS is required'
@@ -395,11 +405,15 @@ esac
 remap_flags="--remap-path-prefix=${REPO_ROOT}=. --remap-path-prefix=${repo_cargo_home}=/cargo-home --remap-path-prefix=${HOME}/.rustup=/rustup --remap-path-prefix=${repo_cargo_target}=/cargo-target"
 export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }${remap_flags}"
 
-log 'building portable release bridge-server'
-(
-  cd "$ENGINE_DIR"
-  cargo build --locked --release -p bridge-server --bin bridge-server
-)
+if [[ -n "${LINGXI_BRIDGE_SERVER_BIN:-}" ]]; then
+  log "using explicit release bridge-server: ${LINGXI_BRIDGE_SERVER_BIN}"
+else
+  log 'building portable release bridge-server'
+  (
+    cd "$ENGINE_DIR"
+    cargo build --locked --release -p bridge-server --bin bridge-server
+  )
+fi
 
 log 'packaging and signing the Electron app'
 (

@@ -45,6 +45,8 @@ export interface RemoteControlUiDeps {
   /** The session's project, if the session is open in this app. */
   runtimeRef(sessionId: string): SessionRef | undefined;
   signedIn(): boolean;
+  /** Account availability can change while the remote service remains off. */
+  onAccountChanged(callback: () => void): () => void;
   /** Deliver to every window of the app. */
   send(channel: string, payload: unknown): void;
 }
@@ -68,6 +70,7 @@ export class RemoteControlUi {
 
   constructor(private readonly deps: RemoteControlUiDeps) {
     this.offs.push(
+      deps.onAccountChanged(() => this.pushStatus()),
       deps.service.onStatus(() => this.pushStatus()),
       deps.policy.onChange(() => { this.pushStatus(); this.pushSessions(); }),
       deps.gateway.onViewersChanged(() => this.pushSessions()),

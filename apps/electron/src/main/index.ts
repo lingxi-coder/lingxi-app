@@ -583,6 +583,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       return runtime ? { projectPath: runtime.projectPath, sessionId } : undefined;
     },
     signedIn: () => account.snapshot().user !== null,
+    onAccountChanged: (callback) => account.onChanged(() => callback()),
     send: (channel, payload) => host?.sendToWindows(channel, payload),
   });
   host.attachRemoteControl(remoteUi);

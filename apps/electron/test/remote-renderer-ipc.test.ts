@@ -27,10 +27,12 @@ import { FakeSettings, PROJECT, SESSION_A, SESSION_B } from './remote-session-he
 function fixture(options: { managedDisabled?: boolean; signedIn?: boolean } = {}) {
   const settings = new FakeSettings();
   let enabled = false;
+  let signedIn = options.signedIn ?? true;
   const policy = new RemotePolicy({ settings });
   if (options.managedDisabled) policy.allows = () => false;
   const statusListeners = new Set<(status: any) => void>();
   const viewerListeners = new Set<() => void>();
+  const accountListeners = new Set<() => void>();
   const devices = [{ device_id: 'dev-1', key: 'SECRET-KEY-MATERIAL', name: 'Pixel', platform: 'android' as const, approved_at: 10, last_seen: 20 }];
   const revoked: string[] = [];
   const toggles: boolean[] = [];
@@ -52,7 +54,8 @@ function fixture(options: { managedDisabled?: boolean; signedIn?: boolean } = {}
       onViewersChanged: (listener) => { viewerListeners.add(listener); return () => { viewerListeners.delete(listener); }; },
     },
     runtimeRef: (sessionId) => (sessionId === SESSION_A ? { projectPath: PROJECT, sessionId } : undefined),
-    signedIn: () => options.signedIn ?? true,
+    signedIn: () => signedIn,
+    onAccountChanged: (listener) => { accountListeners.add(listener); return () => { accountListeners.delete(listener); }; },
     send: (channel, payload) => sent.push({ channel, payload }),
   };
   const ui = new RemoteControlUi(deps);
@@ -61,6 +64,7 @@ function fixture(options: { managedDisabled?: boolean; signedIn?: boolean } = {}
     ui, handlers, sent, settings, policy, devices, revoked, toggles, attached,
     setStatus(next: any) { status = next; for (const l of statusListeners) l(status); },
     viewersChanged() { for (const l of viewerListeners) l(); },
+    setSignedIn(value: boolean) { signedIn = value; for (const l of accountListeners) l(); },
     call: async (channel: string, ...args: unknown[]) => handlers[channel]!(...args),
   };
 }
@@ -94,6 +98,19 @@ test('status changes are pushed to the windows, once each', () => {
   f.setStatus({ state: 'online', connections: [] });
   const events = f.sent.filter((item) => item.channel === CH_REMOTE_STATUS_EVENT);
   assert.deepEqual(events.map((item) => item.payload.state), ['starting', 'online']);
+});
+
+test('sign-in and sign-out update the window while the remote service remains off', () => {
+  const f = fixture({ signedIn: false });
+  assert.equal(f.ui.status().signedIn, false);
+  f.setSignedIn(true);
+  f.setSignedIn(true);
+  f.setSignedIn(false);
+  const events = f.sent.filter((item) => item.channel === CH_REMOTE_STATUS_EVENT);
+  assert.deepEqual(events.map((item) => [item.payload.signedIn, item.payload.state]), [[true, 'off'], [false, 'off']]);
+  f.ui.dispose();
+  f.setSignedIn(true);
+  assert.equal(f.sent.length, 2, 'disposed UI must unsubscribe from account changes');
 });
 
 test('the host-level switch is validated, applied through the service, and refused under a managed veto', async () => {

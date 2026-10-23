@@ -6,6 +6,38 @@ use remote_control_client::signaling::DevicePlatform;
 use serde_json::{json, Value};
 
 #[test]
+fn desktop_text_events_decode_as_known_events() {
+    let event = decode_client_event(json!({ "type": "text_delta", "text": "RC-IPHONE-OK" }));
+    assert!(event.known().is_some(), "{event:?}");
+    for value in [
+        json!({ "type": "turn_started", "turn_id": 7631318840942024u64 }),
+        json!({ "type": "text_delta", "text": "RC-IPHONE-OK" }),
+        json!({ "type": "message_complete", "message": { "role": "assistant", "blocks": [{ "type": "text", "text": "RC-IPHONE-OK" }] } }),
+    ] {
+        let frame: SessionEventParams = serde_json::from_value(json!({
+            "session_id": "s", "seq": 10,
+            "record": { "type": "event", "event": value },
+        }))
+        .unwrap();
+        let RemoteRecord::Event { event, .. } = frame.record else {
+            panic!()
+        };
+        assert!(event.known().is_some(), "{event:?}");
+    }
+}
+
+#[test]
+fn snapshot_pages_decode_nonempty_message_blocks() {
+    let page = json!({
+        "phase": "messages", "session_id": "s",
+        "messages": [{ "role": "assistant", "blocks": [{ "type": "text", "text": "RC-IPHONE-OK" }] }]
+    });
+    let decoded = serde_json::from_value::<SessionSnapshotParams>(page.clone());
+    assert!(decoded.is_ok(), "{decoded:?}");
+    assert_eq!(serde_json::to_value(decoded.unwrap()).unwrap(), page);
+}
+
+#[test]
 fn unknown_client_events_do_not_fail_the_record() {
     // A variant this client's pinned protocol does not know.
     let record: RemoteRecord = serde_json::from_value(json!({

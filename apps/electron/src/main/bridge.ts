@@ -2414,6 +2414,14 @@ export class SessionRuntime {
       this.activeTurnGeneration = this.generation;
       this.activeTurnId = turnId;
       this.cancellingTurn = false;
+      // The bridge announces engine-initiated turns, but an ordinary submitted
+      // prompt relies on its submitting client to open the turn. Passive remote
+      // viewers need that boundary too, before any deltas can be rendered. Keep
+      // it in the replay stream without replaying a second start to the sender.
+      this.noteRemoteEvent(this.eventEnvelope({
+        type: 'turn_started',
+        ...(turnId !== undefined ? { turn_id: turnId } : {}),
+      }, true));
       this.notifyActivityChanged();
     }
   }

@@ -493,7 +493,7 @@ pub enum SessionAttachResult {
 
 /// `session.snapshot` (host to viewer): `begin`, then `messages` pages, then
 /// `records` pages, then `end`, all in order on the one connection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum SessionSnapshotParams {
     /// Start of a snapshot.
@@ -536,6 +536,66 @@ pub enum SessionSnapshotParams {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controls: Option<ConversationControlsDto>,
     },
+}
+
+impl<'de> Deserialize<'de> for SessionSnapshotParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // An internally tagged derive buffers fields through Serde's Content
+        // deserializer. Harness text/message DTOs need JSON's RawValue support,
+        // which that buffer does not provide. Decode each field from JSON Value
+        // directly instead, as we do for RemoteRecord above.
+        let mut value = Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("snapshot is not an object"))?;
+        fn field<T: serde::de::DeserializeOwned, E: Error>(
+            object: &mut serde_json::Map<String, Value>,
+            name: &str,
+        ) -> Result<T, E> {
+            serde_json::from_value(
+                object
+                    .remove(name)
+                    .ok_or_else(|| E::custom(format!("snapshot: missing {name}")))?,
+            )
+            .map_err(E::custom)
+        }
+        fn optional<T: serde::de::DeserializeOwned, E: Error>(
+            object: &mut serde_json::Map<String, Value>,
+            name: &str,
+        ) -> Result<Option<T>, E> {
+            match object.remove(name) {
+                None | Some(Value::Null) => Ok(None),
+                Some(value) => serde_json::from_value(value).map(Some).map_err(E::custom),
+            }
+        }
+        let phase: String = field(object, "phase")?;
+        let session_id = field(object, "session_id")?;
+        Ok(match phase.as_str() {
+            "begin" => Self::Begin {
+                session_id,
+                epoch: field(object, "epoch")?,
+                session_mode: optional(object, "session_mode")?,
+                first_message_index: field(object, "first_message_index")?,
+            },
+            "messages" => Self::Messages {
+                session_id,
+                messages: field(object, "messages")?,
+            },
+            "records" => Self::Records {
+                session_id,
+                records: field(object, "records")?,
+            },
+            "end" => Self::End {
+                session_id,
+                cursor: field(object, "cursor")?,
+                pending: field(object, "pending")?,
+                turn: field(object, "turn")?,
+                controls: optional(object, "controls")?,
+            },
+            _ => return Err(D::Error::custom(format!("unknown snapshot phase: {phase}"))),
+        })
+    }
 }
 
 /// `session.event` (host to viewer): the next record of a session the viewer is attached to.

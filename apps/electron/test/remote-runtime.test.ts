@@ -62,7 +62,8 @@ test('a real runtime: a viewer attaches, prompts as a device, and sees the turn;
   assert.deepEqual(sent, { turn_id: 777 });
   assert.deepEqual(client.prompts, [{ text: 'hello from the phone', opts: { images: [], turnId: 777 } }]);
   assert.equal(runtime.turnActive, true);
-  client.emitEvent({ type: 'turn_started', turn_id: 777 });
+  // Submitted turns do not announce themselves in the real bridge stream.
+  // The submitting host must publish their start for passive viewers.
   client.emitEvent({ type: 'text_delta', text: 'Hi ' });
   client.emitEvent({ type: 'text_delta', text: 'there' });
   client.emitEvent({ type: 'provider_credential_status', secret: 'sk-not-for-viewers' });
@@ -83,6 +84,20 @@ test('a real runtime: a viewer attaches, prompts as a device, and sees the turn;
   const resumed = again.attach({ epoch: view.epoch, after_seq: records.at(-1)!.seq });
   assert.equal(resumed.mode, 'delta');
   again.close();
+  await runtime.dispose();
+});
+
+test('a running turn accepts steering without opening a second remote turn', async () => {
+  const { runtime, client } = connectedRuntime();
+  client.emitEvent({ type: 'session_resumed', session_id: SESSION_A, messages: [] });
+  const observed: RemoteObservation[] = [];
+  runtime.observeRemote((observation) => observed.push(observation));
+  await runtime.sendPrompt('first', [], 1);
+  await runtime.sendPrompt('steering', [], 2);
+  assert.deepEqual(observed.filter((item) => item.type === 'event').map((item) => item.envelope.event),
+    [{ type: 'turn_started', turn_id: 1 }]);
+  assert.deepEqual(runtime.remoteView().turn, { running: true, turn_id: 1 });
+  assert.equal(runtime.remoteView().prompts.length, 2);
   await runtime.dispose();
 });
 

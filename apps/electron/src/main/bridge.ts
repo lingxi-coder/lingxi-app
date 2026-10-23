@@ -1585,6 +1585,7 @@ export class SessionRuntime {
       allowInsights: launch.allowInsights,
       allowTeamOnboarding: launch.allowTeamOnboarding,
       scheduledController: launch.scheduledController,
+      remoteControlEnabled: launch.remoteControlEnabled,
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 

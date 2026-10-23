@@ -13,6 +13,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -44,14 +45,14 @@ fun RemoteOverlay(
 ) {
     val context = LocalContext.current
     val manager = remember(context) { RemoteControl.manager(context) }
-    var stack by rememberSaveable(stateSaver = RemoteRoute.stackSaver) { mutableStateOf(listOf<RemoteRoute>(RemoteRoute.Hosts)) }
+    val uid by manager.uid.collectAsState()
+    var stack by rememberSaveable(uid, stateSaver = RemoteRoute.stackSaver) { mutableStateOf(listOf<RemoteRoute>(RemoteRoute.Hosts)) }
     LaunchedEffect(requestedRoute) {
         requestedRoute?.let {
             stack = RemoteRoute.stackFor(it)
             onRouteHandled()
         }
     }
-    val uid by manager.uid.collectAsState()
     val hosts by manager.hosts.collectAsState()
     val connection by manager.connection.collectAsState()
 
@@ -83,31 +84,33 @@ fun RemoteOverlay(
         Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg)
             .windowInsetsPadding(WindowInsets.systemBars).imePadding(),
     ) {
-        when {
-            uid == null -> RemotePage(stringResource(R.string.remote_title), onBack = onClose) {
-                RemoteSignedOut(onOpenAccount)
-            }
-            current is RemoteRoute.Hosts -> RemotePage(stringResource(R.string.remote_computers), onBack = ::pop) {
-                RemoteHostList(manager, onConnect = { stack = stack + RemoteRoute.Host(it) })
-            }
-            current is RemoteRoute.Host -> RemotePage(hostName(current.hostId), onBack = ::pop) {
-                RemoteHostScreen(
+        key(uid) {
+            when {
+                uid == null -> RemotePage(stringResource(R.string.remote_title), onBack = onClose) {
+                    RemoteSignedOut(onOpenAccount)
+                }
+                current is RemoteRoute.Hosts -> RemotePage(stringResource(R.string.remote_computers), onBack = ::pop) {
+                    RemoteHostList(manager, onConnect = { stack = stack + RemoteRoute.Host(it) })
+                }
+                current is RemoteRoute.Host -> RemotePage(hostName(current.hostId), onBack = ::pop) {
+                    RemoteHostScreen(
+                        manager = manager,
+                        hostId = current.hostId,
+                        hostName = hostName(current.hostId),
+                        onOpenSession = { stack = stack + RemoteRoute.Session(current.hostId, it.sessionId) },
+                        onLeave = ::pop,
+                    )
+                }
+                current is RemoteRoute.Session -> RemoteSessionScreen(
                     manager = manager,
                     hostId = current.hostId,
                     hostName = hostName(current.hostId),
-                    onOpenSession = { stack = stack + RemoteRoute.Session(current.hostId, it.sessionId) },
-                    onLeave = ::pop,
+                    sessionId = current.sessionId,
+                    title = sessions.sessions?.firstOrNull { it.sessionId == current.sessionId }?.title,
+                    isDark = isDark,
+                    onBack = ::pop,
                 )
             }
-            current is RemoteRoute.Session -> RemoteSessionScreen(
-                manager = manager,
-                hostId = current.hostId,
-                hostName = hostName(current.hostId),
-                sessionId = current.sessionId,
-                title = sessions.sessions?.firstOrNull { it.sessionId == current.sessionId }?.title,
-                isDark = isDark,
-                onBack = ::pop,
-            )
         }
     }
 }

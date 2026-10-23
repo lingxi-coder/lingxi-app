@@ -41,10 +41,12 @@ class ChatViewModelExternalTurnTest {
         val feed = MutableSharedFlow<ExternalFeedItem>(extraBufferCapacity = 64)
         val sent = mutableListOf<Pair<String, List<ImageRefDto>>>()
         val dismissed = mutableListOf<String>()
+        val retried = mutableListOf<String>()
         var cancelled = 0
         override val externalFeed: Flow<ExternalFeedItem> = feed.asSharedFlow()
         override fun submit(text: String): Flow<ReplyEvent> = error("an external source never submits a turn")
         override suspend fun sendExternalPrompt(text: String, images: List<ImageRefDto>) { sent += text to images }
+        override suspend fun retryExternalPrompt(promptId: String) { retried += promptId }
         override suspend fun dismissExternalPrompt(promptId: String) { dismissed += promptId }
         override suspend fun cancel() { cancelled++ }
     }
@@ -127,20 +129,26 @@ class ChatViewModelExternalTurnTest {
         assertEquals("来自此设备", vm.state.value.messages.last().originLabel)
     }
 
-    @Test fun aFailedPromptIsRemovedHandedBackForTheComposerAndDismissed() = runTest(dispatcher) {
+    @Test fun aFailedPromptRestoresTheDraftAndRetriesWithTheOriginalId() = runTest(dispatcher) {
         val source = FakeExternalSource()
         val vm = ChatViewModel(source)
         runCurrent()
-        val restored = mutableListOf<String>()
+        val restored = mutableListOf<ExternalSendFailure>()
+        val images = listOf(ImageRefDto("image/png", "AQID"))
         val collector = launch(start = CoroutineStart.UNDISPATCHED) { vm.externalSendFailures.collect { restored += it } }
         source.feed.emit(base("old"))
-        source.feed.emit(ExternalFeedItem.Outgoing(listOf(ExternalOutgoingPrompt("a", "lost", emptyList(), failed = false))))
-        source.feed.emit(ExternalFeedItem.Outgoing(listOf(ExternalOutgoingPrompt("a", "lost", emptyList(), failed = true))))
+        source.feed.emit(ExternalFeedItem.Outgoing(listOf(ExternalOutgoingPrompt("a", "lost", images, failed = false))))
+        source.feed.emit(ExternalFeedItem.Outgoing(listOf(ExternalOutgoingPrompt("a", "lost", images, failed = true))))
         runCurrent()
         assertEquals(listOf("old"), vm.state.value.messages.map { it.text })
-        assertEquals(listOf("lost"), restored)
-        assertEquals(listOf("a"), source.dismissed)
+        assertEquals(listOf(ExternalSendFailure("lost", images)), restored)
+        assertTrue(source.dismissed.isEmpty())
         assertTrue(vm.state.value.error != null)
+        source.feed.emit(ExternalFeedItem.Readiness(true, null))
+        vm.send("lost", images = images)
+        runCurrent()
+        assertEquals(listOf("a"), source.retried)
+        assertTrue(source.sent.isEmpty())
         collector.cancel()
     }
 
@@ -207,4 +215,19 @@ class ChatViewModelExternalTurnTest {
         source.feed.emit(ExternalFeedItem.PromptImages(9L, listOf(image)))
         assertEquals(listOf(image), vm.state.value.messages.last().images)
     }
+    @Test fun remoteConfigurationOutputRendersWithoutOwningOrEndingATurn() = runTest(dispatcher) {
+        val source = FakeExternalSource()
+        val vm = ChatViewModel(source)
+        runCurrent()
+        source.feed.emit(base("old"))
+        source.feed.emit(ExternalFeedItem.Event(ClientEvent.SlashCommandResult(17uL, "model selected".toClientTextDto(), false)))
+        assertEquals("model selected", vm.state.value.messages.last().text)
+        source.feed.emit(ExternalFeedItem.Event(ClientEvent.TurnStarted(19uL)))
+        source.feed.emit(ExternalFeedItem.Event(ClientEvent.TextDelta("working".toClientTextDto())))
+        source.feed.emit(ExternalFeedItem.Event(ClientEvent.SlashCommandResult(20uL, "effort changed".toClientTextDto(), false)))
+        assertTrue(vm.state.value.streaming)
+        assertEquals("working", vm.state.value.streamingMessage?.text)
+        assertEquals("effort changed", vm.state.value.messages.last().text)
+    }
+
 }

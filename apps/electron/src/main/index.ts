@@ -493,6 +493,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         trusted: settings.isTrustedWorkspace(workspace),
         allowInsights: settings.getInsightsAllowed(),
         allowTeamOnboarding: settings.getTeamOnboardingAllowed(),
+        remoteControlEnabled: (settings.getRemoteControlEnabled() || (!app.isPackaged && process.env.LINGXI_REMOTE_CONTROL === '1'))
+          && (remotePolicy?.allows() ?? true),
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         ...credentials,
         ...(openaiOAuth ? { openaiOAuth } : {}),

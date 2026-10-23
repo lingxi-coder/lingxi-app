@@ -776,6 +776,7 @@ fn resume_title_not_found_copy_is_byte_exact() {
 #[test]
 fn resume_title_ambiguous_copy_is_byte_exact() {
     let row = |id: u128, secs: u64| SessionMetadata {
+        workspace_path: None,
         uuid: uuid::Uuid::from_u128(id),
         mode: session::jsonl::SessionMode::Code,
         title: "shared".to_string(),
@@ -807,6 +808,7 @@ async fn resume_title_lookup_declines_an_empty_argument() {
 
 fn titled_row(id: u128, secs: u64, searchable: &str) -> SessionMetadata {
     SessionMetadata {
+        workspace_path: None,
         uuid: uuid::Uuid::from_u128(id),
         mode: session::jsonl::SessionMode::Code,
         title: searchable.to_string(),

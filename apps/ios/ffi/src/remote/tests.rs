@@ -439,8 +439,8 @@ fn images_cross_as_bytes_and_stay_within_two_mib() {
 }
 
 #[test]
-fn webrtc_is_not_wired_yet() {
-    assert!(webrtc_peer_connector().is_none());
+fn native_webrtc_connector_is_wired() {
+    assert!(webrtc_peer_connector().is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +694,8 @@ fn rig() -> Rig {
         keys: Arc::new(KeyStoreBridge::new(store.boxed())),
         clock: clock as _,
         random: Arc::new(|| 0.0),
-        peers: webrtc_peer_connector(),
+        // This fixture exercises the encrypted fallback; native WebRTC has its own adapter tests.
+        peers: None,
         device_name: "Pixel".into(),
         app_version: "1.0".into(),
     };
@@ -740,6 +741,36 @@ async fn hosts_are_listed_and_watched_with_their_online_state() {
         .all()
         .iter()
         .all(|s| !matches!(s, Seen::HostsFailed(_))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_client_can_be_freed_on_a_foreign_thread() {
+    let rig = rig();
+    rig.host.publish_presence().await;
+    rig.client.connect(rig.host.host_id.clone()).await.unwrap();
+    until("pairing", || !rig.host.conns().is_empty()).await;
+    let conn_id = rig.host.conns()[0].conn_id.clone();
+    rig.host.approve(&conn_id).await;
+    until("ready", || {
+        rig.client
+            .connection_state()
+            .is_some_and(|state| state.phase == RemoteConnectionPhaseFfi::Ready)
+    })
+    .await;
+    rig.client.attach_session("s1".into()).await.unwrap();
+    until("attach", || {
+        !requests_of(&rig.host, "session.attach").is_empty()
+    })
+    .await;
+
+    // Mirrors Swift deinit / JVM finalization: no Tokio runtime on this thread.
+    let client = rig.client;
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        drop(client);
+    })
+    .join()
+    .expect("foreign finalization must not panic");
 }
 
 #[tokio::test(start_paused = true)]
@@ -795,7 +826,7 @@ async fn pairing_attach_prompt_and_commands_over_the_tunnel() {
     assert_eq!(
         ready.transport,
         Some(RemoteTransportFfi::Tunnel),
-        "no WebRTC adapter yet"
+        "this fixture forces the encrypted fallback"
     );
     assert_eq!(
         ready.host.as_ref().map(|h| h.name.as_str()),
@@ -1118,4 +1149,32 @@ async fn invalid_arguments_are_refused_before_anything_is_sent() {
         Err(RemoteFfiError::NotConnected)
     );
     assert!(rig.client.sessions().is_none());
+}
+
+#[tokio::test]
+async fn delivery_drops_previous_connections_and_detached_session_callbacks() {
+    let (out, queue) = mpsc::unbounded_channel();
+    let current = Arc::new(AtomicU64::new(2));
+    let recorder = Arc::new(Recorder::default());
+    let update = || {
+        Box::new(session_update(
+            &mut SentMarker::new(),
+            &state_with(SessionStatus::Live, 0, 0, &[]),
+        ))
+    };
+    out.send(Out::Sessions(1, "old-host".into(), vec![]))
+        .unwrap();
+    out.send(Out::Session(1, Arc::new(AtomicBool::new(true)), update()))
+        .unwrap();
+    let detached = Arc::new(AtomicBool::new(true));
+    out.send(Out::Session(2, Arc::clone(&detached), update()))
+        .unwrap();
+    detached.store(false, Ordering::SeqCst);
+    out.send(Out::Session(2, Arc::new(AtomicBool::new(true)), update()))
+        .unwrap();
+    drop(out);
+    deliver(queue, recorder.clone(), current).await;
+    let seen = recorder.all();
+    assert_eq!(seen.len(), 1);
+    assert!(matches!(seen[0], Seen::Session(_)));
 }

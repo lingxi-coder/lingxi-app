@@ -41,8 +41,9 @@ internal fun nextShrinkAttempt(quality: Int, scale: Double): Pair<Int, Double> =
 suspend fun shrinkPickedImage(context: Context, uri: Uri): ComposerAttachment = withContext(Dispatchers.IO) {
     val resolver = context.contentResolver
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    val boundsStream = resolver.openInputStream(uri)
         ?: throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
+    boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
     val (width, height) = fitWithin(bounds.outWidth, bounds.outHeight, REMOTE_MAX_IMAGE_EDGE)
     // Let the decoder do the coarse part of the scaling so a 50 MP photo never sits in memory whole.

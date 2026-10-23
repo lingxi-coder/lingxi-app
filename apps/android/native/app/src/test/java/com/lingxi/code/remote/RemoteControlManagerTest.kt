@@ -12,6 +12,7 @@ import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteSessionUpdateFfi
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.conversation.remoteUpdate
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,14 +39,18 @@ class RemoteControlManagerTest {
         val calls = mutableListOf<String>()
         var closed = false
         var pushId: String? = "unset"
+        var state: RemoteConnectionStateFfi? = null
         override fun setPushInstallationId(id: String?) { pushId = id }
         override suspend fun watchHosts() { calls += "watchHosts" }
         override suspend fun stopWatchingHosts() { calls += "stopWatchingHosts" }
-        override suspend fun connect(hostId: String) { calls += "connect:$hostId" }
+        override suspend fun connect(hostId: String) {
+            calls += "connect:$hostId"
+            state = RemoteConnectionStateFfi(hostId, RemoteConnectionPhaseFfi.READY, null, null, null, 0u, null, null, false)
+        }
         override suspend fun disconnect() { calls += "disconnect" }
         override suspend fun retry() { calls += "retry" }
         override suspend fun nudge() { calls += "nudge" }
-        override fun connectionState(): RemoteConnectionStateFfi? = null
+        override fun connectionState(): RemoteConnectionStateFfi? = state
         override fun sessions(): List<RemoteSessionSummaryFfi>? = null
         override suspend fun forgetHost(hostId: String) { calls += "forget:$hostId" }
         override suspend fun repairHost(hostId: String) { calls += "repair:$hostId" }
@@ -55,6 +60,7 @@ class RemoteControlManagerTest {
         override suspend fun loadOlderMessages(sessionId: String) { calls += "older:$sessionId" }
         override suspend fun fetchImage(sessionId: String, imageRef: String) = RemoteImageFfi("image/png", byteArrayOf())
         override suspend fun sendPrompt(sessionId: String, text: String, images: List<RemotePromptImageFfi>) { calls += "send:$sessionId:$text" }
+        override suspend fun retryPrompt(sessionId: String, promptId: String) { calls += "retry:$sessionId:$promptId" }
         override suspend fun dismissPrompt(sessionId: String, promptId: String) { calls += "dismiss:$sessionId:$promptId" }
         override suspend fun cancelTurn(sessionId: String) { calls += "cancel:$sessionId" }
         override suspend fun respondPermission(sessionId: String, requestId: ULong, allow: Boolean) { calls += "permission:$sessionId:$requestId:$allow" }
@@ -196,4 +202,42 @@ class RemoteControlManagerTest {
         assertEquals(listOf("attach:s1"), client.calls)
         job.cancel()
     }
+    @Test fun accountChangeEndsTheOldFollowAndRejectsItsSessionCommands() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val port = harness.manager.sessionPort("h", "s1")
+        val received = mutableListOf<RemoteSessionUpdateFfi>()
+        val job = launch { port.follow().collect { received += it } }
+        runCurrent()
+        harness.clients.first().listener.onSessionUpdate(remoteUpdate())
+        runCurrent()
+        assertEquals(1, received.size)
+        harness.account.mutableUid.value = "u2"
+        runCurrent()
+        assertTrue(job.isCompleted)
+        assertTrue(runCatching { port.sendPrompt("old account", emptyList()) }.isFailure)
+        assertTrue(harness.clients.last().calls.none { it.startsWith("send:") })
+    }
+
+    @Test fun anAccountThatChangesDuringBuildNeverPublishesTheOldClient() = runTest(UnconfinedTestDispatcher()) {
+        val account = FakeAccount("u1")
+        val gate = CompletableDeferred<Unit>()
+        val clients = mutableListOf<FakeClient>()
+        val manager = RemoteControlManager(backgroundScope, account, { uid, listener ->
+            FakeClient(uid, listener).also {
+                clients += it
+                if (uid == "u1") gate.await()
+            }
+        }, { null })
+        runCurrent()
+        account.mutableUid.value = "u2"
+        clients.first().listener.onHosts(listOf(host("private", true)))
+        assertTrue(manager.hosts.value.hosts.isEmpty())
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(clients.first().closed)
+        manager.watchHosts()
+        assertEquals(listOf("watchHosts"), clients.last().calls)
+    }
+
 }

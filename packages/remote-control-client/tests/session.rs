@@ -532,3 +532,131 @@ async fn the_client_routes_notifications_and_lists_sessions() {
         RemoteRecord::Unsupported { .. }
     ));
 }
+
+#[tokio::test]
+async fn configuration_commands_complete_without_a_prompt_echo() {
+    let io = FakeIo::new(|_, _| Ok(json!({ "turn_id": 17 })));
+    let controller = SessionController::new("s1", io);
+    for text in [
+        "/model",
+        "/model chosen",
+        "/effort high",
+        "/plan",
+        "/plan open",
+        "/plan share",
+    ] {
+        controller.send_prompt(text, vec![]).await;
+        assert!(
+            controller.state().outgoing.is_empty(),
+            "{text} has no prompt echo"
+        );
+    }
+    controller.send_prompt("/plan implement this", vec![]).await;
+    assert_eq!(controller.state().outgoing.len(), 1);
+}
+
+#[tokio::test]
+async fn an_old_history_response_cannot_prepend_to_a_new_snapshot() {
+    struct DelayedHistory(tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<Value>>>);
+    #[async_trait]
+    impl SessionIo for DelayedHistory {
+        async fn request(
+            &self,
+            method: &str,
+            _: Option<Value>,
+            _: Option<Duration>,
+        ) -> Result<Value, RpcError> {
+            assert_eq!(method, "session.history");
+            Ok(self.0.lock().await.take().unwrap().await.unwrap())
+        }
+        async fn notify(&self, _: &str, _: Option<Value>) {}
+        fn connected(&self) -> bool {
+            false
+        }
+    }
+    let (response, receiver) = tokio::sync::oneshot::channel();
+    let controller = SessionController::new(
+        "s1",
+        Arc::new(DelayedHistory(tokio::sync::Mutex::new(Some(receiver)))),
+    );
+    feed(&controller, full_snapshot("old", 100, 2));
+    let reader = controller.clone();
+    let pending = tokio::spawn(async move { reader.load_older().await });
+    while !controller.state().loading_older {
+        tokio::task::yield_now().await;
+    }
+    controller.handle_reset();
+    feed(&controller, full_snapshot("new", 100, 2));
+    let expected = controller.state();
+    response.send(json!({ "messages": [{ "role": "user", "blocks": [] }], "first_index": 99, "has_more": true })).unwrap();
+    pending.await.unwrap();
+    assert_eq!(controller.state(), expected);
+}
+
+#[tokio::test]
+async fn a_queued_attach_does_not_reopen_a_deactivated_session() {
+    let io = FakeIo::new(attach_snapshot("e1"));
+    let controller = SessionController::new("s1", io.clone());
+    controller.activate();
+    controller.deactivate();
+    settle().await;
+    assert!(io.calls("session.attach").is_empty());
+}
+
+#[tokio::test]
+async fn image_cache_is_scoped_to_the_snapshot_epoch() {
+    let io = FakeIo::new(|method, _| {
+        assert_eq!(method, "image.get");
+        Ok(json!({ "media_type": "image/png", "base64": "AQID" }))
+    });
+    let controller = SessionController::new("s1", io.clone());
+    feed(&controller, full_snapshot("old", 0, 2));
+    controller.fetch_image("s1:m:0:0").await.unwrap();
+    controller.fetch_image("s1:m:0:0").await.unwrap();
+    assert_eq!(io.calls("image.get").len(), 1);
+    feed(&controller, full_snapshot("new", 0, 2));
+    controller.fetch_image("s1:m:0:0").await.unwrap();
+    assert_eq!(io.calls("image.get").len(), 2);
+}
+
+#[tokio::test]
+async fn an_image_response_from_an_old_epoch_is_not_returned_or_cached() {
+    struct DelayedImage {
+        started: tokio::sync::Notify,
+        response: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<Value>>>,
+    }
+    #[async_trait]
+    impl SessionIo for DelayedImage {
+        async fn request(
+            &self,
+            _: &str,
+            _: Option<Value>,
+            _: Option<Duration>,
+        ) -> Result<Value, RpcError> {
+            self.started.notify_one();
+            Ok(self.response.lock().await.take().unwrap().await.unwrap())
+        }
+        async fn notify(&self, _: &str, _: Option<Value>) {}
+        fn connected(&self) -> bool {
+            false
+        }
+    }
+    let (response, receiver) = tokio::sync::oneshot::channel();
+    let io = Arc::new(DelayedImage {
+        started: tokio::sync::Notify::new(),
+        response: tokio::sync::Mutex::new(Some(receiver)),
+    });
+    let controller = SessionController::new("s1", io.clone());
+    feed(&controller, full_snapshot("old", 0, 2));
+    let reader = controller.clone();
+    let fetch = tokio::spawn(async move { reader.fetch_image("s1:m:0:0").await });
+    io.started.notified().await;
+    feed(&controller, full_snapshot("new", 0, 2));
+    response
+        .send(json!({ "media_type": "image/png", "base64": "AQID" }))
+        .unwrap();
+    assert_eq!(
+        fetch.await.unwrap().unwrap_err().code,
+        RemoteErrorCode::Closed
+    );
+}

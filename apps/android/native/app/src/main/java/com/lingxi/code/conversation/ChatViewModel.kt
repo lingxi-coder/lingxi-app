@@ -438,6 +438,18 @@ class ChatViewModel(
      *    the plan outlives the turn that rewrote it.
      */
     internal fun reduceClientEvent(event: ClientEvent) {
+        if (source is ExternalTurnConversationSource && event is ClientEvent.SlashCommandResult) {
+            // A remote configuration command has no locally owned turn. Its result
+            // must also leave an unrelated running desktop turn intact.
+            val output = event.display.displayText()
+            _state.update {
+                it.copy(
+                    messages = it.messages + Message(role = Role.Ai, text = output),
+                    error = if (event.isError) ChatError(output, classifyError(output)) else it.error,
+                )
+            }
+            return
+        }
         planTasksFrom(event)?.let { tasks ->
             _state.update { it.copy(planTasks = tasks) }
             return
@@ -974,9 +986,10 @@ class ChatViewModel(
     /** Provisional rows of prompts this device sent, by outgoing prompt id. */
     private val externalOutgoingRows = mutableMapOf<String, String>()
     private val externalFailedPrompts = mutableSetOf<String>()
-    private val _externalSendFailures = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    private val externalRetryPrompts = mutableMapOf<String, ExternalOutgoingPrompt>()
+    private val _externalSendFailures = MutableSharedFlow<ExternalSendFailure>(extraBufferCapacity = 4)
 
-    /** Text of prompts the desktop did not take, so the screen can give it back to the composer. */
+    /** Failed drafts to restore in the composer, retaining attachments for an idempotent retry. */
     internal val externalSendFailures = _externalSendFailures.asSharedFlow()
 
     /**
@@ -1075,19 +1088,23 @@ class ChatViewModel(
             _state.update { state -> state.copy(messages = state.messages.filterNot { it.id == rowId }) }
         }
         externalFailedPrompts.retainAll(live)
+        externalRetryPrompts.keys.retainAll(live)
         for (prompt in prompts) {
             if (prompt.failed) {
                 if (!externalFailedPrompts.add(prompt.id)) continue
                 val rowId = externalOutgoingRows.remove(prompt.id)
                 _state.update { state -> state.copy(messages = state.messages.filterNot { it.id == rowId }) }
-                _externalSendFailures.tryEmit(prompt.text)
+                externalRetryPrompts[prompt.id] = prompt
+                _externalSendFailures.tryEmit(ExternalSendFailure(prompt.text, prompt.images))
                 reportHostError(strings.resolve(R.string.remote_send_failed, "消息未能发送，请重试。"))
-                val external = source as? ExternalTurnConversationSource
-                viewModelScope.launch { runCatching { external?.dismissExternalPrompt(prompt.id) } }
-            } else if (prompt.id !in externalOutgoingRows) {
-                val row = Message(role = Role.User, text = prompt.text, images = prompt.images)
-                externalOutgoingRows[prompt.id] = row.id
-                _state.update { it.copy(isNew = false, messages = it.messages + row) }
+            } else {
+                externalFailedPrompts.remove(prompt.id)
+                externalRetryPrompts.remove(prompt.id)
+                if (prompt.id !in externalOutgoingRows) {
+                    val row = Message(role = Role.User, text = prompt.text, images = prompt.images)
+                    externalOutgoingRows[prompt.id] = row.id
+                    _state.update { it.copy(isNew = false, messages = it.messages + row) }
+                }
             }
         }
     }
@@ -1097,13 +1114,15 @@ class ChatViewModel(
         if (!_state.value.sessionReady) return
         savedState?.set(KEY_DRAFT, "")
         _state.update { it.copy(isNew = false, error = null) }
+        val retry = externalRetryPrompts.values.firstOrNull { it.text == text && it.images == images }
         viewModelScope.launch {
             try {
-                external.sendExternalPrompt(text, images)
+                if (retry != null) external.retryExternalPrompt(retry.id)
+                else external.sendExternalPrompt(text, images)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                _externalSendFailures.tryEmit(text)
+                _externalSendFailures.tryEmit(ExternalSendFailure(text, images))
                 reportHostError(error.message ?: error::class.simpleName.orEmpty())
             }
         }

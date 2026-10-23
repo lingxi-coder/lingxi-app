@@ -22,24 +22,27 @@ import com.lingxi.code.conversation.RemoteSessionPort
 import com.lingxi.code.push.PushRegistration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** The Firebase user Remote Control signs in as, and the ID tokens its requests carry. */
 interface RemoteAccount {
@@ -84,6 +87,7 @@ interface RemoteClientPort {
     suspend fun loadOlderMessages(sessionId: String)
     suspend fun fetchImage(sessionId: String, imageRef: String): com.lingxi.code.bindings.android.RemoteImageFfi
     suspend fun sendPrompt(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>)
+    suspend fun retryPrompt(sessionId: String, promptId: String)
     suspend fun dismissPrompt(sessionId: String, promptId: String)
     suspend fun cancelTurn(sessionId: String)
     suspend fun respondPermission(sessionId: String, requestId: ULong, allow: Boolean)
@@ -129,9 +133,12 @@ class RemoteControlManager(
     private val mutableHosts = MutableStateFlow(RemoteHostsState())
     private val mutableConnection = MutableStateFlow<RemoteConnectionStateFfi?>(null)
     private val mutableSessions = MutableStateFlow(RemoteSessionsState())
-    private val mutableClient = MutableStateFlow<RemoteClientPort?>(null)
-    private val sinks = ConcurrentHashMap<String, CopyOnWriteArrayList<Channel<RemoteSessionUpdateFfi>>>()
-    private var generation = 0
+    private data class ClientBinding(val uid: String, val client: RemoteClientPort)
+    private data class SessionKey(val uid: String, val hostId: String, val sessionId: String)
+    private val mutableClient = MutableStateFlow<ClientBinding?>(null)
+    private val sinks = ConcurrentHashMap<SessionKey, CopyOnWriteArrayList<Channel<RemoteSessionUpdateFfi>>>()
+    private val generation = AtomicInteger()
+    private val sessionLifecycle = Mutex()
 
     val hosts: StateFlow<RemoteHostsState> = mutableHosts.asStateFlow()
     val connection: StateFlow<RemoteConnectionStateFfi?> = mutableConnection.asStateFlow()
@@ -153,44 +160,52 @@ class RemoteControlManager(
     }
 
     private suspend fun rebuild(uid: String?) {
-        val mine = ++generation
-        mutableClient.getAndUpdate { null }?.let { runCatching { it.close() } }
+        val mine = generation.incrementAndGet()
+        val previous = mutableClient.getAndUpdate { null }
+        sinks.values.forEach { channels -> channels.forEach { it.close() } }
+        sinks.clear()
         mutableHosts.value = RemoteHostsState()
         mutableConnection.value = null
         mutableSessions.value = RemoteSessionsState()
+        previous?.let { runCatching { it.client.close() } }
         if (uid == null) return
-        val listener = ManagerListener(mine)
+        val listener = ManagerListener(mine, uid)
         val client = try {
             factory.build(uid, listener)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            mutableHosts.value = RemoteHostsState(error = error.message ?: error.javaClass.simpleName)
+            if (account.uid.value == uid && mine == generation.get()) {
+                mutableHosts.value = RemoteHostsState(error = error.message ?: error.javaClass.simpleName)
+            }
             return
         }
-        if (mine != generation) {
+        if (mine != generation.get() || account.uid.value != uid) {
             runCatching { client.close() }
             return
         }
         client.setPushInstallationId(pushInstallationId())
-        mutableClient.value = client
+        mutableClient.value = ClientBinding(uid, client)
     }
 
-    private suspend fun client(): RemoteClientPort {
-        mutableClient.value?.let { return it }
-        // The account may have changed a moment ago; wait for the matching client.
-        return mutableClient.filterNotNull().first()
+    private suspend fun client(expectedUid: String? = account.uid.value): RemoteClientPort {
+        val owner = checkNotNull(expectedUid) { "not signed in" }
+        // A suspended caller must never resume with a different user's client.
+        return combine(mutableClient, account.uid) { binding, uid ->
+            if (uid != owner) throw CancellationException("remote account changed")
+            binding?.takeIf { it.uid == owner }
+        }.filterNotNull().first().client
     }
 
     /** Keep the list of computers current while the host list is shown. */
     suspend fun watchHosts() = client().watchHosts()
 
     suspend fun stopWatchingHosts() {
-        mutableClient.value?.stopWatchingHosts()
+        mutableClient.value?.client?.stopWatchingHosts()
     }
 
     /** Dial [hostId]; dialling the one already connected only nudges it. */
-    suspend fun connect(hostId: String) = client().connect(hostId)
+    suspend fun connect(hostId: String) = sessionLifecycle.withLock { client().connect(hostId) }
 
     /** Pair again after the computer removed this device. */
     suspend fun repair(hostId: String) = client().repairHost(hostId)
@@ -205,7 +220,7 @@ class RemoteControlManager(
     /** The screens went away: end the connection and stop watching. */
     fun closeConnection() {
         scope.launch {
-            val client = mutableClient.value ?: return@launch
+            val client = mutableClient.value?.client ?: return@launch
             client.stopWatchingHosts()
             client.disconnect()
         }
@@ -213,7 +228,7 @@ class RemoteControlManager(
 
     /** The app is in front again or the network came back. */
     fun nudge() {
-        scope.launch { mutableClient.value?.nudge() }
+        scope.launch { mutableClient.value?.client?.nudge() }
     }
 
     /**
@@ -221,50 +236,79 @@ class RemoteControlManager(
      * the computer first. Updates are deltas and none may be lost, hence the
      * unlimited buffer.
      */
-    fun followSession(hostId: String, sessionId: String): Flow<RemoteSessionUpdateFfi> = callbackFlow {
+    fun followSession(hostId: String, sessionId: String): Flow<RemoteSessionUpdateFfi> =
+        followSession(hostId, sessionId, account.uid.value)
+
+    internal fun followSession(hostId: String, sessionId: String, ownerUid: String?): Flow<RemoteSessionUpdateFfi> = channelFlow {
+        val key = SessionKey(checkNotNull(ownerUid) { "not signed in" }, hostId, sessionId)
         val sink = Channel<RemoteSessionUpdateFfi>(Channel.UNLIMITED)
-        sinks.getOrPut(sessionId) { CopyOnWriteArrayList() }.add(sink)
-        val client = client()
-        if (mutableConnection.value?.hostId != hostId || mutableConnection.value?.phase == RemoteConnectionPhaseFfi.IDLE) {
-            client.connect(hostId)
-        }
-        client.attachSession(sessionId)
-        val forwarding = launch { for (update in sink) send(update) }
-        awaitClose {
-            forwarding.cancel()
-            sinks[sessionId]?.remove(sink)
+        val channels = sinks.getOrPut(key) { CopyOnWriteArrayList() }
+        channels.add(sink)
+        var bound: RemoteClientPort? = null
+        try {
+            sessionLifecycle.withLock {
+                val client = client(ownerUid)
+                bound = client
+                val state = client.connectionState() ?: mutableConnection.value
+                if (state?.hostId != hostId || state.phase == RemoteConnectionPhaseFfi.IDLE) {
+                    client.connect(hostId)
+                }
+                client.attachSession(sessionId)
+            }
+            for (update in sink) send(update)
+        } finally {
+            channels.remove(sink)
             sink.close()
-            scope.launch { runCatching { client.detachSession(sessionId) } }
+            scope.launch {
+                sessionLifecycle.withLock {
+                    // A replacement collector may already own this attachment.
+                    if (sinks[key]?.isNotEmpty() != true) {
+                        sinks.remove(key, channels)
+                        bound?.let { client ->
+                            if (client.connectionState()?.hostId?.let { it == hostId } != false) {
+                                runCatching { client.detachSession(sessionId) }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }.buffer(Channel.UNLIMITED)
 
     /** The calls of one followed session. */
-    fun sessionPort(hostId: String, sessionId: String): RemoteSessionPort = ManagerSessionPort(this, hostId, sessionId)
+    fun sessionPort(hostId: String, sessionId: String): RemoteSessionPort = ManagerSessionPort(this, hostId, sessionId, account.uid.value)
 
-    internal suspend fun port(): RemoteClientPort = client()
+    internal suspend fun port(ownerUid: String?, hostId: String): RemoteClientPort {
+        val client = client(ownerUid)
+        val activeHost = client.connectionState()?.hostId ?: mutableConnection.value?.hostId
+        check(activeHost == null || activeHost == hostId) { "remote computer changed" }
+        return client
+    }
 
-    private inner class ManagerListener(private val mine: Int) : AndroidRemoteListener {
+    private inner class ManagerListener(private val mine: Int, private val ownerUid: String) : AndroidRemoteListener {
         override suspend fun onConnectionState(state: RemoteConnectionStateFfi) {
-            if (mine != generation) return
+            if (mine != generation.get() || account.uid.value != ownerUid) return
             mutableConnection.value = state
             if (state.hostId != mutableSessions.value.hostId) mutableSessions.value = RemoteSessionsState(state.hostId)
         }
 
         override suspend fun onHosts(hosts: List<RemoteHostFfi>) {
-            if (mine == generation) mutableHosts.value = RemoteHostsState(hosts, loaded = true)
+            if (mine == generation.get() && account.uid.value == ownerUid) mutableHosts.value = RemoteHostsState(hosts, loaded = true)
         }
 
         override suspend fun onHostsFailed(message: String) {
-            if (mine == generation) mutableHosts.update { it.copy(loaded = true, error = message) }
+            if (mine == generation.get() && account.uid.value == ownerUid) mutableHosts.update { it.copy(loaded = true, error = message) }
         }
 
         override suspend fun onSessions(hostId: String, sessions: List<RemoteSessionSummaryFfi>) {
-            if (mine == generation) mutableSessions.value = RemoteSessionsState(hostId, sessions)
+            if (mine == generation.get() && account.uid.value == ownerUid) mutableSessions.value = RemoteSessionsState(hostId, sessions)
         }
 
         override suspend fun onSessionUpdate(update: RemoteSessionUpdateFfi) {
-            if (mine != generation) return
-            sinks[update.sessionId]?.forEach { it.trySend(update) }
+            if (mine != generation.get() || account.uid.value != ownerUid) return
+            val hostId = mutableClient.value?.client?.connectionState()?.hostId
+                ?: mutableConnection.value?.hostId ?: return
+            sinks[SessionKey(ownerUid, hostId, update.sessionId)]?.forEach { it.trySend(update) }
         }
     }
 
@@ -278,25 +322,28 @@ private class ManagerSessionPort(
     private val manager: RemoteControlManager,
     private val hostId: String,
     private val sessionId: String,
+    private val ownerUid: String?,
 ) : RemoteSessionPort {
-    override fun follow() = manager.followSession(hostId, sessionId)
-    override suspend fun setForeground(foreground: Boolean) = manager.port().setSessionForeground(sessionId, foreground)
-    override suspend fun loadOlder() = manager.port().loadOlderMessages(sessionId)
-    override suspend fun fetchImage(imageRef: String) = manager.port().fetchImage(sessionId, imageRef)
+    private suspend fun client() = manager.port(ownerUid, hostId)
+    override fun follow() = manager.followSession(hostId, sessionId, ownerUid)
+    override suspend fun setForeground(foreground: Boolean) = client().setSessionForeground(sessionId, foreground)
+    override suspend fun loadOlder() = client().loadOlderMessages(sessionId)
+    override suspend fun fetchImage(imageRef: String) = client().fetchImage(sessionId, imageRef)
     override suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>) =
-        manager.port().sendPrompt(sessionId, text, images)
-    override suspend fun dismissPrompt(promptId: String) = manager.port().dismissPrompt(sessionId, promptId)
-    override suspend fun cancelTurn() = manager.port().cancelTurn(sessionId)
+        client().sendPrompt(sessionId, text, images)
+    override suspend fun retryPrompt(promptId: String) = client().retryPrompt(sessionId, promptId)
+    override suspend fun dismissPrompt(promptId: String) = client().dismissPrompt(sessionId, promptId)
+    override suspend fun cancelTurn() = client().cancelTurn(sessionId)
     override suspend fun respondPermission(requestId: ULong, allow: Boolean) =
-        manager.port().respondPermission(sessionId, requestId, allow)
+        client().respondPermission(sessionId, requestId, allow)
     override suspend fun answerQuestion(requestId: ULong, answers: Map<String, String>) =
-        manager.port().answerQuestion(sessionId, requestId, answers)
-    override suspend fun cancelQuestion(requestId: ULong) = manager.port().cancelQuestion(sessionId, requestId)
-    override suspend fun setModel(model: String) = manager.port().setModel(sessionId, model)
-    override suspend fun setReasoning(selection: ReasoningSelectionDto) = manager.port().setReasoning(sessionId, selection)
+        client().answerQuestion(sessionId, requestId, answers)
+    override suspend fun cancelQuestion(requestId: ULong) = client().cancelQuestion(sessionId, requestId)
+    override suspend fun setModel(model: String) = client().setModel(sessionId, model)
+    override suspend fun setReasoning(selection: ReasoningSelectionDto) = client().setReasoning(sessionId, selection)
     override suspend fun setPermissionMode(mode: RemotePermissionModeFfi) =
-        manager.port().setPermissionMode(sessionId, mode)
-    override suspend fun listModels() = manager.port().listModels()
+        client().setPermissionMode(sessionId, mode)
+    override suspend fun listModels() = client().listModels()
 }
 
 /** The production wiring: Firebase Auth, the Keystore-sealed key store, the generated client. */
@@ -377,6 +424,7 @@ internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClien
         text: String,
         images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>,
     ) = client.sendPrompt(sessionId, text, images)
+    override suspend fun retryPrompt(sessionId: String, promptId: String) = client.retryPrompt(sessionId, promptId)
     override suspend fun dismissPrompt(sessionId: String, promptId: String) = client.dismissPrompt(sessionId, promptId)
     override suspend fun cancelTurn(sessionId: String) = client.cancelTurn(sessionId)
     override suspend fun respondPermission(sessionId: String, requestId: ULong, allow: Boolean) =

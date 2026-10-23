@@ -59,6 +59,7 @@ export interface BridgeLaunchConfig {
   /** Local host policy verdict forwarded to the private bridge process. */
   allowTeamOnboarding?: boolean;
   scheduledController?: boolean;
+  remoteControlEnabled?: boolean;
   model?: string;
   apiBaseUrl?: string;
 }

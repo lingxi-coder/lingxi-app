@@ -15,11 +15,13 @@ import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ConversationControlsDto
 import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.PermissionKindDto
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.ReasoningControl
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +39,7 @@ interface RemoteSessionPort {
     suspend fun loadOlder()
     suspend fun fetchImage(imageRef: String): RemoteImageFfi
     suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>)
+    suspend fun retryPrompt(promptId: String)
     suspend fun dismissPrompt(promptId: String)
     suspend fun cancelTurn()
     suspend fun respondPermission(requestId: ULong, allow: Boolean)
@@ -81,6 +84,8 @@ class RemoteConversationSource(
 
     /** Images already fetched, by reference: a new snapshot re-lists the prompts that carry them. */
     private val fetchedImages = ConcurrentHashMap<String, ImageRefDto>()
+    private val imageLock = Any()
+    private var imageGeneration = 0L
 
     /** Phase, error, paging and controls of the session, current as of the last update. */
     val meta: StateFlow<RemoteSessionMeta> = mutableMeta.asStateFlow()
@@ -91,7 +96,12 @@ class RemoteConversationSource(
     override val externalFeed: Flow<ExternalFeedItem> = channelFlow {
         val mapper = RemoteFeedMapper(strings, thisDeviceName)
         var modelsRequested = false
-        port.follow().collect { update ->
+        port.follow().collect { incoming ->
+            if (incoming.phase == RemoteSessionPhaseFfi.LOADING) synchronized(imageLock) {
+                imageGeneration++
+                fetchedImages.clear()
+            }
+            val update = hydrateMessageImages(incoming)
             mutableMeta.value = RemoteSessionMeta(
                 phase = update.phase,
                 error = update.error,
@@ -107,15 +117,54 @@ class RemoteConversationSource(
                 launch { runCatching { port.listModels() }.getOrNull()?.let(::applyModelList) }
             }
             for ((turnId, images) in mapper.imageRefs(update)) {
+                val generation = synchronized(imageLock) { imageGeneration }
                 launch {
                     val fetched = images.mapNotNull { ref ->
-                        fetchedImages[ref] ?: runCatching { port.fetchImage(ref) }.getOrNull()?.let {
-                            ImageRefDto(it.mediaType, Base64.getEncoder().encodeToString(it.bytes))
-                        }?.also { fetchedImages[ref] = it }
+                        fetchImage(ref)
                     }
-                    if (fetched.isNotEmpty()) send(ExternalFeedItem.PromptImages(turnId, fetched))
+                    if (fetched.isNotEmpty() && synchronized(imageLock) { generation == imageGeneration }) {
+                        send(ExternalFeedItem.PromptImages(turnId, fetched))
+                    }
                 }
             }
+        }
+    }
+
+    /** Snapshot/history/message-complete URLs are opaque image.get references, not data URLs. */
+    private suspend fun hydrateMessageImages(update: RemoteSessionUpdateFfi): RemoteSessionUpdateFfi = update.copy(
+        messages = update.messages.map { hydrateMessage(it) },
+        olderMessages = update.olderMessages.map { hydrateMessage(it) },
+        records = update.records.map { item ->
+            val record = item.record as? RemoteRecordFfi.Event
+            val event = record?.event as? ClientEvent.MessageComplete
+            if (event?.message == null) item else item.copy(
+                record = record.copy(event = event.copy(message = hydrateMessage(event.message))),
+            )
+        },
+    )
+
+    private suspend fun hydrateMessage(message: MessageDto): MessageDto = message.copy(
+        images = message.images.mapNotNull { image ->
+            if (image.url.startsWith("data:")) image else fetchImage(image.url)?.let {
+                image.copy(mediaType = it.mediaType, url = "data:${it.mediaType};base64,${it.base64}")
+            }
+        },
+    )
+
+    private suspend fun fetchImage(ref: String): ImageRefDto? {
+        val generation = synchronized(imageLock) {
+            fetchedImages[ref]?.let { return it }
+            imageGeneration
+        }
+        val image = try {
+            port.fetchImage(ref).let { ImageRefDto(it.mediaType, Base64.getEncoder().encodeToString(it.bytes)) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return null
+        }
+        return synchronized(imageLock) {
+            if (generation != imageGeneration) null else image.also { fetchedImages[ref] = it }
         }
     }
 
@@ -150,6 +199,8 @@ class RemoteConversationSource(
             },
         )
     }
+
+    override suspend fun retryExternalPrompt(promptId: String) = port.retryPrompt(promptId)
 
     override suspend fun dismissExternalPrompt(promptId: String) = port.dismissPrompt(promptId)
 

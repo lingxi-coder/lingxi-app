@@ -18,13 +18,12 @@
 //! is async. Listener callbacks are never made from the caller's thread: one
 //! delivery task per client drains a queue, so their order is the order of events.
 //!
-//! WebRTC is not wired yet: [`webrtc_peer_connector`] is the single seam where a
-//! `PeerConnector` will be plugged in; until then every connection uses the
-//! end-to-end encrypted RTDB tunnel.
+//! WebRTC uses the shared data-only adapter from [`webrtc_peer_connector`],
+//! with the end-to-end encrypted RTDB tunnel as fallback.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -1061,11 +1060,11 @@ async fn paired_hosts(keys: &dyn ViewerKeys, entries: &[(String, HostRecord)]) -
 // ---------------------------------------------------------------------------
 
 enum Out {
-    State(RemoteConnectionStateFfi),
+    State(u64, RemoteConnectionStateFfi),
     Hosts(Vec<RemoteHostFfi>),
     HostsFailed(String),
-    Sessions(String, Vec<RemoteSessionSummaryFfi>),
-    Session(Box<RemoteSessionUpdateFfi>),
+    Sessions(u64, String, Vec<RemoteSessionSummaryFfi>),
+    Session(u64, Arc<AtomicBool>, Box<RemoteSessionUpdateFfi>),
 }
 
 type OutSender = mpsc::UnboundedSender<Out>;
@@ -1080,7 +1079,9 @@ struct StateRelay {
 impl ConnectionListener for StateRelay {
     fn on_state(&self, state: &ConnectionState) {
         if self.current.load(Ordering::SeqCst) == self.generation {
-            let _ = self.out.send(Out::State(connection_state_to_ffi(state)));
+            let _ = self
+                .out
+                .send(Out::State(self.generation, connection_state_to_ffi(state)));
         }
     }
 }
@@ -1097,6 +1098,7 @@ impl RemoteClientListener for SessionsRelay {
     fn on_sessions(&self, sessions: &[RemoteSessionSummary]) {
         if self.current.load(Ordering::SeqCst) == self.generation {
             let _ = self.out.send(Out::Sessions(
+                self.generation,
                 self.host_id.clone(),
                 sessions.iter().map(session_summary_to_ffi).collect(),
             ));
@@ -1107,26 +1109,51 @@ impl RemoteClientListener for SessionsRelay {
 /// Turns a followed session's states into deltas for the app.
 struct SessionWatcher {
     out: OutSender,
+    generation: u64,
+    attached: Arc<AtomicBool>,
     marker: Mutex<SentMarker>,
 }
 
 impl SessionListener for SessionWatcher {
     fn on_session_state(&self, state: &SessionState) {
+        if !self.attached.load(Ordering::SeqCst) {
+            return;
+        }
         // Computed and queued under one lock, so deltas leave in the order of the states.
         let mut marker = self.marker.lock().expect("marker");
         let update = session_update(&mut marker, state);
-        let _ = self.out.send(Out::Session(Box::new(update)));
+        let _ = self.out.send(Out::Session(
+            self.generation,
+            Arc::clone(&self.attached),
+            Box::new(update),
+        ));
     }
 }
 
-async fn deliver(mut queue: mpsc::UnboundedReceiver<Out>, listener: Arc<dyn IosRemoteListener>) {
+async fn deliver(
+    mut queue: mpsc::UnboundedReceiver<Out>,
+    listener: Arc<dyn IosRemoteListener>,
+    current: Arc<AtomicU64>,
+) {
     while let Some(item) = queue.recv().await {
         match item {
-            Out::State(state) => listener.on_connection_state(state).await,
+            Out::State(generation, state) if generation == current.load(Ordering::SeqCst) => {
+                listener.on_connection_state(state).await;
+            }
             Out::Hosts(hosts) => listener.on_hosts(hosts).await,
             Out::HostsFailed(message) => listener.on_hosts_failed(message).await,
-            Out::Sessions(host_id, sessions) => listener.on_sessions(host_id, sessions).await,
-            Out::Session(update) => listener.on_session_update(*update).await,
+            Out::Sessions(generation, host_id, sessions)
+                if generation == current.load(Ordering::SeqCst) =>
+            {
+                listener.on_sessions(host_id, sessions).await;
+            }
+            Out::Session(generation, attached, update)
+                if generation == current.load(Ordering::SeqCst)
+                    && attached.load(Ordering::SeqCst) =>
+            {
+                listener.on_session_update(*update).await;
+            }
+            _ => {}
         }
     }
 }
@@ -1135,11 +1162,11 @@ async fn deliver(mut queue: mpsc::UnboundedReceiver<Out>, listener: Arc<dyn IosR
 // The client
 // ---------------------------------------------------------------------------
 
-/// The seam for WebRTC. `lingxi-webrtc-core`'s data-only session is not pinned yet;
-/// when it is, return its `PeerConnector` adapter here and nowhere else. `None`
-/// makes every connection use the end-to-end encrypted RTDB tunnel.
+/// Both mobile viewers share the data-only Harness WebRTC adapter.
 fn webrtc_peer_connector() -> Option<Arc<dyn PeerConnector>> {
-    None
+    Some(Arc::new(
+        remote_control_client::native_peer::NativePeerConnector,
+    ))
 }
 
 /// What a client is made of; tests substitute the database and the clock.
@@ -1165,6 +1192,9 @@ struct Active {
 
 impl Active {
     fn shutdown(self) {
+        for (watcher, _) in self.watchers.values() {
+            watcher.attached.store(false, Ordering::SeqCst);
+        }
         self.client.remove_listener(self.sessions_listener);
         self.client.dispose();
         self.connection.stop();
@@ -1172,6 +1202,7 @@ impl Active {
 }
 
 struct Core {
+    runtime: tokio::runtime::Handle,
     parts: Parts,
     out: OutSender,
     tunnel_memory: Arc<TunnelMemory>,
@@ -1186,6 +1217,9 @@ struct Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // UniFFI frees objects synchronously on the foreign caller's thread.
+        // Session/tunnel shutdown may spawn async cleanup even from deinit.
+        let _runtime = self.runtime.enter();
         self.delivery.abort();
         if let Some(task) = self.hosts_task.lock().expect("hosts task").take() {
             task.abort();
@@ -1245,17 +1279,19 @@ impl IosRemoteControlClient {
     /// Must be called inside a Tokio runtime.
     fn from_parts(parts: Parts, listener: Arc<dyn IosRemoteListener>) -> Self {
         let (out, queue) = mpsc::unbounded_channel();
+        let current = Arc::new(AtomicU64::new(0));
         let tunnel_memory = Arc::new(TunnelMemory::new(Arc::clone(&parts.clock)));
         Self {
             core: Core {
+                runtime: tokio::runtime::Handle::current(),
                 parts,
                 out,
                 tunnel_memory,
                 push_installation_id: Mutex::new(None),
-                current: Arc::new(AtomicU64::new(0)),
+                current: Arc::clone(&current),
                 active: Mutex::new(None),
                 hosts_task: Mutex::new(None),
-                delivery: tokio::spawn(deliver(queue, listener)),
+                delivery: tokio::spawn(deliver(queue, listener, current)),
             },
         }
     }
@@ -1415,27 +1451,30 @@ impl IosRemoteControlClient {
 
     /// End the connection: sessions are detached, the link is closed.
     pub async fn disconnect(&self) {
-        let (active, current) = {
+        let (active, current, generation) = {
             let mut active = self.core.active.lock().expect("active");
             let current = active.as_ref().map(|a| a.host_id.clone());
-            self.core.current.fetch_add(1, Ordering::SeqCst);
-            (active.take(), current)
+            let generation = self.core.current.fetch_add(1, Ordering::SeqCst) + 1;
+            (active.take(), current, generation)
         };
         if let Some(active) = active {
             active.shutdown();
         }
         if let Some(host_id) = current {
-            let _ = self.core.out.send(Out::State(RemoteConnectionStateFfi {
-                host_id,
-                phase: RemoteConnectionPhaseFfi::Idle,
-                transport: None,
-                pairing_code: None,
-                failure: None,
-                attempt: 0,
-                retry_at_ms: None,
-                host: None,
-                ever_ready: false,
-            }));
+            let _ = self.core.out.send(Out::State(
+                generation,
+                RemoteConnectionStateFfi {
+                    host_id,
+                    phase: RemoteConnectionPhaseFfi::Idle,
+                    transport: None,
+                    pairing_code: None,
+                    failure: None,
+                    attempt: 0,
+                    retry_at_ms: None,
+                    host: None,
+                    ever_ready: false,
+                },
+            ));
         }
     }
 
@@ -1528,6 +1567,8 @@ impl IosRemoteControlClient {
         if let Entry::Vacant(slot) = active.watchers.entry(session_id) {
             let watcher = Arc::new(SessionWatcher {
                 out: self.core.out.clone(),
+                generation: self.core.current.load(Ordering::SeqCst),
+                attached: Arc::new(AtomicBool::new(true)),
                 marker: Mutex::new(SentMarker::new()),
             });
             let id = controller.add_listener(Arc::clone(&watcher) as _);
@@ -1543,7 +1584,8 @@ impl IosRemoteControlClient {
         let mut active = self.core.active.lock().expect("active");
         let active = active.as_mut().ok_or(RemoteFfiError::NotConnected)?;
         let controller = active.client.session(&session_id);
-        if let Some((_, id)) = active.watchers.remove(&session_id) {
+        if let Some((watcher, id)) = active.watchers.remove(&session_id) {
+            watcher.attached.store(false, Ordering::SeqCst);
             controller.remove_listener(id);
         }
         controller.deactivate();

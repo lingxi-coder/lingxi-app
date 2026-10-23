@@ -27,6 +27,9 @@ interface ExternalTurnConversationSource {
     /** Send a prompt to the session; its row comes back through [externalFeed]. */
     suspend fun sendExternalPrompt(text: String, images: List<ImageRefDto>)
 
+    /** Retry with the original request id, including after an ambiguous transport failure. */
+    suspend fun retryExternalPrompt(promptId: String)
+
     /** Drop a prompt that failed to send from the source's outgoing list. */
     suspend fun dismissExternalPrompt(promptId: String)
 }
@@ -76,3 +79,6 @@ data class ExternalOutgoingPrompt(
     val images: List<ImageRefDto>,
     val failed: Boolean,
 )
+
+/** Restore a failed send's complete draft without losing its attachments. */
+data class ExternalSendFailure(val text: String, val images: List<ImageRefDto>)

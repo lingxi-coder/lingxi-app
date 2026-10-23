@@ -19,6 +19,8 @@ pub mod error;
 pub mod framing;
 pub mod keys;
 pub mod messages;
+#[cfg(feature = "webrtc")]
+pub mod native_peer;
 pub mod pairing;
 pub mod peer;
 pub mod rpc;

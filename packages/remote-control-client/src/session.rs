@@ -462,6 +462,9 @@ impl SessionController {
                     })
                     .collect();
                 let _ = assembly.epoch;
+                if core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != Some(cursor.epoch.as_str()) {
+                    self.inner.images.lock().expect("images").clear();
+                }
                 core.cursor = Some(Cursor(cursor));
                 let seen = core.seen_turns.clone();
                 let controls = controls.or_else(|| controls_from_records(&records));
@@ -519,6 +522,7 @@ impl SessionController {
     pub fn handle_reset(&self) {
         let mut core = self.inner.core.lock().expect("core");
         core.cursor = None;
+        self.inner.images.lock().expect("images").clear();
         core.held.clear();
         core.assembly = None;
         core.seen_turns.clear();
@@ -533,6 +537,7 @@ impl SessionController {
             s.pending = RemotePending::default();
             s.turn = RemoteTurnState::default();
             s.has_older = false;
+            s.loading_older = false;
         });
         let inner = Arc::clone(&self.inner);
         core.reset_timer = Some(tokio::spawn(async move {
@@ -726,14 +731,15 @@ impl SessionController {
 
     /// Fetch the page of messages before the ones held.
     pub async fn load_older(&self) {
-        let first = {
+        let (first, epoch) = {
             let mut core = self.inner.core.lock().expect("core");
             if !core.state.has_older || core.state.loading_older {
                 return;
             }
             let first = core.state.first_message_index;
+            let epoch = core.cursor.as_ref().map(|c| c.0.epoch.clone());
             self.inner.commit(&mut core, |s| s.loading_older = true);
-            first
+            (first, epoch)
         };
         let result = self
             .inner
@@ -750,6 +756,11 @@ impl SessionController {
             .await
             .and_then(parse::<SessionHistoryResult>);
         let mut core = self.inner.core.lock().expect("core");
+        if core.state.first_message_index != first
+            || core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref()
+        {
+            return; // A new snapshot owns the transcript and its paging state now.
+        }
         match result {
             Ok(page) => self.inner.commit(&mut core, |s| {
                 let mut messages = page.messages;
@@ -765,9 +776,13 @@ impl SessionController {
 
     /// The bytes of an image the desktop keeps, as a `data:` URL; fetched once.
     pub async fn fetch_image(&self, image_ref: &str) -> Result<String, RpcError> {
-        if let Some(url) = self.inner.images.lock().expect("images").get(image_ref) {
-            return Ok(url.clone());
-        }
+        let epoch = {
+            let core = self.inner.core.lock().expect("core");
+            if let Some(url) = self.inner.images.lock().expect("images").get(image_ref) {
+                return Ok(url.clone());
+            }
+            core.cursor.as_ref().map(|c| c.0.epoch.clone())
+        };
         let result: ImageGetResult = parse(
             self.inner
                 .io
@@ -788,12 +803,34 @@ impl SessionController {
             ));
         }
         let url = format!("data:{};base64,{}", result.media_type, result.base64);
+        let core = self.inner.core.lock().expect("core");
+        if core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref() {
+            return Err(RpcError::new(
+                RemoteErrorCode::Closed,
+                "session changed while fetching image",
+            ));
+        }
         self.inner
             .images
             .lock()
             .expect("images")
             .insert(image_ref.to_owned(), url.clone());
         Ok(url)
+    }
+}
+
+/// Configuration slash commands return a result without a prompt journal entry.
+/// Keep this in step with the desktop's `slashRequestEchoes` for remotely allowed commands.
+fn prompt_expects_echo(text: &str) -> bool {
+    let trimmed = text.trim();
+    let mut words = trimmed.split_whitespace();
+    match words.next().map(str::to_ascii_lowercase).as_deref() {
+        Some("/model" | "/effort") => false,
+        Some("/plan") => {
+            let request = trimmed["/plan".len()..].trim();
+            !request.is_empty() && request != "open" && request != "share"
+        }
+        _ => true,
     }
 }
 
@@ -847,6 +884,9 @@ impl SessionInner {
     async fn attach_once(self: &Arc<Self>) -> bool {
         let (id, resume) = {
             let mut core = self.core.lock().expect("core");
+            if !core.active || !self.io.connected() {
+                return false;
+            }
             core.attach_id += 1;
             if let Some(timer) = core.reset_timer.take() {
                 timer.abort();
@@ -991,7 +1031,7 @@ impl SessionInner {
         let mut core = self.core.lock().expect("core");
         match result {
             Ok(sent) => {
-                if core.seen_turns.contains(&sent.turn_id) {
+                if !prompt_expects_echo(&prompt.text) || core.seen_turns.contains(&sent.turn_id) {
                     self.commit(&mut core, |s| s.outgoing.retain(|p| p.id != prompt.id));
                 } else {
                     self.update_outgoing(&mut core, &prompt.id, |p| p.turn_id = Some(sent.turn_id));

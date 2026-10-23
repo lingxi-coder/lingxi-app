@@ -14,6 +14,7 @@ import com.lingxi.code.bindings.android.RemoteTurnFfi
 import com.lingxi.code.bindings.client.MessageBlockDto
 import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 
@@ -55,18 +56,21 @@ internal class FakeRemoteSessionPort : RemoteSessionPort {
     val updates = MutableSharedFlow<RemoteSessionUpdateFfi>(replay = 1, extraBufferCapacity = 16)
     val calls = mutableListOf<String>()
     val sentImages = mutableListOf<List<RemotePromptImageFfi>>()
+    var fetchGate: CompletableDeferred<Unit>? = null
 
     override fun follow(): Flow<RemoteSessionUpdateFfi> = updates
     override suspend fun setForeground(foreground: Boolean) { calls += "foreground:$foreground" }
     override suspend fun loadOlder() { calls += "loadOlder" }
     override suspend fun fetchImage(imageRef: String): RemoteImageFfi {
         calls += "fetch:$imageRef"
+        fetchGate?.await()
         return RemoteImageFfi("image/png", byteArrayOf(1, 2, 3))
     }
     override suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>) {
         calls += "send:$text"
         sentImages += images
     }
+    override suspend fun retryPrompt(promptId: String) { calls += "retry:$promptId" }
     override suspend fun dismissPrompt(promptId: String) { calls += "dismiss:$promptId" }
     override suspend fun cancelTurn() { calls += "cancel" }
     override suspend fun respondPermission(requestId: ULong, allow: Boolean) { calls += "permission:$requestId:$allow" }

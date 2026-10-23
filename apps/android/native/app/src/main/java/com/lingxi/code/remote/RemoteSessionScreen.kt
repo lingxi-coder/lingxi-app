@@ -1,6 +1,9 @@
 package com.lingxi.code.remote
 
 import android.app.Activity
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.asImageBitmap
+import java.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -121,7 +124,8 @@ internal fun RemoteSessionScreen(
     val context = LocalContext.current
     val t = LingXiTheme.palette
     val holder: RemoteSessionHolder = viewModel()
-    val key = "$hostId/$sessionId"
+    val ownerUid by manager.uid.collectAsState()
+    val key = "$ownerUid/$hostId/$sessionId"
     val strings = remember(context) { conversationStrings(context.applicationContext) }
     val deviceName = remember { RemoteControl.deviceName() }
     val remote = remember(key) {
@@ -161,7 +165,19 @@ internal fun RemoteSessionScreen(
 
     var draft by rememberSaveable(key) { mutableStateOf("") }
     val attachments = remember(key) { mutableStateListOf<ComposerAttachment>() }
-    LaunchedEffect(chat) { chat.externalSendFailures.collect { text -> if (draft.isEmpty()) draft = text } }
+    LaunchedEffect(chat) {
+        chat.externalSendFailures.collect { failed ->
+            if (draft.isEmpty() && attachments.isEmpty()) {
+                draft = failed.text
+                failed.images.forEach { image ->
+                    val bytes = Base64.getDecoder().decode(image.base64)
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { bitmap ->
+                        attachments += ComposerAttachment(bitmap.asImageBitmap(), bitmap.width, bitmap.height, image.mediaType, image.base64)
+                    }
+                }
+            }
+        }
+    }
 
     val rejected = stringResource(R.string.remote_image_unusable)
     val pick = rememberLauncherForActivityResult(

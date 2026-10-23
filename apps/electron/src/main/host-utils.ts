@@ -682,6 +682,7 @@ export function buildBridgeArguments(config: {
   allowTeamOnboarding?: boolean;
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
+  remoteControlEnabled?: boolean;
 }): string[] {
   if (config.listSessionsJson) {
     return ['--cwd', config.workspace, '--list-sessions-json',
@@ -707,6 +708,7 @@ export function buildBridgeArguments(config: {
   if (typeof config.allowTeamOnboarding === 'boolean') {
     args.push('--host-team-onboarding-policy-gate', String(config.allowTeamOnboarding));
   }
+  if (config.remoteControlEnabled) args.push('--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never');
   if (config.scheduledController) args.push('--scheduled-controller');
   if (config.packagedCredentialBoundary) args.push('--packaged-credential-stdin-only');
   return args;

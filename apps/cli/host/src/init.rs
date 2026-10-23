@@ -368,6 +368,9 @@ pub enum InitError {
     /// The embedding tool-alias map failed current runtime validation.
     #[error("Invalid toolAliases configuration: {0}")]
     InvalidToolAliases(String),
+    /// The configured permission-prompt timeout is zero or above the runtime's maximum.
+    #[error("Invalid permission timeout: {0}")]
+    InvalidPermissionTimeout(String),
     /// Custom Anthropic beta headers require an API-key-backed first-party
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
@@ -397,6 +400,9 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
             harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::InvalidToolAliases(m) => {
                 Self::InvalidToolAliases(m)
+            }
+            harness_runtime::desktop::BuildError::InvalidPermissionTimeout(m) => {
+                Self::InvalidPermissionTimeout(m)
             }
             harness_runtime::desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
             harness_runtime::desktop::BuildError::DurableSession(m) => Self::DurableSession(m),

@@ -147,12 +147,14 @@ Rust 或第三方库的堆栈均已覆盖；生产 JNI 仍必须保留并上传�
 
 仅 DEBUG 构建包含 `CrashlyticsDeviceVerification`。使用不附加调试器的设备启动入口，
 同时传入 `LINGXI_CRASHLYTICS_PROJECT=lingxi-5e4b2`、新的
-`LINGXI_CRASHLYTICS_VERIFICATION_ID=<UUID>` 和 `LINGXI_CRASHLYTICS_PHASE=capture`。
+`LINGXI_CRASHLYTICS_VERIFICATION_ID=<UUID>`、`LINGXI_CRASHLYTICS_PHASE=capture` 和
+`LINGXI_CRASHLYTICS_KIND=swift-sigtrap`（Swift fatalError）或 `objc-exception`（未捕获 NSException）。
 缺少任一有效参数或自动采集已打开时不执行。capture 拒绝已有待发送报告，同一 UUID
-不能重复触发；SDK 初始化后有界等待，再产生未捕获的测试 NSException。
+不能重复触发；SDK 初始化后有界等待，再触发明确选择的异常类型。
+诊断进程临时启用 SDK debug 日志，不持久化采集或日志覆盖。
 
-重启时保留相同项目和 UUID，改为 `LINGXI_CRASHLYTICS_PHASE=send`，仅在本地
-capture-ready 回执和前次崩溃状态均匹配时调用一次性发送。回执位于
+重启时保留相同项目、UUID 和 KIND，改为 `LINGXI_CRASHLYTICS_PHASE=send`，仅在本地
+capture-ready 回执、异常类型和前次崩溃状态均匹配时调用一次性发送。回执位于
 `Library/Caches/CrashlyticsDeviceVerification/receipt.json`。SDK 12.19.2 在等待 Debug
 采集同意时会延后自定义字段写入，因此不能只依赖云端 verification_id；发送前保留
 原始捕获目录，以其精确 SDK session ID、时间和匹配 dSYM 交叉核对云端事件。
@@ -195,3 +197,34 @@ capture-ready 回执和前次崩溃状态均匹配时调用一次性发送。回
 参考：[Android](https://firebase.google.com/docs/crashlytics/android/get-started)、
 [NDK 符号](https://firebase.google.com/docs/crashlytics/android/get-started-ndk)、
 [iOS dSYM](https://firebase.google.com/docs/crashlytics/ios/get-deobfuscated-reports)。
+
+
+### Swift SIGTRAP 真机云端复核（2026-10-23 UTC）
+
+- Firebase iOS App 已注册：`com.lingxi.code`，App ID
+  `1:55470483519:ios:dd3320da548259cd57708a`；不是缺少注册导致的失败。
+- SDK 12.19.2、iPhone 11 / iOS 18.6.2、StoreDebug 2.4.1 (8721)，
+  不附加调试器触发一次 `swift-sigtrap`，在发送前保存原始 Mach 报告。
+  SDK session `667f3a781dd34c4f8cef6d2735c1b3a3`，异常 `EXC_BREAKPOINT`。
+- 重启后显式发送；云端事件
+  `667f3a781dd34c4f8cef6d2735c1b3a3_2278168563696168780`，
+  issue `5cb41e6bda8a46079760fe5329c3677e`。eventTime 为
+  `2026-10-23T04:57:33Z`，receivedTime 为 `04:59:01Z`。
+  FATAL 堆栈解析到 `CrashlyticsDeviceVerification.swift:58` 的 Swift fatalError；
+  匹配 debug dylib dSYM UUID `100707A9-8923-3CC5-9B80-6AD8514AC681`。
+  云端 issue 的归因标题选中 App 入口，但实际 crashed thread 的触发帧已正确符号化。
+- 原始 session `63ec06342b1d4c239af5d08522b06c20` 的 Apple IPS 同样确认
+  Swift SIGTRAP，匹配旧 dSYM 并解析到当时的触发行；Crashlytics Mach handler
+  出现在异常服务器线程。原获批时间窗内的云端查询仍无该事件，且当时未保留完整
+  传输回执，无法据此断定历史报告消失的原因。不能把此次复核成功写成已定位历史根因。
+- 修复的是验收入口只支持 NSException、无法单独复核 Swift trap 的缺口；没有替换 SDK
+  异常处理器或声称修复了未经证实的 Firebase 缺陷。发送入队、本地文件清理与云端确认
+  分开记录；后续异常须保留发送前原件及 SDK session。
+- 原始证据位于 `.buildcache/remaining-task-takeover-20261019/mobile-crashlytics-20261022/sigtrap-followup-20261022/`，
+  包括 `original-sigtrap.ips`、`reports-pre-send/`、`confirmed-swift-cloud-event.json`、
+  `build-signature-symbols.json` 及 `symbol-upload.log`。私有日志与配置备份不提交仓库。
+
+依据：[Firebase 测试上报流程](https://firebase.google.com/docs/crashlytics/ios/test-implementation)、
+[Apple Swift runtime trap](https://developer.apple.com/documentation/xcode/addressing-crashes-from-swift-runtime-errors)。
+相似历史问题 [firebase-ios-sdk #4798](https://github.com/firebase/firebase-ios-sdk/issues/4798)
+曾由符号上传解决，但不能据此认定当前 SDK 存在同一问题。

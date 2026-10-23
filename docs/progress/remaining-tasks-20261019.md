@@ -171,3 +171,13 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - **产物来源**：原生 bridge 复用另一批已签名包中从 `6ace0aaa4` 构建的产物，逐项核对本批 `671036149` 的全部 Rust／Cargo 输入一致；没有将旧 `1a2950901` 二进制冒充最新 main。当前包 asar 的 main/preload/renderer 文件与本批构建输出哈希一致。ZIP SHA-256 `936001c647571cbe876ffd3ffa8002ea263f137d0d411a2b9fda5b6c2a9e1ac2`；应用位于 `.buildcache/remaining-task-takeover-20261019/mobile-crashlytics-20261022/desktop-production-fixed/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`。
 - **验证记录**：102 项凭据／Host／打包相关测试及 Electron 两套类型检查通过。完整套件先执行 1,921 个入口：1,916 通过，2 个因 Python 3.9 缺少 tomllib 失败，3 个因未提供显式二进制路径跳过；改用 Python 3.13 重跑两个模块的 64 项全部通过，再指定已验证 Bun／bridge 补跑 6 项全部通过。去除重复项后 1,925 项均有通过证据；没有把初次全量命令写成退出码 0。通用包 smoke 因另一 development App 正在运行而保护性拒绝；没有据此宣称通用 smoke 通过，本次通过的是上述独立 production 凭据专项。最初沙箱全量测试被 localhost／Electron 权限拒绝，保留失败日志，随后在正确权限环境重跑。
 - **证据**：同目录 `desktop-credential-stability-fixed.json` 记录 18 个逐项结果；`desktop-credential-stability-fixed-r3.log`、`desktop-native-reuse-main.json`、`desktop-fixed-bundle-source.json` 和 `desktop-production-fixed-build.log` 保留测试、来源及签名记录。首次实际模型路由失败与调试连接／Broker 清理问题的原始日志未覆盖。此前 Broker 清理中断留下的独立合成 key 也通过其原测试配置删除，`interrupted-credential-probe-cleanup.json` 单独记录。本批未做真实付费模型请求、production 账号迁移、长期压力或跨机器 Gatekeeper 验收。WebRTC 继续跳过，Chat、Computer Use 和其他 session WIP 保留。
+
+
+## 2026-10-23 UTC：iOS Swift SIGTRAP 云端与符号化复核
+
+- 在 `8ac4cb7ea` 基线上，为 DEBUG 真机验收入口加入明确的 `swift-sigtrap` / `objc-exception` 选择及发送回执类型校验；保留项目、UUID、已有待发送报告、前次崩溃和自动采集关闭等保护。正常启动与 Release 不执行诊断。正式 SDK、采集开关和异常处理器未修改。
+- StoreDebug 2.4.1 (8721) 完整签名构建通过，匹配符号上传成功；iPhone 11 / iOS 18.6.2 保留数据更新安装。未附加调试器，仅实际触发一次 Swift trap；发送前保留原始 Mach 报告。第一次启动被锁屏拒绝，未执行进程或触发崩溃，恢复镜像路由后才实际运行。
+- 云端已确认精确 session `667f3a781dd34c4f8cef6d2735c1b3a3`，event `2278168563696168780`，FATAL / EXC_BREAKPOINT，源码触发帧 `CrashlyticsDeviceVerification.swift:58` 正确符号化；debug dylib dSYM UUID `100707A9-8923-3CC5-9B80-6AD8514AC681`。捕获 `04:57:33Z`、云端收到 `04:59:01Z`。上报入队回执没有被当成云端通过证据。
+- 恢复不带诊断环境的正常 App，进程 PID 12684 存活；provider-settings 文件逐字节相同、当前会话选择和既有 Firebase debug 偏好值未改变。该 debug 偏好在本轮前已存在，未为取日志而持久化新覆盖。原始文件与私有备份仅保留于本地证据目录。
+- 旧 SIGTRAP 的 Apple IPS 与旧 dSYM 匹配，原 SDK Mach handler 已运行；用户批准的原时间窗查询仍无该事件。由于原发送过程缺少完整传输证据，历史报告的丢失原因仍不能确定。本批关闭 Swift trap 当前链路与符号化验收，不能宣称已修复一个已证实的 Firebase SDK 缺陷。Firebase App ID 已注册正确，同一 App 的 NSException 及本次 Swift 事件均进入云端。
+- 本地证据：`mobile-crashlytics-20261022/sigtrap-followup-20261022/` 内的原始 Mach 报告、Apple IPS、云端精确事件、构建／签名／符号上传与 `acceptance-summary.json`。源码语法与 diff 检查通过。canonical 的其他 session 正持续修改 Electron／bridge 文件，发布前另取当前 26 文件快照，未复制或重置其工作。WebRTC、Chat、Computer Use 继续排除。

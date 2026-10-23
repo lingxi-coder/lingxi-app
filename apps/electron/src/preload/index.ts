@@ -1,4 +1,5 @@
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
+import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
@@ -208,6 +209,7 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  applicationIcon: ApplicationIconApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
@@ -321,6 +323,7 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
   localApps: {
     list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,
     open: id => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'open', id }),

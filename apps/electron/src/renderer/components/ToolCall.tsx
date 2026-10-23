@@ -42,6 +42,7 @@ import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
 import { MarkdownContent } from './MarkdownContent';
 import { ToolActivityIcon } from './ToolActivityIcon';
+import { ComputerApplicationIcon } from './ComputerApplicationIcon';
 import { ModUiParentSite } from './modUiAbovePrompt';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
@@ -128,7 +129,7 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
     >
       {permissionRequest
         ? <Icon name="hand" size={18} stroke={1.7} />
-        : <ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />}
+        : <ComputerApplicationIcon item={item} fallback={<ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />} />}
     </span>
   );
 }

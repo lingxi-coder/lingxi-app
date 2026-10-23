@@ -151,6 +151,7 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  applicationIcon: import('../../shared/applicationIcon').ApplicationIconApi;
   localApps?: LocalAppsApi;
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled?: ScheduledApi;

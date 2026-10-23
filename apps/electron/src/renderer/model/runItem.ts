@@ -14,7 +14,8 @@
  *  2. **A tool call carries the engine's derived view for Product's normal UI.**
  *     `view` and `result` are the wire DTOs the engine computed once
  *     (`tui-core/src/tool_display/`). Separate raw parsed payloads are retained
- *     only for Native UI render-site props; they never rebuild Product's cards.
+ *     for Native UI render-site props and the recorded computer-application
+ *     identity used by native icons; textual headers stay engine-derived.
  */
 
 import type { MessageImageDto, StructuredDiffDto, ToolHeaderDto, ToolResultDisplayDto, UiJsonValue } from '@lingxi/bridge-client';
@@ -38,7 +39,7 @@ export interface ToolRunItem {
   readonly result?: ToolResultDisplayDto;
   /** Raw parsed tool input retained for Native ToolUse render props. */
   readonly nativeInput?: UiJsonValue;
-  /** Raw parsed tool output retained for Native ToolUse/ToolResult render props. */
+  /** Raw parsed output for Native UI props and recorded computer-application icon identity. */
   readonly nativeOutput?: UiJsonValue;
   /** Persisted outer JSONL row UUID, resolved by assistant-block identity events. */
   readonly transcriptUuid?: string;

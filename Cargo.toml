@@ -34,52 +34,52 @@ repository = "https://github.com/lingxi/lingxi-code"
 
 [workspace.dependencies]
 lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "ff71b2ec1139bc67cc8719d78b1735aca967bbe8" }
-http-client = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
+http-client = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
 # Mobile Linux and desktop PTY use the same immutable SDK source.
 mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9" }
 mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9" }
 mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9" }
 
 # Runtime packages share one immutable upstream source.
-agent = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-branding = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-bridge = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-client = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-command-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-configuration-admin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-core = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-cost = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-harness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199", default-features = false }
-hooks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-llm-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-mcp = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-memory = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-migrations = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-msgqueue = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-orchestrator = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-permission = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-platform-android = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-platform-ios = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-platform-posix = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-platform-posix-minimal = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
+agent = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+branding = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+bridge = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+client = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+command-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+configuration-admin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+core = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+cost = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+harness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b", default-features = false }
+hooks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+llm-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+mcp = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+memory = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+migrations = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+msgqueue = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+orchestrator = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+permission = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+platform-android = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+platform-ios = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+platform-posix = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+platform-posix-minimal = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
 platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9" }
-platform-windows = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-plugin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-provider-config = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-secret = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-session = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-skill = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tasks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-telemetry = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-computer-use = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-git-mobile = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-shell = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-web = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-tool-workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
-workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "5d3e381dca6bf804be5f9d9b472af5cb8726d199" }
+platform-windows = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+plugin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+provider-config = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+secret = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+session = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+skill = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tasks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+telemetry = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-computer-use = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-git-mobile = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-shell = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-web = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+tool-workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
+workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "e6894f9554c8e7b5adedfe154c008821d487807b" }
 
 # Shared registry dependencies for the retained product packages.
 serde = { version = "1", features = ["derive"] }

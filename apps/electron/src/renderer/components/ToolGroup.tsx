@@ -5,6 +5,8 @@ import { toolGroupSummary } from './toolPresentation';
 import { Disclosure } from './Disclosure';
 import { ToolCall, toolIconName } from './ToolCall';
 import { ToolActivityIcon } from './ToolActivityIcon';
+import { ComputerApplicationIcon } from './ComputerApplicationIcon';
+import { groupComputerApplication } from './computerApplication';
 import { useT } from '../theme/ThemeContext';
 
 interface ToolGroupProps {
@@ -48,7 +50,7 @@ export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen, un
       label={`${summary}${failureSummary} · ${group.tools.length} tools`}
       buttonStyle={{ width: '100%', borderRadius: 6, background: 'var(--tool-group-background, transparent)', '--tool-hover-background': t.surfaceHover, maxWidth: '100%', minWidth: 0, minHeight: 28, fontSize: 13, fontWeight: 400, gap: 8, color: t.text3, '--tool-focus-color': t.text } as CSSProperties}
       summary={<>
-        <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ToolActivityIcon name={toolIconName(firstTool.view.verb, firstTool.tool, firstTool.view.icon)} /></span>
+        <span aria-hidden="true" style={{ display: 'inline-flex', flexShrink: 0 }}><ComputerApplicationIcon item={groupComputerApplication(group.tools)} fallback={<ToolActivityIcon name={toolIconName(firstTool.view.verb, firstTool.tool, firstTool.view.icon)} />} /></span>
         <span className="tool-group-summary-text" title={summary} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
         {failed > 0 && <span style={{ flexShrink: 0, color: t.danger }}>{failureSummary}</span>}
       </>}

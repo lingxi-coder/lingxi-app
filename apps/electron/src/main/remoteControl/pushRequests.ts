@@ -6,8 +6,8 @@
  * `HostNotifier` decides whether the desktop itself should be heard from (the
  * notification kinds the user enabled, a window out of focus or a system that
  * has been idle). {@link RemotePush} adds what only Remote Control knows: the
- * session has Remote Control on, nobody is looking at it on a viewer, and the
- * viewers already attached are left out.
+ * session has Remote Control on and nobody is looking at it on a viewer.
+ * A connected viewer in the background still needs the notification.
  */
 
 import type { Clock } from '@lingxi/bridge-client/remote';
@@ -77,8 +77,6 @@ export interface PushPresence {
   isEnabled(sessionId: string): boolean;
   /** How many viewers have this session open in the foreground. */
   foregroundViewers(sessionId: string): number;
-  /** The push installations of the viewers attached to this session. */
-  attachedInstallationIds(sessionId: string): string[];
 }
 
 export interface RemotePushDeps {
@@ -111,6 +109,8 @@ export class RemotePush {
     if (this.recent.size > MAX_RECENT) {
       for (const [other, at] of this.recent) if (now - at >= REPEAT_WINDOW_MS) this.recent.delete(other);
     }
-    void this.deps.requester.request(kind, sessionId, presence.attachedInstallationIds(sessionId));
+    // No viewer is in the foreground. Merely being attached does not mean a
+    // suspended phone can display an incoming request; it must receive push.
+    void this.deps.requester.request(kind, sessionId, []);
   }
 }

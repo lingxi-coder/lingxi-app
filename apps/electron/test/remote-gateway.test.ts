@@ -5,6 +5,7 @@ import { RemoteRpcError } from '@lingxi/bridge-client/remote';
 
 import { LIVE_BATCH_MS } from '../src/main/remoteControl/sessionAttachment.js';
 import { LIST_DEBOUNCE_MS } from '../src/main/remoteControl/sessionGateway.js';
+import { RemotePush } from '../src/main/remoteControl/pushRequests.js';
 import {
   FakeRuntime,
   LEASE_GRACE_MS,
@@ -521,4 +522,23 @@ test('push presence: which sessions are on, who looks, which installations are a
   assert.equal(f.gateway.isEnabled(SESSION_B), false);
   assert.deepEqual(f.gateway.attachedInstallationIds(SESSION_A), ['inst-phone']);
   assert.deepEqual(f.gateway.attachedInstallationIds(SESSION_B), []);
+});
+
+test('an attached phone moved to the background remains eligible for push', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  const phone = { viewer: viewer({ push_installation_id: 'inst-phone' }), channel: new RecordingChannel() };
+  await f.call('session.attach', { session_id: SESSION_A }, phone);
+  await f.call('session.presence', { session_id: SESSION_A, foreground: true }, phone);
+  const exclusions: string[][] = [];
+  const push = new RemotePush({
+    requester: { request: async (_kind, _session, exclude) => { exclusions.push([...exclude]); return true; } },
+    presence: f.gateway, active: () => true, clock: f.clock,
+  });
+  push.notify('question', SESSION_A);
+  assert.deepEqual(exclusions, [], 'an actively viewed session needs no push');
+  await f.call('session.presence', { session_id: SESSION_A, foreground: false }, phone);
+  assert.equal(f.gateway.attachedViewers(SESSION_A), 1, 'backgrounding does not close the connection');
+  push.notify('question', SESSION_A);
+  assert.deepEqual(exclusions, [[]], 'the background phone must not be excluded');
 });

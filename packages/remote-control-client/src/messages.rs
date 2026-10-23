@@ -474,7 +474,7 @@ pub struct SessionAttachParams {
 /// Answer to `session.attach`. `delta`: the viewer's state is still valid; records
 /// after `resume.after_seq` follow as `session.event`, and `pending` is the full
 /// pending set. `snapshot`: `session.snapshot` notifications follow.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SessionAttachResult {
     /// Resume from the viewer's cursor.
@@ -489,6 +489,32 @@ pub enum SessionAttachResult {
         /// The epoch.
         epoch: String,
     },
+}
+
+impl<'de> Deserialize<'de> for SessionAttachResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // Keep pending DTOs out of the internally tagged enum's Content buffer:
+        // question text uses JSON RawValue, just like snapshot message blocks.
+        #[derive(Deserialize)]
+        struct Fields {
+            mode: String,
+            epoch: String,
+            #[serde(default)]
+            pending: Value,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        match fields.mode.as_str() {
+            "delta" => Ok(Self::Delta {
+                epoch: fields.epoch,
+                pending: serde_json::from_value(fields.pending).map_err(D::Error::custom)?,
+            }),
+            "snapshot" => Ok(Self::Snapshot {
+                epoch: fields.epoch,
+            }),
+            mode => Err(D::Error::custom(format!("unknown attach mode: {mode}"))),
+        }
+    }
 }
 
 /// `session.snapshot` (host to viewer): `begin`, then `messages` pages, then

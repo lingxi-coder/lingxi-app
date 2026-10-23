@@ -129,11 +129,10 @@ test('a remote sink that throws changes nothing for the desktop', () => {
 function pushHarness() {
   const clock = newClock();
   const requests: Array<{ kind: RemotePushKind; sessionId: string; exclude: string[] }> = [];
-  const state = { enabled: new Set([SESSION]), foreground: 0, installations: ['inst-a', 'inst-b'], active: true };
+  const state = { enabled: new Set([SESSION]), foreground: 0, active: true };
   const presence: PushPresence = {
     isEnabled: (id) => state.enabled.has(id),
     foregroundViewers: () => state.foreground,
-    attachedInstallationIds: () => state.installations,
   };
   const push = new RemotePush({
     requester: { request: async (kind, sessionId, exclude) => { requests.push({ kind, sessionId, exclude: [...exclude] }); return true; } },
@@ -144,10 +143,10 @@ function pushHarness() {
   return { push, requests, state, clock };
 }
 
-test('a push is requested for an enabled session nobody is looking at, leaving out the attached installations', () => {
+test('a push is requested for all installations when nobody is looking at an enabled session', () => {
   const h = pushHarness();
   h.push.notify('permission', SESSION);
-  assert.deepEqual(h.requests, [{ kind: 'permission', sessionId: SESSION, exclude: ['inst-a', 'inst-b'] }]);
+  assert.deepEqual(h.requests, [{ kind: 'permission', sessionId: SESSION, exclude: [] }]);
 });
 
 test('no push when Remote Control is not running, the session is off, or a viewer has the session in the foreground', () => {

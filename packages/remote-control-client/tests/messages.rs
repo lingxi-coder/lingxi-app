@@ -38,6 +38,26 @@ fn snapshot_pages_decode_nonempty_message_blocks() {
 }
 
 #[test]
+fn delta_attach_decodes_a_pending_question_after_background_reconnect() {
+    let pending = json!({
+        "questions": [{ "request_id": 42, "questions": [{
+            "question": "Which marker?", "header": "Marker", "multi_select": false,
+            "options": [{ "label": "CHERRY", "description": "Choose CHERRY." }]
+        }] }]
+    });
+    let result = json!({ "mode": "delta", "epoch": "e", "pending": pending });
+    let decoded = serde_json::from_value::<SessionAttachResult>(result);
+    assert!(decoded.is_ok(), "{decoded:?}");
+    let SessionAttachResult::Delta { pending, .. } = decoded.unwrap() else {
+        panic!()
+    };
+    assert_eq!(pending.questions.len(), 1);
+    let end = json!({ "phase": "end", "session_id": "s", "cursor": { "epoch": "e", "seq": 42 },
+        "pending": pending, "turn": { "running": true, "turn_id": 1 } });
+    assert!(serde_json::from_value::<SessionSnapshotParams>(end).is_ok());
+}
+
+#[test]
 fn unknown_client_events_do_not_fail_the_record() {
     // A variant this client's pinned protocol does not know.
     let record: RemoteRecord = serde_json::from_value(json!({

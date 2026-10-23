@@ -3508,7 +3508,12 @@ mod tests {
         let u = usage();
         assert!(u.contains("--api-key-stdin"));
         assert!(!u.contains("ANTHROPIC_API_KEY"));
-        assert!(!u.contains("sk-"), "usage must not embed a key literal");
+        // Match a key-shaped token, not the substring in --ask-user-question-timeout.
+        assert!(
+            !u.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+                .any(|token| token.starts_with("sk-")),
+            "usage must not embed a key literal"
+        );
     }
 
     #[test]

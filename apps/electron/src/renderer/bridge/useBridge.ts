@@ -567,7 +567,21 @@ export function useBridge(): UseBridge {
     const bootstrapRevision = latestBootstrapRevisionRef.current;
     const requestKey = `${scope}\0${projectPath}`;
     const generation = beginProjectCatalogRequest(catalogRequestGenerations.current, requestKey);
-    const result = await host.listProjectSessions(projectPath, scope);
+    const updateCatalog = (catalog: ProjectSessionCatalogState): void => {
+      if (scope !== 'current') return;
+      // Settings and sidebar rows retain their requested directory key, even
+      // when the host resolves it to a canonical path. Recheck at React commit
+      // time so a queued result cannot overwrite a newer request or navigation.
+      setBootstrap((previous) => previous && latestBootstrapRevisionRef.current === bootstrapRevision
+        && isLatestProjectCatalogRequest(catalogRequestGenerations.current, requestKey, generation) ? {
+          ...previous,
+          projectCatalogs: { ...previous.projectCatalogs, [projectPath]: catalog },
+        } : previous);
+    };
+    const result = await host.listProjectSessions(projectPath, scope).catch((cause) => {
+      updateCatalog({ sessions: [], error: messageFrom(cause) });
+      throw cause;
+    });
     // A move, removal or other accepted host snapshot owns its complete
     // sidebar catalog. An older list must not merge disposed rows back in.
     if (scope === 'current' && latestBootstrapRevisionRef.current !== bootstrapRevision) return undefined;
@@ -576,12 +590,7 @@ export function useBridge(): UseBridge {
       sessions: result.sessions.map((session) => ({ ...session })),
       ...(result.error ? { error: result.error } : {}),
     };
-    if (scope === 'current') {
-      setBootstrap((previous) => previous && latestBootstrapRevisionRef.current === bootstrapRevision ? {
-        ...previous,
-        projectCatalogs: { ...previous.projectCatalogs, [result.projectPath]: catalog },
-      } : previous);
-    }
+    updateCatalog(catalog);
     return { ...catalog, projectPath: result.projectPath };
   }, [host]);
 

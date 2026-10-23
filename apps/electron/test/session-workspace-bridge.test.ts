@@ -548,6 +548,7 @@ function catalogNavigationHarness() {
       updateSessionWorkspace: () => mutation.promise, removeProject: () => mutation.promise,
     },
     shouldApplyBootstrapSnapshot, pruneRuntimeMaps, beginProjectCatalogRequest, isLatestProjectCatalogRequest, nextOperationId,
+    messageFrom: (cause: Error) => cause.message,
     latestBootstrapRevisionRef: { current: null }, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
     activeSessionIdRef: { current: 'chat-A' }, navigationOperationRef: { current: 0 },
     catalogRequestGenerations: { current: new Map() }, removedRuntimeIds: { current: new Set() },
@@ -573,6 +574,65 @@ function catalogNavigationHarness() {
     flushCatalogUpdates: () => { for (const update of queuedCatalogUpdates.splice(0)) bootstrap = update(bootstrap); },
   };
 }
+
+test('a rejected saved directory catalog settles and a canonical response updates its requested sidebar key', async () => {
+  const h = catalogNavigationHarness();
+  const denied = h.context.listProjectSessions('/A');
+  h.requests[0]!.response.reject(new Error('project is not in the project list'));
+  await assert.rejects(denied, /not in the project list/);
+  assert.equal(h.bootstrap().projectCatalogs['/A'].error, 'project is not in the project list');
+  assert.equal(h.bootstrap().projectCatalogs['/A'].sessions.length, 0);
+  const retry = h.context.listProjectSessions('/A');
+  h.requests[1]!.response.resolve({ projectPath: '/canonical-A', sessions: [{ uuid: 'restored-A' }] });
+  assert.equal((await retry).projectPath, '/canonical-A');
+  assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].uuid, 'restored-A');
+  assert.equal(h.bootstrap().projectCatalogs['/A'].error, undefined);
+  assert.equal(Object.hasOwn(h.bootstrap().projectCatalogs, '/canonical-A'), false);
+  assert.equal(h.bootstrap().projectCatalogs['/B'].sessions.length, 0);
+});
+
+test('expanded catalog errors do not replace the default sidebar catalog', async () => {
+  const h = catalogNavigationHarness();
+  const expanded = h.context.listProjectSessions('/A', 'all');
+  h.requests[0]!.response.reject(new Error('expanded catalog failed'));
+  await assert.rejects(expanded, /expanded catalog failed/);
+  assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].uuid, 'chat-A');
+  assert.equal(h.bootstrap().projectCatalogs['/A'].error, undefined);
+});
+
+test('queued Current catalog results and failures cannot overwrite a newer request for the same directory', async () => {
+  for (const fail of [false, true]) {
+    const h = catalogNavigationHarness();
+    h.deferCatalogUpdates();
+    const old = h.context.listProjectSessions('/A');
+    if (fail) {
+      h.requests[0]!.response.reject(new Error('old request failed'));
+      await assert.rejects(old, /old request failed/);
+    } else {
+      h.requests[0]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'old-A' }] });
+      await old;
+    }
+    const fresh = h.context.listProjectSessions('/A');
+    h.flushCatalogUpdates();
+    assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].uuid, 'chat-A');
+    assert.equal(h.bootstrap().projectCatalogs['/A'].error, undefined);
+    h.requests[1]!.response.resolve({ projectPath: '/A', sessions: [{ uuid: 'fresh-A' }] });
+    await fresh;
+    h.flushCatalogUpdates();
+    assert.equal(h.bootstrap().projectCatalogs['/A'].sessions[0].uuid, 'fresh-A');
+  }
+});
+
+test('an old catalog failure cannot re-add a directory after an authoritative bootstrap', async () => {
+  const h = catalogNavigationHarness();
+  const old = h.context.listProjectSessions('/A');
+  const authoritative = { revision: 2, settings: { projects: ['/B'] }, projectCatalogs: { '/B': { sessions: [] } } };
+  h.context.applyBootstrap(authoritative);
+  h.requests[0]!.response.reject(new Error('removed directory'));
+  await assert.rejects(old, /removed directory/);
+  assert.equal(h.bootstrap(), authoritative);
+  assert.equal(Object.hasOwn(h.bootstrap().projectCatalogs, '/A'), false);
+});
 
 for (const action of ['cd', 'remove-project']) {
   test(`an old Current response cannot re-add a catalog after an authoritative ${action} snapshot`, async () => {

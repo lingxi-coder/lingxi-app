@@ -18,7 +18,9 @@ export function parseBrowserCredential(value: unknown, provider: BrowserCredenti
   if (input.providerId !== provider) throw new Error('Unexpected sign-in provider');
   const result: BrowserCredential = { providerId: provider };
   for (const key of ['idToken', 'accessToken', 'nonce', 'pendingToken'] as const) {
-    if (input[key] !== undefined) {
+    // Firebase serializes absent optional OAuth fields (notably Google's
+    // pendingToken) as null. Only non-null values carry a credential.
+    if (input[key] !== undefined && input[key] !== null) {
       if (typeof input[key] !== 'string' || input[key].length > 32_768) throw new Error('Invalid sign-in response');
       result[key] = input[key];
     }

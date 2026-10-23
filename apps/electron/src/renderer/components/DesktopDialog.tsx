@@ -94,6 +94,7 @@ export const DesktopDialog = forwardRef<HTMLDivElement, DesktopDialogProps>(func
           if (event.key === 'Escape' && onEscape) {
             if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             event.preventDefault();
+            event.stopPropagation();
             onEscape();
             return;
           }

@@ -106,7 +106,9 @@ test('App exposes pending resume permission, question and computer approvals whi
 test('App suspends the picker and releases its background only while a loading target needs approval', () => {
   let backgroundActive: ts.Expression | undefined;
   const visit = (node: ts.Node): void => {
-    if (ts.isJsxOpeningElement(node) && node.tagName.getText(appSource) === 'SettingsBackground') {
+    // The first boundary owns the app shell; Settings has a separate boundary
+    // when a project dialog opens above it.
+    if (!backgroundActive && ts.isJsxOpeningElement(node) && node.tagName.getText(appSource) === 'SettingsBackground') {
       const attribute = node.attributes.properties.find(property => ts.isJsxAttribute(property)
         && property.name.getText(appSource) === 'active');
       if (attribute && ts.isJsxAttribute(attribute) && attribute.initializer && ts.isJsxExpression(attribute.initializer)) {
@@ -117,13 +119,17 @@ test('App suspends the picker and releases its background only while a loading t
   };
   visit(appSource); assert.ok(backgroundActive);
   const context: any = { sessionPicker: { id: 1 }, settingsRoute: null,
-    bridge: { sessionLoading: true, pendingPermission: null, pendingAskUserQuestion: null, pendingComputerAccess: null } };
+    bridge: { projectCreationOpen: false, sessionLoading: true, pendingPermission: null, pendingAskUserQuestion: null, pendingComputerAccess: null } };
   for (const request of ['pendingPermission', 'pendingAskUserQuestion', 'pendingComputerAccess']) {
     context.bridge[request] = { request_id: 7 };
     evaluate('globalThis.sessionPickerSuspended = ' + initializer(appSource, 'sessionPickerSuspended'), context);
     evaluate('globalThis.backgroundActive = ' + backgroundActive.getText(appSource), context);
     assert.equal(context.sessionPickerSuspended, true, request);
     assert.equal(context.backgroundActive, false, request);
+    context.bridge.projectCreationOpen = true;
+    evaluate('globalThis.backgroundActive = ' + backgroundActive.getText(appSource), context);
+    assert.equal(context.backgroundActive, true, 'a project dialog keeps the app shell inert');
+    context.bridge.projectCreationOpen = false;
     context.bridge[request] = null;
   }
   evaluate('globalThis.sessionPickerSuspended = ' + initializer(appSource, 'sessionPickerSuspended'), context);

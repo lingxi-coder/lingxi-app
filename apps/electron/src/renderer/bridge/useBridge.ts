@@ -117,6 +117,7 @@ import type {
   SessionPinInput,
   SessionRef,
   SessionRuntimeSummary,
+  WorkspaceMetadata,
   SystemSettingsPane,
   WorkspaceFilePreview,
 } from './lingxi.js';
@@ -201,6 +202,15 @@ export function useBridge(): UseBridge {
   }
   const hosted = host !== undefined;
   const [loading, setLoading] = useState(hosted);
+  const [projectCreationOpen, setProjectCreationOpen] = useState(false);
+  const pendingProjectCreation = useRef<{
+    promise: Promise<WorkspaceMetadata | null>;
+    resolve(workspace: WorkspaceMetadata | null): void;
+  } | null>(null);
+  useEffect(() => () => {
+    pendingProjectCreation.current?.resolve(null);
+    pendingProjectCreation.current = null;
+  }, []);
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
   // A new runtime can be used as soon as its bridge handshake completes. The
@@ -1506,29 +1516,61 @@ export function useBridge(): UseBridge {
     try { return await hostMicrophonePermissionReader(host)(); } catch { return 'unavailable'; }
   }, [host]);
 
-  const addProject = useCallback(async () => {
-    if (!host) return null;
+  const addProject = useCallback((): Promise<WorkspaceMetadata | null> => {
+    if (!host) return Promise.resolve(null);
+    if (sessionLoadingRef.current) return Promise.reject(new Error('Wait for the session to finish opening before navigating.'));
+    if (pendingProjectCreation.current) return pendingProjectCreation.current.promise;
+    let resolve!: (workspace: WorkspaceMetadata | null) => void;
+    const promise = new Promise<WorkspaceMetadata | null>((complete) => { resolve = complete; });
+    pendingProjectCreation.current = { promise, resolve };
+    setProjectCreationOpen(true);
+    return promise;
+  }, [host]);
+
+  const cancelProjectCreation = useCallback(() => {
+    pendingProjectCreation.current?.resolve(null);
+    pendingProjectCreation.current = null;
+    setProjectCreationOpen(false);
+  }, []);
+
+  const pickProjectFolder = useCallback(async () => {
+    if (!host || !pendingProjectCreation.current) throw new Error('Open Create project before choosing a folder.');
+    return host.pickProjectFolder();
+  }, [host]);
+
+  const confirmProjectCreation = useCallback(async (selectionId: string) => {
+    const request = pendingProjectCreation.current;
+    if (!host || !request) throw new Error('Open Create project before choosing a folder.');
     const operationId = beginNavigationOperation();
     try {
-      const workspace = await host.pickWorkspace();
-      if (workspace && isCurrentNavigationOperation(operationId)) {
-        const snapshot = await host.bootstrap();
-        if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+      const workspace = await host.createProject(selectionId);
+      if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) {
+        try {
+          const snapshot = await host.bootstrap();
+          if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+        } catch (cause) {
+          if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) {
+            setError(`Project created; refreshing the project list failed: ${messageFrom(cause)}`);
+          }
+        }
       }
-      return workspace;
+      if (pendingProjectCreation.current === request) {
+        pendingProjectCreation.current = null;
+        setProjectCreationOpen(false);
+        request.resolve(workspace);
+      }
     } catch (cause) {
       // The host persists the first project before starting its initial
       // session. Recover that saved project even if engine startup fails.
-      if (isCurrentNavigationOperation(operationId)) {
+      if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) {
         try {
           const snapshot = await host.bootstrap();
-          if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+          if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
         } catch { /* Preserve the original project/startup error. */ }
       }
-      if (isCurrentNavigationOperation(operationId)) return capture(cause);
-      return null;
+      throw cause;
     }
-  }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
+  }, [applyBootstrap, beginNavigationOperation, host, isCurrentNavigationOperation]);
 
   const activateProject = useCallback(async (path: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -2367,6 +2409,10 @@ export function useBridge(): UseBridge {
     audioCancel,
     audioFinishListen,
     addProject,
+    projectCreationOpen,
+    pickProjectFolder,
+    confirmProjectCreation,
+    cancelProjectCreation,
     activateProject,
     updateSessionWorkspace,
     removeProject,

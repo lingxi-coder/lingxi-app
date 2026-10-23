@@ -199,6 +199,10 @@ export interface UseBridge {
    */
   microphonePermission(): Promise<VoicePermissionStatus>;
   addProject(): Promise<WorkspaceMetadata | null>;
+  readonly projectCreationOpen: boolean;
+  pickProjectFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
+  confirmProjectCreation(selectionId: string): Promise<void>;
+  cancelProjectCreation(): void;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
   updateSidebarPreferences(preferences: import('../../shared/settings').SidebarPreferences): Promise<void>;

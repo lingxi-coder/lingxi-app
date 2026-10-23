@@ -1,4 +1,5 @@
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
+import type { ProjectFolderSelection } from '../../shared/projectCreation';
 import type { AccountApi } from '../../shared/account.js';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
@@ -175,6 +176,8 @@ export interface LingxiApi {
     sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
+  pickProjectFolder(): Promise<ProjectFolderSelection | null>;
+  createProject(selectionId: string): Promise<WorkspaceMetadata>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;

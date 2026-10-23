@@ -49,6 +49,7 @@ import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
 import { restoreSessionPickerFocus, SessionPicker } from './components/SessionPicker';
 import './components/SessionPicker.css';
 import { SESSION_PICKER_EVENT } from '../shared/sessionWorkspace';
+import { CreateProjectDialog } from './components/CreateProjectDialog';
 
 interface SessionPickerRequest {
   id: number;
@@ -78,7 +79,7 @@ export function App() {
   const bridge = useBridge();
   const localAppBridge = useRef(bridge);
   localAppBridge.current = bridge;
-  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading, []);
+  const sessionNavigationBlocked = useCallback(() => localAppBridge.current.sessionLoading || localAppBridge.current.projectCreationOpen, []);
   const openLocalAppChat = useCallback((app?: LocalAppEditRequest) => {
     if (sessionNavigationBlocked()) return;
     const nonce = ++localAppNavigation.current;
@@ -243,11 +244,11 @@ export function App() {
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
-  useEffect(() => { linkSurfacePending.current = Boolean(settingsRoute || sessionPicker || terminal.hasCommandReview); }, [settingsRoute, sessionPicker, terminal.hasCommandReview]);
+  useEffect(() => { linkSurfacePending.current = Boolean(settingsRoute || sessionPicker || bridge.projectCreationOpen || terminal.hasCommandReview); }, [settingsRoute, sessionPicker, bridge.projectCreationOpen, terminal.hasCommandReview]);
   const linkHandler = useRef<() => void>(() => {});
   linkHandler.current = () => {
     const api = window.lingxi?.deepLinks;
-    if (!api || !bridge.bootstrap || bridge.sessionLoading || settingsRoute || sessionPicker || terminal.hasCommandReview || linkSurfacePending.current || linkBusy.current) return;
+    if (!api || !bridge.bootstrap || bridge.sessionLoading || bridge.projectCreationOpen || settingsRoute || sessionPicker || terminal.hasCommandReview || linkSurfacePending.current || linkBusy.current) return;
     linkBusy.current = true;
     let delivered = false;
     void (async () => {
@@ -329,7 +330,7 @@ export function App() {
     const unsubscribe = window.lingxi?.deepLinks?.onAvailable(() => linkHandler.current());
     linkHandler.current();
     return unsubscribe;
-  }, [bridge.bootstrap, bridge.sessionLoading, settingsRoute, sessionPicker, terminal.hasCommandReview]);
+  }, [bridge.bootstrap, bridge.sessionLoading, bridge.projectCreationOpen, settingsRoute, sessionPicker, terminal.hasCommandReview]);
   useEffect(() => {
     if (!messageRequest || bridge.sessionLoading) return;
     if (bridge.activeSession?.sessionId !== messageRequest.sessionId || bridge.activeSession?.projectPath !== messageRequest.projectPath) {
@@ -366,7 +367,7 @@ export function App() {
         data-screen-label="LingXi Code Desktop Beta"
         style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border } as CSSProperties}
       >
-        <SettingsBackground active={settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
+        <SettingsBackground active={bridge.projectCreationOpen || settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
           <BetaSidebar
             bridge={bridge}
             activityView={activityView}
@@ -520,21 +521,25 @@ export function App() {
         </SettingsBackground>
 
         {settingsRoute && (
-          <SettingsScreen
-            bridge={bridge}
-            theme={theme}
-            onTheme={changeTheme}
-            linkRequest={settingsRoute.linkRequest}
-            initialPageId={settingsRoute.pageId}
-            initialProviderId={settingsRoute.providerId}
-            pendingModelReference={settingsRoute.pendingModelReference}
-            onClose={() => {
-              const restoreFocus = settingsRoute.restoreFocus;
-              setSettingsRoute(null);
-              window.requestAnimationFrame(() => restoreFocus?.());
-            }}
-          />
+          <SettingsBackground active={bridge.projectCreationOpen}>
+            <SettingsScreen
+              bridge={bridge}
+              theme={theme}
+              onTheme={changeTheme}
+              linkRequest={settingsRoute.linkRequest}
+              initialPageId={settingsRoute.pageId}
+              initialProviderId={settingsRoute.providerId}
+              pendingModelReference={settingsRoute.pendingModelReference}
+              onClose={() => {
+                const restoreFocus = settingsRoute.restoreFocus;
+                setSettingsRoute(null);
+                window.requestAnimationFrame(() => restoreFocus?.());
+              }}
+            />
+          </SettingsBackground>
         )}
+        {bridge.projectCreationOpen && <CreateProjectDialog onPickFolder={bridge.pickProjectFolder}
+          onCreate={bridge.confirmProjectCreation} onClose={bridge.cancelProjectCreation} />}
         {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} initialQuery={sessionPicker.query}
           suspended={sessionPickerSuspended}
           activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={bridge.openSession}

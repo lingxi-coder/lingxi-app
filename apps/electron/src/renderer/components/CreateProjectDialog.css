@@ -1,0 +1,74 @@
+.desktop-dialog-overlay:has(> .create-project-dialog) {
+  padding: 20px;
+  background: rgba(0, 0, 0, .14);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.desktop-dialog-panel.create-project-dialog {
+  position: relative;
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 40px);
+  padding: 24px 20px 20px;
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--dialog-window) 98.5%, var(--dialog-text));
+  box-shadow: 0 0 0 1px var(--dialog-border), 0 3px 8px rgba(0, 0, 0, .08);
+}
+.create-project-dialog .desktop-dialog-header { padding: 0 28px 14px 0; }
+.create-project-dialog .desktop-dialog-icon { display: none; }
+.create-project-dialog .desktop-dialog-header h2 { font-size: 20px; line-height: 24px; font-weight: 650; letter-spacing: -.025em; }
+.create-project-dialog .desktop-dialog-body { padding: 0; }
+.create-project-close, .create-project-remove {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dialog-text-2);
+  cursor: pointer;
+}
+.create-project-close { position: absolute; top: 16px; right: 16px; }
+.create-project-name {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  border: 1px solid var(--dialog-border-strong);
+  border-radius: 12px;
+  background: var(--dialog-window);
+  transition: border-color 120ms ease;
+}
+.create-project-name:focus-within { border-color: #4488ff; box-shadow: 0 0 0 .25px #4488ff; }
+.create-project-name-icon { width: 40px; height: 100%; display: grid; place-items: center; flex: 0 0 auto; border-right: 1px solid var(--dialog-border); }
+.create-project-name input { width: 100%; min-width: 0; height: 100%; padding: 0 9px; border: 0; border-radius: 0 12px 12px 0; outline: none; background: transparent; color: var(--dialog-text); font: inherit; font-size: 14px; }
+.create-project-name input::placeholder { color: var(--dialog-text-3); opacity: 1; }
+.create-project-sources-heading { margin-top: 12px; color: var(--dialog-text); font-size: 14px; font-weight: 500; line-height: 20px; }
+.create-project-sources { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 104px; margin-top: 8px; padding: 16px 18px; border: 1px solid var(--dialog-border); border-radius: 11px; background: var(--dialog-window); }
+.create-project-source-location { display: flex; align-items: center; gap: 3px; color: var(--dialog-text-3); font-size: 14px; line-height: 20px; }
+.create-project-location-select { position: relative; display: inline-flex; align-items: center; }
+.create-project-location-select select { appearance: none; max-width: 100%; padding: 0 20px 0 0; border: 0; background: transparent; color: var(--dialog-text); font: inherit; cursor: pointer; }
+.create-project-location-select > svg { position: absolute; right: 0; pointer-events: none; color: var(--dialog-text); }
+.create-project-add-folder { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 25px; padding: 2px 11px; border: 0; border-radius: 100px; background: color-mix(in srgb, var(--dialog-text) 4.5%, var(--dialog-window)); color: var(--dialog-text); font: inherit; font-size: 14px; cursor: pointer; }
+.create-project-selected-folder { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; color: var(--dialog-text); }
+.create-project-folder-copy { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.create-project-folder-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 550; }
+.create-project-folder-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dialog-text-3); font-size: 11px; }
+.create-project-actions { display: flex; align-items: center; justify-content: flex-end; gap: 22px; margin-top: 32px; }
+.create-project-actions button { min-height: 32px; border: 0; font: inherit; font-size: 14px; cursor: pointer; }
+.create-project-cancel { padding: 4px 7px; border-radius: 8px; background: transparent; color: var(--dialog-text-3); }
+.create-project-submit { min-width: 127px; padding: 5px 17px; border-radius: 10px; background: var(--dialog-text); color: var(--dialog-window); }
+.create-project-dialog button:disabled { cursor: default; }
+.create-project-dialog button:disabled:not(.create-project-submit) { opacity: .45; }
+.create-project-submit:disabled { opacity: 1; }
+.create-project-dialog button:focus-visible, .create-project-location-select select:focus-visible { outline: 2px solid var(--dialog-accent); outline-offset: 3px; }
+.create-project-dialog button:not(:disabled):hover { filter: brightness(.92); }
+.create-project-error { margin: 12px 0 0; color: var(--dialog-danger); font-size: 12px; line-height: 1.5; }
+@media (max-width: 400px) {
+  .desktop-dialog-panel.create-project-dialog { padding: 22px 16px 18px; }
+  .create-project-source-location { flex-wrap: wrap; justify-content: center; }
+  .create-project-actions { gap: 12px; margin-top: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .create-project-dialog, .create-project-dialog .create-project-name { animation: none; transition: none; }
+}

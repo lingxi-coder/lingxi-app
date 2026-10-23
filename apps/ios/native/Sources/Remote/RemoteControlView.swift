@@ -238,6 +238,9 @@ private struct RemoteSessionView: View {
                 }.font(.caption).padding(10)
             }
         }
+        // The reused chat draws its background beyond the safe area. Keep its
+        // scrolling transcript inside this navigation destination's bounds.
+        .clipped()
         .navigationTitle(title)
         .task { await source.start() }
         .onDisappear { Task { await source.stop() } }

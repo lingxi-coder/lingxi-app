@@ -19,7 +19,7 @@
 | WebRTC 产品接入与 Remote | 独立 transport/media/FFI 与 localhost TURN 已验证；生产产品没有接入 | 在媒体边界验证后接入现有 host/control-plane；认证、设备与权限仍归项目自有服务，不另造执行所有者 |
 | WebRTC 其他媒体边界 | 限制性 NAT、TCP/TLS、手机互通、长期刷新、热状态与能耗尚无完整证据 | 逐项实施和验证，区分共享测试与真实设备结果 |
 | 版本化模型目录四端刷新 | 四端实现与启动缓存验收完成；本页最新记录补齐 Android 实体手机和 Flare 签名 iPhone 的首次获取、重启及配置保留验证 | 保留发行渠道、逐模型推理及其他平台验收边界，不把目录刷新通过扩大为全部运行时通过 |
-| iOS 真机界面与 Side Chat | 源码与模拟器回归已存在，旧 session 的真机检查因镜像/锁屏未完成 | 用匹配绑定和库的当前签名 App 验证键盘、独立草稿、隐藏重开与模型设置 |
+| iOS 旧会话恢复与 Side Chat | 2026-10-22 已用 `a5b3dfac5` 签名包通过旧会话链接／普通重启、硬件键盘输入、独立草稿、隐藏重开与模型隔离 | 本项受测包已通过；后续 main 新运行时、屏幕键盘触控与发行包不继承此结果 |
 | 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
 | 移动 Crashlytics | Android JVM 测试云端入库已有记录；iOS 真机上报及 NDK 云端符号化未完成 | 准备匹配产物和隔离测试；云端上传遵守既有授权范围，不对正在使用的会话故意触发崩溃 |
 | Desktop production 凭据稳定性 | 旧任务等待 production 通道保存凭据，未完成约定的 15 次刷新、3 次启动 | 先确认当前签名通道及凭据状态；不跨通道复制密钥，不记录明文凭据 |
@@ -130,3 +130,13 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - 当前证据集中于 `.buildcache/remaining-task-takeover-20261019/mobile-main-acceptance-811473f9a/`；原始修复备份、首次失败、真实数据夹具和 7 项回归位于相邻 `mobile-main-acceptance-74a6c9744/`。各轮已签名 App、匹配 dSYM、APK 与数据原件均保留；仅退休已完成、无占用的本任务可重建中间产物。WebRTC 继续跳过；Chat、Computer Use 和其他 session WIP 不纳入。两个修复提交随本次进度报告一起整合到 main；最终远端提交以交付回执为准。
 
 - 发布整合：按用户明确要求接入最新 main `dff63c360`（包含 Local Apps、消息间距及 iOS FFI 生成修复），无合并冲突；相对 main 最终只新增上述 3 个 iOS 文件和本报告。合并候选 `553b3fed2` 上重新编译并执行 7 项 Darwin XCTest，全部通过；725 个客户端源码和 3 份协议镜像检查通过，差异空白检查通过。没有将之前签名包记为该合并候选已重新打包／真机通过，iOS 最终 GUI 和额外 Android instrumentation 仍按上述边界待验收。
+
+
+## 2026-10-22：旧会话恢复与 Side Chat 真机验收
+
+- 已恢复 iPhone 11 / iOS 18.6.2 的镜像连接，用现有 Flare 签名 `a5b3dfac54b99e7c5fe5be826ba6d73a00823cf4` App 完成生产入口验证，没有启用 UI-test fixture、修改凭据或发送新的模型请求。本批无新增源码修复，也无旧版兼容层；原修复已在 `7c9fe7f7c` 进入 main。
+- **旧会话恢复通过**：公开链接打开原会话后，v2 inbox 激活序号由 4 升为 5；随后普通重启、不再传入链接，仍恢复同一会话，序号升为 6。两个阶段均确认当前 `/private/var/...` 目录键、18 个原 catalog 文件哈希不变、完整历史字节前缀保留、provider-settings 字节不变、1327 模型缓存校验通过及进程存活。镜像实际显示原始鹈鹕动画对话，无新的会话不可用或 admission 错误；其中历史 `[Request interrupted by user]` 保留，不作为当前失败。
+- **Side Chat 真机交互通过**：从上述真实主会话打开旁聊，用镜像硬件键盘输入 `2026102201`；隐藏后主会话草稿仍为空，重开旁聊保留输入。创建第二条旁聊，其草稿初始为空，输入 `2026102202` 后经真实 Side 1 / Side 2 列表切回第一条，原草稿保持 `2026102201`。第一条旁聊选择 DeepSeek V4 Pro 后草稿仍保留，隐藏旁聊后主会话仍为 Flash。操作后再次从真机读取 provider-settings，与测试前字节完全一致。两条测试草稿均未发送；本次不把镜像硬件键盘测试扩大为手机屏幕键盘触控验收。
+- 镜像输入曾出现 `noWindowsAvailable`、短暂暂停和重连。一次自动审批因工具报告暂停而拒绝继续按键；随后先只读确认 Mirroir Connected 和 CoreDevice 无线显示仍可用，才恢复正常交互，没有绕过锁屏或降低系统保护。测试最后镜像再次重连，未完成测试旁聊清理；这不撤销此前已观察到的草稿隔离、隐藏重开和模型隔离结果。
+- 原始设备回执：`.buildcache/remaining-task-takeover-20261019/mobile-main-acceptance-811473f9a/ios-device-receipt-connected-20261022.json`；两阶段文件、配置和进程证据位于 `ios-explicit-old-session-realpath-connected-20261022/`、`ios-restart-old-session-realpath-connected-20261022/`。GUI 观察汇总为同目录 `sidechat-physical-receipt-20261022.json`，原始截图由本会话 CUA 工具记录保存。
+- 整合时接入 main `1418b97a4`。会话目录 helper、EngineConversationSource、SideChatSheet 和 ChatView 与受测 `a5b3dfac5` 源码字节相同；后续 main 的 Harness pin、时间线间距及其他功能不属于本次签名包，不能据此声称最新 main 全包真机验收完成。WebRTC 继续跳过；Android 额外 instrumentation、其他平台/发行项及其他 session WIP 不纳入本阶段。

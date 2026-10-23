@@ -999,9 +999,10 @@ export function assertCustomProviderTurn(events) {
 }
 
 async function assertCustomProviderRequest(page, probe, sessionId) {
+  const previousRequestCount = probe.requests.length;
   await evaluate(page, `window.lingxi.command(${JSON.stringify(sessionId)}, ${JSON.stringify({ type: 'set_model', model: `${probe.providerId}/smoke-model` })})`);
   await evaluate(page, `window.lingxi.sendPrompt(${JSON.stringify(sessionId)}, 'Reply briefly, without calling tools.')`);
-  await waitFor(() => probe.requests.length > 0, { label: 'custom provider authenticated request' });
+  await waitFor(() => probe.requests.length > previousRequestCount, { label: 'custom provider authenticated request' });
   assert.ok(probe.requests.every((request) => request.authenticated), 'custom model must resolve its own stored key');
   assert.equal(JSON.parse(probe.requests[0].body).model, 'smoke-model');
   await waitFor(() => evaluate(page, `window.__lingxiSmoke.events.some(e => e.type === 'turn_ended')`), { label: 'custom provider turn completion' });
@@ -1072,6 +1073,117 @@ export async function unregisterCredentialBrokerForColdStart(channel, run = spaw
     assert.equal(state.status, 0, 'launchctl failed while waiting for broker removal');
     if (Date.now() >= deadline) throw new Error('credential broker remained registered after bootout');
     await delay(100);
+  }
+}
+
+/** Isolated production Keychain check; never reads or copies a user's provider key. */
+export async function runPackagedCredentialStability(appPath) {
+  assert.equal(process.platform, 'darwin');
+  appPath = realpathSync(appPath);
+  const rendererUrl = pathToFileURL(join(appPath, 'Contents', 'Resources', 'app.asar', 'out', 'renderer', 'index.html')).href;
+  const manifest = JSON.parse(readFileSync(join(appPath, 'Contents', 'Resources', 'credential-broker', 'broker-manifest.json'), 'utf8'));
+  assert.equal(manifest.channel, 'production', 'production signed package required');
+  assert.equal(packagedAppBundleId(appPath), 'com.lingxi.code');
+  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appPath], { stdio: 'pipe' });
+  // A running development app owns a different Broker and Keychain namespace.
+  // Fail closed for any production or unidentifiable instance.
+  for (const command of runningAppCommands()) {
+    const match = command.match(/^\d+\s+(.+?\.app)\/Contents\/MacOS\/LingXi Code(?:\s|$)/);
+    assert.ok(match, 'unidentifiable running Desktop instance');
+    const other = JSON.parse(readFileSync(join(match[1], 'Contents', 'Resources', 'credential-broker', 'broker-manifest.json'), 'utf8'));
+    assert.equal(other.channel, 'development', 'another production Desktop instance is running');
+    assert.equal(packagedAppBundleId(match[1]), 'com.lingxi.code.development');
+  }
+  const tempRoot = mkdtempSync(join('/tmp', 'lingxi-credential-stability-'));
+  log(`credential stability evidence: ${tempRoot}`);
+  const home = join(tempRoot, 'home'), temporary = join(tempRoot, 'tmp');
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  mkdirSync(temporary, { recursive: true, mode: 0o700 });
+  const runtime = runtimePathsForHome(home);
+  writeJson(runtime.settingsPath, createPackagedSettings({ workspace: createAdversarialWorkspace(tempRoot) }));
+  const env = sanitizePackagedAppEnvironment(process.env, {
+    HOME: home, CFFIXED_USER_HOME: home, TMPDIR: temporary, LINGXI_CONFIG_DIR: join(home, '.lingxi'),
+  });
+  const port = await reserveLoopbackPort();
+  const probe = await customProviderProbe();
+  const checks = [];
+  let child, browser, page, output;
+  const stopOwnedBroker = async () => {
+    const target = `gui/${process.getuid()}/com.lingxi.code.credential-broker`;
+    const state = spawnSync('/bin/launchctl', ['print', target], { encoding: 'utf8', timeout: 10_000 });
+    if (state.status === 113) return;
+    assert.equal(state.status, 0, 'cannot inspect production Broker ownership');
+    assert.ok(state.stdout.includes(join(home, 'Library', 'Application Support', 'LingXi',
+      'CredentialBroker', 'production', 'LingXiCredentialBroker.app', 'Contents', 'MacOS', 'LingXiCredentialBroker')),
+    'refusing to stop a Broker outside this isolated test');
+    await unregisterCredentialBrokerForColdStart('production');
+  };
+  const close = async () => {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      // Chromium may close the CDP socket before acknowledging a normal quit.
+      try { await browser.send('Browser.close'); } catch {}
+      await waitFor(() => child.exitCode !== null || child.signalCode !== null, { label: 'credential stability normal exit' });
+      assert.equal(child.exitCode, 0, 'Desktop must exit normally');
+    }
+    await page?.close(); await browser?.close();
+    child = browser = page = null;
+  };
+  try {
+    for (let launch = 1; launch <= 3; launch++) {
+      ({ child, output } = spawnPackagedApp(appPath, env, port, runtime.userDataDir));
+      ({ browser, page } = await connectToDebugger(port, rendererUrl));
+      await page.send('Page.enable');
+      await page.send('Runtime.enable');
+      await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'production credential bootstrap' });
+      let sessionId = await prepareCustomProvider(page, probe, launch > 1);
+      await assertCustomProviderRequest(page, probe, sessionId);
+      checks.push({ launch, type: 'launch', credentialConfigured: true, authenticatedRequest: true });
+      for (let refresh = 1; refresh <= 5; refresh++) {
+        const previousLoader = (await page.send('Page.getFrameTree')).frameTree.frame.loaderId;
+        await page.send('Page.reload', { ignoreCache: true });
+        await waitFor(async () => {
+          const frame = (await page.send('Page.getFrameTree')).frameTree.frame;
+          return frame.loaderId && frame.loaderId !== previousLoader && frame.url.startsWith('file://');
+        },
+          { label: 'credential refresh main-frame navigation' });
+        await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'production credential refresh' });
+        sessionId = await prepareCustomProvider(page, probe, true);
+        await assertCustomProviderRequest(page, probe, sessionId);
+        checks.push({ launch, refresh, type: 'refresh', credentialConfigured: true, authenticatedRequest: true });
+      }
+      if (launch === 3) {
+        await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(probe.providerId)})`);
+        const cleared = await evaluate(page, `window.lingxi.providerCredentials(${JSON.stringify(probe.providerId)})`);
+        assert.equal(cleared.find(entry => entry.providerId === probe.providerId)?.configured, false);
+      }
+      await close();
+      await stopOwnedBroker();
+      await assertRuntimeCleanup(tempRoot, runtime.bridgeRuntimeDir);
+    }
+    assert.ok(probe.requests.length >= checks.length, 'every step requires a fresh authenticated request');
+    assert.ok(probe.requests.every(request => request.authenticated));
+    return { result: 'PASS', channel: 'production', appPath, tempRoot, checks, launches: 3, refreshes: 15,
+      requests: probe.requests.length, testCredentialDeleted: true, realProviderCredentialsCopied: false };
+  } finally {
+    writeFileSync(join(tempRoot, 'request-checks.json'), JSON.stringify({
+      requests: probe.requests.map(request => ({ authenticated: request.authenticated })), checks,
+    }, null, 2), { mode: 0o600 });
+    if (page) {
+      try {
+        const events = await evaluate(page, `window.__lingxiSmoke?.events.filter(e =>
+          ['error', 'model_changed', 'provider_credential_status', 'settings_snapshot'].includes(e.type)).map(e =>
+          e.type === 'settings_snapshot' ? { type: e.type, testProfile: JSON.parse(e.effective_json).providers?.[${JSON.stringify(probe.providerId)}] } : e)`);
+        writeFileSync(join(tempRoot, 'credential-events.json'), JSON.stringify(events, null, 2), { mode: 0o600 });
+      } catch {}
+    }
+    if (page) {
+      try { await evaluate(page, `window.lingxi.clearProviderCredential(${JSON.stringify(probe.providerId)})`); } catch {}
+    }
+    try { await close(); } catch {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    }
+    if (output) writeFileSync(join(tempRoot, 'last-process.log'), output.stdout + output.stderr, { mode: 0o600 });
+    try { await stopOwnedBroker(); } finally { await probe.close(); }
   }
 }
 

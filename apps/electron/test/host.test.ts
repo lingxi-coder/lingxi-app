@@ -1064,19 +1064,25 @@ test('custom provider credentials use the current runtime configuration and rema
   const settings = {
     getWorkspace: () => '/workspace',
     getTrust: () => ({ trusted: true, fingerprint: 'fingerprint' }),
-    getPublic: () => ({ version: 1, activeSession: { sessionId: 'custom-session' }, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
+    getPublic: () => ({ version: 1, activeSession: { sessionId: 'custom-session', projectPath: '/workspace' }, activeProject: '/workspace', projects: ['/workspace'], pinnedSessions: [] }),
   };
   const operations: string[] = [];
   const runtime = {
     connectionState: { status: 'connected' as const },
     customProviderIds: ['my-provider'],
   };
+  let activeWork = false;
   const bridge = {
     get: () => runtime,
     registerIpc: () => undefined,
     registerWindow: () => undefined,
     runtimeSummaries: [],
-    hasActiveWork: () => false,
+    hasActiveWork: () => activeWork,
+    restart: async (ref: unknown, beforeRestart: () => void) => {
+      assert.deepEqual(ref, { sessionId: 'custom-session', projectPath: '/workspace' });
+      beforeRestart();
+      operations.push('runtime:reload:custom-session');
+    },
     invalidateLaunchConfigCache: () => undefined,
     refreshCachedProviderCredential: async (providerId: string, credential: string) => {
       assert.equal(credential, 'sk-replacement-secret');
@@ -1129,7 +1135,12 @@ test('custom provider credentials use the current runtime configuration and rema
   assert.ok(clearCredential);
   const stored = await setCredential!({ sender, senderFrame: frame }, 'my-provider', 'sk-replacement-secret') as Record<string, unknown>;
   assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
-  assert.deepEqual(operations, ['broker:set:my-provider', 'runtime:set:my-provider']);
+  assert.deepEqual(operations, ['broker:set:my-provider', 'runtime:set:my-provider', 'runtime:reload:custom-session']);
+
+  activeWork = true;
+  await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'my-provider', 'secret'), /cancel the active turn/);
+  assert.equal(operations.length, 3, 'active work must prevent persistence and runtime replacement');
+  activeWork = false;
 
   await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'unknown', 'secret'), /unsupported provider/);
   runtime.customProviderIds = [];
@@ -1139,6 +1150,7 @@ test('custom provider credentials use the current runtime configuration and rema
   assert.deepEqual(operations, [
     'broker:set:my-provider',
     'runtime:set:my-provider',
+    'runtime:reload:custom-session',
     'runtime:delete:my-provider',
     'broker:delete:my-provider',
   ]);

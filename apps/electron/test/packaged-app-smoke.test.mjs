@@ -12,6 +12,7 @@ import {
   isExpectedBootstrapPromptPlaceholder,
   isSafeProviderCredentialSnapshot,
   runtimePathsForHome,
+  runPackagedCredentialStability,
   sanitizePackagedAppEnvironment,
   waitForRendererCommit,
   workspaceTrustFingerprint,
@@ -48,6 +49,14 @@ test('packaged debugger rejects a document that never commits the packaged rende
   await assert.rejects(waitForRendererCommit(page, 'file:///packaged/index.html', { timeoutMs: 0 }),
     /committed packaged renderer document did not become ready/);
 });
+test('credential stability cannot substitute a development package for production',
+  { skip: process.platform !== 'darwin' }, async () => {
+    const app = temporaryDirectory();
+    const broker = join(app, 'Contents', 'Resources', 'credential-broker');
+    mkdirSync(broker, { recursive: true });
+    writeFileSync(join(broker, 'broker-manifest.json'), JSON.stringify({ channel: 'development' }));
+    await assert.rejects(runPackagedCredentialStability(app), /production signed package required/);
+  });
 
 test('custom provider smoke requires a successful answer, not merely any terminal event', () => {
   const answer = { type: 'text_delta', text: 'Custom provider verified.' };

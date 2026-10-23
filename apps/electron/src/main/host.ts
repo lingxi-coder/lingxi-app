@@ -1564,6 +1564,10 @@ export class HostController {
     this.invalidateCredentialBrokerStatus();
     if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
     else this.brokerCredentialPreviews.delete(providerId);
+    // Settings can contain a newly saved custom profile before this engine's
+    // provider registry does. Reassemble the owned session with the saved
+    // configuration, retaining the existing session and active-work guards.
+    if (!providerById(providerId)) await this.restartIfConfigured();
     return {
       providerId,
       configured: true,

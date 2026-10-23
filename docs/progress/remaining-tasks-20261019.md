@@ -22,7 +22,7 @@
 | iOS 旧会话恢复与 Side Chat | 2026-10-22 已重新构建最新 main `406879ed2`、Harness `5a2de5b1` 的签名包并通过旧会话链接／普通重启、硬件键盘、独立草稿、隐藏重开、模型隔离及结束生命周期 | 本批当前 main 签名真机验收完成；后续源码、屏幕键盘触控与发行渠道不继承本结果 |
 | 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
 | 移动 Crashlytics | 2026-10-22 iOS 真机未捕获 NSException 云端入库并解析到 Swift 源码行；Android NDK 测试库云端入库并解析到 C 源码行 | 本批接入链路通过；首次 Swift SIGTRAP 对照未观察到云端事件，单独保留未通过记录，不扩大为所有原生信号／Rust／第三方库覆盖 |
-| Desktop production 凭据稳定性 | 旧任务等待 production 通道保存凭据，未完成约定的 15 次刷新、3 次启动 | 先确认当前签名通道及凭据状态；不跨通道复制密钥，不记录明文凭据 |
+| Desktop production 凭据稳定性 | 2026-10-22 Flare production 签名包完成 3 次正常启动、15 次页面刷新、18 次真实 Broker 取钥及 localhost 鉴权请求；测试密钥删除、隔离进程清理通过 | 已关闭本批稳定性项；不扩大为真实云端 provider 质量、长期运行或跨机器 Keychain 验收 |
 | 其他验收边界 | macOS 公证/跨机器 Gatekeeper、长期稳定性等没有因 main 合并自动完成 | 只在对应环境与实际操作完成后关闭 |
 
 Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 503 未配置”报告已被后续 Firebase 部署替代；本轮实际读取当前市场 `/api/v1/health` 与 `/api/v1/capabilities`，均为 JSON / HTTP 200，可关闭那条旧阻塞。模型公共 API 实际返回 46 个提供商、1327 个模型，未登录管理接口返回 401；这证明后台可用，不代表四端启动刷新已经实现。生产服务变更和证书发布须保留具体可审内容与相应授权。
@@ -160,4 +160,14 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - **iOS 真机通过**：Flare StoreDebug 2.4.1 / 8721 签名构建、dSYM 上传及保留数据安装通过。iPhone 11 / iOS 18.6.2 的未捕获 `CrashlyticsDeviceVerification` NSException 云端入库，问题 `925eb6051ce7dd7c5069d43d8d07482d`；完整事件名中的 SDK session `152959a7ac6c491e97551c2dd841af8e` 与发送前原始捕获目录一致。云端解析到 `CrashlyticsDeviceVerification.swift:51`，匹配 debug dylib dSYM `0E02F537-EB9C-3B90-B76E-97F121A3E638`。SDK 在等待 Debug 采集同意时延迟写自定义字段，本次采用精确 SDK session ID 关联，不把本地 UUID 误写为云端已有字段。
 - **保留失败与边界**：首次 Swift SIGTRAP 有本地捕获／一次性发送回执，但未观察到云端事件；没有把它改写为通过。后续仅增加一次不同异常类型的有界对照，未大规模重采。测试库符号化不代表每个生产 Rust／第三方堆栈均已验证，也未做新的 Release 发行验收。
 - **恢复与保护**：两端原 provider 配置逐字节一致。Android 主 App 已正常重新打开；iOS 已无诊断环境正常重启，原会话选择仍在、进程存活。签名、构建日志、原始 SDK 捕获文件、云端测试事件、匹配符号和数据备份保留在 `.buildcache/remaining-task-takeover-20261019/mobile-crashlytics-20261022/`。WebRTC 继续跳过，Chat、Computer Use 与其他 session 修改不纳入。
-- Desktop production 凭据稳定性仍在本轮后续执行；不会将 development 通道的结果代替 production 验收。
+- Desktop production 凭据稳定性结果见下节；没有将 development 通道的结果代替 production 验收。
+
+
+## 2026-10-22：Desktop production 凭据稳定性与自定义 provider 修复
+
+- **根因与修复**：签名 production 包中，新建自定义 provider 后 settings 已更新、Broker 也已安全保存凭据，但当前引擎仍持有启动时的 provider 注册表。首次切换到新增模型会落入原默认路由并报 Authentication failed，localhost 根本没有收到请求。保存自定义 provider 凭据后，现在通过已有管理器重新装配当前拥有的会话；保留会话身份、活动任务／待处理交互保护，以及并发切换和恢复的身份校验。内置 provider 的现有路径不变，没有旧版本兼容层。先复现失败并记录，Host 回归在修复前因缺少重载操作失败、修复后通过。
+- **当前 production 包验收通过**：基于 main `671036149` 加本节修复，Flare Team `AZ4AX7J833`、Bundle ID `com.lingxi.code` 完成签名与静态验收。隔离 HOME 和配置，仅创建随机测试 profile／测试 key，通过真实 renderer IPC、生产 Credential Broker、Keychain 及实际 bridge-server 执行：3 次正常启动、15 次真实页面刷新、18 次鉴权 localhost 模型请求全部成功，回答和 turn 结果均核对；renderer 状态与 diagnostics 不泄漏测试 key，最后删除测试 key、关闭本次 App 并注销本次 Broker，确认进程和 runtime 产物清理。没有读取／复制用户真实 provider key，也未停止另一 session 正在使用的 development App。
+- **测试工具与构建**：新增 `node apps/electron/scripts/verify-credential-stability.mjs <production-signed-app> <new-receipt.json>`，拒绝 development 包和并行 production App；附 development 通道拒绝回归。复用 main 的已提交主文档／loader 屏障，保证 CDP 不误绑初始空页。App 正常退出后只注销路径确属测试 HOME 的 launchd Broker，不把设计上的常驻服务误判为内存泄漏。Flare wrapper 现在尊重已显式指定、可执行的 `LINGXI_BRIDGE_SERVER_BIN`，实际复制前仍执行原有架构、可移植性、签名与静态检查，避免编译一个打包根本不用的第二份二进制。
+- **产物来源**：原生 bridge 复用另一批已签名包中从 `6ace0aaa4` 构建的产物，逐项核对本批 `671036149` 的全部 Rust／Cargo 输入一致；没有将旧 `1a2950901` 二进制冒充最新 main。当前包 asar 的 main/preload/renderer 文件与本批构建输出哈希一致。ZIP SHA-256 `936001c647571cbe876ffd3ffa8002ea263f137d0d411a2b9fda5b6c2a9e1ac2`；应用位于 `.buildcache/remaining-task-takeover-20261019/mobile-crashlytics-20261022/desktop-production-fixed/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`。
+- **验证记录**：102 项凭据／Host／打包相关测试及 Electron 两套类型检查通过。完整套件先执行 1,921 个入口：1,916 通过，2 个因 Python 3.9 缺少 tomllib 失败，3 个因未提供显式二进制路径跳过；改用 Python 3.13 重跑两个模块的 64 项全部通过，再指定已验证 Bun／bridge 补跑 6 项全部通过。去除重复项后 1,925 项均有通过证据；没有把初次全量命令写成退出码 0。通用包 smoke 因另一 development App 正在运行而保护性拒绝；没有据此宣称通用 smoke 通过，本次通过的是上述独立 production 凭据专项。最初沙箱全量测试被 localhost／Electron 权限拒绝，保留失败日志，随后在正确权限环境重跑。
+- **证据**：同目录 `desktop-credential-stability-fixed.json` 记录 18 个逐项结果；`desktop-credential-stability-fixed-r3.log`、`desktop-native-reuse-main.json`、`desktop-fixed-bundle-source.json` 和 `desktop-production-fixed-build.log` 保留测试、来源及签名记录。首次实际模型路由失败与调试连接／Broker 清理问题的原始日志未覆盖。此前 Broker 清理中断留下的独立合成 key 也通过其原测试配置删除，`interrupted-credential-probe-cleanup.json` 单独记录。本批未做真实付费模型请求、production 账号迁移、长期压力或跨机器 Gatekeeper 验收。WebRTC 继续跳过，Chat、Computer Use 和其他 session WIP 保留。

@@ -395,11 +395,19 @@ esac
 remap_flags="--remap-path-prefix=${REPO_ROOT}=. --remap-path-prefix=${repo_cargo_home}=/cargo-home --remap-path-prefix=${HOME}/.rustup=/rustup --remap-path-prefix=${repo_cargo_target}=/cargo-target"
 export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }${remap_flags}"
 
-log 'building portable release bridge-server'
-(
-  cd "$ENGINE_DIR"
-  cargo build --locked --release -p bridge-server --bin bridge-server
-)
+if [[ -n "${LINGXI_BRIDGE_SERVER_BIN:-}" ]]; then
+  [[ "$LINGXI_BRIDGE_SERVER_BIN" == /* && -f "$LINGXI_BRIDGE_SERVER_BIN" && -x "$LINGXI_BRIDGE_SERVER_BIN" ]] ||
+    fail 'LINGXI_BRIDGE_SERVER_BIN must identify an absolute executable file'
+  # package-mac validates this exact input's architecture and portability before
+  # copying it. Do not compile a second binary that packaging will never use.
+  log "using explicit release bridge-server: ${LINGXI_BRIDGE_SERVER_BIN}"
+else
+  log 'building portable release bridge-server'
+  (
+    cd "$ENGINE_DIR"
+    cargo build --locked --release -p bridge-server --bin bridge-server
+  )
+fi
 
 log 'packaging and signing the Electron app'
 (

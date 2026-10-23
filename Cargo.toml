@@ -5,6 +5,7 @@ members = [
     "tools/ios-use",
     "tools/native-bindgen",
     "packages/config-requirements",
+    "packages/remote-control-client",
     "apps/ios/ffi",
     "apps/android/ffi",
     "apps/bridge-server",

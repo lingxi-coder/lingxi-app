@@ -150,3 +150,5 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - **当前包 Side Chat 真机通过**：真实生产入口创建第一条旁聊，硬件键盘输入 `2026102203`，隐藏后主会话输入框仍为空，重开保留该草稿；第二条旁聊初始为空，输入 `2026102204` 后切回第一条，仍为 `2026102203`。第一条选择 V4 Pro 后草稿保留，主会话仍为 Flash。结束第一条后自动选中第二条，`2026102204` 与 Flash 均保持；结束第二条显示空 Side chats 列表，再关闭面板返回原会话。两条测试旁聊均已清理，未向模型发送测试草稿；最后再次核对 provider-settings 与升级前字节相同、原会话仍选中、序号至少 8 且进程存活。
 - 镜像曾短暂暂停，按其公开 Resume 操作恢复。多显示器下 CUA 报 `noWindowsAvailable`，通过镜像自身 Window 菜单把窗口移到 S27 PRO 后恢复正常点击，不需要修改产品、绕过锁屏或调整安全权限。本次记录镜像硬件键盘，不扩大为手机屏幕键盘触控验收；GUI 原始截图与操作由本会话 CUA 工具记录保留。
 - **证据和产物**：`.buildcache/remaining-task-takeover-20261019/ios-main-406879ed2-20261022/acceptance-index.json` 汇总 source、native archive 哈希、签名清单、旧会话两阶段回执和 Side Chat 回执；同目录保存原始构建日志、安装日志、升级前备份及旧 `a5b3dfac5` App/dSYM/native pair。新 App 为 `.buildcache/remaining-task-takeover-20261019/catalog-ios-xcode/Build/Products/StoreDebug-iphoneos/LingxiCode.app`，匹配 dSYM 在其旁边，已安装并留在原会话。此次无新增源码修复、无兼容层；只提交验收报告。WebRTC、其他平台、真实云端推理及发行渠道继续按既有范围排除；其他 session 未提交源码保留。
+
+- 发布前并发整合 main 的 `fd23050c0`、`34fb5bd55`、`1a2950901`（仅 6 个 Electron 文件）。已逐项核对 iOS 源码、生成输入和所有依赖未变化；本批签名包覆盖最终 main 的 iOS 代码组合，无需为桌面改动重建手机包。其他 session 的 11 个未提交路径及 staged/unstaged 状态逐项保留。

@@ -23,3 +23,12 @@ test('desktop errors distinguish credential, protocol, engine, workspace, and tr
   assert.equal(classifyDesktopError('workspace path is not a directory').title, 'Workspace unavailable');
   assert.equal(classifyDesktopError('socket disconnected').title, 'Engine connection interrupted');
 });
+
+test('unreadable responses offer plain language and retain the technical error', () => {
+  const raw = 'unexpected result: invalid type: newtype struct, expected any valid JSON value';
+  assert.deepEqual(classifyDesktopError(raw), {
+    title: 'Couldn’t read the response',
+    detail: 'LingXi received an unexpected response. Try your request again.',
+    technicalDetail: raw,
+  });
+});

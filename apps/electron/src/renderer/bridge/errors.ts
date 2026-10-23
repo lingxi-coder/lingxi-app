@@ -1,6 +1,7 @@
 export interface ActionableError {
   readonly title: string;
   readonly detail: string;
+  readonly technicalDetail?: string;
 }
 
 export function classifyDesktopError(raw: string): ActionableError {
@@ -35,6 +36,13 @@ export function classifyDesktopError(raw: string): ActionableError {
   }
   if (/binary|bridge-server.*(missing|not found)|ENOENT/i.test(message)) {
     return { title: 'Bundled engine unavailable', detail: 'Reinstall the verified Beta artifact.' };
+  }
+  if (/unexpected result:.*(?:invalid type|valid JSON value)|invalid type: newtype struct/i.test(message)) {
+    return {
+      title: 'Couldn’t read the response',
+      detail: 'LingXi received an unexpected response. Try your request again.',
+      technicalDetail: message,
+    };
   }
   if (/workspace|directory|cwd|folder/i.test(message)) {
     return { title: 'Workspace unavailable', detail: 'Choose a readable workspace folder and review trust again.' };

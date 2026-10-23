@@ -12,12 +12,13 @@ function ErrorNotification({ message, onDismiss }: { message: string; onDismiss:
   const t = useT();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const error = classifyDesktopError(message);
   useEffect(() => {
-    if (hovered || focused) return;
+    if (hovered || focused || detailsOpen) return;
     const timeout = window.setTimeout(onDismiss, 5_000);
     return () => window.clearTimeout(timeout);
-  }, [hovered, focused, onDismiss]);
+  }, [hovered, focused, detailsOpen, onDismiss]);
 
   return (
     <div className="desktop-notification-region">
@@ -38,13 +39,19 @@ function ErrorNotification({ message, onDismiss }: { message: string; onDismiss:
           '--notification-focus': t.accent,
         } as CSSProperties}
       >
-        <span className="desktop-notification-icon"><Icon name="circleAlert" size={19} /></span>
+        <span className="desktop-notification-icon" aria-hidden="true"><Icon name="circleAlert" size={19} /></span>
         <div className="desktop-notification-content">
           <strong className="desktop-notification-title">{error.title}</strong>
           <p className="desktop-notification-detail" tabIndex={0} aria-label="Notification details">{error.detail}</p>
+          {error.technicalDetail && (
+            <details className="desktop-notification-diagnostics" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+              <summary>Technical details</summary>
+              <pre tabIndex={0} aria-label="Technical error details">{error.technicalDetail}</pre>
+            </details>
+          )}
         </div>
         <button type="button" className="desktop-notification-close" onClick={onDismiss} aria-label="Dismiss notification" title="Dismiss notification">
-          <Icon name="x" size={14} />
+          <Icon name="x" size={12} stroke={2} />
         </button>
       </div>
     </div>

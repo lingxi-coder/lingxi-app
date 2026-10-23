@@ -221,6 +221,9 @@ private struct RemoteSessionView: View {
                 Button(source.loadingOlder ? "remote_loading_older" : "remote_load_older", action: source.loadOlder)
                     .disabled(source.loadingOlder).padding(6)
             }
+            RemoteFilesView(manager: manager, hostID: source.hostID, sessionID: source.sessionID,
+                enabled: source.phase == .live && manager.connection?.transport == .webrtc)
+                .id("\(manager.uid ?? "")/\(source.hostID)/\(source.sessionID)")
             ChatView(session: SessionRef(id: source.sessionID, title: title), draft: $draft,
                 voiceInteraction: voice, source: source, workspaceName: title,
                 workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey)

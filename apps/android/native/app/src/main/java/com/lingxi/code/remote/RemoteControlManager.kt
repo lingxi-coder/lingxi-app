@@ -1,5 +1,6 @@
 package com.lingxi.code.remote
 
+import com.lingxi.code.bindings.android.RemoteFileFfi
 import android.content.Context
 import android.os.Build
 import com.google.firebase.auth.FirebaseAuth
@@ -70,6 +71,14 @@ class FirebaseRemoteAccount(private val auth: FirebaseAuth = FirebaseAuth.getIns
 
 /** What the app uses of the generated client; tests substitute it. */
 interface RemoteClientPort {
+    suspend fun prepareFile(sessionId: String, path: String, name: String): RemoteFileFfi
+    suspend fun uploadFile(file: RemoteFileFfi, path: String): RemoteFileFfi
+    suspend fun downloadFile(file: RemoteFileFfi, path: String): RemoteFileFfi
+    suspend fun listFiles(sessionId: String): List<RemoteFileFfi>
+    fun fileProgress(transferId: String): ULong
+    fun cancelFile(transferId: String)
+    suspend fun sendPromptWithFiles(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>, fileRefs: List<String>)
+
     fun setPushInstallationId(id: String?)
     suspend fun watchHosts()
     suspend fun stopWatchingHosts()
@@ -402,6 +411,14 @@ internal class FfiRemoteClientFactory(
 
 /** [RemoteClientPort] over the generated [AndroidRemoteControlClient]. */
 internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClient) : RemoteClientPort {
+    override suspend fun prepareFile(sessionId: String, path: String, name: String) = client.prepareFile(sessionId, path, name)
+    override suspend fun uploadFile(file: RemoteFileFfi, path: String) = client.uploadFile(file, path)
+    override suspend fun downloadFile(file: RemoteFileFfi, path: String) = client.downloadFile(file, path)
+    override suspend fun listFiles(sessionId: String) = client.listFiles(sessionId)
+    override fun fileProgress(transferId: String) = client.fileProgress(transferId)
+    override fun cancelFile(transferId: String) = client.cancelFile(transferId)
+    override suspend fun sendPromptWithFiles(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>, fileRefs: List<String>) = client.sendPromptWithFiles(sessionId, text, images, fileRefs)
+
     override fun setPushInstallationId(id: String?) = client.setPushInstallationId(id)
     override suspend fun watchHosts() = client.watchHosts()
     override suspend fun stopWatchingHosts() = client.stopWatchingHosts()

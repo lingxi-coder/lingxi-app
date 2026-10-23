@@ -403,3 +403,6 @@ export {
  * documented where it is declared.
  */
 export type * from './remote/messages.js';
+
+// Independent binary file channel; never wrap this in MessageTransport.
+export * from './remote/files.js';

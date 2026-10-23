@@ -7,7 +7,7 @@
 //!
 //! - three foreign callback interfaces: [`AndroidRemoteTokenProvider`] (Firebase ID
 //!   token), [`AndroidRemoteKeyStore`] (the device key and the pinned host keys, which
-//!   the app persists — Rust writes no files) and [`AndroidRemoteListener`];
+//!   the app persists — Rust never persists keys itself) and [`AndroidRemoteListener`];
 //! - flat records for connection state, hosts and session summaries;
 //! - session content as [`RemoteSessionUpdateFfi`] deltas whose records embed the
 //!   UniFFI `ClientEvent` the rest of the app already renders.
@@ -45,6 +45,7 @@ use remote_control_client::device::{
     DeviceIdentity, KeysError, PinnedHost, TunnelMemory, ViewerKeys,
 };
 use remote_control_client::encoding::{b64_decode, b64_encode, random_unit};
+use remote_control_client::files::{FileOffer, FileReceipt, FileTask};
 use remote_control_client::keys::IdentityKey;
 use remote_control_client::messages::{
     PermissionModeId, RemoteImageRef, RemotePending, RemotePendingAction, RemotePromptOrigin,
@@ -1201,6 +1202,50 @@ impl Active {
     }
 }
 
+/// Metadata and receipt of an arbitrary original-file attachment.
+#[derive(Clone, uniffi::Record)]
+pub struct RemoteFileFfi {
+    pub transfer_id: String,
+    pub session_id: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub file_ref: String,
+}
+impl From<FileReceipt> for RemoteFileFfi {
+    fn from(value: FileReceipt) -> Self {
+        Self {
+            transfer_id: value.offer.transfer_id,
+            session_id: value.offer.session_id,
+            name: value.offer.name,
+            size: value.offer.size,
+            sha256: value.offer.sha256,
+            file_ref: value.r#ref,
+        }
+    }
+}
+impl RemoteFileFfi {
+    fn offer(self) -> FileOffer {
+        FileOffer {
+            transfer_id: self.transfer_id,
+            session_id: self.session_id,
+            name: self.name,
+            size: self.size,
+            sha256: self.sha256,
+        }
+    }
+}
+fn file_error(message: String) -> RemoteFfiError {
+    RemoteFfiError::InvalidArgument { message }
+}
+struct FileTaskGuard(Arc<FileTask>);
+impl Drop for FileTaskGuard {
+    fn drop(&mut self) {
+        self.0.active.store(false, Ordering::Release);
+        self.0.cancel.cancel();
+    }
+}
+
 struct Core {
     runtime: tokio::runtime::Handle,
     parts: Parts,
@@ -1213,6 +1258,7 @@ struct Core {
     active: Mutex<Option<Active>>,
     hosts_task: Mutex<Option<JoinHandle<()>>>,
     delivery: JoinHandle<()>,
+    file_tasks: Mutex<HashMap<String, Arc<FileTask>>>,
 }
 
 impl Drop for Core {
@@ -1221,6 +1267,9 @@ impl Drop for Core {
         // Session/tunnel shutdown may spawn async cleanup even from deinit.
         let _runtime = self.runtime.enter();
         self.delivery.abort();
+        for task in self.file_tasks.lock().expect("file tasks").values() {
+            task.cancel.cancel();
+        }
         if let Some(task) = self.hosts_task.lock().expect("hosts task").take() {
             task.abort();
         }
@@ -1276,6 +1325,37 @@ pub async fn build_android_remote_control_client(
 }
 
 impl AndroidRemoteControlClient {
+    fn file_connection(&self) -> Result<ViewerConnection, RemoteFfiError> {
+        self.core
+            .active
+            .lock()
+            .expect("active")
+            .as_ref()
+            .map(|a| a.connection.clone())
+            .ok_or(RemoteFfiError::NotConnected)
+    }
+    fn begin_file_task(&self, id: &str) -> Result<FileTaskGuard, RemoteFfiError> {
+        let mut tasks = self.core.file_tasks.lock().expect("file tasks");
+        if tasks
+            .values()
+            .filter(|t| t.active.load(Ordering::Acquire))
+            .count()
+            >= 4
+            || tasks
+                .get(id)
+                .is_some_and(|t| t.active.load(Ordering::Acquire))
+        {
+            return Err(file_error("file transfer busy".into()));
+        }
+        if tasks.len() >= 32 {
+            tasks.retain(|_, t| t.active.load(Ordering::Acquire));
+        }
+        let task = Arc::new(FileTask::default());
+        task.active.store(true, Ordering::Release);
+        tasks.insert(id.to_owned(), task.clone());
+        Ok(FileTaskGuard(task))
+    }
+
     /// Must be called inside a Tokio runtime.
     fn from_parts(parts: Parts, listener: Arc<dyn AndroidRemoteListener>) -> Self {
         let (out, queue) = mpsc::unbounded_channel();
@@ -1292,6 +1372,7 @@ impl AndroidRemoteControlClient {
                 active: Mutex::new(None),
                 hosts_task: Mutex::new(None),
                 delivery: tokio::spawn(deliver(queue, listener, current)),
+                file_tasks: Mutex::new(HashMap::new()),
             },
         }
     }
@@ -1634,6 +1715,130 @@ impl AndroidRemoteControlClient {
         let images = prompt_images(images)?;
         self.controller(&session_id)?
             .send_prompt(&text, images)
+            .await;
+        Ok(())
+    }
+
+    /// Hash an original file without loading it into memory.
+    pub async fn prepare_file(
+        &self,
+        session_id: String,
+        path: String,
+        name: String,
+    ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        let task = self.begin_file_task(&path)?;
+        let offer = remote_control_client::files::prepare(
+            session_id,
+            path.into(),
+            name,
+            task.0.cancel.clone(),
+        )
+        .await
+        .map_err(file_error)?;
+        Ok(FileReceipt {
+            offer,
+            r#ref: String::new(),
+        }
+        .into())
+    }
+    /// Stream original bytes on the independent file DataChannel.
+    pub async fn upload_file(
+        &self,
+        file: RemoteFileFfi,
+        path: String,
+    ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        let connection = self.file_connection()?;
+        let task = self.begin_file_task(&file.transfer_id)?;
+        remote_control_client::files::upload(
+            connection,
+            file.offer(),
+            path.into(),
+            task.0.cancel.clone(),
+            task.0.progress.clone(),
+        )
+        .await
+        .map(Into::into)
+        .map_err(file_error)
+    }
+    /// Published files this account/device may access in the attached session.
+    pub async fn list_files(
+        &self,
+        session_id: String,
+    ) -> Result<Vec<RemoteFileFfi>, RemoteFfiError> {
+        let value = self
+            .file_connection()?
+            .request(
+                "file.list",
+                Some(serde_json::json!({"session_id":session_id})),
+                None,
+            )
+            .await
+            .map_err(rpc_error)?;
+        let files: Vec<FileReceipt> =
+            serde_json::from_value(value.get("files").cloned().unwrap_or_default())
+                .map_err(|e| file_error(e.to_string()))?;
+        for file in &files {
+            file.offer.validate().map_err(file_error)?;
+            if file.r#ref != file.offer.transfer_id {
+                return Err(file_error("invalid published file reference".into()));
+            }
+        }
+        Ok(files.into_iter().map(Into::into).collect())
+    }
+    /// Save a verified receipt to an app-selected destination; interrupted files resume.
+    pub async fn download_file(
+        &self,
+        file: RemoteFileFfi,
+        path: String,
+    ) -> Result<RemoteFileFfi, RemoteFfiError> {
+        let connection = self.file_connection()?;
+        let task = self.begin_file_task(&file.transfer_id)?;
+        let file_ref = file.file_ref.clone();
+        remote_control_client::files::download(
+            connection,
+            FileReceipt {
+                offer: file.offer(),
+                r#ref: file_ref,
+            },
+            path.into(),
+            task.0.cancel.clone(),
+            task.0.progress.clone(),
+        )
+        .await
+        .map(Into::into)
+        .map_err(file_error)
+    }
+    /// Bytes durably acknowledged by the receiving device.
+    pub fn file_progress(&self, transfer_id: String) -> u64 {
+        self.core
+            .file_tasks
+            .lock()
+            .expect("file tasks")
+            .get(&transfer_id)
+            .map_or(0, |t| t.progress.load(Ordering::Acquire))
+    }
+    /// Cancel an active operation. Network errors retain resumable checkpoints.
+    pub fn cancel_file(&self, transfer_id: String) {
+        if let Some(t) = self
+            .core
+            .file_tasks
+            .lock()
+            .expect("file tasks")
+            .get(&transfer_id)
+        {
+            t.cancel.cancel();
+        }
+    }
+    /// Attach only published receipts; desktop validates ownership and session.
+    pub async fn send_prompt_with_files(
+        &self,
+        session_id: String,
+        text: String,
+        images: Vec<RemotePromptImageFfi>,
+        file_refs: Vec<String>,
+    ) -> Result<(), RemoteFfiError> {
+        self.controller(&session_id)?
+            .send_prompt_with_files(&text, prompt_images(images)?, file_refs)
             .await;
         Ok(())
     }

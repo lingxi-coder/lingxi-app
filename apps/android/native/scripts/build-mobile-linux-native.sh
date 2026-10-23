@@ -59,4 +59,6 @@ for abi in arm64-v8a x86_64; do
   done
 done
 python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${BUILD_ROOT}/sdk-source.json"
-"${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --jni-root "${JNI_ROOT}"
+VERIFY_ABIS="${LINGXI_ANDROID_ABI:-all}"
+if [[ "${VERIFY_ABIS}" == "all" ]]; then VERIFY_ABIS="arm64-v8a,x86_64"; fi
+"${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --jni-root "${JNI_ROOT}" --abis "${VERIFY_ABIS}"

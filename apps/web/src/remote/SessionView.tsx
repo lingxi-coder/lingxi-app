@@ -1,4 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { Files } from './Files';
+import type { FileReceipt } from '@lingxi/bridge-client/remote';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Locale } from '../utils/locale';
 import { Composer } from './Composer';
 import { Controls } from './Controls';
@@ -37,7 +39,9 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
   const list = useStore(client)!;
   const summary = list.sessions?.find((session) => session.session_id === sessionId);
   const scroller = useRef<HTMLDivElement>(null);
+  const [attachments, setAttachments] = useState<FileReceipt[]>([]);
   const stickToBottom = useRef(true);
+  useEffect(() => setAttachments([]), [sessionId]);
 
   useEffect(() => {
     controller.activate();
@@ -116,11 +120,17 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
       </div>
 
       <PendingPrompts locale={locale} controller={controller} pending={state.pending} answeredElsewhere={state.answeredElsewhere} />
+      <Files key={sessionId} client={client} session={sessionId} locale={locale} disabled={!live || connection.transport !== 'webrtc'}
+        onAttach={file => setAttachments(current => [...current.filter(f => f.ref !== file.ref), file].slice(-4))} />
+      {attachments.length ? <ul>{attachments.map(file => <li key={file.ref}>{file.name}{' '}
+        <button type="button" aria-label={locale === 'zh' ? '移除文件' : 'Remove file'} onClick={() => setAttachments(current => current.filter(f => f.ref !== file.ref))}>×</button>
+      </li>)}</ul> : null}
       <Composer
         locale={locale}
         running={running}
         disabled={!live}
-        onSend={(text, images) => void controller.sendPrompt(text, images)}
+        hasFiles={attachments.length > 0}
+        onSend={(text, images) => { void controller.sendPrompt(text, images, attachments.map(f => f.ref)); setAttachments([]); }}
         onStop={() => void controller.cancelTurn().catch(() => undefined)}
       />
     </div>

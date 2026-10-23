@@ -1,6 +1,8 @@
 import {
   CLIENT_PROTOCOL_MAJOR,
   DATA_CHANNEL_LABEL,
+  FILE_CHANNEL_LABEL,
+  FileChannel,
   DATA_CHANNEL_OPEN_TIMEOUT_MS,
   DEFAULT_STUN_URLS,
   ICE_GATHER_TIMEOUT_MS,
@@ -284,6 +286,9 @@ class Attempt {
   offerWritten = false;
   peer: PeerConnectionLike | undefined;
   dataLink: DataChannelLink | undefined;
+  fileLink: DataChannelLink | undefined;
+  files: FileChannel | undefined;
+  filesOpen = false;
   tunnel: TunnelLink | undefined;
   answers: RtdbSubscription | undefined;
   rpc: RpcPeer | undefined;
@@ -367,6 +372,13 @@ export class ViewerConnection {
   onNotification(listener: NotificationListener): () => void {
     this.notificationListeners.add(listener);
     return () => this.notificationListeners.delete(listener);
+  }
+
+  get fileScope(): string { return `${this.deps.uid}\0${this.deps.hostId}`; }
+
+  get files(): FileChannel | undefined {
+    const a = this.live;
+    return a?.ready && a.kind === 'webrtc' && a.filesOpen ? a.files : undefined;
   }
 
   /** Send a request on the ready link. Rejects with `closed` when there is none. */
@@ -626,6 +638,7 @@ export class ViewerConnection {
       if (a.peer !== undefined) {
         // The desktop chose the tunnel for a direct offer: same connection id, no new offer.
         this.tunnelMemory.remember(hostId);
+        a.files?.close();
         a.dataLink?.close('downgraded');
         a.dataLink = undefined;
         a.peer.close();
@@ -674,6 +687,10 @@ export class ViewerConnection {
       a.peer = peer;
       const channel: DataChannelLike = peer.createDataChannel(DATA_CHANNEL_LABEL, { ordered: true });
       a.dataLink = new DataChannelLink(channel);
+      a.fileLink = new DataChannelLink(peer.createDataChannel(FILE_CHANNEL_LABEL, { ordered: true }), () => peer.sctp?.maxMessageSize || 16384);
+      a.files = new FileChannel(a.fileLink);
+      a.fileLink.onOpen(() => { a.filesOpen = true; });
+      a.fileLink.onClose(() => { a.filesOpen = false; });
       const offer = await raced(a.abort, peer.createOffer());
       await raced(a.abort, peer.setLocalDescription(offer));
       await raced(a.abort, waitForIceGathering(peer, this.clock, ICE_GATHER_TIMEOUT_MS));
@@ -682,6 +699,7 @@ export class ViewerConnection {
       return sdp;
     } catch (error) {
       if (error instanceof Cancelled) throw error;
+      a.files?.close();
       a.dataLink?.close('no_offer');
       a.dataLink = undefined;
       a.peer?.close();
@@ -925,7 +943,8 @@ export class ViewerConnection {
     a.closed.reject(new Cancelled());
     if (a.rpc !== undefined) a.rpc.close(reason);
     else if (a.tunnel !== undefined) a.tunnel.close(reason);
-    else a.dataLink?.close(reason);
+    a.files?.close();
+    if (!a.transport) a.dataLink?.close(reason);
     a.peer?.close();
     const { uid, hostId, rtdb } = this.deps;
     if (a.connId === '') return;

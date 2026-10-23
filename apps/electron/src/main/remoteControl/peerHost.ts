@@ -48,6 +48,7 @@ export interface RtcWindow {
 /** One WebRTC connection as a fragment stream, with what the page reports about it. */
 export interface PeerLink extends FragmentLink {
   readonly connId: string;
+  readonly files?: PeerLink;
   /** Whether the DataChannel is open. */
   readonly connected: boolean;
   /** The selected pair's local candidate type, once the page has reported it. */
@@ -239,7 +240,8 @@ export class PeerHost {
   }
 
   private apply(message: PageToMain): void {
-    const link = this.links.get(message.conn);
+    const parent = this.links.get(message.conn);
+    const link = 'lane' in message && message.lane === 'files' ? parent?.files : parent;
     switch (message.t) {
       case 'answered': {
         const pending = this.pending.get(message.conn);
@@ -254,7 +256,7 @@ export class PeerHost {
         else link?.close('page_error');
         return;
       case 'state':
-        link?.apply(message.state, message.candidate);
+        link?.apply(message.state, message.candidate, message.max_message_bytes);
         return;
       case 'data':
         link?.receive(new Uint8Array(message.data));
@@ -270,7 +272,8 @@ export class PeerHost {
 }
 
 class LinkImpl implements PeerLink {
-  readonly maxFragmentBytes = FRAGMENT_MAX_BYTES;
+  maxFragmentBytes = FRAGMENT_MAX_BYTES;
+  readonly files: LinkImpl | undefined;
   connected = false;
   candidate: RtcCandidateType | undefined;
 
@@ -285,14 +288,15 @@ class LinkImpl implements PeerLink {
   constructor(
     readonly connId: string,
     private readonly host: PeerHost,
-  ) {}
+    private readonly lane?: 'files',
+  ) { if (!lane) this.files = new LinkImpl(connId, host, 'files'); }
 
   sendFragment(fragment: Uint8Array): void {
     if (this.closed) throw new Error(`peer link is closed: ${this.closeReason}`);
     if (fragment.length === 0 || fragment.length > FRAGMENT_MAX_BYTES) throw new RangeError('fragment size out of range');
     const data = new Uint8Array(fragment.length);
     data.set(fragment);
-    this.host.post({ t: 'send', conn: this.connId, data: data.buffer });
+    this.host.post({ t: 'send', conn: this.connId, data: data.buffer, ...(this.lane ? { lane: this.lane } : {}) });
   }
 
   onFragment(callback: (fragment: Uint8Array) => void): void {
@@ -330,7 +334,9 @@ class LinkImpl implements PeerLink {
     if (this.closed) return;
     this.closed = true;
     this.closeReason = reason;
-    this.host.release(this.connId, tellPage);
+    this.files?.close(reason, false);
+    if (!this.lane) this.host.release(this.connId, tellPage);
+    else if (tellPage) this.host.post({ t: 'close_files', conn: this.connId });
     this.wake();
     for (const handler of this.closeHandlers.splice(0)) {
       try { handler(reason); } catch { /* Close handlers are independent of each other. */ }
@@ -339,9 +345,10 @@ class LinkImpl implements PeerLink {
   }
 
   /** @internal */
-  apply(state: RtcPeerState, candidate: RtcCandidateType | undefined): void {
+  apply(state: RtcPeerState, candidate: RtcCandidateType | undefined, limit?: number): void {
     if (this.closed) return;
     if (state === 'connected') {
+      if (limit !== undefined) this.maxFragmentBytes = Math.min(FRAGMENT_MAX_BYTES, limit);
       this.connected = true;
       this.candidate = candidate;
       this.notifyState('connected');

@@ -46,9 +46,13 @@ def verify_elf(path, machine):
         raise ValueError(f"wrong ELF64 architecture: {path}")
 
 
-def verify(source, destination):
+def verify(source, destination, abis=None):
+    abis = tuple(ABIS if abis is None else abis)
+    if not abis or len(set(abis)) != len(abis) or any(abi not in ABIS for abi in abis):
+        raise ValueError("invalid selected ABIs")
     entries = inventory(source)
-    for abi, machine in ABIS.items():
+    for abi in abis:
+        machine = ABIS[abi]
         for name in SUPPORT | {"libandroid_aar.so"}:
             artifact = (source / "jniLibs" if name in SUPPORT else destination) / abi / name
             if artifact.is_symlink():
@@ -93,9 +97,11 @@ def main():
     parser.add_argument("--jni-root", type=Path, required=True)
     parser.add_argument("--maven-dir", type=Path)
     parser.add_argument("--expected-revision")
+    parser.add_argument("--abis", default="arm64-v8a,x86_64")
     args = parser.parse_args()
     try:
-        verify(args.source, args.jni_root)
+        abis = args.abis.split(",")
+        verify(args.source, args.jni_root, abis)
         if args.maven_dir:
             verify_maven(args.maven_dir, args.expected_revision)
     except (OSError, ValueError, KeyError) as error:

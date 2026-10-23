@@ -17,6 +17,7 @@ import {
   CLIENT_PROTOCOL_MAJOR,
   MAX_HOST_CONNECTIONS,
   MessageTransport,
+  FileChannel,
   REMOTE_PROTOCOL_MAJOR,
   RemoteProtocolError,
   RemoteRpcError,
@@ -173,6 +174,7 @@ export class HostConnection {
   private peer: PeerLink | undefined;
   private tunnel: TunnelLink | undefined;
   private rpc: RpcPeer | undefined;
+  private fileChannel: FileChannel | undefined;
   private viewer: RemoteViewer | undefined;
   private pairingCode: string | undefined;
   private transportTimer: unknown;
@@ -189,7 +191,13 @@ export class HostConnection {
   constructor(private readonly deps: HostConnectionDeps) {
     this.connId = deps.connId;
     this.finished = new Promise<void>((resolve) => { this.resolveFinished = resolve; });
+    const connection = this;
     this.channel = {
+      get files() {
+        const link = connection.peer?.files;
+        if (!connection.approved || connection.kind !== 'webrtc' || !link?.connected) return undefined;
+        return connection.fileChannel ??= new FileChannel(link);
+      },
       notify: (method, params) => {
         this.rpc?.notify(method, params).catch((error: unknown) => {
           this.deps.diagnostics('warn', `a notification to a viewer could not be sent (${describeError(error)})`);
@@ -247,6 +255,7 @@ export class HostConnection {
   close(reason: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.fileChannel?.close();
     this.deps.clock.clearTimeout(this.transportTimer);
     this.deps.clock.clearTimeout(this.initializeTimer);
     this.abort.abort();
@@ -479,6 +488,7 @@ export class HostConnection {
     const { uid, registry } = this.deps;
     this.deps.clock.clearTimeout(this.initializeTimer);
     this.viewer = {
+      account_uid: uid,
       device_id: offer.device.id,
       device_name: offer.device.name,
       platform: offer.device.platform,

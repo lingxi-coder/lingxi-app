@@ -91,7 +91,7 @@ test('an unknown device gets a pairing code, the user allows it, and the device 
     assert.equal(h.gateway.calls.length, 1);
     assert.deepEqual(
       { ...h.gateway.calls[0]!.viewer },
-      { device_id: viewer.deviceId, device_name: 'Lingfeng iPhone', platform: 'ios', conn_id: viewer.connId },
+      { account_uid: h.uid, device_id: viewer.deviceId, device_name: 'Lingfeng iPhone', platform: 'ios', conn_id: viewer.connId },
     );
 
     // initialize again is idempotent and now says approved.

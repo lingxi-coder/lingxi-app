@@ -1,3 +1,4 @@
+import { RemoteFileStore } from './remoteControl/fileStore.js';
 import { LocalAppHost } from './local-apps/host.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { homedir } from 'node:os';
@@ -534,6 +535,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remotePolicy = policy;
   const runtimes = bridge;
   const gateway = new SessionGateway({
+    files: new RemoteFileStore(join(userData, 'remote-files')),
     runtimes,
     policy,
     commands: new RemoteCommands({

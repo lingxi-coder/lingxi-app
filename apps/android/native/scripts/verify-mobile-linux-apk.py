@@ -74,7 +74,7 @@ def verify_apk(apk, source, jni_root, assets_root, abis=None):
     abis = set(native.ABIS if abis is None else abis)
     if not abis or not abis <= native.ABIS.keys():
         raise ValueError("APK ABIs must contain arm64-v8a, x86_64, or both")
-    native.verify(source, jni_root)
+    native.verify(source, jni_root, abis)
     assets = staged_assets(assets_root, source)
     expected = {
         f"lib/{abi}/{name}": native.sha256((source / "jniLibs" if name in native.SUPPORT else jni_root) / abi / name)

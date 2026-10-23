@@ -19,7 +19,7 @@
 | WebRTC 产品接入与 Remote | 独立 transport/media/FFI 与 localhost TURN 已验证；生产产品没有接入 | 在媒体边界验证后接入现有 host/control-plane；认证、设备与权限仍归项目自有服务，不另造执行所有者 |
 | WebRTC 其他媒体边界 | 限制性 NAT、TCP/TLS、手机互通、长期刷新、热状态与能耗尚无完整证据 | 逐项实施和验证，区分共享测试与真实设备结果 |
 | 版本化模型目录四端刷新 | 四端实现与启动缓存验收完成；本页最新记录补齐 Android 实体手机和 Flare 签名 iPhone 的首次获取、重启及配置保留验证 | 保留发行渠道、逐模型推理及其他平台验收边界，不把目录刷新通过扩大为全部运行时通过 |
-| iOS 旧会话恢复与 Side Chat | 2026-10-22 已用 `a5b3dfac5` 签名包通过旧会话链接／普通重启、硬件键盘输入、独立草稿、隐藏重开与模型隔离 | 本项受测包已通过；后续 main 新运行时、屏幕键盘触控与发行包不继承此结果 |
+| iOS 旧会话恢复与 Side Chat | 2026-10-22 已重新构建最新 main `406879ed2`、Harness `5a2de5b1` 的签名包并通过旧会话链接／普通重启、硬件键盘、独立草稿、隐藏重开、模型隔离及结束生命周期 | 本批当前 main 签名真机验收完成；后续源码、屏幕键盘触控与发行渠道不继承本结果 |
 | 深链接发行验收 | 本地实现、网页、AASA/direct 关联已发布；Play 真实 App Signing 指纹、签名 iOS Universal Link、Windows/Linux 实机仍开放 | 复用当前实现做平台验收；不能猜证书或把模拟器/脚本结果标为发行通过 |
 | 移动 Crashlytics | Android JVM 测试云端入库已有记录；iOS 真机上报及 NDK 云端符号化未完成 | 准备匹配产物和隔离测试；云端上传遵守既有授权范围，不对正在使用的会话故意触发崩溃 |
 | Desktop production 凭据稳定性 | 旧任务等待 production 通道保存凭据，未完成约定的 15 次刷新、3 次启动 | 先确认当前签名通道及凭据状态；不跨通道复制密钥，不记录明文凭据 |
@@ -140,3 +140,13 @@ Local App 原产品代码不是 Claude 对齐项。独立市场的旧“后端 5
 - 镜像输入曾出现 `noWindowsAvailable`、短暂暂停和重连。一次自动审批因工具报告暂停而拒绝继续按键；随后先只读确认 Mirroir Connected 和 CoreDevice 无线显示仍可用，才恢复正常交互，没有绕过锁屏或降低系统保护。测试最后镜像再次重连，未完成测试旁聊清理；这不撤销此前已观察到的草稿隔离、隐藏重开和模型隔离结果。
 - 原始设备回执：`.buildcache/remaining-task-takeover-20261019/mobile-main-acceptance-811473f9a/ios-device-receipt-connected-20261022.json`；两阶段文件、配置和进程证据位于 `ios-explicit-old-session-realpath-connected-20261022/`、`ios-restart-old-session-realpath-connected-20261022/`。GUI 观察汇总为同目录 `sidechat-physical-receipt-20261022.json`，原始截图由本会话 CUA 工具记录保存。
 - 整合时接入 main `1418b97a4`。会话目录 helper、EngineConversationSource、SideChatSheet 和 ChatView 与受测 `a5b3dfac5` 源码字节相同；后续 main 的 Harness pin、时间线间距及其他功能不属于本次签名包，不能据此声称最新 main 全包真机验收完成。WebRTC 继续跳过；Android 额外 instrumentation、其他平台/发行项及其他 session WIP 不纳入本阶段。
+
+
+## 2026-10-22：最新 main 签名包与真机复验完成
+
+- **受测代码固定为 Product `406879ed2871983fd22fd56cc198f020ff7db1d0`**（开始及提交报告前两次 fetch 均为该 main），Harness `5a2de5b14e6c0d8d2e5bac9155c9c39accda86c7`、SDK `ff71b2ec1139bc67cc8719d78b1735aca967bbe8`、mobile-linux `6b033d41a2b6b736fda1e8f996f55a4b20bd885d`。没有复用旧 Harness 原生核心：官方脚本重新构建 Host 元数据库、生成 7 个 Swift/FFI 文件，再构建 ARM64 device release 库并组装 XCFramework。生成文件恰与旧绑定字节相同，但新核心来源独立记录，不能用它推断旧库可替代。既有 native-support/rootfs 仅在同一 immutable SDK 和哈希校验通过后复用。
+- **构建／签名通过**：Xcode 27.1 `27A9275`、Rust 1.94.0；当前 StoreDebug App `2.4.1 / 8721` 完整构建成功，Flare Team `AZ4AX7J833` 签名、设备授权、iPhone/iPad 竖屏及 dSYM 匹配通过。新 debug dylib UUID 为 `D7979A20-00F6-35FD-A077-CB974D2D176E`；完整 App 文件清单 SHA-256 为 `726a3b6d091dc05ee5712195cec3ea9be5e6e85b91a16d21641c5cadad187c9d`。725 个客户端源码及 3 份协议镜像检查通过。未上传符号或故意触发崩溃。
+- **保留数据升级与旧会话恢复通过**：先备份 provider-settings、preferences、inboxes 和 projects，再安装新包。iPhone 11 / iOS 18.6.2 上公开链接打开原会话 `9d838fee-9184-40fe-8604-2f2d43e9577a`，激活序号由 6 升为 7；普通重启不传链接仍选中同一会话，序号升为 8。两个阶段均确认 v2 身份、当前 POSIX 目录、32 个原 catalog 文件哈希不变、完整目标历史字节前缀保留、provider-settings 字节不变、1327 模型缓存校验和有效及进程存活。GUI 观察原对话正常，无新的 admission／会话不可用错误；历史 interruption 记录保留。
+- **当前包 Side Chat 真机通过**：真实生产入口创建第一条旁聊，硬件键盘输入 `2026102203`，隐藏后主会话输入框仍为空，重开保留该草稿；第二条旁聊初始为空，输入 `2026102204` 后切回第一条，仍为 `2026102203`。第一条选择 V4 Pro 后草稿保留，主会话仍为 Flash。结束第一条后自动选中第二条，`2026102204` 与 Flash 均保持；结束第二条显示空 Side chats 列表，再关闭面板返回原会话。两条测试旁聊均已清理，未向模型发送测试草稿；最后再次核对 provider-settings 与升级前字节相同、原会话仍选中、序号至少 8 且进程存活。
+- 镜像曾短暂暂停，按其公开 Resume 操作恢复。多显示器下 CUA 报 `noWindowsAvailable`，通过镜像自身 Window 菜单把窗口移到 S27 PRO 后恢复正常点击，不需要修改产品、绕过锁屏或调整安全权限。本次记录镜像硬件键盘，不扩大为手机屏幕键盘触控验收；GUI 原始截图与操作由本会话 CUA 工具记录保留。
+- **证据和产物**：`.buildcache/remaining-task-takeover-20261019/ios-main-406879ed2-20261022/acceptance-index.json` 汇总 source、native archive 哈希、签名清单、旧会话两阶段回执和 Side Chat 回执；同目录保存原始构建日志、安装日志、升级前备份及旧 `a5b3dfac5` App/dSYM/native pair。新 App 为 `.buildcache/remaining-task-takeover-20261019/catalog-ios-xcode/Build/Products/StoreDebug-iphoneos/LingxiCode.app`，匹配 dSYM 在其旁边，已安装并留在原会话。此次无新增源码修复、无兼容层；只提交验收报告。WebRTC、其他平台、真实云端推理及发行渠道继续按既有范围排除；其他 session 未提交源码保留。

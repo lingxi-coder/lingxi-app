@@ -72,11 +72,11 @@ body {
   gap: 8px;
   flex: 0 0 calc(var(--desktop-rail-width) + var(--desktop-shell-gap) + var(--desktop-sidebar-width));
   min-width: 0;
-  padding: 0 12px 0 116px;
+  padding: 0 12px 0 calc(env(titlebar-area-x, 0px) + 12px);
   transition: flex-basis 170ms cubic-bezier(.2, 0, 0, 1);
 }
 .desktop-navigation:has(.desktop-sidebar[data-resizing='true']) .desktop-sidebar-brand { transition: none; }
-.desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand { flex-basis: 164px; }
+.desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand { flex-basis: calc(env(titlebar-area-x, 0px) + 56px); }
 .desktop-navigation[data-collapsed='true'] .desktop-sidebar-brand > :not(.desktop-rail-toggle) { display: none; }
 .desktop-surface {
   display: flex;
@@ -223,7 +223,15 @@ body {
   scale: .96;
 }
 .desktop-topbar {
-  z-index: 45;
+  position: relative;
+  z-index: 47;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: var(--desktop-toolbar-height, 44px);
+  gap: 4px;
+  padding: 0 16px 0 22px;
   background: var(--toolbar-material);
   backdrop-filter: blur(20px) saturate(1.15);
 }
@@ -2443,9 +2451,7 @@ textarea, input, select { font-family: inherit; }
 }
 
 /* The expanded pane owns its toggle, as in the Codex split header. */
-@media (min-width: 1101px) {
-  .desktop-inspector-trigger[aria-expanded='true'] { display: none; }
-}
+.desktop-inspector-trigger[aria-expanded='true'] { display: none; }
 
 /* Stop and send share one fixed trailing action slot. */
 .composer-submit-actions {

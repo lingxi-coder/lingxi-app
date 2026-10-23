@@ -1369,6 +1369,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
 }) {
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
+  const projectPath = bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path;
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -1379,12 +1380,12 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 'var(--desktop-toolbar-height, 44px)', position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 16px 0 22px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
-      <div className="desktop-topbar-project">
+    <header className="drag-region desktop-topbar" style={{ '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
+      <div className="desktop-topbar-project" title={projectPath}>
         <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.65} /></span>
         <div style={{ minWidth: 0 }}>
-          <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
-          <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
+          <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(projectPath)}</div>
+          <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{projectPath ?? 'Add a project to begin'}</div>
         </div>
       </div>
       <button
@@ -1402,6 +1403,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
       ><Icon name="topbar-summary" size={20} stroke={1.75} /></button>
       <button type="button" className="no-drag desktop-topbar-action" aria-label="Toggle terminal" title="Toggle terminal (Ctrl+`)" aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><Icon name="topbar-terminal" size={20} stroke={1.75} /></button>
       {sideChatAvailable ? <button className="no-drag desktop-topbar-action" type="button" title="Reopen Side Chat" aria-label="Reopen Side Chat" aria-expanded={sideChatOpen} aria-pressed={sideChatOpen} onClick={onToggleSideChat} style={topbarActionTokens}><Icon name="chat" size={19} /></button> : null}
+      <div id="runtime-inspector-topbar-controls" className="no-drag runtime-inspector-topbar-controls" style={topbarActionTokens} />
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"

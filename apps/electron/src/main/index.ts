@@ -158,6 +158,8 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#0c0b10',
     titleBarStyle: 'hiddenInset',
+    // Expose the native traffic-light exclusion area to the renderer.
+    titleBarOverlay: process.platform === 'darwin' ? true : undefined,
     // Center the 12px native buttons in the renderer's 44px desktop toolbar.
     trafficLightPosition: { x: 14, y: 16 },
     autoHideMenuBar: true,

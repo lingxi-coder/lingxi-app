@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useInspectorMotion } from './useInspectorMotion';
 import { SummaryContextActions } from './BetaDesktop';
 import { PlanDocument } from './PlanDocument';
@@ -405,8 +406,7 @@ function tabIcon(item: RuntimeCenterItemRef): string {
   return 'file';
 }
 
-function InspectorTabs({ bridge }: { bridge: UseBridge }) {
-  const t = useT();
+function InspectorTabs({ bridge, toolsOpen, onTools, onSelect }: { bridge: UseBridge; toolsOpen: boolean; onTools: () => void; onSelect: () => void }) {
   const center = bridge.runtimeCenter;
   const focusTab = (item: RuntimeCenterItemRef) => {
     const key = runtimeCenterItemKey(item);
@@ -424,23 +424,26 @@ function InspectorTabs({ bridge }: { bridge: UseBridge }) {
     if (event.key === 'End') target = center.tabs.at(-1);
     if (!target) return;
     event.preventDefault();
+    onSelect();
     bridge.openRuntimeItem(target);
     focusTab(target);
   };
   return (
+    <>
     <div className="runtime-inspector-tabs" role="tablist" aria-label="Runtime inspector items">
+      {toolsOpen && <div className="runtime-inspector-tab runtime-inspector-tools-tab" data-active="true"><button type="button" role="tab" aria-selected="true" aria-controls="runtime-inspector-panel" className="no-drag runtime-inspector-tab-select" onClick={onTools} onKeyDown={(event) => { if (event.key === 'ArrowRight' && center.tabs[0]) { event.preventDefault(); onSelect(); bridge.openRuntimeItem(center.tabs[0]); focusTab(center.tabs[0]); } }}><Icon name="box" size={16} />Tools</button></div>}
       {center.tabs.map((item, index) => {
-        const active = sameRuntimeCenterItem(item, center.activeItem);
+        const active = !toolsOpen && sameRuntimeCenterItem(item, center.activeItem);
         const key = runtimeCenterItemKey(item);
         return (
-          <div key={`${item.kind}:${item.id}`} role="presentation" style={{ display: 'flex', alignItems: 'center', flexShrink: 0, height: 32, borderRadius: 12, background: active ? t.surfaceActive : 'transparent', color: active ? t.text : t.text3 }}>
-            <button type="button" className="no-drag" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => bridge.openRuntimeItem(item)} onKeyDown={(event) => selectFromKeyboard(event, index)} style={{ maxWidth: 180, minWidth: 0, height: 32, display: 'flex', alignItems: 'center', gap: 8, padding: '0 7px 0 11px', border: 0, background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, fontWeight: 400, cursor: 'pointer' }}>{item.kind === 'agent' ? <AgentAvatar agentId={item.id} size={16} /> : <Icon name={tabIcon(item)} size={16} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
+          <div key={`${item.kind}:${item.id}`} role="presentation" className="runtime-inspector-tab" data-active={active || undefined}>
+            <button type="button" role="tab" id={`runtime-inspector-tab-${encodeURIComponent(key)}`} aria-controls="runtime-inspector-panel" aria-selected={active} tabIndex={active ? 0 : -1} data-runtime-inspector-tab={key} data-runtime-inspector-active={active ? 'true' : undefined} onClick={() => { onSelect(); bridge.openRuntimeItem(item); }} onKeyDown={(event) => selectFromKeyboard(event, index)} className="no-drag runtime-inspector-tab-select">{item.kind === 'agent' ? <AgentAvatar agentId={item.id} size={16} /> : <Icon name={tabIcon(item)} size={16} />}<span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tabLabel(item, bridge)}</span></button>
             <button type="button" className="no-drag" aria-label={`Close ${tabLabel(item, bridge)}`} onClick={() => { bridge.closeRuntimeItem(item); window.requestAnimationFrame(() => (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]') ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button') ?? document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]'))?.focus()); }} style={{ display: 'grid', placeItems: 'center', width: 22, height: 22, marginRight: 2, border: 0, borderRadius: 5, background: 'transparent', color: 'inherit', cursor: 'pointer' }}><Icon name="x" size={11} /></button>
           </div>
         );
       })}
-      <button type="button" className="no-drag" aria-label="Open pinned summary" onClick={() => bridge.setRuntimeCenterOverviewOpen(true)} style={{ display: 'grid', placeItems: 'center', flexShrink: 0, width: 32, height: 32, border: 0, borderRadius: 10, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="plus" size={17} /></button>
     </div>
+    </>
   );
 }
 
@@ -528,8 +531,12 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
   const center = bridge.runtimeCenter;
   const [panelWidth, setPanelWidth] = useState(() => { try { return Math.max(320, Math.min(960, Number(localStorage.getItem('lingxi.inspector.width')) || 390)); } catch { return 390; } });
   const [expanded, setExpanded] = useState(false);
+  const [topbarControls, setTopbarControls] = useState<HTMLElement | null>(null);
+  useEffect(() => { setTopbarControls(document.getElementById('runtime-inspector-topbar-controls')); }, []);
   const resize = (width: number) => { const next = Math.max(320, Math.min(window.innerWidth - 280, width)); setPanelWidth(next); try { localStorage.setItem('lingxi.inspector.width', String(next)); } catch {} };
-  const active = center.activeItem;
+  const [toolsOpen, setToolsOpen] = useState(false);
+  useEffect(() => setToolsOpen(false), [center.activeItem, bridge.conversation.sessionKey]);
+  const active = toolsOpen ? null : center.activeItem;
   const motion = useInspectorMotion(center.inspectorOpen, active ? runtimeCenterItemKey(active) : 'landing', bridge.conversation.sessionKey);
   const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   const resource = active?.kind === 'resource' ? center.resources.find((entry) => entry.id === active.id) : undefined;
@@ -600,15 +607,20 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
 
   if (!motion.present) return null;
   return (
-    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), background: t.surface, borderLeft: `0.5px solid ${t.border}` }}>
+    <>
+      {center.inspectorOpen && topbarControls && createPortal(<>
+        <button type="button" className="no-drag desktop-topbar-action" aria-label="Open tools" title="Open tools" onClick={() => setToolsOpen(true)}><Icon name="plus" size={18} /></button>
+        <button type="button" aria-label={expanded ? 'Restore panel size' : 'Expand right panel'} className="no-drag desktop-topbar-action" onClick={() => setExpanded(!expanded)} title={expanded ? 'Restore panel size' : 'Expand right panel'} aria-pressed={expanded}><Icon name={expanded ? 'collapse' : 'expand'} size={17} /></button>
+        <button type="button" aria-label="Hide right panel" className="no-drag desktop-topbar-action" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} title="Hide right panel" aria-expanded="true" aria-controls="runtime-inspector"><Icon name="panel-right" size={18} /></button>
+      </>, topbarControls)}
+    <aside ref={motion.ref} aria-hidden={!center.inspectorOpen || undefined} id="runtime-inspector" className="runtime-inspector" aria-label="Runtime inspector" style={{ position: expanded ? 'absolute' : undefined, inset: expanded ? '0 0 0 0' : undefined, zIndex: expanded ? 46 : undefined, width: expanded ? '100%' : panelWidth, minWidth: expanded ? 0 : Math.min(panelWidth, 320), '--inspector-bg': t.dark ? t.windowBg : t.sidebarPanelBg, '--inspector-surface': t.surface, '--inspector-active': t.surfaceActive, '--inspector-text': t.text, '--inspector-muted': t.text3, '--inspector-border': t.border, background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}` } as CSSProperties}>
       {!expanded && <div className="no-drag runtime-inspector-resize" role="separator" aria-label="Resize right panel" aria-orientation="vertical" aria-valuenow={panelWidth} aria-valuemin={320} aria-valuemax={960} tabIndex={0} onKeyDown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); resize(panelWidth + (e.key === 'ArrowLeft' ? 24 : -24)); } }} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); }} onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) resize(window.innerWidth - e.clientX); }} onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} />}
       <header className="no-drag runtime-inspector-header" style={{ borderBottom: `0.5px solid ${t.border}` }}>
-        <InspectorTabs bridge={bridge} />
-        <button type="button" aria-label={expanded ? 'Restore panel size' : 'Expand right panel'} className="no-drag runtime-panel-hide" onClick={() => setExpanded(!expanded)} style={runtimeCenterButtonStyle(t, expanded)}>{expanded ? '↙' : '↗'}</button>
-        <button type="button" aria-label="Hide right panel" className="no-drag runtime-panel-hide" onClick={() => { bridge.setRuntimeInspectorOpen(false); window.requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-runtime-inspector-trigger="true"]')?.focus()); }} style={runtimeCenterButtonStyle(t, true)}><Icon name="panel-right" size={18} /></button>
+        <InspectorTabs bridge={bridge} toolsOpen={!active} onTools={() => setToolsOpen(true)} onSelect={() => setToolsOpen(false)} />
+
       </header>
-      <div id="runtime-inspector-panel" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-        {!active && <div className="runtime-inspector-landing">{(['review', 'agents', 'todos', 'resources', 'plan'] as const).map((section) => <OverviewRow key={section} icon={section === 'agents' ? 'subagent' : section === 'todos' ? 'check' : section === 'resources' ? 'resources' : 'file'} title={SECTION_LABELS[section]} onClick={() => bridge.openRuntimeItem({ kind: 'section', id: section })} />)}</div>}
+      <div id="runtime-inspector-panel" className="runtime-inspector-content" role={active ? 'tabpanel' : 'region'} aria-label={active ? undefined : 'Details'} aria-labelledby={active ? `runtime-inspector-tab-${encodeURIComponent(runtimeCenterItemKey(active))}` : undefined} style={{ minHeight: 0, flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+        {!active && <InspectorTools bridge={bridge} onSelect={() => setToolsOpen(false)} /> }
         {active?.kind === 'turn-review' && <TurnFileReview key={`${active.id}:${active.path ?? ''}`} files={active.files} path={active.path} />}
         {active?.kind === 'section' && <SectionDetail section={active.id} bridge={bridge} />}
         {active?.kind === 'task' && <TaskDetail task={task} bridge={bridge} />}
@@ -618,7 +630,34 @@ export function RuntimeCenterInspector({ bridge }: { bridge: UseBridge }) {
         {active?.kind === 'plan-document' && <SubmittedPlanDetail plan={center.submittedPlanState.calls.find((call) => call.id === active.id) ?? (center.submittedPlan?.id === active.id ? center.submittedPlan : undefined)} />}
       </div>
     </aside>
+    </>
   );
+}
+
+function InspectorTools({ bridge, onSelect }: { bridge: UseBridge; onSelect: () => void }) {
+  const tools = [
+    { id: 'review', icon: 'file', detail: 'Changes and file diffs' },
+    { id: 'agents', icon: 'subagent', detail: 'Agents and background tasks' },
+    { id: 'todos', icon: 'check', detail: 'Track work in progress' },
+    { id: 'resources', icon: 'resources', detail: 'Files and attachments' },
+    { id: 'plan', icon: 'file', detail: 'Read the proposed approach' },
+  ] as const;
+  const open = (item: RuntimeCenterItemRef) => { onSelect(); bridge.openRuntimeItem(item); };
+  return <div className="runtime-inspector-landing">
+    <section aria-labelledby="inspector-tools-heading">
+      <h2 id="inspector-tools-heading">Tools</h2>
+      <div className="runtime-inspector-tool-grid">
+        {tools.map(({ id, icon, detail }) => <button key={id} type="button" className="runtime-inspector-tool" onClick={() => open({ kind: 'section', id })}>
+          <Icon name={icon} size={20} /><span><strong>{SECTION_LABELS[id]}</strong><small>{detail}</small></span>
+        </button>)}
+        <button type="button" className="runtime-inspector-tool" aria-label="Open pinned summary" onClick={() => bridge.setRuntimeCenterOverviewOpen(true)}><Icon name="summary-list" size={20} /><span><strong>Summary</strong><small>Session context at a glance</small></span></button>
+      </div>
+    </section>
+    <section aria-labelledby="inspector-resources-heading">
+      <h2 id="inspector-resources-heading">Session resources</h2>
+      {bridge.runtimeCenter.resources.length ? <div className="runtime-inspector-resource-grid">{bridge.runtimeCenter.resources.slice(0, 6).map(resource => <button type="button" key={resource.id} title={resource.path ?? resource.name} onClick={() => open({ kind: 'resource', id: resource.id })}><Icon name={resource.kind === 'image' ? 'image' : 'file'} size={24} /><span>{resource.name}</span></button>)}</div> : <p className="runtime-inspector-resource-empty">Files and attachments from this session appear here.</p>}
+    </section>
+  </div>;
 }
 
 function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined }) {

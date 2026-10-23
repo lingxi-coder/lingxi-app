@@ -66,6 +66,32 @@ async function main() {
     assert.equal(await js(`document.querySelector('.runtime-inspector').inert`), false);
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).opacity`), '1');
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector-header')).getPropertyValue('-webkit-app-region')`), 'no-drag');
+    for (const width of [900, 1400]) {
+      window.setContentSize(width, 900);
+      await delay(150);
+      assert.equal(await js(`getComputedStyle(document.querySelector('[aria-label="Toggle right panel"]')).display`), 'none', `${width}px: the open panel owns its only visible toggle`);
+      assert.equal(await js(`document.querySelector('[aria-label="Hide right panel"]').getBoundingClientRect().width > 0`), true);
+    }
+    await js(`document.activeElement?.blur()`);
+    await capture('tools-light');
+    await pointerClick('.runtime-inspector-tool');
+    await waitFor(wc, `Boolean(document.querySelector('[data-runtime-inspector-active="true"]'))`);
+    await pointerClick('[aria-label="Open tools"]');
+    await waitFor(wc, `Boolean(document.querySelector('.runtime-inspector-landing'))`);
+    await pointerClick('.runtime-inspector-resource-grid button');
+    await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('Reference content')`);
+    await pointerClick('[aria-label="Open tools"]');
+    await waitFor(wc, `Boolean(document.querySelector('.runtime-inspector-landing'))`);
+    await js(`window.dispatchEvent(new CustomEvent('fixture-reset', {detail:{theme:'dark'}}))`);
+    await capture('tools-dark');
+    window.setContentSize(900, 900);
+    await capture('tools-narrow');
+    window.setContentSize(1400, 900);
+    await js(`window.dispatchEvent(new CustomEvent('fixture-reset', {detail:{theme:'light'}}))`);
+    await pointerClick('[aria-label="Close Review"]');
+    await pointerClick('[aria-label="Close desktop-reference.png"]');
+    assert.equal(await js(`['Open tools', 'Expand right panel', 'Hide right panel'].every(label => document.querySelector('.desktop-topbar [aria-label="' + label + '"]'))`), true);
+    assert.equal(await js(`document.querySelectorAll('.runtime-inspector-header button[aria-label="Open tools"], .runtime-inspector-header .runtime-panel-hide').length`), 0);
     await pointerClick('[aria-label="Open pinned summary"]');
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
     await click('[aria-label="Toggle pinned summary"]');

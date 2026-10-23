@@ -154,7 +154,7 @@ test('an open inspector with no tabs shows four content entry points', () => {
   bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: null, tabs: [] };
   const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
   for (const label of ['Subagents', 'Todos', 'Resources', 'Plan']) assert.ok(html.includes(label));
-  assert.ok(html.includes('Hide right panel'));
+  assert.ok(!html.includes('Hide right panel'), 'window controls render in the topbar portal');
   assert.ok(html.includes('Open pinned summary'));
 });
 

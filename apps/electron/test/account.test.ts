@@ -182,7 +182,7 @@ test('provider popup cancellation settles the service and closes the origin-chec
   const button = { disabled: false, onclick: async () => {} };
   const status = { textContent: '' };
   // Execute the actual served handler with only the provider and DOM mocked.
-  vm.runInNewContext(script.replace(/^import .*;$/gm, ''), {
+  vm.runInNewContext(script.replace(/^const \{.*\} = await import\('\/firebase-(?:app|auth)\.js'\);$/gm, ''), {
     initializeApp: () => ({}), initializeAuth: () => ({}), inMemoryPersistence: {}, browserPopupRedirectResolver: {},
     GoogleAuthProvider: class { addScope() {} },
     document: { getElementById: (id: string) => id === 'login' ? button : status },

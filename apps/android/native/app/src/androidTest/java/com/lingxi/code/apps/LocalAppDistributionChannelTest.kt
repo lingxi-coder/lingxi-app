@@ -22,6 +22,38 @@ class LocalAppDistributionChannelTest {
         assertEquals(BuildConfig.MOBILE_LINUX_FULL, "background" in capabilities)
     }
 
+    @Test fun externalBrowserRequiresConsentBoundToPublishedContent() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val apps = UnifiedLocalApps.get(context)
+        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/browser-consent-${UUID.randomUUID()}")
+        check(source.mkdirs())
+        source.resolve("lingxi-app.json").writeText("""{"schema":2,"name":"Browser consent fixture","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"android","environment":"web"}]}""")
+        source.resolve("index.html").writeText("<!doctype html><title>Consent fixture</title>")
+        var id: String? = null
+        try {
+            val published = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject
+            val record = published.getJSONObject("record").appRecord()
+            val release = published.getJSONObject("release").appRelease()
+            id = record.id
+            assertFalse(apps.keepRunning(record.id, release.digest))
+            val failure = runCatching { apps.openExternalBrowser(record.id) }.exceptionOrNull()
+            assertTrue("Opening must require explicit foreground notification consent", failure is IllegalStateException)
+            assertFalse(LocalAppProcessService.owns(record.id))
+            assertTrue(apps.runs(record.id).isEmpty())
+            apps.setKeepRunning(record.id, release.digest, true)
+            assertTrue(apps.keepRunning(record.id, release.digest))
+            source.resolve("index.html").appendText("<!-- changed release -->")
+            val changed = apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", release.revision) } as JSONObject
+            val next = changed.getJSONObject("release").appRelease()
+            assertNotEquals(release.digest, next.digest)
+            assertFalse("New release contents need fresh consent", apps.keepRunning(record.id, next.digest))
+            apps.setKeepRunning(record.id, release.digest, false)
+        } finally {
+            id?.let { apps.remove(it) }
+            source.deleteRecursively()
+        }
+    }
+
     @Test fun playRejectsGrantedLinuxReleaseBeforeRuntimePreparation() = runBlocking<Unit> {
         assumeFalse("Requires the actual Play package", BuildConfig.MOBILE_LINUX_FULL)
         val context = InstrumentationRegistry.getInstrumentation().targetContext

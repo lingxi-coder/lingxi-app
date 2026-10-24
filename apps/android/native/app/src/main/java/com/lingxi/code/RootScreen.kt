@@ -1658,7 +1658,10 @@ fun RootScreen(
                         }
                         "market" -> { appsPageOpen = true }
                         "apps" -> {
-                            check(appLibrary.apps.any { it.id == id }) { "App is not installed on this device. Import legacy apps from the archive first." }
+                            // Initial library refresh can still be in flight
+                            // when a cold-start link reaches this route.
+                            // Resolve against the durable owner, not UI cache.
+                            localApps.get(id)
                             runtimeAppId = id
                         }
                         "runtime" -> {

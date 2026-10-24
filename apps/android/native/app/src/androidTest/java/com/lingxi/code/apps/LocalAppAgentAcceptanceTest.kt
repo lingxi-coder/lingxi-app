@@ -438,8 +438,11 @@ class LocalAppAgentAcceptanceTest {
                         browserPackage = root?.packageName?.toString().orEmpty()
                         if (browserPackage == context.packageName) {
                             // Exercise the trusted native exact-content consent UI.
-                            root?.findAccessibilityNodeInfosByText("允许并打开浏览器")?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
-                                ?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                            var consent = root?.findAccessibilityNodeInfosByText("允许并打开浏览器")
+                                ?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                            // Compose may expose the label separately from its clickable parent.
+                            while (consent != null && !consent.isClickable) consent = consent.parent
+                            consent?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
                         }
                         if (browserPackage == "com.android.chrome" || browserPackage == "com.sec.android.app.sbrowser" || browserPackage.contains("firefox")) break
                         delay(250)

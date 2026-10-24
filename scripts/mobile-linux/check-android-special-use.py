@@ -28,6 +28,7 @@ PERMISSION = "android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
 SUBTYPE = "android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
 CONVERSATION = ".conversation.ConversationTurnService"
 CONTROL = ".computeruse.ComputerUseSessionService"
+LOCAL_APP = ".apps.LocalAppProcessService"
 MAIN = Path("apps/android/native/app/src/main/AndroidManifest.xml")
 DIRECT = Path("apps/android/native/app/src/direct/AndroidManifest.xml")
 TOKEN = re.compile(r"FOREGROUND_SERVICE_(?:TYPE_)?SPECIAL_USE|PROPERTY_SPECIAL_USE_FGS_SUBTYPE|specialUse")
@@ -53,6 +54,7 @@ def validate_manifest(path, repo_root, mode):
     expected = {}
     if relative == MAIN:
         expected[CONVERSATION] = ("specialUse", "User-started LLM inference and agent tool execution")
+        expected[LOCAL_APP] = ("specialUse", "User-authorized local application services")
     if mode == "direct" and relative == DIRECT:
         expected[CONTROL] = ("mediaProjection|microphone|specialUse", "User-started Android Computer Use control session")
     seen = set()
@@ -64,7 +66,7 @@ def validate_manifest(path, repo_root, mode):
             if "mediaPlayback" in node.get(ANDROID + "foregroundServiceType", "").split("|"):
                 reject(path, "forbidden mediaPlayback foreground service")
             canonical = service_name(name)
-            if canonical in (CONVERSATION, CONTROL) or TOKEN.search(node.get(ANDROID + "foregroundServiceType", "")):
+            if canonical in (CONVERSATION, CONTROL, LOCAL_APP) or TOKEN.search(node.get(ANDROID + "foregroundServiceType", "")):
                 if canonical not in expected or canonical in seen:
                     reject(path, "unreviewed or duplicate specialUse service / manifest override")
                 kind, subtype = expected[canonical]
@@ -124,7 +126,9 @@ def validate_sources(repo_root, mode, scan_paths):
         validate_manifest(path, repo_root, mode)
     package_path = Path(*android_package().split("."))
     constant_paths = {repo_root / "apps/android/native/app/src/main/java" / package_path
-                      / "conversation/ConversationBackgroundExecution.kt"}
+                      / "conversation/ConversationBackgroundExecution.kt",
+                      repo_root / "apps/android/native/app/src/main/java" / package_path
+                      / "apps/LocalAppProcessService.kt"}
     if mode == "direct":
         constant_paths.add(repo_root / "apps/android/native/app/src/direct/java" / package_path
                            / "computeruse/ComputerUseSessionService.kt")

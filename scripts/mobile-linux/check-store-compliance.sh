@@ -33,6 +33,11 @@ declare -a base_rg=(
   --glob=!**/.build/**
   --glob=!**/DerivedData/**
   --glob=!**/.git/**
+  # Instrumentation/unit test bundles are not distributed application code.
+  --glob=!**/src/androidTest/**
+  --glob=!**/src/test/**
+  --glob=!**/native/Tests/**
+  --glob=!**/native/UITests/**
 )
 if [[ "${mode}" == "play" ]]; then
   base_rg+=(--glob=!**/src/direct/**)

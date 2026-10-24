@@ -8,7 +8,10 @@ import {
   APP_USER_DATA_SUBPATH,
   unregisterCredentialBrokerForColdStart,
   assertCustomProviderTurn,
+  assertPackagedLocalAppCatalogSession,
   assertPackagedLocalAppAuthoring,
+  assertPackagedLocalAppPendingAuthoring,
+  enterPackagedProjectName,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
   isSafeProviderCredentialSnapshot,
@@ -89,6 +92,55 @@ test('packaged Local App smoke requires a native dedicated source Code binding',
   assert.throws(() => assertPackagedLocalAppAuthoring({ ...app, authoring: undefined }, sourceSession), /persist its host-verified authoring binding/);
   assert.throws(() => assertPackagedLocalAppAuthoring({ ...app, authoring: { ...app.authoring, authoringSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } }, sourceSession), /real Code session/);
   assert.throws(() => assertPackagedLocalAppAuthoring(app, { ...sourceSession, mode: 'chat' }), /must use a Code session/);
+});
+
+test('Native Create smoke requires the host-persisted pending binding before first publish', () => {
+  const sourceSession = { projectPath: '/tmp/native-app-source', sessionId: '12345678-1234-4234-8234-123456789abc', mode: 'code' };
+  const authoring = { workspaceId: '12345678-1234-4234-8234-abcdef123456', sourceDirectory: sourceSession.projectPath,
+    projectRef: { kind: 'desktopPath', path: sourceSession.projectPath }, authoringSessionId: sourceSession.sessionId };
+  const index = { version: 1, entries: [{ authoring, registeredAtMs: 123, state: 'pending' }] };
+  assert.strictEqual(assertPackagedLocalAppPendingAuthoring(index, sourceSession), authoring);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring(undefined, sourceSession), /host-owned pending authoring index/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring({ ...index, entries: [] }, sourceSession), /exactly one pending binding/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring({ ...index, entries: [{ ...index.entries[0], state: 'consumed' }] }, sourceSession), /remain unconsumed/);
+  assert.throws(() => assertPackagedLocalAppPendingAuthoring({ ...index, entries: [{ ...index.entries[0], authoring: { ...authoring, sourceDirectory: '/tmp/other' } }] }, sourceSession), /sourceDirectory/);
+});
+
+test('packaged Local App smoke checks the persisted public Code catalog after the first prompt', () => {
+  const sourceSession = { projectPath: '/tmp/native-app-source', sessionId: '12345678-1234-4234-8234-123456789abc', mode: 'code' };
+  const catalog = { sessions: [{ uuid: sourceSession.sessionId, mode: 'code' }] };
+  assert.strictEqual(assertPackagedLocalAppCatalogSession(catalog, sourceSession), catalog.sessions[0]);
+  assert.throws(() => assertPackagedLocalAppCatalogSession(undefined, sourceSession), /persisted catalog/);
+  assert.throws(() => assertPackagedLocalAppCatalogSession({ sessions: [{ ...catalog.sessions[0], mode: 'chat' }] }, sourceSession), /Code session/);
+  assert.throws(() => assertPackagedLocalAppCatalogSession({ sessions: [{ ...catalog.sessions[0], workspace_path: '/tmp/other' }] }, sourceSession), /must not expose private/);
+  assert.throws(() => assertPackagedLocalAppCatalogSession({ sessions: [{ ...catalog.sessions[0], uuid: 'unrelated' }] }, sourceSession), /must persist the authoring session/);
+});
+
+test('packaged Local App creation waits for the default folder selection before typing the Project name', async () => {
+  const projectName = 'Packaged Local App Source';
+  let inputReady = false;
+  let focused = false;
+  let inputValue = '';
+  const page = { send: async (method, params = {}) => {
+    if (method === 'Runtime.evaluate') {
+      const { expression } = params;
+      if (expression.includes('!input.disabled && !input.readOnly')) return { result: { value: inputReady } };
+      if (expression.endsWith('.focus()')) { focused = inputReady; return { result: { value: undefined } }; }
+      if (expression.includes('document.activeElement ===')) return { result: { value: focused } };
+      if (expression.includes('input?.value ===')) return { result: { value: inputReady && inputValue === projectName ? inputValue : undefined } };
+      throw new Error(`Unexpected renderer expression in fixture test: ${expression}`);
+    }
+    if (method === 'Input.insertText') {
+      assert.equal(inputReady, true, 'CDP must not type into the dialog while its default folder is still loading');
+      assert.equal(focused, true, 'CDP must type into the focused Project name input');
+      inputValue += params.text;
+      return {};
+    }
+    throw new Error(`Unexpected CDP method in fixture test: ${method}`);
+  } };
+  setTimeout(() => { inputReady = true; }, 15);
+  await enterPackagedProjectName(page, projectName);
+  assert.equal(inputValue, projectName);
 });
 
 function temporaryDirectory() {

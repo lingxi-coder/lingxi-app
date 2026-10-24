@@ -35,7 +35,7 @@ export interface DesktopAppManifest {
   processes?: LocalAppProcess[];
   capabilities?: LocalAppCapability[];
   /** Requested host catalog IDs. This declaration never grants tool access. */
-  agent?: { tools: string[]; skills: Array<{ id: string; path: string }> };
+  agent?: { tools: string[]; skills?: Array<{ id: string; path: string }> };
 }
 export interface LocalAppTarget {
   platform: 'android' | 'ios' | 'macos' | 'windows' | 'linux' | 'web';

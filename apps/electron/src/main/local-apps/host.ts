@@ -634,7 +634,7 @@ export class LocalAppHost {
         // Persist only permission identity, never labels or catalog metadata.
         return found.kind === 'builtin' ? { id: found.id, kind: found.kind, name: found.name } : { id: found.id, kind: found.kind, serverConfigId: found.serverConfigId, configRevision: found.configRevision, rawToolName: found.rawToolName, definitionDigest: found.definitionDigest };
       });
-      const requestedSkills = row.manifest.agent?.skills.map(skill => skill.id) ?? [];
+      const requestedSkills = (row.manifest.agent?.skills ?? []).map(skill => skill.id);
       if (!Array.isArray(settings.skills) || settings.skills.some(skill => !requestedSkills.includes(skill))) throw new Error('Only Skills declared by this release can be granted');
       const epoch = await this.cancelAgentApp(id, 'Application Agent permissions changed');
       try {

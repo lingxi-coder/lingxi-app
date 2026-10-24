@@ -25,6 +25,7 @@ import {
 } from './bridgeIpc.js';
 import type {
   BridgeManagerOptions,
+  RuntimeSessionMode,
   SequencedRuntimeEventEnvelope,
   SessionRef,
   SessionRuntimeManagerOptions,
@@ -45,6 +46,32 @@ import { validateRequestId } from './validation.js';
 const DEFAULT_MAX_CACHED_RUNTIMES = 6;
 
 const MAX_CONFIGURED_CACHED_RUNTIMES = 32;
+
+export interface LiveDraftSession {
+  sessionId: string;
+  projectPath: string;
+  mode: RuntimeSessionMode;
+  engineCwd: string;
+}
+
+/** Accept only a live, active, host-created draft with explicit runtime mode and cwd. */
+export function resolveActiveDraftSession(
+  requested: SessionRef,
+  activeRef: SessionRef | undefined,
+  draftRef: SessionRef | undefined,
+  runtime: Pick<SessionRuntime, 'sessionId' | 'projectPath' | 'sessionMode' | 'engineWorkspacePath' | 'connectionState'> | undefined,
+  activeRuntimeSessionId: string | null,
+): LiveDraftSession | undefined {
+  try { assertSessionRef(requested); } catch { return undefined; }
+  if (!activeRef || activeRef.projectPath !== requested.projectPath || activeRef.sessionId !== requested.sessionId
+    || !draftRef || draftRef.projectPath !== requested.projectPath || draftRef.sessionId !== requested.sessionId
+    || !runtime || activeRuntimeSessionId !== requested.sessionId
+    || runtime.projectPath !== requested.projectPath || runtime.sessionId !== requested.sessionId
+    || runtime.sessionMode !== 'code' || runtime.connectionState.status !== 'connected'
+    || typeof runtime.engineWorkspacePath !== 'string' || !runtime.engineWorkspacePath) return undefined;
+  return { projectPath: runtime.projectPath, sessionId: runtime.sessionId, mode: runtime.sessionMode,
+    engineCwd: runtime.engineWorkspacePath };
+}
 
 
 
@@ -117,6 +144,10 @@ export class SessionRuntimeManager {
 
   get(sessionId: string): SessionRuntime | undefined {
     return this.runtimes.get(sessionId);
+  }
+
+  getActiveDraftSession(ref: SessionRef, activeRef: SessionRef | undefined): LiveDraftSession | undefined {
+    return resolveActiveDraftSession(ref, activeRef, this.draftSessions.get(ref.projectPath), this.runtimes.get(ref.sessionId), this.activeSessionId);
   }
 
   setSessionDirectoryGrants(sessionId: string, directories: readonly string[]): void {
@@ -212,12 +243,13 @@ export class SessionRuntimeManager {
   }
 
   /** Create, validate, and optionally start one session-owned runtime. */
-  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string): Promise<SessionRuntime> {
+  async ensure(ref: SessionRef, start = true, resumeModel?: string, remountControls?: string, sessionMode?: RuntimeSessionMode): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
     if (existing) {
       if (existing.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
+      if (sessionMode !== undefined && existing.sessionMode !== sessionMode) throw new Error('session runtime mode does not match the requested session');
       if (start) await existing.start();
       this.touch(existing.sessionId);
       return existing;
@@ -225,7 +257,7 @@ export class SessionRuntimeManager {
 
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
-    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls });
+    const runtime = new SessionRuntime({ ...runtimeOptions, remountControls }, sessionMode);
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const [webContents, origins] of this.targets) {
@@ -371,7 +403,7 @@ export class SessionRuntimeManager {
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(projectPath);
     if (draft) {
-      const runtime = await this.ensure(draft, true, model);
+      const runtime = await this.ensure(draft, true, model, undefined, 'code');
       this.activate(runtime);
       return { ...draft };
     }
@@ -401,7 +433,7 @@ export class SessionRuntimeManager {
     if (!ref) throw new Error('could not allocate a new session id');
     this.draftSessions.set(projectPath, ref);
     try {
-      const runtime = await this.ensure(ref, true, model);
+      const runtime = await this.ensure(ref, true, model, undefined, 'code');
       this.activate(runtime);
     } catch (error) {
       this.clearDraftSession(ref);

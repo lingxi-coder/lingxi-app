@@ -91,6 +91,8 @@ Create establishes a Project and Code session for that source before composing t
 
 Before showing a new draft, native Create durably registers the verified source Project and Code session as a pending authoring binding. First publication serializes the pending-binding check, Core publication, and binding consumption. Core saves the complete authoring reference with the App record. A failure before commit can be retried; after a committed publication or an uncertain response, another first-publish attempt reports the existing App identity instead of creating a duplicate. The tool's session locator is resolved through the trusted session catalog and never grants authority by itself. Ordinary publication outside native Create remains available without an authoring binding.
 
+Before its first prompt, a native Code draft may not have a persisted catalog row yet. In that case only, the host can verify its exact current, connected runtime: the active session, native draft, runtime session and Project must match, its explicit mode must be Code, and the engine launch cwd must resolve to the source Project. An existing catalog row always takes precedence; a saved Chat session or mismatched workspace cannot use the draft path to bypass validation.
+
 ## Implementation map
 
 - `apps/electron/src/preload/localAppSdk.ts` and `preload/localApp.ts`: bundled page SDK, File conversion and narrow preload surface.

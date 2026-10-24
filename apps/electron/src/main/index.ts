@@ -535,7 +535,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       accountId: () => accountService.snapshot().user?.uid ?? undefined,
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
       resolveAuthoringBinding: async (_appId, session) => {
-        return resolveDesktopAuthoringBinding(sessionCatalog, session);
+        const activeSession = settings.getPublic().activeSession ?? undefined;
+        const liveDraft = bridge?.getActiveDraftSession(session, activeSession);
+        return resolveDesktopAuthoringBinding(sessionCatalog, session, liveDraft);
       },
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,

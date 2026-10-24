@@ -125,6 +125,27 @@ test('grant changes persist catalog-bound identity and refuse undeclared tools o
   await assert.rejects(host.request({ action: 'agent-settings', id: row.id, settings: { ...settings, tools: [catalog.tools[2]] } }), /requested/);
 });
 
+test('Core releases that omit an empty Skill list can enable Agent access without granting undeclared Skills', async t => {
+  const { host, row } = await fixture(t);
+  const get = host.store.get.bind(host.store);
+  // Rust omits an empty skills array from its serialized release manifest.
+  // The disk fixture normalizes it, so reproduce the actual Core DTO boundary.
+  host.store.get = async (id: string) => {
+    const value = await get(id);
+    value.manifest.agent = { tools: [] };
+    return value;
+  };
+  const emptySettings = { ...settings, tools: [], skills: [] };
+  await host.request({ action: 'agent-settings', id: row.id, settings: emptySettings });
+  const saved = await host.store.get(row.id);
+  assert.equal(saved.agent.enabled, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.agent.skills)), []);
+  const catalog = await host.request({ action: 'agent-catalog', id: row.id });
+  assert.deepEqual(JSON.parse(JSON.stringify(catalog.skills)), []);
+  await assert.rejects(host.request({ action: 'agent-settings', id: row.id,
+    settings: { ...emptySettings, skills: ['nutrition'] } }), /Only Skills declared/);
+});
+
 test('stop waits for Agent cancellation before stopping the runtime and denies new admission immediately', async t => {
   const { host, row, owner } = await fixture(t);
   const order: string[] = [];

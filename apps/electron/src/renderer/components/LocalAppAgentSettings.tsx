@@ -16,6 +16,7 @@ export function LocalAppAgentSettingsDialog({ app, onClose, onSaved }: { app: De
   const [settings, setSettings] = useState<LocalAppAgentSettings | undefined>(() => app.agent ? structuredClone(app.agent) : undefined);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const declaredSkills = app.manifest.agent?.skills ?? [];
   useEffect(() => {
     let current = true;
     void api().agentCatalog(app.id).then(value => {
@@ -54,9 +55,9 @@ export function LocalAppAgentSettingsDialog({ app, onClose, onSaved }: { app: De
         {settings.tools.some(grant => !catalog.tools.some(tool => sameTool(grant, tool))) && <><p className="local-app-agent-hint">Some previously allowed tools changed or are unavailable. Select their current versions above to renew access, or remove their old permissions.</p><button type="button" onClick={() => setSettings({ ...settings, tools: settings.tools.filter(grant => catalog.tools.some(tool => sameTool(grant, tool))) })}>Remove outdated tool permissions</button></>}
       </fieldset>
       <fieldset><legend>Requested Skills</legend><p className="local-app-agent-hint">Skills provide release-local instructions. They do not grant tools or permissions.</p>
-        {(app.manifest.agent?.skills ?? []).map(skill => <label key={skill.id} className="local-app-agent-tool"><input type="checkbox" checked={settings.skills.includes(skill.id)} onChange={event => setSettings({ ...settings, skills: event.target.checked ? [...settings.skills, skill.id] : settings.skills.filter(id => id !== skill.id) })}/><span><strong>{catalog.skills.find(choice => choice.id === skill.id)?.label ?? skill.id}</strong><small>{skill.path}</small></span></label>)}
-        {!app.manifest.agent?.skills.length && <p className="local-app-agent-hint">This app does not declare any Skills.</p>}
-        {settings.skills.some(id => !app.manifest.agent?.skills.some(skill => skill.id === id)) && <><p className="local-app-agent-hint">Some previously allowed Skills are no longer declared.</p><button type="button" onClick={() => setSettings({ ...settings, skills: settings.skills.filter(id => app.manifest.agent?.skills.some(skill => skill.id === id)) })}>Remove outdated Skill permissions</button></>}
+        {declaredSkills.map(skill => <label key={skill.id} className="local-app-agent-tool"><input type="checkbox" checked={settings.skills.includes(skill.id)} onChange={event => setSettings({ ...settings, skills: event.target.checked ? [...settings.skills, skill.id] : settings.skills.filter(id => id !== skill.id) })}/><span><strong>{catalog.skills.find(choice => choice.id === skill.id)?.label ?? skill.id}</strong><small>{skill.path}</small></span></label>)}
+        {!declaredSkills.length && <p className="local-app-agent-hint">This app does not declare any Skills.</p>}
+        {settings.skills.some(id => !declaredSkills.some(skill => skill.id === id)) && <><p className="local-app-agent-hint">Some previously allowed Skills are no longer declared.</p><button type="button" onClick={() => setSettings({ ...settings, skills: settings.skills.filter(id => declaredSkills.some(skill => skill.id === id)) })}>Remove outdated Skill permissions</button></>}
       </fieldset>
       <div className="local-app-agent-limits"><label>Maximum turns<input type="number" min="1" max={LOCAL_APP_AGENT_MAX_TURNS} value={settings.maxTurns} onChange={event => setSettings({ ...settings, maxTurns: Number(event.target.value) })}/></label><label>Time limit (minutes)<input type="number" min="1" max={LOCAL_APP_AGENT_MAX_TIMEOUT_MS / 60000} value={settings.timeoutMs / 60000} onChange={event => setSettings({ ...settings, timeoutMs: Number(event.target.value) * 60000 })}/></label></div>
       <label className="local-app-agent-check"><input type="checkbox" checked={settings.background} onChange={event => setSettings({ ...settings, background: event.target.checked })}/> Let Agent tasks finish when this app is closed</label>

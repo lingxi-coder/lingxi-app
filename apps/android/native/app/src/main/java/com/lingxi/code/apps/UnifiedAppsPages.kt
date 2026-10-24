@@ -129,6 +129,7 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
     var pendingRelease by remember { mutableStateOf<AppRelease?>(null) }
     var publication by remember { mutableStateOf<AppMarketPublication?>(null) }
     var publicationStatus by remember { mutableStateOf<String?>(null) }
+    var agentRelease by remember(appId) { mutableStateOf<AppRelease?>(null) }
     var serving by remember(appId) { mutableStateOf<AppRun?>(null) }
     var dataDirectory by remember(appId) { mutableStateOf("") }
     var sourceExport by remember(appId) { mutableStateOf<AppSourceExport?>(null) }
@@ -204,6 +205,7 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
                         val restored = apps.restoreSource(appId, app.marketOrigin?.remixedFrom == null && app.marketOrigin != null)
                         onAuthoring(restored.id, restored.name, restored.authoring?.sourceDirectory.orEmpty())
                     } }) { Text(stringResource(if (app.marketOrigin != null && app.marketOrigin.remixedFrom == null) R.string.local_app_v2_remix else R.string.local_app_v2_restore)) } }
+                    if ("agent" in release.capabilities) item { TextButton(onClick = { agentRelease = release }) { Text("Agent 模型与工具授权") } }
                     item { Text(stringResource(R.string.local_app_v2_permissions), style = MaterialTheme.typography.titleMedium) }
                     items(release.capabilities.filter { it in AppDevicePermissions.supported }, key = { it }) { capability ->
                         val granted = remember(permissionRevision, release.digest) { apps.permissions.granted(appId, release.digest) }
@@ -231,5 +233,6 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
         publicationStatus = context.getString(R.string.local_app_v2_publish_status, status)
         publication = null
     } }) { Text(stringResource(R.string.local_app_v2_publish_confirm)) } }, dismissButton = { TextButton(enabled = !busy, onClick = { publication = null }) { Text(stringResource(R.string.local_app_v2_cancel)) } }) }
+    agentRelease?.let { release -> LocalAppAgentSettingsDialog(apps, release) { agentRelease = null } }
     if (deleting) AlertDialog(onDismissRequest = { deleting = false }, title = { Text(stringResource(R.string.local_app_v2_remove_title)) }, text = { Text(stringResource(R.string.local_app_v2_remove_note)) }, confirmButton = { TextButton(onClick = { deleting = false; scope.launch { try { apps.remove(appId); onBack() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_remove_confirm)) } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
 }

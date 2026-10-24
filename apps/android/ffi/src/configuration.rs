@@ -179,6 +179,8 @@ pub struct AndroidEngineLaunchConfigFfi {
     /// Actual native app version enables official startup catalog delivery.
     /// None is a deterministic embedder with no catalog networking.
     pub app_version: Option<String>,
+    /// Standalone Local App model host; disables personal session startup.
+    pub app_agent_host: bool,
     pub api_base: String,
     pub api_key: String,
     pub model: String,

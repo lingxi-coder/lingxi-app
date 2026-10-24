@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>餐盘笔记</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <header><p class="eyebrow">MEAL NOTES</p><h1>给这一餐，留一张照片。</h1><p>先估算，再确认。记录属于你的份量。</p></header>
+    <section aria-labelledby="photo-title" class="panel">
+      <h2 id="photo-title">1 · 拍照或选择照片</h2>
+      <div id="preview-area"><p id="photo-placeholder">把餐盘完整放进画面，光线自然一些。</p><video id="camera" playsinline muted hidden aria-label="相机预览"></video><img id="photo" alt="待识别的餐食照片" hidden></div>
+      <div class="actions"><button id="camera-open" type="button">打开相机</button><button id="camera-capture" type="button" hidden>拍下这一餐</button><button id="camera-close" type="button" hidden>关闭相机</button><button id="photo-choose" type="button">选择照片</button><input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>
+      <label for="notes">补充食材、烹饪方式或已知份量</label><textarea id="notes" rows="2" maxlength="2000" placeholder="例如：一小碗米饭，鸡肉用少量油煎制"></textarea>
+      <p class="fine">点击识别后，照片和补充说明会交给 LingXi 中为此应用选择的模型。照片不保存在餐食记录中。</p>
+      <div class="actions"><button id="analyze" class="primary" type="button" disabled>识别这一餐</button><button id="cancel" type="button" hidden>取消识别</button></div>
+      <div id="pending-review" hidden>
+        <p>上次请求未确认受理。重试会使用同一张照片和请求编号；重新选择照片前，请先明确放弃此请求。若原请求已启动，放弃这里只会移除本应用的恢复记录，并不会取消宿主任务。</p>
+        <label><input id="discard-confirm" type="checkbox"> 我了解以上情况，放弃原请求并重新选择照片</label>
+        <button id="discard-pending" type="button" disabled>放弃原请求，重新选图</button>
+      </div>
+      <p id="status" role="status" aria-live="polite">请先选择一张照片。</p><p id="error" role="alert" hidden></p>
+    </section>
+    <section id="result" aria-labelledby="result-title" class="panel" hidden>
+      <h2 id="result-title">2 · 确认食物与份量</h2><p class="estimate-label">模型估算 · 未查询营养数据库</p>
+      <p>照片无法确定所有食材和用油量。修改名称或克数后再保存；修改食物种类时请补充说明并重新识别。</p>
+      <div id="food-items"></div><p class="total">估算总热量 <strong id="total"></strong><span> kcal</span></p>
+      <div id="assumptions"></div><div id="questions"></div>
+      <button id="save" class="primary" type="button">确认并保存记录</button>
+    </section>
+    <section aria-labelledby="history-title" class="panel"><h2 id="history-title">已确认的餐食</h2><p class="fine">保存在此应用的浏览器存储中，不同步到聊天。</p><div id="history"></div></section>
+  </main>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>

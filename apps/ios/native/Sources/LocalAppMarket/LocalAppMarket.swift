@@ -69,7 +69,7 @@ final class UnifiedAppMarket {
         } catch { self.error = error.localizedDescription }
     }
     static var targets: [UnifiedAppManifest.Target] {
-        let supported = LocalAppDevicePermissions.supported.sorted() + ["network"]
+        let supported = LocalAppDevicePermissions.supported.sorted() + ["network", "agent"]
         let runtimeVersion: String? = {
             guard let url = Bundle.main.url(forResource: "mobile-linux-native-pins", withExtension: "json"),
                   let data = try? Data(contentsOf: url),

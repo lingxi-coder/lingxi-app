@@ -279,6 +279,7 @@ pub fn build_android_engine(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let AndroidEngineLaunchConfigFfi {
         app_version,
+        app_agent_host,
         api_base,
         api_key,
         model,
@@ -302,6 +303,7 @@ pub fn build_android_engine(
     #[cfg(not(target_os = "android"))]
     let _ = (
         app_version,
+        app_agent_host,
         project_cwd,
         device_control,
         session_mode,
@@ -350,6 +352,7 @@ pub fn build_android_engine(
         )?;
         let (cwd, logical_cwd) = directories.resolve_cwd(project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
+            app_agent_host,
             startup_catalog: app_version.as_ref().map(|version| {
                 harness_runtime::StartupCatalog::new(
                     harness_runtime::CatalogPlatform::Android,

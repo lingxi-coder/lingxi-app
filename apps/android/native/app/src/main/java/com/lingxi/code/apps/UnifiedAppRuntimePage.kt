@@ -75,6 +75,12 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         } catch (e: Exception) { error = e.message }
         finally { starting = false }
     }
+    fun closePage() {
+        scope.launch {
+            apps.runtime.launch(appId)?.let { launch -> runCatching { apps.agentClosed(launch) } }
+            onClose()
+        }
+    }
     fun finishPicker(uri: Uri?) {
         val pending = request ?: return
         val temporaryPhoto = cameraFile.takeIf { pending.kind == "camera.capture" }
@@ -164,7 +170,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             }
         }
     }
-    BackHandler { if (view?.canGoBack() == true) view?.goBack() else onClose() }
+    BackHandler { if (view?.canGoBack() == true) view?.goBack() else closePage() }
     Box(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).testTag(UiTags.APP_RUNTIME_PAGE)) {
         view?.let { web -> AndroidView(factory = { web }, modifier = Modifier.fillMaxSize(), onRelease = { (it.parent as? android.view.ViewGroup)?.removeView(it) }) }
         if (view == null && !needsConsent) Column(Modifier.align(Alignment.Center).padding(24.dp)) {
@@ -185,7 +191,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
                         })
                     }
                 }
-                TextButton(onClick = onClose) { Text(stringResource(R.string.local_app_v2_close)) }
+                TextButton(onClick = ::closePage) { Text(stringResource(R.string.local_app_v2_close)) }
             }
         }
     }
@@ -193,8 +199,9 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     request?.takeIf { it.kind == "microphone.record" }?.let { pending ->
         LocalAppRecordingDialog(apps, pending) { if (request === pending) request = null }
     }
-    if (needsConsent && selected != null) AlertDialog(onDismissRequest = onClose, title = { Text(stringResource(R.string.local_app_v2_allow_title)) }, text = {
+    if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId)
+    if (needsConsent && selected != null) AlertDialog(onDismissRequest = ::closePage, title = { Text(stringResource(R.string.local_app_v2_allow_title)) }, text = {
         Text(stringResource(R.string.local_app_v2_execution_note, selected.revision, selected.digest.take(16)))
-    }, confirmButton = { TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; open() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_allow_release)) } }, dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.local_app_v2_cancel)) } })
+    }, confirmButton = { TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; open() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_allow_release)) } }, dismissButton = { TextButton(onClick = ::closePage) { Text(stringResource(R.string.local_app_v2_cancel)) } })
     external?.let { url -> AlertDialog(onDismissRequest = { external = null }, title = { Text(stringResource(R.string.local_app_v2_external_title)) }, text = { Text(url) }, confirmButton = { TextButton(onClick = { external = null; runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } }) { Text(stringResource(R.string.local_app_v2_open)) } }, dismissButton = { TextButton(onClick = { external = null }) { Text(stringResource(R.string.local_app_v2_cancel)) } }) }
 }

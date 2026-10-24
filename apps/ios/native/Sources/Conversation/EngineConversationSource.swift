@@ -1837,6 +1837,7 @@ final class EngineConversationSource: ConversationSource {
         }
         let launchConfig = IosEngineLaunchConfigFfi(
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            appAgentHost: false,
             apiBase: config.apiBase,
             apiKey: config.apiKey,
             model: config.model,

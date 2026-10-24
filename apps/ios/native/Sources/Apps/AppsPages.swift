@@ -215,6 +215,7 @@ struct LocalAppDetailPage: View {
     @State private var dataPath = ""
     @State private var error: String?
     @State private var consent: UnifiedAppRelease?
+    @State private var agentRelease: UnifiedAppRelease?
     @State private var deleting = false
     @State private var publication: LocalAppMarketPublication?
     @State private var preparingPublication = false
@@ -247,6 +248,9 @@ struct LocalAppDetailPage: View {
                     Text("执行授权按发布摘要保存；撤销会停止当前应用。").font(.footnote)
                     Button("撤销执行授权",role:.destructive) { operation("revoke") }
                     if let release = releases.first(where: { $0.revision == app.currentRevision }) {
+                        if (release.manifest.capabilities ?? []).contains("agent") {
+                            Button("Agent 模型与工具授权") { agentRelease = release }
+                        }
                         ForEach((release.manifest.capabilities ?? []).filter { LocalAppDevicePermissions.supported.contains($0) }, id: \.self) { capability in
                             Toggle(capability, isOn: Binding(get: {
                                 library.devicePermissions.allows(capability, appID: appId, digest: release.digest)
@@ -309,6 +313,7 @@ struct LocalAppDetailPage: View {
                 }
             }
         }
+        .sheet(item: $agentRelease) { release in LocalAppAgentSettingsView(client: library.client, appID: appId, release: release) }
         .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await runRelease(release) } catch { self.error = error.localizedDescription; consent = nil } } } }
         .confirmationDialog("清除浏览器数据？", isPresented: $clearingBrowserData, titleVisibility: .visible) {
             Button("停止并清除浏览器数据", role: .destructive) { Task { do { try await library.stop(appId); try await library.browser.clearData(appId) } catch { self.error = error.localizedDescription } } }
@@ -353,6 +358,7 @@ struct AppRuntimeView: View {
     let onShowDetails: (String) -> Void
     @State private var webView: WKWebView?
     @State private var error: String?
+    @State private var hasAgent = false
     @State private var externalURL: URL?
     @State private var consent: UnifiedAppRelease?
     var body: some View {
@@ -366,7 +372,7 @@ struct AppRuntimeView: View {
                         Task { do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription } }
                     }
                 } label: { Image(systemName:"ellipsis") }.accessibilityLabel("应用菜单")
-                Button(action:onClose) { Image(systemName:"xmark") }.accessibilityLabel("关闭应用窗口")
+                Button { Task { if let run = library.runs[appId] { try? await library.client.agentClosed(appID: appId, invocationID: run.runId) }; onClose() } } label: { Image(systemName:"xmark") }.accessibilityLabel("关闭应用窗口")
             }.padding()
             if library.isPaused(appId) {
                 ContentUnavailableView { Label("应用已暂停",systemImage:"pause.circle") } description: { Text("系统后台运行时间已结束。返回应用后可恢复运行。")} actions: { Button("恢复") { Task { await load() } } }
@@ -379,6 +385,7 @@ struct AppRuntimeView: View {
         // tear down the app, change navigation, or clear its document state.
         .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await load() } catch { self.error = error.localizedDescription; consent = nil } } } }
         .alert("打开外部链接？",isPresented:Binding(get:{externalURL != nil},set:{if !$0 { externalURL = nil }}),presenting:externalURL) { url in Button("打开") { openURL(url) }; Button("取消",role:.cancel) {} } message: { url in Text(url.absoluteString) }
+        .background { if hasAgent { LocalAppAgentInteractions(client: library.client, appID: appId) } }
         .accessibilityIdentifier("app-runtime")
     }
     private func load() async {
@@ -387,6 +394,7 @@ struct AppRuntimeView: View {
             await library.refresh()
             guard let app = library.record(appId) else { throw LocalAppServiceFailure("APP_NOT_FOUND","The local app was not found.") }
             let release = try await library.release(appId,revision:app.currentRevision)
+            hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
             webView = try await library.browser.open(appId) { externalURL = $0 }; info.markOpened(app)
         } catch { self.error = error.localizedDescription }

@@ -32,6 +32,23 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     private val creation = Mutex()
     private var handle: MobileLocalAppServiceHandle? = null
     private var linuxBound = false
+    private val agentCreation = Mutex()
+    private var agentModelHost: com.lingxi.code.bindings.runtime.MobileEngineHandle? = null
+    private var agentConfiguration: com.lingxi.code.settings.ProviderEngineLaunchConfig? = null
+    private suspend fun ensureAgentHost() = agentCreation.withLock {
+        val configured = withContext(Dispatchers.IO) {
+            com.lingxi.code.settings.ProviderSettingsRepository(context).engineLaunchConfig()
+        }
+        if (agentModelHost == null || agentConfiguration != configured) withContext(Dispatchers.IO) {
+            agentModelHost = com.lingxi.code.voice.buildVoiceEngine(
+                context = context, model = configured.defaultModel,
+                providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
+                appAgentHost = true, onEvent = {}, onPermission = {},
+            ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
+            agentConfiguration = configured
+        }
+    }
+
     val permissions = AppDevicePermissions(context)
     val runtime = UnifiedAppWebRuntime(context, this)
     val market = UnifiedAppMarket(context, this)
@@ -57,6 +74,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                             if (runtime.pendingDeviceRequest(app.id) != null) continue
                             val running = (request("status", app.id) as JSONObject).optJSONObject("run") ?: continue
                             val release = release(app.id, running.getLong("revision"))
+                            if ("agent" in release.capabilities) runtime.launch(app.id)?.let { runCatching { agentClosed(it) } }
                             if (visible.isEmpty() && runtime.pendingDeviceRequest(app.id) == null && release.executesCode && !keepRunning(app.id, release.digest)) runCatching { suspend(app.id) }
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -79,6 +97,19 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                 decodeAppResponse(created.requestJson(JSONObject().put("op", "configureTarget").put("target", appTarget(if (BuildConfig.MOBILE_LINUX_FULL) "mobile-linux" else "web")).toString()))
             }
         }.also { handle = it }
+    }
+    suspend fun agentPage(launch: AppLaunch, method: String, args: JSONObject): Any? = withContext(Dispatchers.IO) {
+        ensureAgentHost()
+        decodeAppResponse(service().agentPageJson(launch.run.appId, launch.run.runId, method, args.toString()))
+    }
+    /** Trusted app-details UI only; no WebView message can reach this method. */
+    suspend fun agentHost(request: JSONObject): Any? = withContext(Dispatchers.IO) {
+        ensureAgentHost()
+        decodeAppResponse(service().agentHostJson(request.toString()))
+    }
+    suspend fun agentClosed(launch: AppLaunch) = withContext(Dispatchers.IO) {
+        decodeAppResponse(service().agentPageClosed(launch.run.appId, launch.run.runId))
+        Unit
     }
     private suspend fun bindLinux() = creation.withLock {
         check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持 Linux 应用代码执行。" }
@@ -266,4 +297,4 @@ internal fun appTarget(environment: String): JSONObject = JSONObject().put("plat
     .put("architecture", canonicalAppArchitecture(Build.SUPPORTED_ABIS.firstOrNull()))
     .put("runtimeVersion", BuildConfig.MOBILE_LINUX_SDK_VERSION)
     .put("channels", JSONArray(listOf(BuildConfig.FLAVOR)))
-    .put("capabilities", JSONArray((AppDevicePermissions.supported + setOf("network") + if (BuildConfig.MOBILE_LINUX_FULL) setOf("process", "background") else emptySet()).toList()))
+    .put("capabilities", JSONArray((AppDevicePermissions.supported + setOf("network", "agent") + if (BuildConfig.MOBILE_LINUX_FULL) setOf("process", "background") else emptySet()).toList()))

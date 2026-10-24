@@ -36,6 +36,26 @@ actor LocalAppServiceClient {
         }
         return try await send(service, fields)
     }
+    func agentPage(appID: String, invocationID: String, method: String, arguments: String) async throws -> LocalAppJSON {
+        try await LocalAppAgentModelHost.shared.ensure()
+        let _: LocalAppJSON = try await request(["op": .string("list")])
+        guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
+        let response = try await handle.agentPageJson(appId: appID, invocationId: invocationID, method: method, arguments: arguments)
+        return try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
+    }
+    // Trusted native UI only. No WebKit SDK method forwards to this operation.
+    func agentHost(_ request: String) async throws -> LocalAppJSON {
+        try await LocalAppAgentModelHost.shared.ensure()
+        let _: LocalAppJSON = try await self.request(["op": .string("list")])
+        guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
+        let response = try await handle.agentHostJson(request: request)
+        return try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
+    }
+    func agentClosed(appID: String, invocationID: String) async throws {
+        guard let handle else { return }
+        let response = try await handle.agentPageClosed(appId: appID, invocationId: invocationID)
+        _ = try JSONDecoder().decode(LocalAppServiceEnvelope<LocalAppJSON>.self, from: Data(response.utf8)).result()
+    }
     private func send<T: Decodable & Sendable>(_ service: MobileLocalAppServiceHandle, _ fields: [String: LocalAppJSON]) async throws -> T {
         let data = try JSONEncoder().encode(fields)
         let response = try await service.requestJson(request: String(decoding: data, as: UTF8.self))
@@ -182,7 +202,11 @@ final class UnifiedLocalApps {
 
     func sceneChanged(background: Bool) {
         sceneIsBackground = background
-        if background { beginBackgroundLease() }
+        if background {
+            beginBackgroundLease()
+            let running = Array(runs.values)
+            Task { for run in running where run.isLive { try? await client.agentClosed(appID: run.appId, invocationID: run.runId) } }
+        }
         else {
             endBackgroundLease()
             Task { await refresh() }

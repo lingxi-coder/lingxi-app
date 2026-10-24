@@ -27,8 +27,9 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         let marker = "overlay-acceptance-" + UUID().uuidString
         let projectSentinel = projects.appendingPathComponent(marker)
         try Data("keep-workspace-source".utf8).write(to: projectSentinel)
-        let guest = "/home/lingxi/" + marker
-        let hidden = try UnifiedLocalApps.hostSourceDirectory(guest)
+        let homeGuest = "/home/lingxi/" + marker
+        let guest = "/tmp/" + marker
+        let hidden = try UnifiedLocalApps.hostSourceDirectory(homeGuest)
         let external = URL(fileURLWithPath: ConversationSourceFactory.appSandboxRoot())
             .appendingPathComponent(marker, isDirectory: true)
         for directory in [hidden, external, external.appendingPathComponent("ro"), external.appendingPathComponent("writable")] {
@@ -55,7 +56,19 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         var phase = "boot"
         do {
             _ = try await runtime.boot()
+            phase = "managed-home-rejection"
+            do {
+                _ = try await runtime.configureMounts(mounts: [MobileLinuxMountSpecFfi(
+                    hostPath: external.path, guestPath: homeGuest, readOnly: false, purpose: .external)])
+                XCTFail("External overlays must not replace runtime-managed HOME paths")
+            } catch MobileLinuxOperationFfiError.InvalidRequest(let message) {
+                XCTAssertTrue(message.contains("persistent guest homes"), message)
+            }
+            // Public app requests reserve HOME for the managed user/workspace.
+            // Exercise external overlays at an allowed temporary guest location,
+            // while checking both the hidden guest file and persistent HOME.
             phase = "external-overlay-command"
+            try await run("import os; os.makedirs('\(guest)', exist_ok=True); open('\(guest)/same.txt', 'w').write('hidden-guest-value')")
             let mounts = [
                 MobileLinuxMountSpecFfi(hostPath: external.path, guestPath: guest, readOnly: false, purpose: .external),
                 MobileLinuxMountSpecFfi(hostPath: external.appendingPathComponent("ro").path, guestPath: guest + "/ro", readOnly: true, purpose: .external),
@@ -107,7 +120,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
 
             // Adding and removing an ancestor rebuilds the child's physical /
             // table-only representation, without stranding its mount owner.
-            let parentGuest = "/var/lingxi/" + marker
+            let parentGuest = "/tmp/ancestor-" + marker
             phase = "ancestor-transitions"
             let child = MobileLinuxMountSpecFfi(hostPath: external.path, guestPath: parentGuest + "/job", readOnly: false, purpose: .external)
             _ = try await runtime.configureMounts(mounts: [child])
@@ -118,6 +131,8 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             _ = try await runtime.configureMounts(mounts: [child])
             try await run("assert open('same.txt').read() == 'ext'", cwd: child.guestPath)
             _ = try await runtime.configureMounts(mounts: [])
+            try await run("import shutil; assert open('\(guest)/same.txt').read() == 'hidden-guest-value'; shutil.rmtree('\(guest)')")
+            XCTAssertEqual(try Data(contentsOf: hidden.appendingPathComponent("same.txt")), original)
             XCTAssertEqual(try Data(contentsOf: projectSentinel), Data("keep-workspace-source".utf8))
             XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: projects.path)[.type] as? FileAttributeType, .typeDirectory)
             print("IOS_LOCAL_APP_OVERLAY PASS cold-stat truncate hardlink fake-symlink readlink fifo readonly nearest-RW ancestor-transition HOME-and-workspace-preserved")

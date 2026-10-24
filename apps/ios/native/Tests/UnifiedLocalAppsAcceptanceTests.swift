@@ -12,6 +12,9 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         #else
         LXISHRuntimeResourceBootstrap.prepare()
         let metadata = LXISHRuntimeBundleMetadata.current()
+        let storage = MobileUserStorage.directories()
+        let existingTarget = (try? FileManager.default.destinationOfSymbolicLink(atPath: storage.projects)) ?? "<not a symlink>"
+        print("IOS_LOCAL_APP_WORKSPACE_PREPARATION projects=\(storage.projects) linkTarget=\(existingTarget)")
         let projects = try MobileUserStorage.prepareProjectsDirectory()
         let marker = "overlay-acceptance-" + UUID().uuidString
         let projectSentinel = projects.appendingPathComponent(marker)

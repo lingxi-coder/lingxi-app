@@ -264,7 +264,7 @@ class LocalAppAgentAcceptanceTest {
             val rejected = JSONObject().put("requestId", "ungranted-${UUID.randomUUID()}").put("prompt", "do nothing").put("tools", JSONArray().put(forbidden))
             assertTrue("Unapproved same-server tool cannot enter a task", runCatching { apps.agentPage(launch, "agent.run", rejected) }.isFailure)
             fun input() = JSONObject().put("requestId", "mcp-${UUID.randomUUID()}")
-                .put("prompt", "Use ToolSearch to locate acceptance_nonce on server $serverName, call that tool once with {}, then return its exact nonce with the result tool. Do not invent it. No other business tool is authorized.")
+                .put("prompt", "Call the authorized acceptance_nonce tool on server $serverName once with {}, then return its exact nonce with the result tool. Use ToolSearch only if it is available and needed to discover the tool. Do not invent the nonce. No other business tool is authorized.")
                 .put("tools", JSONArray(granted.toList()))
                 .put("outputSchema", JSONObject("""{"type":"object","properties":{"nonce":{"type":"string"}},"required":["nonce"],"additionalProperties":false}"""))
             val admitted = apps.agentPage(launch, "agent.run", input()) as JSONObject

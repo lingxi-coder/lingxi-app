@@ -1,12 +1,26 @@
+// Desktop supplies its preload SDK; Mobile loads the authenticated browser SDK.
+if (!globalThis.localApp && location.hostname === '127.0.0.1') {
+  try { await import('/__local_app_sdk.js'); }
+  catch { /* The UI below explains how to reopen this app from LingXi. */ }
+}
+
 import { MealAgentClient, terminalStates, revisionStorage } from './agent-client.mjs';
 import { nutritionSchema, recognitionPrompt, checkedResult, calorieRange, mealRecord } from './nutrition.mjs';
 
 const $ = (id) => document.getElementById(id);
+$('host-open').hidden = !window.localApp?.host?.open;
+$('host-open').addEventListener('click', () => window.localApp?.host?.open());
 let agent = window.localApp?.agent;
 let taskStorage;
 let hostError = '';
 if (agent) {
-  try { taskStorage = revisionStorage(sessionStorage, (await window.localApp.info()).revision); }
+  try {
+    const info = await window.localApp.info();
+    $('ios-host-note').hidden = info.hostPlatform !== 'ios';
+    // Safari/Chrome may reopen the fresh run in another tab after host resume.
+    // Browser recovery is app-origin/revision scoped, rather than tab scoped.
+    taskStorage = revisionStorage(info.platform === 'mobile-browser' ? localStorage : sessionStorage, info.revision);
+  }
   catch (failure) { agent = null; hostError = `无法读取应用运行版本：${failure.message}。请重新打开应用。`; }
 }
 const historyKey = 'meal-notes.records.v1';
@@ -200,6 +214,11 @@ function renderResult(value) {
 const phases = { starting: '正在连接模型…', thinking: '正在识别餐食…', tool: '正在处理结果…',
   waiting_for_permission: '请在 LingXi 宿主窗口中处理工具授权。', waiting_for_answer: '请在 LingXi 宿主窗口中回答待确认问题。' };
 const client = agent ? new MealAgentClient(agent, taskStorage, (event) => {
+  if (event.type === 'connection') {
+    error(event.error.message);
+    $('status').textContent = '连接已暂停；请返回灵犀恢复应用。不会自动重新提交识别请求。';
+    return;
+  }
   if (event.type === 'progress') {
     $('status').textContent = phases[event.phase] || '正在处理…';
     return;
@@ -216,7 +235,7 @@ const client = agent ? new MealAgentClient(agent, taskStorage, (event) => {
   } else if (terminalStates.has(run.state)) {
     $('status').textContent = run.state === 'cancelled' ? '识别已取消。' : run.state === 'interrupted' ? '任务已中断，请手动重试。' : '识别失败。';
     error(run.error ? `${run.error.message} (${run.error.code})` : '');
-  } else $('status').textContent = run.state === 'queued' ? '请求已提交…' : '正在识别餐食…';
+  } else $('status').textContent = phases[run.phase] || (run.state === 'queued' ? '请求已提交…' : '正在识别餐食…');
 }) : null;
 
 $('analyze').addEventListener('click', async () => {
@@ -295,7 +314,7 @@ $('save').addEventListener('click', () => {
 window.addEventListener('pagehide', () => { stopCamera(); client?.dispose(); });
 try { renderHistory(); } catch (failure) { error(failure.message); }
 if (!client) {
-  $('status').textContent = hostError || '请从支持 Agent 的 LingXi Desktop Apps 中打开。此示例不在手机或普通浏览器中调用 Agent。';
+  $('status').textContent = hostError || '请从支持 Agent 的灵犀应用库中打开，并在应用详情中选择模型与授权。普通浏览器无法调用宿主 Agent。';
 } else {
   setBusy(true);
   client.resume().then((runId) => {

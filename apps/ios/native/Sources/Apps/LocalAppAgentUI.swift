@@ -85,7 +85,7 @@ struct LocalAppAgentSettingsView: View {
                     Section("每次任务限额") {
                         Stepper("最多 \(turns) 轮", value: $turns, in: 1...100)
                         Stepper("最多 \(minutes) 分钟", value: $minutes, in: 1...60)
-                        Text("关闭应用页面时停止任务。模型费用按实际用量计量。").font(.footnote)
+                        Text("停止应用或撤销授权会停止任务。浏览器页面关闭不等于停止；模型费用按实际用量计量。").font(.footnote)
                     }
                     Section {
                         Button("保存授权", action: save).disabled(model.isEmpty || busy)

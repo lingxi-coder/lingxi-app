@@ -2109,7 +2109,10 @@ struct RootView: View {
                 await LocalApps.initializeOnce()
                 await LocalApps.library.refresh()
                 guard requestID == externalAsyncRouteID else { return }
-                if LocalApps.library.record(id) != nil { navigation.runApp(id) }
+                if LocalApps.library.record(id) != nil {
+                    if target.params["review"] == "agent" { LocalApps.library.browserReviewAppID = id }
+                    navigation.runApp(id)
+                }
                 else { _ = missingLinkedResource("installed app") }
             }
         case "market": navigation.openMarketApp(id)

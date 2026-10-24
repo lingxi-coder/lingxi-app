@@ -16,3 +16,10 @@
 - Run `npm run package:mac:flare -- --check` to create/download missing profiles and validate signing assets without building the real app. Add `-- --launch` to launch the packaged app after all verification passes.
 - Do not use `npm run dev` to test macOS credential persistence. The Credential Broker intentionally rejects unpackaged Electron processes.
 - The wrapper must retain the release Rust path remapping, inside-out signing performed by `package-mac.mjs`, and `verify:package` static/runtime verification. A successful compilation without those checks is not a completed macOS package.
+
+## Mobile Local App presentation (user decision, 2026-10-24)
+
+- The first Android and iOS Local App release opens application pages in the external system browser (for example Chrome or Safari). Do not use an embedded Android WebView or iOS WKWebView as the Mobile product entry point. Desktop keeps its existing application windows.
+- LingXi owns runtime services, independent Agent tasks, model credentials and trusted native permission/tool approval. Preserve Agent support using an authenticated browser-to-host interface scoped to the installed app and current run; never expose host-administration or approval APIs to app pages.
+- Use browser camera/file selection for the application UI. Verify external-browser navigation, photo return, host lifecycle, Agent requests, cancellation and recovery on physical Android and iOS. Historical WebView checks are not external-browser acceptance.
+- This is a product architecture requirement motivated by store distribution, not a guarantee of store approval. Do not switch back to WebView without an explicit user decision.

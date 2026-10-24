@@ -4,6 +4,7 @@ import UIKit
 
 /// One service for the local Linux user, independent of Firebase and chat engines.
 actor LocalAppServiceClient {
+    private struct TargetCompatibility: Decodable, Sendable { let compatible: Bool }
     private var handle: MobileLocalAppServiceHandle?
     private var linuxAttached = false
 
@@ -21,6 +22,13 @@ actor LocalAppServiceClient {
             let release: UnifiedAppRelease = try await send(service, ["op": .string("getRelease"), "appId": .string(id), "revision": revision])
             // Never even prepare the Linux adapter before exact-content consent.
             if release.manifest.executesCode, record.executionGrants.contains(release.digest) {
+                // Reject Store-channel/target mismatches before preparing rootfs
+                // resources or constructing any Linux runtime adapter.
+                guard let target = await MainActor.run(body: { UnifiedAppMarket.targets.first { $0.environment == "mobile-linux" } }) else {
+                    throw LocalAppServiceFailure("UNSUPPORTED_CHANNEL", "此发行渠道不支持安装、构建或运行应用服务。")
+                }
+                let compatibility: TargetCompatibility = try await send(service, ["op": .string("checkTarget"), "appId": .string(id), "revision": revision, "target": try .encode(target)])
+                guard compatibility.compatible else { throw LocalAppServiceFailure("UNSUPPORTED_TARGET", "此版本不支持当前设备或发行渠道。") }
                 LXISHRuntimeResourceBootstrap.prepare()
                 let metadata = LXISHRuntimeBundleMetadata.current()
                 let workspace = try MobileUserStorage.prepareProjectsDirectory()
@@ -80,6 +88,25 @@ final class UnifiedLocalApps {
     @ObservationIgnored private var backgroundGeneration = UUID()
     @ObservationIgnored private var pausedApps = Set<String>()
     @ObservationIgnored private var sceneIsBackground = false
+    @ObservationIgnored private var browserRuns: [String: LocalAppLaunch] = [:]
+    var browserReviewAppID: String?
+    func consumeBrowserReview(_ id: String) -> Bool {
+        guard browserReviewAppID == id else { return false }
+        browserReviewAppID = nil
+        return true
+    }
+    func openExternalBrowser(_ id: String) async throws -> LocalAppLaunch {
+        guard let app = record(id) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
+        let release = try await release(id, revision: app.currentRevision)
+        if (release.manifest.capabilities ?? []).contains("agent") { try await LocalAppAgentModelHost.shared.ensure() }
+        let value = try await launch(id)
+        browserRuns[id] = value
+        // Reserve only the OS-provided finite background budget before Safari
+        // becomes foreground. Expiration suspends the app instead of claiming
+        // the loopback server can run indefinitely.
+        beginBackgroundLease()
+        return value
+    }
 
     init(client: LocalAppServiceClient = LocalAppServiceClient()) { self.client = client }
     func initialize() async { await refresh(); initialized = true }
@@ -132,6 +159,7 @@ final class UnifiedLocalApps {
         return result
     }
     func stop(_ id: String) async throws {
+        browserRuns.removeValue(forKey: id)
         let _: LocalAppJSON = try await client.request(["op": .string("stop"), "appId": .string(id)])
         browser.close(id)
         await refresh()
@@ -141,7 +169,7 @@ final class UnifiedLocalApps {
         defer { busy.remove(id) }
         var request = extra; request["op"] = .string(operation); request["appId"] = .string(id)
         let _: LocalAppJSON = try await client.request(request)
-        if ["stop", "revoke", "remove", "restart", "repair"].contains(operation) { browser.close(id) }
+        if ["stop", "revoke", "remove", "restart", "repair"].contains(operation) { browserRuns.removeValue(forKey: id); browser.close(id) }
         if operation == "remove" { devicePermissions.revoke(appID: id) }
         await refresh()
     }
@@ -205,7 +233,7 @@ final class UnifiedLocalApps {
         if background {
             beginBackgroundLease()
             let running = Array(runs.values)
-            Task { for run in running where run.isLive { try? await client.agentClosed(appID: run.appId, invocationID: run.runId) } }
+            Task { for run in running where run.isLive && browserRuns[run.appId] == nil { try? await client.agentClosed(appID: run.appId, invocationID: run.runId) } }
         }
         else {
             endBackgroundLease()
@@ -226,7 +254,7 @@ final class UnifiedLocalApps {
     private func expireBackgroundLease() {
         let active = runs.values.filter(\.isLive).map(\.appId)
         pausedApps.formUnion(active)
-        for id in active { browser.close(id) }
+        for id in active { browserRuns.removeValue(forKey: id); browser.close(id) }
         Task {
             for id in active {
                 do { let _: LocalAppJSON = try await client.request(["op": .string("suspend"), "appId": .string(id)]) }

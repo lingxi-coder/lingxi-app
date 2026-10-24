@@ -195,24 +195,14 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
                 }
                 val release = releases.firstOrNull { it.revision == app.currentRevision }
                 if (release != null) {
-                    item {
-                        val background = remember(permissionRevision, release.digest) { apps.keepRunning(appId, release.digest) }
-                        ListItem(headlineContent = { Text(stringResource(R.string.local_app_v2_background)) }, supportingContent = { Text(stringResource(R.string.local_app_v2_background_note)) }, trailingContent = {
-                            Switch(background, { value -> action { apps.setKeepRunning(appId, release.digest, value); permissionRevision++ } }, enabled = !busy)
-                        })
-                    }
+                    item { Text("浏览器使用期间通过运行通知保留本地服务。停止应用会停止服务与 Agent 任务。", style = MaterialTheme.typography.bodySmall) }
                     item { TextButton(onClick = { action {
                         val restored = apps.restoreSource(appId, app.marketOrigin?.remixedFrom == null && app.marketOrigin != null)
                         onAuthoring(restored.id, restored.name, restored.authoring?.sourceDirectory.orEmpty())
                     } }) { Text(stringResource(if (app.marketOrigin != null && app.marketOrigin.remixedFrom == null) R.string.local_app_v2_remix else R.string.local_app_v2_restore)) } }
                     if ("agent" in release.capabilities) item { TextButton(onClick = { agentRelease = release }) { Text("Agent 模型与工具授权") } }
                     item { Text(stringResource(R.string.local_app_v2_permissions), style = MaterialTheme.typography.titleMedium) }
-                    items(release.capabilities.filter { it in AppDevicePermissions.supported }, key = { it }) { capability ->
-                        val granted = remember(permissionRevision, release.digest) { apps.permissions.granted(appId, release.digest) }
-                        ListItem(headlineContent = { Text(capability) }, trailingContent = { Switch(checked = capability in granted, onCheckedChange = { allow ->
-                            apps.permissions.grant(appId, release.digest, if (allow) granted + capability else granted - capability); permissionRevision++
-                        }) })
-                    }
+                    item { Text("相机、麦克风、照片和文件由外部浏览器处理。请在浏览器的网站权限中管理授权和清除站点数据；灵犀不会代替浏览器授予或撤销这些权限。", style = MaterialTheme.typography.bodySmall) }
                 }
                 item { Row { Text(stringResource(R.string.local_app_v2_logs), style = MaterialTheme.typography.titleMedium); TextButton(onClick = { action { val run = apps.runs(appId).lastOrNull(); logs = run?.let { apps.logs(appId, it.runId) }.orEmpty() } }) { Text(stringResource(R.string.local_app_v2_read_logs)) } } }
                 item { Text(logs.ifEmpty { stringResource(R.string.local_app_v2_logs_empty) }, style = MaterialTheme.typography.bodySmall) }

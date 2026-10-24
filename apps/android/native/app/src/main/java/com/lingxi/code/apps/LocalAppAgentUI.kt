@@ -94,7 +94,7 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
                 Text("敏感操作仍由灵犀请求批准；工具或连接配置变化后需要重新授权。", style = MaterialTheme.typography.bodySmall)
                 Row { Text("最多 $turns 轮", Modifier.weight(1f)); TextButton(onClick = { turns = (turns - 1).coerceAtLeast(1) }) { Text("−") }; TextButton(onClick = { turns = (turns + 1).coerceAtMost(100) }) { Text("＋") } }
                 Row { Text("最多 $minutes 分钟", Modifier.weight(1f)); TextButton(onClick = { minutes = (minutes - 1).coerceAtLeast(1) }) { Text("−") }; TextButton(onClick = { minutes = (minutes + 1).coerceAtMost(60) }) { Text("＋") } }
-                Text("关闭应用页面时停止任务。模型费用按实际用量计量。", style = MaterialTheme.typography.bodySmall)
+                Text("停止应用或撤销授权会停止任务。浏览器页面关闭不等于停止；模型费用按实际用量计量。", style = MaterialTheme.typography.bodySmall)
                 TextButton(enabled = !busy, onClick = { save(true) }) { Text("撤销 Agent 授权") }
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }

@@ -63,7 +63,9 @@ export class MealAgentClient {
     this.state = null;
     this.lastSequence = -1;
     const accept = (event) => {
-      if (event.runId !== this.runId || event.sequence <= this.lastSequence) return;
+      if (event.runId !== this.runId) return;
+      if (event.type === 'connection') { this.onEvent(event); return; }
+      if (event.sequence <= this.lastSequence) return;
       this.lastSequence = event.sequence;
       if (event.type === 'state') this.state = event.run.state;
       this.onEvent(event);

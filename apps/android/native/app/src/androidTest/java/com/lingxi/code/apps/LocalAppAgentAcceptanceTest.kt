@@ -401,4 +401,86 @@ class LocalAppAgentAcceptanceTest {
             android.util.Log.i("LocalAppAgentAcceptance", "RESTART_CLOSE_OWNER PASS old-task-cancelled stale-close-does-not-cancel-replacement")
         } finally { apps.remove(app.id); sources.forEach { it.deleteRecursively() } }
     }
+
+    /** Actual external browser foreground, product JNI HTTP server and model.
+     * Browser DOM/photo interaction is checked separately through device UI. */
+    @Test fun externalBrowserForegroundAndRealHTTPAgent() = runBlocking<Unit> {
+        val apps = UnifiedLocalApps.get(context)
+        val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
+        suspend fun call(launch: AppLaunch, method: String, args: JSONObject, origin: String = launch.origin): JSONObject = withContext(Dispatchers.IO) {
+            val connection = java.net.URL("${launch.origin}/__run/${launch.run.runId}/__host/agent").openConnection() as java.net.HttpURLConnection
+            try {
+                connection.requestMethod = "POST"; connection.doOutput = true
+                connection.connectTimeout = 10_000; connection.readTimeout = 30_000
+                connection.setRequestProperty("Origin", origin)
+                connection.setRequestProperty("Referer", launch.url)
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setRequestProperty("X-LingXi-App-Request", "1")
+                val body = JSONObject().put("method", method).put("args", args).toString().toByteArray(Charsets.UTF_8)
+                connection.setFixedLengthStreamingMode(body.size)
+                connection.outputStream.use { it.write(body) }
+                if (connection.responseCode != 200) JSONObject().put("httpStatus", connection.responseCode)
+                else JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            } finally { connection.disconnect() }
+        }
+        try {
+            val app = publish(apps, sources); ids.add(app.id)
+            val other = publish(apps, sources); ids.add(other.id)
+            configure(apps, app.id)
+            val intent = Intent().setClassName(context.packageName, "com.lingxi.code.apps.LocalAppAcceptanceActivity")
+                .putExtra("appId", app.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            NativeAppActivityHost(intent).use { native ->
+                var browserPackage = ""
+                withTimeout(35_000) {
+                    while (true) {
+                        browserPackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString().orEmpty()
+                        if (browserPackage == "com.android.chrome" || browserPackage == "com.sec.android.app.sbrowser" || browserPackage.contains("firefox")) break
+                        delay(250)
+                    }
+                }
+                assertFalse("Application must leave the native host", native.isResumed())
+                delay(1500)
+                assertTrue(LocalAppProcessService.owns(app.id))
+                val launch = apps.start(app.id)
+                val photo = File(context.filesDir, "local-app-acceptance-fixtures/test-photo.jpg").readBytes()
+                val input = JSONObject().put("requestId", "browser-photo-${UUID.randomUUID()}")
+                    .put("prompt", "Identify the visible food in English in food and one visible detail in detail. Use the result tool; no business tools.")
+                    .put("images", JSONArray().put(JSONObject().put("media_type", "image/jpeg").put("base64", Base64.encodeToString(photo, Base64.NO_WRAP))))
+                    .put("tools", JSONArray()).put("outputSchema", JSONObject("""{"type":"object","properties":{"food":{"type":"string"},"detail":{"type":"string"}},"required":["food","detail"],"additionalProperties":false}"""))
+                assertEquals(403, call(launch, "agent.run", input, "https://other.example").getInt("httpStatus"))
+                assertEquals(403, call(launch, "answer", JSONObject()).getInt("httpStatus"))
+                val admitted = call(launch, "agent.run", input)
+                assertTrue(admitted.toString(), admitted.getBoolean("ok"))
+                val runId = admitted.getJSONObject("value").getString("runId")
+                assertEquals(runId, call(launch, "agent.run", input).getJSONObject("value").getString("runId"))
+                val otherLaunch = apps.start(other.id)
+                assertFalse(call(otherLaunch, "agent.get", JSONObject().put("runId", runId)).getBoolean("ok"))
+                var task = JSONObject()
+                withTimeout(180_000) {
+                    while (true) {
+                        val response = call(launch, "agent.get", JSONObject().put("runId", runId))
+                        assertTrue(response.toString(), response.getBoolean("ok"))
+                        task = response.getJSONObject("value")
+                        if (task.getString("state") in setOf("succeeded", "failed", "cancelled", "interrupted")) break
+                        delay(750)
+                    }
+                }
+                assertEquals(task.toString(), "succeeded", task.getString("state"))
+                assertTrue(task.getJSONObject("result").getJSONObject("output").getString("food").lowercase().contains("apple"))
+                assertTrue(task.getJSONObject("usage").getLong("outputTokens") > 0)
+                assertTrue(task.getJSONObject("usage").getLong("turns") > 0)
+                File(context.filesDir, "external-browser-agent-acceptance.json").writeText(JSONObject().put("browserPackage", browserPackage).put("appId", app.id).put("task", task).toString(2))
+                instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
+                    File(context.filesDir, "external-browser-agent-acceptance.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                    bitmap.recycle()
+                }
+                val next = apps.start(app.id, "restart")
+                assertNotEquals(launch.run.runId, next.run.runId)
+                assertEquals(410, call(launch, "agent.get", JSONObject().put("runId", runId)).getInt("httpStatus"))
+                assertEquals("succeeded", call(next, "agent.get", JSONObject().put("runId", runId)).getJSONObject("value").getString("state"))
+                android.util.Log.i("LocalAppAgentAcceptance", "EXTERNAL_BROWSER_HTTP PASS browser=$browserPackage actual-model/schema/positive-usage/dedup/cross-app/cross-origin/no-approval-route/stale-epoch/terminal-recovery")
+            }
+        } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }
+    }
+
 }

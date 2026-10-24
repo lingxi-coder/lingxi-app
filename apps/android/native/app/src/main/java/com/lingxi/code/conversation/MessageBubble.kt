@@ -91,8 +91,10 @@ fun MessageBubble(
         // A subagent's dispatch prompt arrives as the first USER bubble of its
         // child transcript and runs to thousands of characters. Same policy and
         // the same two strings as the assistant branch below.
-        val isCollapsible = remember(message.text) {
-            AssistantMessageCollapsePolicy.shouldCollapse(message.text, isUser = true)
+        val peer = remember(message.text) { crossSessionMessage(message.text) }
+        val displayText = peer?.text ?: message.text
+        val isCollapsible = remember(displayText) {
+            AssistantMessageCollapsePolicy.shouldCollapse(displayText, isUser = true)
         }
         var expanded by rememberSaveable(message.id) { mutableStateOf(false) }
         Column(
@@ -100,6 +102,13 @@ fun MessageBubble(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            (peer?.label ?: message.originLabel ?: message.tag)?.let { origin ->
+                Text(origin, color = t.text3,
+                    fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.widthIn(max = 700.dp)
+                        .testTag("conversation.message.user.origin"))
+            }
             if (message.images.isNotEmpty()) {
                 AttachedImages(images = message.images)
             }
@@ -107,7 +116,7 @@ fun MessageBubble(
             Row(horizontalArrangement = Arrangement.End) {
                 Spacer(Modifier.weight(1f))
                 val shape = RoundedCornerShape(16.dp)
-                if (message.text.isNotBlank()) {
+                if (displayText.isNotBlank()) {
                     Box(
                         modifier = Modifier
                             .widthIn(max = 700.dp)
@@ -116,7 +125,7 @@ fun MessageBubble(
                             .padding(horizontal = 18.dp, vertical = 12.dp),
                     ) {
                         AIText(
-                            markdown = message.text,
+                            markdown = displayText,
                             onOpenLink = onOpenLink,
                             modifier = if (isCollapsible && !expanded) {
                                 Modifier.heightIn(max = 190.4.dp).clipToBounds()
@@ -541,10 +550,6 @@ private fun UserMessageActions(message: Message) {
         if (clock != null) {
             Text(clock, color = t.text3, fontSize = 11.sp,
                 modifier = Modifier.testTag("conversation.message.user.time"))
-        }
-        message.originLabel?.let { origin ->
-            Text(origin, color = t.text3, fontSize = 11.sp,
-                modifier = Modifier.testTag("conversation.message.user.origin"))
         }
         IconButton(
             onClick = {

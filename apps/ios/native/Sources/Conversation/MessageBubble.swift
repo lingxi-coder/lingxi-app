@@ -120,6 +120,14 @@ struct MessageBubble: View, Equatable {
     var body: some View {
         if message.role == .user {
             VStack(alignment: .trailing, spacing: 4) {
+                if let origin = crossSessionMessage(message.text)?.label ?? message.tag {
+                    Text(verbatim: origin)
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 700, alignment: .trailing)
+                        .accessibilityIdentifier("conversation.message.user.origin")
+                }
                 if let chip = message.visualizationContext {
                     VisualizationContextChipView(chip: chip)
                 }
@@ -227,10 +235,10 @@ struct MessageBubble: View, Equatable {
 
     @ViewBuilder
     private var userContent: some View {
-        if message.text.contains("\n") {
-            AIText(markdown: message.text)
+        if userDisplayText.contains("\n") {
+            AIText(markdown: userDisplayText)
         } else {
-            Text(AIText.parseInline(message.text, size: 14))
+            Text(AIText.parseInline(userDisplayText, size: 14))
                 .textSelection(.enabled)
         }
     }
@@ -249,8 +257,12 @@ struct MessageBubble: View, Equatable {
         }
     }
 
+    private var userDisplayText: String {
+        crossSessionMessage(message.text)?.text ?? message.text
+    }
+
     private var userIsCollapsible: Bool {
-        AssistantMessageCollapsePolicy.shouldCollapse(message.text, isUser: true)
+        AssistantMessageCollapsePolicy.shouldCollapse(userDisplayText, isUser: true)
     }
 
     private var userIsCollapsed: Bool {
@@ -1161,4 +1173,36 @@ private struct UserMessageActions: View {
             copied = false
         }
     }
+}
+
+// Only unwrap complete peer envelopes at the presentation boundary.
+private enum CrossSessionEnvelope {
+    static let pattern = try! NSRegularExpression(
+        pattern: #"^\s*<cross-session-message(?=\s|>)([^>]*)>([\s\S]*)</cross-session-message>\s*$"#
+    )
+}
+
+func crossSessionMessage(_ text: String) -> (text: String, label: String)? {
+    let source = text as NSString
+    guard let match = CrossSessionEnvelope.pattern.firstMatch(
+        in: text, range: NSRange(location: 0, length: source.length)
+    ) else { return nil }
+    let attributes = source.substring(with: match.range(at: 1))
+    func attribute(_ name: String) -> String? {
+        let pattern = #"(?:^|\s)"# + name + #"="([^"]*)""#
+        guard let range = attributes.range(of: pattern, options: .regularExpression) else { return nil }
+        let assignment = String(attributes[range])
+        guard let quote = assignment.firstIndex(of: "\"") else { return nil }
+        let value = String(assignment[assignment.index(after: quote)..<assignment.index(before: assignment.endIndex)])
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+    let sender = attribute("from-name") ?? attribute("from") ?? attribute("from-session")
+    return (source.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines),
+            sender.map { "来自其他会话 · \($0)" } ?? "来自其他会话")
 }

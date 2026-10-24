@@ -1,3 +1,4 @@
+import { crossSessionMessage } from './messageOrigin';
 import { ActivityToolGroup } from './ActivityToolGroup';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
@@ -738,16 +739,18 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
             const user = item.role === 'user';
-            const narrationOpen = collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item);
+            const peer = user ? crossSessionMessage(item.text) : null;
+            const displayItem = peer ? { ...item, text: peer.text } : item;
+            const narrationOpen = collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(displayItem);
             const narration = item.role === 'user' || item.role === 'assistant'
               ? <NativeNarrationRow
                 sessionId={modUiSessionId}
-                item={item as Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' }}
+                item={displayItem as Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' }}
                 open={narrationOpen}
                 isFirstOfReply={item.role === 'assistant' ? firstAssistantById.get(item.id) ?? false : false}
                 onSetOpen={setOpen}
               />
-              : <NarrationLine item={item} open={narrationOpen} onSetOpen={setOpen} />;
+              : <NarrationLine item={displayItem} open={narrationOpen} onSetOpen={setOpen} />;
             // A user row is a COLUMN so the actions sit under the bubble and
             // share its right edge; an assistant row stays a single line.
             return (
@@ -763,6 +766,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
                 }}
               >
+                {user && (peer || item.origin?.kind === 'device') && <div className="message-origin-caption" style={{ color: t.text3, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: '0.4em', maxWidth: 'min(700px, 90%)', padding: '0 4px 2px', fontSize: 12, lineHeight: 1.5, textAlign: 'end', overflowWrap: 'anywhere' }}>
+                  <Icon name="chat" size={13} style={{ flex: 'none', marginTop: '0.2em' }} />
+                  <span>{peer?.label ?? `来自 ${item.origin?.kind === 'device' ? item.origin.deviceName || '远程设备' : ''}`}</span>
+                </div>}
                 {user && item.visualizationContext && <VisualizationContextBadge chip={item.visualizationContext} />}
                 {narration}
                 {/*
@@ -773,7 +780,6 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   key drops that state and clears its reset timer.
                 */}
                 {user && goalMessageObjective(item.text) && !item.delivery && <div className="goal-message-caption" style={{ color: t.text3 }}><Icon name="goal" size={14} /><span>Sent as goal</span></div>}
-                {user && item.origin?.kind === 'device' && <div className="goal-message-caption remote-message-origin" style={{ color: t.text3 }}><span>来自 {item.origin.deviceName || '远程设备'}</span></div>}
                 {user && <UserMessageActions key={sessionKey} text={item.text} sentAt={item.sentAt} />}
               </div>
             );

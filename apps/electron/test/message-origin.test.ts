@@ -1,0 +1,17 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { crossSessionMessage } from '../src/renderer/components/messageOrigin.ts';
+
+test('peer envelopes show a sender and preserve multiline Unicode body', () => {
+  assert.deepEqual(crossSessionMessage('<cross-session-message from="session-a" from-name="设计 &amp; 开发">\n第一行🙂\n**正文**\n</cross-session-message>'),
+    { text: '第一行🙂\n**正文**', label: '来自其他会话 · 设计 & 开发' });
+});
+test('falls back to address or generic origin', () => {
+  assert.equal(crossSessionMessage('<cross-session-message from="alpha">hi</cross-session-message>')?.label, '来自其他会话 · alpha');
+  assert.equal(crossSessionMessage('<cross-session-message>hi</cross-session-message>')?.label, '来自其他会话');
+});
+test('ordinary text, incomplete envelopes and lookalike tags remain intact', () => {
+  for (const text of ['hello', 'Example: <cross-session-message>hi</cross-session-message>', '<cross-session-message>hi', '<cross-session-messages>hi</cross-session-message>']) {
+    assert.equal(crossSessionMessage(text), null);
+  }
+});

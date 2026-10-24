@@ -6,13 +6,18 @@ import CryptoKit
 actor LocalAppAgentModelHost {
     static let shared = LocalAppAgentModelHost()
     private var handle: MobileEngineHandle?
-    private var building: Task<MobileEngineHandle, Error>?
+    private struct Building {
+        let id: UUID
+        let digest: String
+        let task: Task<MobileEngineHandle, Error>
+    }
+    private var building: Building?
     private var configurationDigest: String?
 
     func ensure() async throws {
-        if let building {
-            _ = try await building.value
-            return
+        if let pending = building {
+            try await complete(pending)
+            return try await ensure()
         }
         let configuration: IosEngineLaunchConfigFfi = try await MainActor.run {
             let snapshot = ProviderRepository.shared.makeLaunchSnapshot()
@@ -32,9 +37,12 @@ actor LocalAppAgentModelHost {
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory, hostEnvironment: nil)
         }
         // The actor can reenter while the global snapshot is read.
-        if let building { _ = try await building.value; return }
+        if let pending = building {
+            try await complete(pending)
+            return try await ensure()
+        }
         let identity = [configuration.providerConfig?.providerProfilesJson ?? "", configuration.providerConfig?.routingJson ?? "",
-                        configuration.model, configuration.apiBase, configuration.apiKey].joined(separator: "\u{0}")
+                        configuration.apiBase, configuration.apiKey].joined(separator: "\u{0}")
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         if handle != nil && configurationDigest == digest { return }
         let task = Task.detached(priority: .userInitiated) { () throws -> MobileEngineHandle in
@@ -56,9 +64,24 @@ actor LocalAppAgentModelHost {
                 thread.stackSize = 8 * 1024 * 1024; thread.start()
             }
         }
-        building = task
-        do { handle = try await task.value; configurationDigest = digest; building = nil }
-        catch { building = nil; throw error }
+        let pending = Building(id: UUID(), digest: digest, task: task)
+        building = pending
+        try await complete(pending)
+        // Settings can change while native construction is in flight. Never
+        // dispatch against the stale result, even for the first caller.
+        return try await ensure()
+    }
+
+    private func complete(_ pending: Building) async throws {
+        do {
+            let completed = try await pending.task.value
+            if building?.id == pending.id {
+                handle = completed; configurationDigest = pending.digest; building = nil
+            }
+        } catch {
+            if building?.id == pending.id { building = nil }
+            throw error
+        }
     }
 }
 private final class AppAgentBootstrapListener: IosEventListener, @unchecked Sendable {

@@ -35,6 +35,9 @@ async fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--local-app-service-json") {
         return bridge_server::local_app_service::run().await;
     }
+    if std::env::args().nth(1).as_deref() == Some("--app-agent") {
+        return bridge_server::app_agent::run().await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--audio-service-json") {
         return bridge_server::audio_provider::run().await;
     }

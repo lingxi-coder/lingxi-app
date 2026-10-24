@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { LocalAppAgentSettings } from '../../shared/localAppAgent.js';
 import type { DesktopAppManifest, DesktopLocalApp, LocalAppCapability, LocalAppPhase } from '../../shared/localApps.js';
 import { LocalAppStore, appId, atomicJson } from './store.js';
 import type { LocalAppCoreTransport } from './coreClient.js';
@@ -15,7 +16,7 @@ export interface AppRelease { marketOrigin?: AppRecord['marketOrigin']; appId: s
 interface AppLayout { sourcePath: string; dataPath: string; releasesPath: string; runsPath: string }
 export interface AppRun { appId: string; runId: string; revision: number; releaseDigest: string; phase: string; services: { name: string; port: number }[]; startedAtMs: number; updatedAtMs: number; error?: string }
 interface RunPreparation { record: AppRecord; release: AppRelease; run: AppRun; sourcePath: string; workPath: string; dataPath: string; preparationDataPath: string }
-interface Preferences { background: boolean; grantsByDigest: Record<string, LocalAppCapability[]> }
+interface Preferences { background: boolean; grantsByDigest: Record<string, LocalAppCapability[]>; agent?: LocalAppAgentSettings }
 /** Only the Rust library owns identities, releases, consent digests and run records. */
 export class CoreLocalAppStore implements LocalAppStore {
   readonly importsRoot: string;
@@ -47,7 +48,7 @@ export class CoreLocalAppStore implements LocalAppStore {
     return { id: record.appId, name: manifest.name, summary: manifest.summary ?? '', revision: release.revision, currentRevision: record.currentRevision,
       releaseDigest: release.digest, marketOrigin: release.marketOrigin ?? record.marketOrigin, manifest, createdAt: record.createdAtMs, updatedAt: record.updatedAtMs,
       sourcePath: record.authoring?.sourceDirectory, sourceSession: record.authoring?.sourceSessionId ? { projectPath: record.authoring.sourceDirectory, sessionId: record.authoring.sourceSessionId } : undefined,
-      background: prefs.background, grants, phase: 'stopped' };
+      background: prefs.background, grants, agent: prefs.agent, phase: 'stopped' };
   }
   async get(id: string): Promise<DesktopLocalApp> { return this.row(await this.core.request<AppRecord>({ op: 'get', appId: id })); }
   async getRevision(id: string, revision?: number): Promise<DesktopLocalApp> {
@@ -61,7 +62,7 @@ export class CoreLocalAppStore implements LocalAppStore {
     if (row.grants.includes('process') && !current.grants.includes('process')) await this.core.request({ op: 'grant', appId: row.id, digest: row.releaseDigest });
     if (current.grants.includes('process') && !row.grants.includes('process')) await this.core.request({ op: 'revoke', appId: row.id });
     const prefs = await this.preferences(row.id);
-    await atomicJson(join(this.directory(row.id), 'preferences.json'), { background: row.background, grantsByDigest: { ...prefs.grantsByDigest, [row.releaseDigest!]: row.grants.filter(cap => cap !== 'process') } });
+    await atomicJson(join(this.directory(row.id), 'preferences.json'), { background: row.background, grantsByDigest: { ...prefs.grantsByDigest, [row.releaseDigest!]: row.grants.filter(cap => cap !== 'process') }, agent: row.agent });
   }
   async publish(input: Parameters<LocalAppStore['publish']>[0] & { expectedRevision?: number }): Promise<DesktopLocalApp> {
     if (input.id && !Number.isSafeInteger(input.expectedRevision)) throw new Error('Updating an application requires expectedRevision from its latest read');
@@ -115,7 +116,7 @@ export class CoreLocalAppStore implements LocalAppStore {
   async revoke(id: string): Promise<void> {
     await this.core.request({ op: 'revoke', appId: id });
     const prefs = await this.preferences(id);
-    await atomicJson(join(this.directory(id), 'preferences.json'), { ...prefs, grantsByDigest: {} });
+    await atomicJson(join(this.directory(id), 'preferences.json'), { ...prefs, grantsByDigest: {}, agent: prefs.agent ? { ...prefs.agent, enabled: false, tools: [], background: false } : undefined });
   }
   async remove(id: string): Promise<void> { await this.core.request({ op: 'remove', appId: id }); this.prepared.delete(id); }
 }

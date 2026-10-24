@@ -20,6 +20,18 @@ export class LocalAppStore {
     row.manifest = parseManifest(row.manifest);
     return row;
   }
+  async getRevision(id: string, revision?: number): Promise<DesktopLocalApp> {
+    const row = await this.get(id);
+    if (revision === undefined || revision === row.revision) return row;
+    const manifest = parseManifest(JSON.parse(await fs.readFile(join(this.revisionPath(id, revision), 'lingxi-app.json'), 'utf8')));
+    return { ...row, revision, manifest };
+  }
+  async assertTarget(_row: DesktopLocalApp): Promise<void> {}
+  async revoke(id: string): Promise<void> {
+    const row = await this.get(id); row.grants = [];
+    if (row.agent) row.agent = { ...row.agent, enabled: false, tools: [], background: false };
+    await this.save(row);
+  }
   async list(): Promise<DesktopLocalApp[]> {
     await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
     const rows: DesktopLocalApp[] = [];
@@ -80,7 +92,7 @@ export class LocalAppStore {
       published = true;
       const now = Date.now();
       const row: DesktopLocalApp = { id, revision, manifest, name: manifest.name, summary: manifest.summary ?? '',
-        createdAt: previous?.createdAt ?? now, updatedAt: now, phase: 'stopped', background: previous?.background ?? false,
+        createdAt: previous?.createdAt ?? now, updatedAt: now, phase: 'stopped', background: previous?.background ?? false, agent: previous?.agent,
         grants: previous?.grants ?? [], sourcePath: input.source_path ?? previous?.sourcePath,
         sourceSession: input.source_session ?? previous?.sourceSession };
       await this.save(row);

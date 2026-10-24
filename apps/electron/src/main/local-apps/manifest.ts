@@ -90,6 +90,18 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     }
   }
   const install = steps(v.install), build = steps(v.build);
+  let agent: DesktopAppManifest['agent'];
+  if (v.agent !== undefined) {
+    const a = object(v.agent);
+    if (Object.keys(a).some(key => key !== 'tools')) throw new Error('Application agent declarations only accept requested tools');
+    if (a.tools !== undefined && (!Array.isArray(a.tools) || a.tools.length > 128)) throw new Error('Application agent tools must be an array of at most 128 catalog IDs');
+    const tools = (a.tools as unknown[] | undefined ?? []).map(value => text(value, 'agent tool catalog ID', 512));
+    if (tools.some(id => !/^(builtin:|mcp:)[A-Za-z0-9_.:/-]+$/.test(id))) throw new Error('Invalid agent tool catalog ID');
+    if (new Set(tools).size !== tools.length) throw new Error('Duplicate agent tool catalog ID');
+    agent = { tools: tools.sort() };
+    capabilities.add('agent');
+  }
+  if (capabilities.has('agent') && !agent) agent = { tools: [] };
   if (install.length || build.length || processes.length) capabilities.add('process');
   if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Application targets must be a nonempty array');
   const targets = v.targets.map(raw => {
@@ -98,9 +110,7 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     if (t.capabilities !== undefined && (!Array.isArray(t.capabilities) || t.capabilities.some(c => !supported.includes(c as LocalAppCapability)))) throw new Error('Unsupported target capability');
     return t as unknown as LocalAppTarget;
   });
-  const agent = v.agent === undefined ? undefined : object(v.agent);
-  if (agent && (!Array.isArray(agent.tools) || agent.tools.some(t => typeof t !== 'string' || !t.trim()) || Object.keys(agent).some(k => k !== 'tools'))) throw new Error('Invalid agent requirements');
-  return { schema: 2, targets, ...(agent ? { agent: { tools: agent.tools as string[] } } : {}),
+  return { schema: 2, targets, ...(agent ? { agent: { tools: agent.tools } } : {}),
     ...(v.dataSchema ? { dataSchema: v.dataSchema as DesktopAppManifest['dataSchema'] } : {}),
     ...(v.remix ? { remix: v.remix as DesktopAppManifest['remix'] } : {}),
     ...(v.package ? { package: v.package as DesktopAppManifest['package'] } : {}), name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',

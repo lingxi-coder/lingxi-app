@@ -1,3 +1,5 @@
+import type { LocalAppAgentCatalog, LocalAppAgentSettings } from './localAppAgent.js';
+import type { AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 /** Shared schema-2 application contract; platform execution remains host-owned. */
 export const CH_LOCAL_APPS = 'lingxi:local-apps';
 export const CH_LOCAL_APPS_CHANGED = 'lingxi:local-apps:changed';
@@ -25,7 +27,6 @@ export interface DesktopAppManifest {
   dataSchema?: { version: number; compatibleFrom: number };
   remix?: { allowed: boolean; license?: string };
   package?: { files: string[]; dependencyLocks: string[] };
-  agent?: { tools: string[] };
   name: string;
   summary?: string;
   entry: { type: 'static'; path: string } | { type: 'server'; process: string; path?: string };
@@ -33,6 +34,8 @@ export interface DesktopAppManifest {
   build?: LocalAppStep[];
   processes?: LocalAppProcess[];
   capabilities?: LocalAppCapability[];
+  /** Requested host catalog IDs. This declaration never grants tool access. */
+  agent?: { tools: string[] };
 }
 export interface LocalAppTarget {
   platform: 'android' | 'ios' | 'macos' | 'windows' | 'linux' | 'web';
@@ -53,6 +56,8 @@ export interface DesktopLocalApp {
   sourceSession?: { projectPath: string; sessionId: string };
   background: boolean;
   grants: LocalAppCapability[];
+  /** Trusted Apps settings, never supplied by an application manifest. */
+  agent?: LocalAppAgentSettings;
   phase: LocalAppPhase;
   runningRevision?: number;
   releaseDigest?: string;
@@ -68,6 +73,11 @@ export interface LocalAppEditRequest {
   sourcePath?: string;
   sourceMissing?: boolean;
   sourceSession?: DesktopLocalApp['sourceSession'];
+}
+export interface LocalAppAgentQuestion {
+  id: string;
+  appName: string;
+  request: AskUserQuestionRequestDto;
 }
 export interface LocalAppsApi {
   list(): Promise<DesktopLocalApp[]>;
@@ -91,6 +101,10 @@ export interface LocalAppsApi {
   importLegacy(legacyId: string): Promise<void>;
   restoreSource(id: string): Promise<void>;
   remix(id: string): Promise<void>;
+  agentCatalog(id: string): Promise<LocalAppAgentCatalog>;
+  setAgentSettings(id: string, settings: LocalAppAgentSettings): Promise<void>;
+  agentQuestions(): Promise<LocalAppAgentQuestion[]>;
+  answerAgentQuestion(id: string, answers: Record<string, string> | null): Promise<void>;
   onChanged(listener: () => void): () => void;
 }
 

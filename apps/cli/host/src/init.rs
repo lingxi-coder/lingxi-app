@@ -381,6 +381,9 @@ pub enum InitError {
     /// Structured output schema could not be compiled for the active request.
     #[error("structured output JSON Schema compilation failed: {0}")]
     StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
+    /// Host-owned application execution profile was rejected before startup.
+    #[error("invalid application Agent profile: {0}")]
+    AppInvocation(#[source] harness_runtime::desktop::app_invocation::AppInvocationError),
     /// A managed-policy startup refusal retains its source diagnostic until
     /// the CLI renders the error.
     #[error("{0}")]
@@ -396,6 +399,7 @@ pub enum InitError {
 impl From<harness_runtime::desktop::BuildError> for InitError {
     fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
+            harness_runtime::desktop::BuildError::AppInvocation(error) => Self::AppInvocation(error),
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::InvalidToolAliases(m) => {

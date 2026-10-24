@@ -46,6 +46,21 @@
 .local-app-chat-card button:active { background: var(--apps-accent-bg); opacity: .7; }
 .local-app-chat-card button:disabled { opacity: .55; cursor: progress; }
 .local-app-chat-error { grid-column: 2 / -1; margin: 0; color: var(--apps-error); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.local-app-agent-settings { display: flex; flex-direction: column; gap: 16px; font-size: 13px; }
+.local-app-agent-settings > label:not(.local-app-agent-check), .local-app-agent-limits label { display: flex; flex-direction: column; gap: 7px; }
+.local-app-agent-settings select, .local-app-agent-settings input[type=number] { box-sizing: border-box; width: 100%; border: 1px solid var(--dialog-border); border-radius: 8px; padding: 9px 10px; color: var(--dialog-text); background: var(--dialog-surface); font: inherit; }
+.local-app-agent-check, .local-app-agent-tool { display: flex; align-items: flex-start; gap: 9px; line-height: 1.5; }
+.local-app-agent-settings input[type=checkbox] { margin-top: 3px; accent-color: var(--dialog-accent); }
+.local-app-agent-settings fieldset { border: 1px solid var(--dialog-border); border-radius: 9px; padding: 12px; margin: 0; }
+.local-app-agent-settings legend { padding: 0 5px; }
+.local-app-agent-hint { margin: 0; color: var(--dialog-text-3); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.local-app-agent-tool { margin-top: 12px; }
+.local-app-agent-tool span { min-width: 0; }
+.local-app-agent-tool strong, .local-app-agent-tool small { display: block; overflow-wrap: anywhere; }
+.local-app-agent-tool strong { font-weight: 550; }
+.local-app-agent-tool small { color: var(--dialog-text-3); font-size: 11px; }
+.local-app-agent-limits { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.local-app-agent-error { color: var(--dialog-danger); font-size: 12px; overflow-wrap: anywhere; }
 @media (max-width: 380px) {
   .local-app-chat-card { gap: 10px; padding: 12px; }
   .local-app-chat-card button { grid-column: 2; justify-self: start; }

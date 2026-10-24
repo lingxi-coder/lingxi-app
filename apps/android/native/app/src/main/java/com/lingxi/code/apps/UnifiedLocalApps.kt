@@ -34,18 +34,25 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     private var linuxBound = false
     private val agentCreation = Mutex()
     private var agentModelHost: com.lingxi.code.bindings.runtime.MobileEngineHandle? = null
-    private var agentConfiguration: com.lingxi.code.settings.ProviderEngineLaunchConfig? = null
+    private var agentConfiguration: Pair<String, String?>? = null
     private suspend fun ensureAgentHost() = agentCreation.withLock {
-        val configured = withContext(Dispatchers.IO) {
-            com.lingxi.code.settings.ProviderSettingsRepository(context).engineLaunchConfig()
-        }
-        if (agentModelHost == null || agentConfiguration != configured) withContext(Dispatchers.IO) {
-            agentModelHost = com.lingxi.code.voice.buildVoiceEngine(
-                context = context, model = configured.defaultModel,
-                providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
-                appAgentHost = true, onEvent = {}, onPermission = {},
-            ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
-            agentConfiguration = configured
+        while (true) {
+            val configured = withContext(Dispatchers.IO) {
+                com.lingxi.code.settings.ProviderSettingsRepository(context).engineLaunchConfig()
+            }
+            // A chat's default model/thinking choice is not this app's model.
+            val identity = configured.providerProfilesJson to configured.routingJson
+            if (agentModelHost != null && agentConfiguration == identity) return@withLock
+            withContext(Dispatchers.IO) {
+                agentModelHost = com.lingxi.code.voice.buildVoiceEngine(
+                    context = context, model = configured.defaultModel,
+                    providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
+                    appAgentHost = true, onEvent = {}, onPermission = {},
+                ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
+                agentConfiguration = identity
+            }
+            // Re-read after construction; a concurrent settings change must
+            // not let the first page request use the previous configuration.
         }
     }
 

@@ -263,9 +263,12 @@ private final class LocalAppBrowserSession: NSObject, WKNavigationDelegate, WKUI
 private final class LocalAppMediaPicker: NSObject, PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate {
     private var continuation: CheckedContinuation<[String: String], Error>?
     private weak var controller: UIViewController?
+    private var requestID: UUID?
     func pick(method: String, presenter: UIViewController) async throws -> [String: String] {
-        try await withCheckedThrowingContinuation { continuation in
+        guard continuation == nil else { throw LocalAppServiceFailure("DEVICE_BUSY", "A device picker is already open.") }
+        return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
+            self.requestID = UUID()
             let picker: UIViewController
             if method == "photos.pick" {
                 var config = PHPickerConfiguration(); config.filter = .images; config.selectionLimit = 1
@@ -282,15 +285,16 @@ private final class LocalAppMediaPicker: NSObject, PHPickerViewControllerDelegat
     }
     func cancel() { finish(.failure(CancellationError())) }
     private func finish(_ result: Result<[String: String], Error>) {
-        guard let pending = continuation else { return }; continuation = nil
+        guard let pending = continuation else { return }; continuation = nil; requestID = nil
         controller?.dismiss(animated: true); controller = nil; pending.resume(with: result)
     }
     private func value(_ data: Data, name: String, type: String) throws -> [String: String] {
         guard data.count <= 16 * 1024 * 1024 else { throw LocalAppServiceFailure("FILE_TOO_LARGE", "Select a file smaller than 16 MB.") }
         return ["name": name, "mimeType": type, "base64": data.base64EncodedString()]
     }
-    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { cancel() }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { if self.controller === controller { cancel() } }
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard self.controller === controller else { return }
         guard let url = urls.first else { cancel(); return }
         do {
             let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -299,21 +303,27 @@ private final class LocalAppMediaPicker: NSObject, PHPickerViewControllerDelegat
             finish(.success(try value(Data(contentsOf: url), name: url.lastPathComponent, type: attributes.contentType?.preferredMIMEType ?? "application/octet-stream")))
         } catch { finish(.failure(error)) }
     }
-    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { cancel() }
+    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { if controller === picker { cancel() } }
     func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+        guard controller === picker else { return }
         guard let image = info[.originalImage] as? UIImage, let data = image.jpegData(compressionQuality: 0.85) else { cancel(); return }
         do { finish(.success(try value(data, name: "photo.jpg", type: "image/jpeg"))) } catch { finish(.failure(error)) }
     }
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        guard controller === picker, let expected = requestID else { return }
         guard let provider = results.first?.itemProvider else { cancel(); return }
         provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] data, error in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.requestID == expected else { return }
                 do {
                     if let error { throw error }
                     guard let data else { throw LocalAppServiceFailure("PHOTO_UNAVAILABLE", "The selected photo could not be loaded.") }
-                    self.finish(.success(try self.value(data, name: "photo", type: "image/*")))
-                } catch { self.finish(.failure(error)) }
+                    let jpeg = try await Task.detached(priority: .userInitiated) { try LocalAppPhotoEncoding.jpeg(data) }.value
+                    guard self.requestID == expected else { return }
+                    self.finish(.success(try self.value(jpeg, name: "photo.jpg", type: "image/jpeg")))
+                } catch {
+                    if self.requestID == expected { self.finish(.failure(error)) }
+                }
             }
         }
     }

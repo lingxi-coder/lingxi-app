@@ -70,3 +70,30 @@ test('device consent belongs to the exact release and historical consent does no
   await store.revoke(id);
   assert.deepEqual((await store.getRevision(id, 1)).grants, []);
 });
+
+test('Agent preferences survive updates but grants remain bound to exact release digests', async t => {
+  const root = await fs.mkdtemp(join(tmpdir(), 'local-app-core-agent-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let latest = 1;
+  const transport: LocalAppCoreTransport = { dispose: async () => undefined, request: async <T>(request: Record<string, unknown>) => {
+    if (request.op === 'get') return { appId: id, currentRevision: 1, latestRevision: latest, name: 'App', summary: '', executionGrants: [], createdAtMs: 1, updatedAtMs: 2 } as T;
+    if (request.op === 'getRelease') return { appId: id, revision: request.revision, digest: `digest-${request.revision}`, manifest: { ...manifest, capabilities: ['agent'], agent: {tools: []} } } as T;
+    if (request.op === 'layout') return { sourcePath: '/release/source', dataPath: '/data' } as T;
+    if (request.op === 'revoke') return {} as T;
+    throw new Error('Unexpected request ' + request.op);
+  } };
+  const store = new CoreLocalAppStore(root, transport);
+  const first = await store.get(id);
+  first.agent = { enabled: true, model: {providerId:'configured',modelId:'vision'}, tools:[], background:false,maxTurns:20,timeoutMs:600000 };
+  first.grants = ['agent']; await store.save(first);
+  latest = 2;
+  const second = await store.get(id);
+  assert.deepEqual(second.agent, first.agent, 'native model choices are retained');
+  assert.deepEqual(second.grants, [], 'a new code digest receives no existing capability grants');
+  assert.deepEqual((await store.getRevision(id, 1)).grants, ['agent']);
+  await store.revoke(id);
+  const revoked = await store.getRevision(id, 1);
+  assert.deepEqual(revoked.grants, []);
+  assert.equal(revoked.agent?.enabled, false);
+  assert.deepEqual(revoked.agent?.tools, []);
+});

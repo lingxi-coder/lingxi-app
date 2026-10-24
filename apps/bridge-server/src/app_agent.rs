@@ -6,26 +6,27 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine;
-use client::protocol::commands::ImageRefDto;
+use cost::{
+    CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId,
+};
 use harness_runtime::desktop::app_invocation::{
-    prepare_app_config, AppInvocationIdentity, AppInvocationProfile, DEFAULT_MAX_TURNS,
-    DEFAULT_TIMEOUT_MS,
+    AppChatProfile, AppInvocationIdentity, AppInvocationProfile, DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_MS, MAX_MAX_TURNS, MAX_TIMEOUT_MS, prepare_app_config,
 };
 use harness_runtime::desktop::{DesktopConfig, DesktopRuntime, SharedCredentialStack};
 use lingxi_core::host::permission_gate::{PermissionDecision, PermissionGate};
 use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use lingxi_core::types::ToolUseId;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tool_api::ask_user_question::AskUserQuestionExchange;
 use tool_api::{SessionToolGrantLease, SessionToolPolicy};
@@ -35,8 +36,7 @@ const MAX_START_BYTES: usize = 116 * 1024 * 1024;
 const MAX_CONTROL_BYTES: usize = 512 * 1024;
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 256 * 1024;
-const MAX_SCHEMA_BYTES: usize = 256 * 1024;
-const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 const CANCELLED: u8 = 1;
 const INTERRUPTED: u8 = 2;
 const INVALID_CONTROL: u8 = 3;
@@ -68,15 +68,29 @@ pub struct StartRequest {
     pub tool_policy: SessionToolPolicy,
     #[serde(default)]
     pub mcp_configs: Vec<mcp::McpServerConfig>,
-    pub prompt: String,
+    pub input: local_app::v2::agent::Input,
     #[serde(default)]
-    pub images: Vec<ImageRefDto>,
+    pub app_chat: Option<AppChatProfile>,
     #[serde(default)]
-    pub output_schema: Option<Box<serde_json::value::RawValue>>,
+    pub skill_source_directory: PathBuf,
+    pub release_revision: u64,
+    #[serde(default)]
+    pub skill_specs: Vec<local_app::v2::AgentSkill>,
+    #[serde(default)]
+    pub granted_skills: Vec<String>,
+    #[serde(default)]
+    pub release_files: Vec<local_app::v2::ReleaseFile>,
+    pub model_capabilities: AgentModelCapabilities,
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentModelCapabilities {
+    pub vision: bool,
+    pub structured_output: bool,
 }
 fn default_max_turns() -> u32 {
     DEFAULT_MAX_TURNS
@@ -356,6 +370,8 @@ struct AppOutput {
     sink: Arc<EventSink>,
     text: Mutex<String>,
     error: AtomicU8,
+    cost_baseline: Mutex<Option<CostSnapshot>>,
+    completed_model_turns: AtomicU32,
 }
 #[async_trait]
 impl OutputStream for AppOutput {
@@ -391,16 +407,55 @@ impl OutputStream for AppOutput {
             .await;
     }
     async fn emit_end_turn(&self, _: &str, cost: &CostSnapshot) {
+        let completed = self.completed_model_turns.fetch_add(1, Ordering::AcqRel) + 1;
         self.sink
-            .emit(json!({"type":"usage","usage":usage(cost)}))
+            .emit(json!({"type":"progress","phase":"thinking","completedModelTurns":completed}))
+            .await;
+        let baseline = self.cost_baseline.lock().await.clone().unwrap_or_default();
+        self.sink
+            .emit(json!({"type":"usage","usage":usage(cost, &baseline, completed)}))
             .await;
     }
     async fn emit_terminal_api_error(&self, _: Option<u16>, _: &str, _: &str) {
         self.error.store(2, Ordering::Release);
     }
 }
-fn usage(cost: &CostSnapshot) -> Value {
-    json!({"inputTokens":cost.input_tokens,"outputTokens":cost.output_tokens,"cacheReadTokens":cost.cache_read_tokens,"cacheCreationTokens":cost.cache_creation_tokens,"totalTokens":cost.total_tokens,"totalUsd":cost.total_usd,"apiCalls":cost.api_calls})
+fn usage(cost: &CostSnapshot, baseline: &CostSnapshot, turns: u32) -> Value {
+    let input = cost.input_tokens.saturating_sub(baseline.input_tokens);
+    let output = cost.output_tokens.saturating_sub(baseline.output_tokens);
+    let amount = (cost.total_usd - baseline.total_usd).max(0.0);
+    let mut value = serde_json::Map::new();
+    value.insert("inputTokens".into(), json!(input));
+    value.insert("outputTokens".into(), json!(output));
+    value.insert("turns".into(), json!(turns));
+    value.insert("costEstimated".into(), json!(!cost.unknown_models));
+    if !cost.unknown_models {
+        value.insert("costUsd".into(), json!(amount));
+    }
+    Value::Object(value)
+}
+
+fn side_query_usage(usage: &cost::Usage, turns: Option<u32>, model: &str, profile: &str) -> Value {
+    let mut value = serde_json::Map::new();
+    value.insert("inputTokens".into(), json!(usage.tokens.input));
+    value.insert("outputTokens".into(), json!(usage.tokens.output));
+    if let Some(turns) = turns {
+        value.insert("turns".into(), json!(turns));
+    }
+    let provider = CostProviderId::Custom {
+        name: profile.to_owned(),
+    };
+    let reference = CostModelRef {
+        provider,
+        model: model.to_owned(),
+    };
+    let pricing = PricingCatalog::builtin_reference();
+    if let Ok((rate, _)) = pricing.resolve(&reference) {
+        let nanos = CostCalculator::calculate_nano_usd(usage, &rate);
+        value.insert("costUsd".into(), json!(nanos as f64 / 1_000_000_000.0));
+        value.insert("costEstimated".into(), json!(true));
+    }
+    Value::Object(value)
 }
 
 fn credentials(value: Value) -> Result<crate::boot::CredentialEnvelope, &'static str> {
@@ -410,57 +465,17 @@ fn credentials(value: Value) -> Result<crate::boot::CredentialEnvelope, &'static
         .map_err(|_| "invalid_credentials")
 }
 
-fn validate_images(images: &[ImageRefDto]) -> Result<(), &'static str> {
-    if images.len() > 4 {
-        return Err("invalid_images");
+fn validate_agent_input(input: &local_app::v2::agent::Input) -> Result<(), &'static str> {
+    local_app::v2::agent::validate_input(input).map_err(|_| "invalid_input")?;
+    if input.prompt.len() > MAX_PROMPT_BYTES {
+        return Err("invalid_input");
     }
-    for image in images {
-        if image.base64.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
-            return Err("invalid_images");
-        }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&image.base64)
-            .map_err(|_| "invalid_images")?;
-        if bytes.is_empty()
-            || bytes.len() > MAX_IMAGE_BYTES
-            || base64::engine::general_purpose::STANDARD.encode(&bytes) != image.base64
-        {
-            return Err("invalid_images");
-        }
-        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            "image/png"
-        } else if bytes.starts_with(b"\xff\xd8\xff") {
-            "image/jpeg"
-        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-            "image/gif"
-        } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-            "image/webp"
-        } else {
-            return Err("invalid_images");
-        };
-        if image.media_type != mime {
-            return Err("invalid_images");
-        }
+    if input.output_schema.as_ref().is_some_and(|schema| {
+        serde_json::to_vec(schema).map_or(true, |bytes| bytes.len() > MAX_SCHEMA_BYTES)
+    }) {
+        return Err("invalid_schema");
     }
     Ok(())
-}
-fn prepare_images(images: Vec<ImageRefDto>) -> Result<Vec<ImageRefDto>, &'static str> {
-    images
-        .into_iter()
-        .map(|image| {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&image.base64)
-                .map_err(|_| "invalid_images")?;
-            // Reuse the shared model image budget: complete decoder validation,
-            // camera EXIF orientation and bounded dimensions, without filesystem paths.
-            let image =
-                tool_api::util::image_budget::process_image(bytes).map_err(|_| "invalid_images")?;
-            Ok(ImageRefDto {
-                media_type: image.media_type,
-                base64: image.base64,
-            })
-        })
-        .collect()
 }
 
 fn valid_id(id: &str) -> bool {
@@ -492,27 +507,83 @@ fn validate_start(request: &StartRequest) -> Result<(), &'static str> {
     {
         return Err("invalid_model");
     }
-    if request.prompt.trim().is_empty() || request.prompt.len() > MAX_PROMPT_BYTES {
-        return Err("invalid_prompt");
-    }
     if request.max_turns == 0
         || request.timeout_ms == 0
-        || request.max_turns > 10_000
-        || request.timeout_ms > 86_400_000
+        || request.max_turns > MAX_MAX_TURNS
+        || request.timeout_ms > MAX_TIMEOUT_MS
     {
         return Err("invalid_limits");
     }
+    validate_agent_input(&request.input)?;
     if request
-        .output_schema
-        .as_ref()
-        .is_some_and(|s| s.get().len() > MAX_SCHEMA_BYTES)
+        .input
+        .max_turns
+        .is_some_and(|turns| turns > request.max_turns)
+        || request
+            .input
+            .timeout_ms
+            .is_some_and(|timeout| timeout > request.timeout_ms)
     {
-        return Err("invalid_schema");
+        return Err("invalid_limits");
+    }
+    if (!request.input.tools.is_empty() || request.input.output_schema.is_some())
+        && !request.model_capabilities.structured_output
+    {
+        return Err("model_structured_output_unsupported");
+    }
+    if request.release_revision == 0
+        || !request.skill_source_directory.is_absolute()
+        || request.skill_specs.len() > 128
+        || request.granted_skills.len() > 128
+        || request.release_files.len() > 20_000
+    {
+        return Err("invalid_skills");
+    }
+    let expected_source = request
+        .config_home
+        .join("local-apps/v2/apps")
+        .join(&request.app_id)
+        .join("releases")
+        .join(request.release_revision.to_string())
+        .join("source");
+    if request.skill_source_directory != expected_source {
+        return Err("invalid_skills");
+    }
+    if !request.input.skills.iter().all(|id| {
+        request.granted_skills.contains(id)
+            && request.skill_specs.iter().any(|skill| skill.id == *id)
+    }) {
+        return Err("invalid_skills");
+    }
+    let source_metadata =
+        std::fs::symlink_metadata(&request.skill_source_directory).map_err(|_| "invalid_skills")?;
+    if source_metadata.file_type().is_symlink()
+        || !source_metadata.is_dir()
+        || std::fs::canonicalize(&request.skill_source_directory).map_err(|_| "invalid_skills")?
+            != std::fs::canonicalize(&expected_source).map_err(|_| "invalid_skills")?
+    {
+        return Err("invalid_skills");
     }
     if request.mcp_configs.len() > 128 {
         return Err("invalid_mcp_config");
     }
-    validate_images(&request.images)
+    if request
+        .skill_specs
+        .iter()
+        .map(|skill| &skill.id)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != request.skill_specs.len()
+        || request
+            .granted_skills
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != request.granted_skills.len()
+    {
+        return Err("invalid_skills");
+    }
+    Ok(())
 }
 fn validate_paths(
     cwd: &std::path::Path,
@@ -720,45 +791,75 @@ async fn execute(
     state: Arc<InteractionState>,
     output: Arc<AppOutput>,
 ) -> Result<Value, &'static str> {
-    let images = tokio::task::spawn_blocking(move || prepare_images(request.images))
+    let prepared = harness_runtime::app_agent_input::prepare(&request.input)
         .await
-        .map_err(|_| "invalid_images")??;
-    let envelope = credentials(request.credentials)?;
+        .map_err(|error| {
+            if error == "attachment_type_unsupported" {
+                "attachment_type_unsupported"
+            } else {
+                "invalid_attachments"
+            }
+        })?;
+    let uses_vision = prepared.uses_vision;
+    if uses_vision && !request.model_capabilities.vision {
+        return Err("model_vision_unsupported");
+    }
+    if request.app_chat.is_none()
+        && request.input.tools.is_empty()
+        && request.input.skills.is_empty()
+    {
+        return execute_side_query(request, prepared.blocks, state).await;
+    }
+    let skill_instructions = harness_runtime::app_agent_skills::materialize(
+        &request.skill_source_directory,
+        &request.cwd,
+        &request.skill_specs,
+        &request.release_files,
+        &request.input.skills,
+    )
+    .await
+    .map_err(|_| "invalid_skills")?;
+    let envelope = credentials(request.credentials.clone())?;
     let mut config = base_config(
-        request.cwd,
-        request.config_home,
+        request.cwd.clone(),
+        request.config_home.clone(),
         request.model.clone(),
-        request.provider_profiles,
-        request.routing,
+        request.provider_profiles.clone(),
+        request.routing.clone(),
         state.clone(),
     );
     config.api_key = envelope.api_key.clone().unwrap_or_default();
     config.api_key_source = llm_runtime::CredentialSource::Configured;
-    config.cli_mcp_servers = request.mcp_configs;
+    config.cli_mcp_servers = request.mcp_configs.clone();
     config.json_schema = request
+        .input
         .output_schema
         .as_ref()
-        .map(|s| Utf16JsonProjection::parse(s.get()))
-        .transpose()
-        .map_err(|_| "invalid_schema")?;
+        .map(|schema| {
+            serde_json::to_string(schema)
+                .map_err(|_| "invalid_schema")
+                .and_then(|encoded| {
+                    Utf16JsonProjection::parse(&encoded).map_err(|_| "invalid_schema")
+                })
+        })
+        .transpose()?;
     let schema_required = config.json_schema.is_some();
     let (question_tx, question_rx) = mpsc::channel(8);
     config.ask_user_question_tx = Some(question_tx);
     let expected_mcp_tools = request.tool_policy.mcp_tools.clone();
-    config = prepare_app_config(
-        config,
-        AppInvocationProfile {
-            identity: AppInvocationIdentity {
-                app_id: request.app_id,
-                version_id: request.version_id,
-                invocation_id: request.invocation_id,
-            },
-            tool_policy: request.tool_policy,
-            max_turns: request.max_turns,
-            timeout_ms: request.timeout_ms,
+    let mut profile = AppInvocationProfile::new(
+        AppInvocationIdentity {
+            app_id: request.app_id.clone(),
+            version_id: request.version_id.clone(),
+            invocation_id: request.invocation_id.clone(),
         },
-    )
-    .map_err(|_| "invalid_profile")?;
+        request.tool_policy.clone(),
+    );
+    profile.max_turns = request.max_turns;
+    profile.timeout_ms = request.timeout_ms;
+    profile.app_chat = request.app_chat.clone();
+    profile.skill_instructions = skill_instructions;
+    config = prepare_app_config(config, profile).map_err(|_| "invalid_profile")?;
     *state.lease.lock().await = config.session_tool_grant_lease.clone();
     let shared = credential_stack(&config, envelope, &state).await?;
     let runtime = tokio::select! {
@@ -784,8 +885,8 @@ async fn execute(
     let result = execute_runtime(
         &runtime,
         &request.model,
-        request.prompt,
-        images,
+        prepared.blocks,
+        uses_vision,
         schema_required,
         state.clone(),
         output,
@@ -803,11 +904,121 @@ async fn execute(
     .await;
     result
 }
+
+async fn execute_side_query(
+    request: StartRequest,
+    blocks: Vec<ContentBlock>,
+    state: Arc<InteractionState>,
+) -> Result<Value, &'static str> {
+    let Some((profile, model)) = request.model.split_once('/') else {
+        return Err("invalid_model");
+    };
+    if profile.is_empty() || model.is_empty() {
+        return Err("invalid_model");
+    }
+    let envelope = credentials(request.credentials.clone())?;
+    let mut config = base_config(
+        request.cwd.clone(),
+        request.config_home.clone(),
+        request.model.clone(),
+        request.provider_profiles.clone(),
+        request.routing.clone(),
+        state.clone(),
+    );
+    config.api_key = envelope.api_key.clone().unwrap_or_default();
+    config.api_key_source = llm_runtime::CredentialSource::Configured;
+    config.cli_mcp_servers = request.mcp_configs.clone();
+    config.routing = None;
+    let shared = credential_stack(&config, envelope, &state).await?;
+    state
+        .sink
+        .emit(json!({"type":"started","model":request.model}))
+        .await;
+    let message = user_message(blocks);
+    let result = if let Some(schema) = request.input.output_schema.clone() {
+        let query = harness_runtime::desktop::app_invocation::strict_side_query_request(
+            model.to_owned(),
+            Some(profile.to_owned()),
+            vec![message],
+            schema,
+        );
+        tokio::select! {
+            biased;
+            _ = state.cancel.cancelled() => return Err("cancelled"),
+            result = harness_runtime::desktop::app_invocation::run_side_query_json_schema_accounted(config, shared, query) => {
+                match result {
+                    Ok(response) => {
+                        let usage = side_query_usage(&response.usage, Some(1), model, profile);
+                        state.sink.emit(json!({"type":"usage","usage":usage})).await;
+                        if state.cancel.is_cancelled() { return Err("cancelled"); }
+                        json!({"type":"finished","status":"succeeded","text":"","result":response.value,"usage":usage})
+                    }
+                    Err(error) => {
+                        if let Some(usage) = error.usage {
+                            state.sink.emit(json!({"type":"usage","usage":side_query_usage(&usage, error.turns, model, profile)})).await;
+                        }
+                        return Err(error.code);
+                    }
+                }
+            }
+        }
+    } else {
+        let mut query = harness_runtime::desktop::app_invocation::side_query_request(
+            model.to_owned(),
+            Some(profile.to_owned()),
+            vec![message],
+            None,
+        );
+        query.max_tokens = Some(8192);
+        query.max_retries = 0;
+        query.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::Disabled);
+        tokio::select! {
+            biased;
+            _ = state.cancel.cancelled() => return Err("cancelled"),
+            result = harness_runtime::desktop::app_invocation::run_side_query_accounted(config, shared, query) => {
+                match result {
+                    Ok(response) => {
+                        if !response.tool_calls.is_empty() { return Err("model_tools_unsupported"); }
+                        let text = response.text.and_then(|value| value.string_at("").map(str::to_owned)).ok_or("model_response_empty")?;
+                        let usage = side_query_usage(&response.usage, Some(1), model, profile);
+                        state.sink.emit(json!({"type":"usage","usage":usage})).await;
+                        if state.cancel.is_cancelled() { return Err("cancelled"); }
+                        json!({"type":"finished","status":"succeeded","text":text,"usage":usage})
+                    }
+                    Err(error) => {
+                        if let Some(usage) = error.usage {
+                            state.sink.emit(json!({"type":"usage","usage":side_query_usage(&usage, error.turns, model, profile)})).await;
+                        }
+                        return Err(error.code);
+                    }
+                }
+            }
+        }
+    };
+    serde_json::to_vec(&result)
+        .map_err(|_| "invalid_result")
+        .and_then(|bytes| {
+            if bytes.len() > MAX_OUTPUT_BYTES - 512 {
+                Err("result_too_large")
+            } else {
+                Ok(result)
+            }
+        })
+}
+
+fn user_message(blocks: Vec<ContentBlock>) -> ConversationMessage {
+    let mut message = ConversationMessage::user(MessageId::new(), String::new());
+    if let ConversationMessage::User { content, .. } = &mut message {
+        *content = blocks;
+    }
+    message
+}
+
 async fn execute_runtime(
     runtime: &DesktopRuntime,
     model: &str,
-    prompt: String,
-    images: Vec<ImageRefDto>,
+    blocks: Vec<ContentBlock>,
+    uses_vision: bool,
     schema_required: bool,
     state: Arc<InteractionState>,
     output: Arc<AppOutput>,
@@ -833,7 +1044,7 @@ async fn execute_runtime(
             return Err("model_selection_changed");
         }
     }
-    if !images.is_empty() && !selected.capabilities.vision {
+    if uses_vision && !selected.capabilities.vision {
         return Err("model_vision_unsupported");
     }
     if schema_required && !selected.capabilities.tools {
@@ -844,21 +1055,23 @@ async fn execute_runtime(
         .sink
         .emit(json!({"type":"started","model":model}))
         .await;
-    let sources = images
-        .into_iter()
-        .map(|image| orchestrator::conversation::ImageSource::Base64 {
-            media_type: image.media_type,
-            data: image.base64,
-        })
-        .collect();
+    let content = serde_json::to_string(&blocks).map_err(|_| "invalid_attachments")?;
+    let content = Utf16JsonProjection::parse(&content).map_err(|_| "invalid_attachments")?;
+    let baseline = runtime.orchestrator.snapshot_cost().await;
+    *output.cost_baseline.lock().await = Some(baseline.clone());
     let result = runtime
         .orchestrator
-        .run_turn_streaming_with_cancel_image_sources(prompt, sources, state.cancel.clone())
+        .run_turn_streaming_with_cancel_projected_content(&content, state.cancel.clone(), None)
         .await;
     questions.abort();
     state.questions.lock().await.clear();
     state.permissions.lock().await.clear();
-    let usage = usage(&runtime.orchestrator.snapshot_cost().await);
+    let usage = usage(
+        &runtime.orchestrator.snapshot_cost().await,
+        &baseline,
+        output.completed_model_turns.load(Ordering::Acquire),
+    );
+    state.sink.emit(json!({"type":"usage","usage":usage})).await;
     if state.cancel.is_cancelled() {
         return Err("cancelled");
     }
@@ -926,6 +1139,8 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
         sink,
         text: Mutex::new(String::new()),
         error: AtomicU8::new(0),
+        cost_baseline: Mutex::new(None),
+        completed_model_turns: AtomicU32::new(0),
     });
     let envelope = credentials(request.credentials)?;
     let mut config = base_config(
@@ -986,13 +1201,14 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
                 serde_json::to_value(identity).map_err(|_| "catalog_serialization_failed")?;
             row["configIndex"] = json!(config_index);
             row["label"] = json!(format!("{} / {}", config.name, tool.tool_name));
-            row["description"] = json!(tool
-                .description
-                .string_at("")
-                .unwrap_or_default()
-                .chars()
-                .take(1024)
-                .collect::<String>());
+            row["description"] = json!(
+                tool.description
+                    .string_at("")
+                    .unwrap_or_default()
+                    .chars()
+                    .take(1024)
+                    .collect::<String>()
+            );
             mcp_tools.push(row);
         }
         mcp_configs.push(config.clone());
@@ -1096,6 +1312,8 @@ pub async fn run() -> anyhow::Result<()> {
                 sink: sink.clone(),
                 text: Mutex::new(String::new()),
                 error: AtomicU8::new(0),
+                cost_baseline: Mutex::new(None),
+                completed_model_turns: AtomicU32::new(0),
             });
             let mut execution = Box::pin(execute(request, state.clone(), output));
             let result = tokio::select! {
@@ -1165,41 +1383,41 @@ mod tests {
             read_frame(&mut data, 4).await.unwrap(),
             Some(b"next".to_vec())
         );
-        assert!(read_frame(&mut std::io::Cursor::new(b"12345\n"), 4)
-            .await
-            .is_err());
-        assert!(read_frame(&mut std::io::Cursor::new(b"1234"), 4)
-            .await
-            .is_err());
+        assert!(
+            read_frame(&mut std::io::Cursor::new(b"12345\n"), 4)
+                .await
+                .is_err()
+        );
+        assert!(
+            read_frame(&mut std::io::Cursor::new(b"1234"), 4)
+                .await
+                .is_err()
+        );
+    }
+    fn input() -> local_app::v2::agent::Input {
+        local_app::v2::agent::Input {
+            request_id: "request-1".into(),
+            prompt: "Describe this".into(),
+            attachments: Vec::new(),
+            output_schema: None,
+            tools: Vec::new(),
+            skills: Vec::new(),
+            max_turns: None,
+            timeout_ms: None,
+        }
     }
     #[test]
-    fn image_validation_rejects_mime_spoofing_and_noncanonical_base64() {
-        let image = ImageRefDto {
+    fn shared_input_validation_rejects_paths_external_schemas_and_excessive_limits() {
+        let mut value = input();
+        value.attachments.push(local_app::v2::agent::Attachment {
+            name: "../private.png".into(),
             media_type: "image/png".into(),
-            base64: base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture"),
-        };
-        assert!(validate_images(std::slice::from_ref(&image)).is_ok());
-        assert!(validate_images(&[ImageRefDto {
-            media_type: "image/jpeg".into(),
-            ..image.clone()
-        }])
-        .is_err());
-        assert!(validate_images(&[ImageRefDto {
-            base64: format!("{}\n", image.base64),
-            ..image.clone()
-        }])
-        .is_err());
-        assert!(validate_images(&vec![image; 5]).is_err());
-    }
-    #[test]
-    fn malformed_image_pixels_fail_before_runtime_execution() {
-        let image = ImageRefDto {
-            media_type: "image/png".into(),
-            base64: base64::engine::general_purpose::STANDARD
-                .encode(b"\x89PNG\r\n\x1a\nnot a complete image"),
-        };
-        assert!(validate_images(std::slice::from_ref(&image)).is_ok());
-        assert_eq!(prepare_images(vec![image]).err(), Some("invalid_images"));
+            base64: "AAAA".into(),
+        });
+        assert!(validate_agent_input(&value).is_err());
+        let mut value = input();
+        value.output_schema = Some(json!({"$ref":"https://example.invalid/schema"}));
+        assert!(validate_agent_input(&value).is_err());
     }
     #[test]
     fn credentials_fail_without_echoing_input() {
@@ -1228,28 +1446,45 @@ mod tests {
     }
     #[test]
     fn control_protocol_rejects_ambient_chat_and_extra_authority() {
-        assert!(serde_json::from_value::<Control>(
-            json!({"type":"permission_response","requestId":1,"approved":true})
-        )
-        .is_ok());
-        assert!(serde_json::from_value::<Control>(
-            json!({"type":"permission_response","requestId":1,"approved":true,"always":true})
-        )
-        .is_err());
-        assert!(serde_json::from_value::<Control>(
-            json!({"type":"send_prompt","sessionId":"another-chat"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<Control>(
+                json!({"type":"permission_response","requestId":1,"approved":true})
+            )
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<Control>(
+                json!({"type":"permission_response","requestId":1,"approved":true,"always":true})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Control>(
+                json!({"type":"send_prompt","sessionId":"another-chat"})
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn start_wire_is_explicit_and_rejects_foreign_chat_authority() {
+        let config_home =
+            std::env::temp_dir().join(format!("app-agent-wire-{}", uuid::Uuid::new_v4()));
+        let app_id = format!("a{}", "1".repeat(32));
+        let source = config_home
+            .join("local-apps/v2/apps")
+            .join(&app_id)
+            .join("releases/1/source");
+        std::fs::create_dir_all(&source).unwrap();
+        let release_digest = "a".repeat(64);
         let start = json!({
             "type":"start", "protocolVersion":1, "runId":"run-1",
-            "appId":"food", "versionId":"v1", "invocationId":"window-1",
-            "cwd":"/tmp/food-run", "configHome":"/tmp/host-config",
+            "appId":app_id.clone(), "versionId":release_digest.clone(), "invocationId":"window-1",
+            "cwd":"/tmp/food-run", "configHome":config_home.to_string_lossy().to_string(),
+            "skillSourceDirectory":source.to_string_lossy().to_string(), "releaseRevision":1, "skillSpecs":[], "grantedSkills":[], "releaseFiles":[],
+            "modelCapabilities":{"vision":false,"structuredOutput":true},
             "model":"openai/example", "credentials":{}, "toolPolicy":{"builtinTools":[],"mcpTools":[]},
-            "prompt":"Describe the food", "outputSchema":{"type":"object"}
+            "input":{"requestId":"request-1","prompt":"Describe the food","outputSchema":{"type":"object"}}
         });
         let InitialRequest::Start(request) =
             parse_initial(&serde_json::to_vec(&start).unwrap()).unwrap()
@@ -1262,6 +1497,7 @@ mod tests {
         let mut foreign = start;
         foreign["sessionId"] = json!("creating-chat");
         assert!(parse_initial(&serde_json::to_vec(&foreign).unwrap()).is_err());
+        std::fs::remove_dir_all(config_home).unwrap();
     }
 
     #[tokio::test]

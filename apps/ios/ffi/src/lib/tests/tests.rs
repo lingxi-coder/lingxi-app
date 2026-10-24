@@ -18,6 +18,9 @@ fn user_storage_config(root: &std::path::Path) -> super::IosMobileLinuxConfigFfi
     paths.prepare().unwrap();
     super::IosMobileLinuxConfigFfi {
         mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: paths.brand_id.clone(),
+        linux_user: paths.linux_user.clone(),
+        config_dir_name: paths.config_dir_name.clone(),
         managed_root: managed.display().to_string(),
         workspace_host_path: paths.projects,
         stable_workspace_id: "projects".into(),
@@ -40,6 +43,9 @@ fn the_runtime_sandbox_root_is_the_engine_data_root_not_the_container() {
 
     let config = super::IosMobileLinuxConfigFfi {
         mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: "lingxi".to_string(),
+        linux_user: "lingxi".to_string(),
+        config_dir_name: ".lingxi".to_string(),
         managed_root: format!("{support}/mobile-linux/ios-ish"),
         workspace_host_path: format!("{engine_data_root}/workspaces/default"),
         stable_workspace_id: "default".to_string(),
@@ -70,6 +76,36 @@ fn the_runtime_sandbox_root_is_the_engine_data_root_not_the_container() {
         super::resolve_mobile_linux_app_sandbox_root(&empty).is_err(),
         "an absent root must fail loudly, never fall back to a guess"
     );
+}
+
+#[test]
+fn ios_runtime_status_uses_the_selected_brand_writable_guest_paths() {
+    let config = super::IosMobileLinuxConfigFfi {
+        mode: super::MobileLinuxRuntimeModeFfi::Legacy,
+        brand_id: "atlas".to_string(),
+        linux_user: "atlas_guest".to_string(),
+        config_dir_name: ".atlas".to_string(),
+        managed_root: "/tmp/mobile-linux-atlas".to_string(),
+        workspace_host_path: "/tmp/mobile-linux-atlas-projects".to_string(),
+        stable_workspace_id: "projects".to_string(),
+        abi: "arm64".to_string(),
+        rootfs_version: "test".to_string(),
+        archive_sha256: None,
+        authorization_file: None,
+        app_sandbox_root: "/tmp/mobile-linux-atlas-sandbox".to_string(),
+    };
+
+    let status = super::ios_mobile_linux_status_from_config(Some(&config));
+
+    assert!(status
+        .writable_guest_paths
+        .contains(&"/home/atlas_guest".to_string()));
+    assert!(status
+        .writable_guest_paths
+        .contains(&"/home/atlas_guest/atlas".to_string()));
+    assert!(!status
+        .writable_guest_paths
+        .contains(&"/home/lingxi".to_string()));
 }
 
 /// A task's non-terminal status changes must NEVER surface as stream
@@ -269,6 +305,9 @@ fn mobile_linux_legacy_status_reports_the_posix_stub_backend() {
     let status =
         super::ios_mobile_linux_status_from_config(Some(&super::IosMobileLinuxConfigFfi {
             mode: super::MobileLinuxRuntimeModeFfi::Legacy,
+            brand_id: "lingxi".to_string(),
+            linux_user: "lingxi".to_string(),
+            config_dir_name: ".lingxi".to_string(),
             managed_root: "/tmp/mobile-linux".to_string(),
             workspace_host_path: "/tmp/workspaces/default".to_string(),
             stable_workspace_id: "default".to_string(),
@@ -290,6 +329,9 @@ fn mobile_linux_legacy_status_reports_the_posix_stub_backend() {
 fn mobile_linux_command_api_reports_unavailable_on_host_without_device_bridge() {
     let handle = super::create_ios_mobile_linux_runtime(super::IosMobileLinuxConfigFfi {
         mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: "lingxi".to_string(),
+        linux_user: "lingxi".to_string(),
+        config_dir_name: ".lingxi".to_string(),
         managed_root: "/tmp/mobile-linux".to_string(),
         workspace_host_path: "/tmp/workspaces/default".to_string(),
         stable_workspace_id: "default".to_string(),
@@ -327,6 +369,9 @@ fn mobile_linux_command_api_reports_unavailable_on_host_without_device_bridge() 
 fn mobile_linux_handle_reuses_one_runtime_instance_for_multiple_calls() {
     let handle = super::create_ios_mobile_linux_runtime(super::IosMobileLinuxConfigFfi {
         mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: "lingxi".to_string(),
+        linux_user: "lingxi".to_string(),
+        config_dir_name: ".lingxi".to_string(),
         managed_root: "/tmp/mobile-linux".to_string(),
         workspace_host_path: "/tmp/workspaces/default".to_string(),
         stable_workspace_id: "default".to_string(),
@@ -370,6 +415,9 @@ fn mobile_linux_handle_reuses_one_runtime_instance_for_multiple_calls() {
 fn mobile_linux_workspace_id_rejects_guest_path_components() {
     let config = super::IosMobileLinuxConfigFfi {
         mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: "lingxi".to_string(),
+        linux_user: "lingxi".to_string(),
+        config_dir_name: ".lingxi".to_string(),
         managed_root: "/tmp/lingxi-app/mobile-linux".to_string(),
         workspace_host_path: "/tmp/lingxi-app/workspaces/project".to_string(),
         stable_workspace_id: "..".to_string(),
@@ -402,6 +450,9 @@ fn mobile_linux_workspace_rejects_parent_traversal_into_protected_roots() {
     ] {
         let config = super::IosMobileLinuxConfigFfi {
             mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+            brand_id: "lingxi".to_string(),
+            linux_user: "lingxi".to_string(),
+            config_dir_name: ".lingxi".to_string(),
             managed_root: managed_root.to_string_lossy().into_owned(),
             workspace_host_path: workspace_host_path.to_string_lossy().into_owned(),
             stable_workspace_id: "default".to_string(),
@@ -444,6 +495,9 @@ fn mobile_linux_workspace_rejects_symlink_aliases_to_protected_roots() {
         std::os::unix::fs::symlink(destination, &alias).expect("create protected alias");
         let config = super::IosMobileLinuxConfigFfi {
             mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+            brand_id: "lingxi".to_string(),
+            linux_user: "lingxi".to_string(),
+            config_dir_name: ".lingxi".to_string(),
             managed_root: managed_root.to_string_lossy().into_owned(),
             workspace_host_path: alias.join("workspace").to_string_lossy().into_owned(),
             stable_workspace_id: "default".to_string(),
@@ -473,6 +527,9 @@ fn standalone_mobile_linux_runtime_applies_workspace_boundary_validation() {
     std::fs::create_dir_all(&managed_root).expect("create managed root");
     let config = super::IosMobileLinuxConfigFfi {
         mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
+        brand_id: "lingxi".to_string(),
+        linux_user: "lingxi".to_string(),
+        config_dir_name: ".lingxi".to_string(),
         managed_root: managed_root.to_string_lossy().into_owned(),
         workspace_host_path: app_root
             .join("workspaces/default/../../.lingxi/state")
@@ -547,6 +604,10 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
         app_agent_host: false,
         app_version: Some("2.4.1".into()),
+        brand_id: paths.brand_id.clone(),
+        linux_user: paths.linux_user.clone(),
+        config_dir_name: paths.config_dir_name.clone(),
+        native_config_home: paths.config_home.clone(),
         api_base: "https://example.invalid".to_string(),
         api_key: "sk-test".to_string(),
         model: "claude-test".to_string(),
@@ -610,9 +671,16 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
 #[test]
 fn ios_host_environment_maps_stable_native_facts_without_model_state() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let linux = user_storage_config(temp.path());
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone()).unwrap();
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
         app_agent_host: false,
         app_version: None,
+        brand_id: paths.brand_id.clone(),
+        linux_user: paths.linux_user.clone(),
+        config_dir_name: paths.config_dir_name.clone(),
+        native_config_home: paths.config_home.clone(),
         api_base: String::new(),
         api_key: String::new(),
         model: String::new(),
@@ -621,7 +689,7 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
         provider_config: None,
-        mobile_linux: Some(user_storage_config(temp.path())),
+        mobile_linux: Some(linux),
         physical_memory_bytes: 0,
         host_environment: Some(super::IosHostEnvironmentFfi {
             os_version: "19.0".to_string(),
@@ -646,6 +714,46 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
     assert_eq!(
         environment.launch_mode,
         lingxi_core::host::MobileLaunchMode::ScheduledHeadless
+    );
+}
+
+#[test]
+fn ios_provider_only_app_agent_uses_native_brand_config_without_mobile_linux_setup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let managed = temp.path().join("runtime");
+    let paths =
+        harness_runtime::mobile::mobile_user_directories(managed.display().to_string()).unwrap();
+    let config = super::IosEngineLaunchConfigFfi {
+        app_agent_host: true,
+        app_version: None,
+        brand_id: paths.brand_id.clone(),
+        linux_user: paths.linux_user.clone(),
+        config_dir_name: paths.config_dir_name.clone(),
+        native_config_home: paths.config_home.clone(),
+        api_base: String::new(),
+        api_key: String::new(),
+        model: String::new(),
+        session_mode: harness_runtime::mobile::SessionModeDto::Code,
+        vision_delegation_enabled: false,
+        app_sandbox_root: temp.path().to_string_lossy().into_owned(),
+        project_cwd: None,
+        provider_config: None,
+        mobile_linux: None,
+        physical_memory_bytes: 0,
+        host_environment: None,
+    };
+
+    let cfg = super::ios_mobile_config_from_launch_config(&config).expect("provider-only config");
+
+    assert!(cfg.app_agent_host);
+    assert_eq!(cfg.brand_runtime_profile.brand_id, paths.brand_id);
+    assert_eq!(cfg.brand_runtime_profile.linux_user, paths.linux_user);
+    assert_eq!(cfg.lingxi_home, std::path::PathBuf::from(paths.config_home));
+    assert!(cfg.logical_cwd.is_none());
+    assert!(cfg.mobile_shell().is_none());
+    assert!(
+        !managed.join("persistent").exists(),
+        "provider-only setup must not prepare projects or rootfs user storage"
     );
 }
 

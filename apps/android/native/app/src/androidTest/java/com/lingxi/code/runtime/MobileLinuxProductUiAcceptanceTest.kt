@@ -23,9 +23,10 @@ class MobileLinuxProductUiAcceptanceTest {
     @Test fun realTerminalRouteDisplaysDefaultUser() = runBlocking<Unit> {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        val directories = com.lingxi.code.project.MobileUserStorage.directories(context)
         val config = LinuxRuntimeBridge.configForWorkspace(context, LinuxRuntimeMode.MobileLinux)
         val name = "product-ui-${UUID.randomUUID()}"
-        val proof = File(config.managedRoot, "persistent/lingxi/$name")
+        val proof = File(config.managedRoot, "persistent/${directories.linuxUser}/$name")
         val command = "clear; printf 'PRODUCT_UI:%s:%s:%s\\n' \"\$(id -u)\" \"\$HOME\" \"\$PWD\"; printf '%s:%s:%s' \"\$(id -u)\" \"\$HOME\" \"\$PWD\" > \"\$HOME/$name\"\n"
         val url = Uri.Builder().scheme("lingxi").authority("open_terminal")
             .appendQueryParameter("sessionId", name).appendQueryParameter("initCommand", command).build()
@@ -34,9 +35,9 @@ class MobileLinuxProductUiAcceptanceTest {
             ActivityScenario.launch<MainActivity>(intent).use {
                 val deadline = System.currentTimeMillis() + 30_000
                 while (System.currentTimeMillis() < deadline &&
-                    !runCatching { proof.readText().startsWith("1000:/home/lingxi:/home/lingxi/lingxi") }.getOrDefault(false)) delay(100)
+                    !runCatching { proof.readText().startsWith("1000:${directories.guestHome}:${directories.defaultGuestCwd}") }.getOrDefault(false)) delay(100)
                 assertTrue("Public terminal route must execute on the real PTY", proof.exists())
-                assertTrue(proof.readText(), proof.readText().startsWith("1000:/home/lingxi:/home/lingxi/lingxi"))
+                assertTrue(proof.readText(), proof.readText().startsWith("1000:${directories.guestHome}:${directories.defaultGuestCwd}"))
                 delay(300)
                 val screenshot = File(context.getExternalFilesDir("runtime-acceptance"), "real-product-terminal.png")
                 screenshot.parentFile!!.mkdirs()

@@ -685,10 +685,7 @@ struct RootView: View {
             .fullScreenCover(
                 item: Binding(
                     get: { navigation.runningAppID.map(RunningApp.init) },
-                    set: {
-                        if let previous = navigation.runningAppID, previous != $0?.id { LocalApps.library.browser.deactivate(previous) }
-                        navigation.runningAppID = $0?.id
-                    }
+                    set: { navigation.runningAppID = $0?.id }
                 )
             ) { running in
                 Group {
@@ -696,9 +693,8 @@ struct RootView: View {
                         library: LocalApps.library,
                         info: LocalApps.info,
                         appId: running.id,
-                        onClose: { LocalApps.library.browser.deactivate(running.id); navigation.runningAppID = nil },
+                        onClose: { navigation.runningAppID = nil },
                         onShowDetails: { appID in
-                            LocalApps.library.browser.deactivate(running.id)
                             navigation.runningAppID = nil
                             navigation.openLocalApp(appID)
                         }
@@ -1899,7 +1895,6 @@ struct RootView: View {
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
-        if phase != .inactive { LocalApps.library.sceneChanged(background: phase == .background) }
         conversationBackgroundAlerts.setScenePhase(phase)
         switch phase {
         case .background:
@@ -2110,7 +2105,17 @@ struct RootView: View {
                 await LocalApps.library.refresh()
                 guard requestID == externalAsyncRouteID else { return }
                 if LocalApps.library.record(id) != nil {
-                    if target.params["review"] == "agent" { LocalApps.library.browserReviewAppID = id }
+                    if target.params["review"] == "agent" {
+                        LocalApps.library.browserReviewAppID = id
+                        if let requestID = target.params["requestId"],
+                           let revision = target.params["revision"].flatMap(UInt64.init) {
+                            LocalApps.library.queueBrowserAgentWake(
+                                appID: id,
+                                revision: revision,
+                                requestID: requestID
+                            )
+                        }
+                    }
                     navigation.runApp(id)
                 }
                 else { _ = missingLinkedResource("installed app") }
@@ -2205,13 +2210,25 @@ struct RootView: View {
     private func continueLocalAppDevelopment(_ app: UnifiedAppRecord) {
         Task { @MainActor in
             do {
-                var sessions: [String: String] = [:]
-                for row in projectStore.globalSessions { if let cwd = row.workspaceDirectory { sessions[row.sessionId] = cwd } }
-                for project in projectStore.projects { for row in project.sessions { if let cwd = row.workspaceDirectory { sessions[row.sessionId] = cwd } } }
+                var sessions: [String: LocalAppAuthoringSessionBinding] = [:]
+                for project in projectStore.projects {
+                    for row in project.sessions {
+                        sessions[canonicalSessionID(row.sessionId)] = .init(
+                            workspaceId: project.record.id,
+                            sourceDirectory: row.workspaceDirectory ?? project.record.activeDirectory,
+                            projectRef: .mobileProject(project.record.id),
+                            mode: row.mode.rawValue
+                        )
+                    }
+                }
                 let result = try await LocalApps.library.prepareAuthoring(app.appId, sessions: sessions)
                 guard result.action != "sourceMissing" else { throw LocalAppServiceFailure("SOURCE_MISSING", "Source folder is missing. Import an editable copy before continuing development.") }
+                var authoring = result.authoring
+                if let sessionID = result.authoringSessionId {
+                    authoring?.authoringSessionId = sessionID
+                }
                 beginLocalAppDevelopment(.init(appId: app.appId, name: app.name, sourceDirectory: result.sourceDirectory,
-                    sourceSessionID: result.action == "resumeSession" ? result.sessionId : nil, prompt: "继续开发这个应用。"))
+                    authoring: authoring, prompt: "继续开发这个应用。"))
             } catch { externalLinkError = error.localizedDescription }
         }
     }
@@ -2221,15 +2238,38 @@ struct RootView: View {
               !projectSwitching, !source.model.streaming, !source.model.sessionTransitionPending else {
             externalLinkError = "Finish or save the current conversation draft before opening app development."; return
         }
-        let match = request.sourceSessionID.flatMap { id in
-            projectStore.projects.first(where: { $0.sessions.contains(where: { $0.sessionId == id }) })
-        }
-        let scope: ConversationScope = match.map { .project($0.id) } ?? .global
-        guard switchScope(to: scope, mode: .code, resumeSessionID: request.sourceSessionID) else {
-            externalLinkError = "The conversation cannot switch right now."; return
-        }
         Task { @MainActor in
             do {
+                let existingBinding = request.authoring
+                let boundProject: ProjectSnapshot? = {
+                    guard let existingBinding,
+                          existingBinding.sourceDirectory == request.sourceDirectory,
+                          let workspaceID = existingBinding.workspaceId,
+                          case .mobileProject(let projectID)? = existingBinding.projectRef,
+                          workspaceID == projectID else { return nil }
+                    return projectStore.projects.first {
+                        $0.record.id == projectID && $0.record.activeDirectory == request.sourceDirectory
+                    }
+                }()
+                let project: ProjectSnapshot
+                if let boundProject { project = boundProject }
+                else {
+                    project = try await projectStore.createLocalAppAuthoringProject(
+                        name: request.name,
+                        sourceDirectory: request.sourceDirectory
+                    )
+                }
+                let existingSession = existingBinding?.authoringSessionId.flatMap { id in
+                    project.sessions.first {
+                        canonicalSessionID($0.sessionId) == canonicalSessionID(id)
+                            && $0.mode == .code
+                            && $0.workspaceDirectory == request.sourceDirectory
+                    }?.sessionId
+                }
+                let scope = ConversationScope.project(project.record.id)
+                guard switchScope(to: scope, mode: .code, resumeSessionID: existingSession) else {
+                    throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation cannot switch to the app source project right now.")
+                }
                 for _ in 0..<400 {
                     if !projectSwitching, activeScope == scope, !source.model.sessionTransitionPending { break }
                     try await Task.sleep(for: .milliseconds(50))
@@ -2239,16 +2279,38 @@ struct RootView: View {
                 #if canImport(harness_runtimeFFI)
                 guard let engine = source as? EngineConversationSource else { throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.") }
                 let sessionID: String
-                if let existing = request.sourceSessionID {
+                if let existing = existingSession {
                     guard engine.model.activeSessionId == existing, engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_MOVED", "The source session moved. Refresh the app details before continuing.") }
                     sessionID = existing
                 } else { sessionID = try await engine.startLocalAppAuthoringSession(cwd: request.sourceDirectory) }
                 guard source === engine, engine.model.activeSessionId == sessionID,
-                      engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
-                if let appId = request.appId {
-                    try await LocalApps.library.bindAuthoring(appId, authoring: .init(sourceDirectory: request.sourceDirectory, sourceSessionId: sessionID, projectId: scope.projectID))
+                      engine.model.workspaceState?.cwd == request.sourceDirectory,
+                      activeMode == .code, activeScope == scope else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
+                let authoring = LocalAppAuthoring(
+                    sourceDirectory: request.sourceDirectory,
+                    workspaceId: project.record.id,
+                    projectRef: .mobileProject(project.record.id),
+                    authoringSessionId: sessionID,
+                    appId: request.appId
+                )
+                if let workspace = engine.model.workspaceState, workspace.sessionId == sessionID {
+                    try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
+                } else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be recorded. No draft was inserted.")
                 }
-                guard source === engine, engine.model.activeSessionId == sessionID else { return }
+                if let appId = request.appId {
+                    try await LocalApps.library.bindAuthoring(appId, authoring: authoring)
+                } else {
+                    try await LocalApps.library.registerPendingAuthoring(authoring)
+                }
+                guard source === engine, engine.model.activeSessionId == sessionID,
+                      engine.model.workspaceState?.cwd == request.sourceDirectory,
+                      !engine.model.sessionTransitionPending, activeMode == .code, activeScope == scope,
+                      !projectSwitching,
+                      draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !hasUnsavedConversationMedia else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
+                }
                 draft = "Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.\n\n\(request.prompt)"
                 navigation.path.removeAll(); navigation.focusDetail()
                 #else

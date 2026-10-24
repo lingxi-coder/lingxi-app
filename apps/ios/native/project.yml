@@ -2,7 +2,7 @@ name: LingxiCode
 options:
   bundleIdPrefix: com.lingxi
   deploymentTarget:
-    iOS: "18.0"
+    iOS: "26.0"
   createIntermediateGroups: true
   developmentLanguage: "zh-Hans"
 
@@ -50,7 +50,7 @@ targets:
   LingxiCode:
     type: application
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Sources
         excludes:
@@ -247,7 +247,7 @@ targets:
   LingxiCodeTests:
     type: bundle.unit-test
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Tests
       - path: ../../../packages/deep-links/fixtures.json
@@ -290,7 +290,7 @@ targets:
   ConversationWidget:
     type: app-extension
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Sources/ConversationWidget
       - path: Sources/ConversationWidgetShared
@@ -319,7 +319,7 @@ targets:
   LingxiCodeUITests:
     type: bundle.ui-testing
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: UITests
     dependencies:

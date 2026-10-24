@@ -8,6 +8,7 @@ import {
   APP_USER_DATA_SUBPATH,
   unregisterCredentialBrokerForColdStart,
   assertCustomProviderTurn,
+  assertPackagedLocalAppAuthoring,
   createPackagedSettings,
   isExpectedBootstrapPromptPlaceholder,
   isSafeProviderCredentialSnapshot,
@@ -66,6 +67,28 @@ test('custom provider smoke requires a successful answer, not merely any termina
   assert.throws(() => assertCustomProviderTurn([answer, { ...ended, outcome: { type: 'cancelled' } }]));
   assert.throws(() => assertCustomProviderTurn([answer, ended, { type: 'error', message: 'request failed' }]));
   assert.throws(() => assertCustomProviderTurn([answer, ended, { type: 'system_notice', is_error: true }]));
+});
+
+test('packaged Local App smoke requires a native dedicated source Code binding', () => {
+  const sourceSession = {
+    projectPath: '/tmp/native-app-source',
+    sessionId: '12345678-1234-4234-8234-123456789abc',
+    mode: 'code',
+  };
+  const app = {
+    id: 'a123456789abcdef0123456789abcdef',
+    authoring: {
+      workspaceId: '12345678-1234-4234-8234-abcdef123456',
+      sourceDirectory: sourceSession.projectPath,
+      projectRef: { kind: 'desktopPath', path: sourceSession.projectPath },
+      authoringSessionId: sourceSession.sessionId,
+      appId: 'a123456789abcdef0123456789abcdef',
+    },
+  };
+  assert.doesNotThrow(() => assertPackagedLocalAppAuthoring(app, sourceSession));
+  assert.throws(() => assertPackagedLocalAppAuthoring({ ...app, authoring: undefined }, sourceSession), /persist its host-verified authoring binding/);
+  assert.throws(() => assertPackagedLocalAppAuthoring({ ...app, authoring: { ...app.authoring, authoringSessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } }, sourceSession), /real Code session/);
+  assert.throws(() => assertPackagedLocalAppAuthoring(app, { ...sourceSession, mode: 'chat' }), /must use a Code session/);
 });
 
 function temporaryDirectory() {

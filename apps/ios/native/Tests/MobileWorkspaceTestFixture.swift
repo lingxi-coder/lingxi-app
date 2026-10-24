@@ -7,7 +7,8 @@ func mobileWorkspaceTestConfiguration(sandboxRoot: URL) throws -> IosMobileLinux
     let managedRoot = sandboxRoot.appendingPathComponent("runtime", isDirectory: true).path
     let paths = try mobileUserDirectories(managedRoot: managedRoot)
     return IosMobileLinuxConfigFfi(
-        mode: .mobileLinux, managedRoot: managedRoot, workspaceHostPath: paths.projects,
+        mode: .mobileLinux, brandId: paths.brandId, linuxUser: paths.linuxUser,
+        configDirName: paths.configDirName, managedRoot: managedRoot, workspaceHostPath: paths.projects,
         stableWorkspaceId: "projects", abi: "arm64", rootfsVersion: "test",
         archiveSha256: nil, authorizationFile: nil, appSandboxRoot: sandboxRoot.path)
 }

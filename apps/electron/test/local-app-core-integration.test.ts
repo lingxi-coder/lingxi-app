@@ -20,7 +20,7 @@ test('real Rust library owns Desktop static, Python and Node fixture lifecycles'
   for (const name of ['static', 'python', 'node']) {
     const source = join(store.importsRoot, name);
     await fs.cp(fileURLToPath(new URL(`../../../fixtures/local-apps/v2/${name}`, import.meta.url)), source, { recursive: true, filter: path => !path.split('/').includes('node_modules') });
-    const row = await store.publish({ staged_path: source, source_path: source });
+    const row = await store.publish({ staged_path: source });
     if (name !== 'static') {
       await assert.rejects(runtime.start(row.id), /permission/);
       row.grants = row.manifest.capabilities ?? []; await store.save(row);

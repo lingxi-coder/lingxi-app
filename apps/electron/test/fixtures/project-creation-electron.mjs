@@ -133,7 +133,7 @@ async function main() {
     await run(`document.querySelector('.create-project-submit').click()`);
     await wait(`!document.querySelector('[aria-label="Create project"]') && window.projectCreationFixture.newSessions.length === 2`);
     await check(`window.projectCreationFixture.newSessions[1] === '/Users/tester/Projects/Explicit app' && window.projectCreationFixture.rendererErrors.length === 0`, 'Explicit app workspaces must own their chat without renderer errors');
-    const editRequest = { id: 'a12345678901234567890', name: 'Recovered reader', sourceSession: { projectPath: '/fixture/Removed project', sessionId: '33333333-2222-4333-8444-555555555555' } };
+    const editRequest = { id: 'a12345678901234567890', name: 'Recovered reader', authoring: { sourceDirectory: '/fixture/Removed project' }, authoringSourceMissing: true, authoringAction: 'sourceMissing' };
     const previousDraft = await run(`document.querySelector('[contenteditable=true]').textContent`);
     await run(`window.projectCreationFixture.requestEdit(${JSON.stringify(editRequest)})`);
     await wait(`!!document.querySelector('[aria-label="Create project"]') && !document.querySelector('form[aria-busy=true]')`);

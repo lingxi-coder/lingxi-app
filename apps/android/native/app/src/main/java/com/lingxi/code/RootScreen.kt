@@ -91,6 +91,9 @@ import com.lingxi.code.apps.UnifiedAppRuntimePage
 import com.lingxi.code.apps.UnifiedAppsPage
 import com.lingxi.code.apps.UnifiedLocalApps
 import com.lingxi.code.apps.UnifiedAppDetailsPage
+import com.lingxi.code.apps.AppAuthoringSessionContext
+import com.lingxi.code.apps.AppProjectRef
+import com.lingxi.code.apps.isCanonicalUuidValue
 import com.lingxi.code.conversation.LocalAppCardLinks
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.ConversationScope
@@ -1574,7 +1577,22 @@ fun RootScreen(
     LaunchedEffect(requestedDeepLink, projectState.loading, state.sessionReady, state.sessionTransitioning, state.streaming, approvedDraftLink, sourceScope, currentEngineSource, runtimeAppId, flowActive, voiceActive, captureState.phase, attachment, showCreateProject, activeProjectSyncing, workspacePickerOpen, routingDeepLink, draftLinkReview, linkedTargetError, linkedMessageUuid) {
         val link = requestedDeepLink ?: return@LaunchedEffect
         if (runtimeAppId != null && link.route == "apps/$runtimeAppId" && link.params["review"] == "agent") {
-            onDeepLinkHandled(link)
+            try {
+                val appId = runtimeAppId!!
+                val app = localApps.get(appId)
+                val expectedRevision = link.params["revision"]?.toLongOrNull()
+                check(expectedRevision == null || expectedRevision == app.currentRevision) {
+                    "This Agent request belongs to a different application revision. Reopen the current app and retry."
+                }
+                localApps.setBrowserReviewRequest(appId, link.params["requestId"])
+                onDeepLinkHandled(link)
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                linkedTargetError = error.message ?: "Unable to open this Agent request."
+                onDeepLinkBlockingChanged(true)
+                chatViewModel.reportHostError(linkedTargetError!!)
+                onDeepLinkHandled(link)
+            }
             return@LaunchedEffect
         }
         if (routingDeepLink || draftLinkReview != null || linkedTargetError != null || linkedMessageUuid != null) return@LaunchedEffect
@@ -1665,8 +1683,14 @@ fun RootScreen(
                             // Initial library refresh can still be in flight
                             // when a cold-start link reaches this route.
                             // Resolve against the durable owner, not UI cache.
-                            localApps.get(id)
-                            if (link.params["review"] == "agent") localApps.browserReviewAppId = id
+                            val app = localApps.get(id)
+                            if (link.params["review"] == "agent") {
+                                val expectedRevision = link.params["revision"]?.toLongOrNull()
+                                check(expectedRevision == null || expectedRevision == app.currentRevision) {
+                                    "This Agent request belongs to a different application revision. Reopen the current app and retry."
+                                }
+                                localApps.setBrowserReviewRequest(id, link.params["requestId"])
+                            }
                             runtimeAppId = id
                         }
                         "runtime" -> {
@@ -1873,41 +1897,98 @@ fun RootScreen(
         scope.launch {
             try {
                 check(!state.streaming && !state.sessionTransitioning) { "当前会话正在执行，请先停止或等待完成。" }
-                val sessions = projectStore.state.value.projects.flatMap { project ->
-                    project.sessions.map { it.sessionId to (it.workspaceDirectory ?: project.record.activeDirectory) }
-                }.toMap()
-                val resolution = appId?.let { localApps.prepareAuthoring(it, sessions) }
+                val appRecord = appId?.let { localApps.get(it) }
+                val oldBinding = appRecord?.authoring
+                val oldProjectRef = oldBinding?.projectRef?.takeIf { it.kind == "mobileProject" }?.projectId
+                val boundProject = if (oldBinding != null && appRecord != null && isCanonicalUuidValue(oldProjectRef) &&
+                    oldBinding.isBoundTo(appRecord.id, oldProjectRef!!, oldBinding.sourceDirectory)) {
+                    projectStore.state.value.projects.firstOrNull { project ->
+                        project.record.id == oldProjectRef && project.record.directory == oldBinding.sourceDirectory
+                    }
+                } else null
+                val sessionBindings = if (boundProject != null && oldBinding != null) {
+                    boundProject.sessions.filter { row ->
+                        row.mode == SessionMode.Code &&
+                            (row.workspaceDirectory ?: boundProject.record.activeDirectory) == oldBinding.sourceDirectory
+                    }.associate { row ->
+                        canonicalSessionId(row.sessionId) to AppAuthoringSessionContext(
+                            workspaceId = oldBinding.workspaceId!!,
+                            sourceDirectory = oldBinding.sourceDirectory,
+                            projectRef = oldBinding.projectRef!!,
+                            mode = "code",
+                        )
+                    }
+                } else emptyMap()
+                val resolution = appId?.let { localApps.prepareAuthoring(it, sessionBindings) }
                 check(resolution?.action != "sourceMissing") { "源码目录已不可用，请从应用管理中恢复源码或创建获许可的副本。" }
                 val directory = resolution?.sourceDirectory ?: createdDirectory
-                val existingOwner = resolution?.sessionId?.let { sessionId -> projectStore.state.value.projects.firstOrNull { project ->
-                    project.sessions.any { it.sessionId == sessionId && (it.workspaceDirectory ?: project.record.activeDirectory) == directory }
-                } }
-                val ownedProject = existingOwner ?: projectStore.registerAuthoringWorkspace(name, directory)
+                val ownedProject = boundProject?.takeIf { it.record.directory == directory }
+                    ?: projectStore.registerAuthoringWorkspace(name, directory)
                 val project = ownedProject.copy(workspace = com.lingxi.code.project.ProjectWorkspace(ownedProject.record.id, localApps.hostFile(directory).absolutePath, directory))
-                val target = resolution?.sessionId?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
+                val targetSessionId = resolution?.authoring?.authoringSessionId
+                    ?.takeIf { resolution.action == "resumeSession" && boundProject?.record?.id == ownedProject.record.id }
+                val target = targetSessionId?.let { id -> project.sessions.firstOrNull { row ->
+                    canonicalSessionId(row.sessionId) == canonicalSessionId(id) && row.mode == SessionMode.Code &&
+                        (row.workspaceDirectory ?: project.record.activeDirectory) == directory
+                } }
                 val mode = target?.mode ?: SessionMode.Code
+                val workspaceId = oldBinding?.workspaceId
+                    ?.takeIf { boundProject?.record?.id == ownedProject.record.id && oldBinding.sourceDirectory == directory }
+                    ?: java.util.UUID.randomUUID().toString()
                 scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
-                check(switchEngineScope(ConversationScope.Project(project.record.id), project,
+                val authoringScope = ConversationScope.Project(project.record.id)
+                check(switchEngineScope(authoringScope, project,
                     target?.let { SessionRef(it.sessionId, it.title) }, target == null,
                     newSessionDirectory = directory.takeIf { target == null }, sessionModeOverride = mode)) { "无法切换到应用源码会话。" }
                 setConversationMode(mode)
+                val attemptedAuthoringSource = chatViewModel.engineSource.value
+                var confirmed = try {
+                    chatViewModel.awaitAppAuthoringSession(directory, target?.sessionId)
+                } catch (resumeFailure: Exception) {
+                    if (resumeFailure is kotlinx.coroutines.CancellationException) throw resumeFailure
+                    if (target == null) throw resumeFailure
+                    // The stored catalogue can lag an engine-side cwd change.
+                    // A failed real-cwd check replaces that session in the same
+                    // App-owned Project; it never falls back to a global project.
+                    check(chatViewModel.engineSource.value === attemptedAuthoringSource &&
+                        chatViewModel.sourceScope.value == authoringScope) { "开发会话已切换，请重新打开应用源码。" }
+                    check(switchEngineScope(authoringScope, project, null, true, newSessionDirectory = directory,
+                        sessionModeOverride = SessionMode.Code)) { "无法恢复应用源码会话。" }
+                    setConversationMode(SessionMode.Code)
+                    chatViewModel.awaitAppAuthoringSession(directory)
+                }
                 val authoringSource = chatViewModel.engineSource.value
-                val confirmed = chatViewModel.awaitAppAuthoringSession(directory, target?.sessionId)
                 check(chatViewModel.engineSource.value === authoringSource &&
                     chatViewModel.sourceScope.value == ConversationScope.Project(project.record.id)) { "开发会话已切换，请重新打开应用源码。" }
                 // Empty confirmed sessions also need the existing catalog
                 // entry so reopening the app can reuse this recovery UUID.
                 projectStore.recordStartedSession(project.record.id, confirmed.sessionId, name, mode)
                 projectStore.recordWorkspace(project.record.id, confirmed)
+                check(chatViewModel.engineSource.value === authoringSource &&
+                    authoringSource.workspaceState.value == confirmed &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) { "开发目录已变化，没有插入草稿。" }
+                val authoring = org.json.JSONObject()
+                    .put("workspaceId", workspaceId)
+                    .put("sourceDirectory", directory)
+                    .put("projectRef", AppProjectRef("mobileProject", projectId = project.record.id).toJson())
+                    .put("authoringSessionId", canonicalSessionId(confirmed.sessionId))
                 if (appId != null) {
                     localApps.request("bindAuthoring", appId) {
-                        put("authoring", org.json.JSONObject().put("sourceDirectory", directory)
-                            .put("sourceSessionId", canonicalSessionId(confirmed.sessionId)).put("projectId", project.record.id))
+                        put("authoring", org.json.JSONObject(authoring.toString()).put("appId", appId))
+                    }
+                } else {
+                    val saved = localApps.registerAuthoring(authoring)
+                    check(saved.appId == null && saved.sourceDirectory == directory &&
+                        saved.workspaceId == workspaceId && saved.projectRef == AppProjectRef("mobileProject", projectId = project.record.id) &&
+                        saved.authoringSessionId?.let(::canonicalSessionId) == canonicalSessionId(confirmed.sessionId)) {
+                        "应用源码会话绑定没有保存，未插入草稿。"
                     }
                 }
                 check(chatViewModel.engineSource.value === authoringSource &&
                     authoringSource.workspaceState.value == confirmed &&
-                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) { "开发目录已变化，没有插入草稿。" }
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) {
+                    "开发目录已变化，没有插入草稿。"
+                }
                 if (appId == null) {
                     val prompt = "请在这个源码项目中创建应用：$name。使用 LocalApp schema 2，完成后发布到本机应用库。"
                     val key = ConversationScope.Project(project.record.id).sessionStateKey(mode)

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { DesktopLocalApp, LocalAppAgentQuestion } from '../../shared/localApps';
-import { LOCAL_APP_AGENT_DEFAULT_MAX_TURNS, LOCAL_APP_AGENT_DEFAULT_TIMEOUT_MS, type LocalAppAgentCatalog, type LocalAppAgentSettings, type LocalAppAgentToolGrant } from '../../shared/localAppAgent';
+import { LOCAL_APP_AGENT_DEFAULT_MAX_TURNS, LOCAL_APP_AGENT_DEFAULT_TIMEOUT_MS, LOCAL_APP_AGENT_MAX_TIMEOUT_MS, LOCAL_APP_AGENT_MAX_TURNS, type LocalAppAgentCatalog, type LocalAppAgentSettings, type LocalAppAgentToolGrant } from '../../shared/localAppAgent';
 import { AskUserQuestionPrompt } from './AskUserQuestionPrompt';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 
@@ -23,8 +23,8 @@ export function LocalAppAgentSettingsDialog({ app, onClose, onSaved }: { app: De
       setCatalog(value);
       setSettings(app.agent ? structuredClone(app.agent) : { enabled: false,
         model: value.models.find(model => model.canSelect) ?? { providerId: '', modelId: '' },
-        tools: [], background: false, maxTurns: LOCAL_APP_AGENT_DEFAULT_MAX_TURNS, timeoutMs: LOCAL_APP_AGENT_DEFAULT_TIMEOUT_MS });
-    }).catch(error => { if (current) { setError(error instanceof Error ? error.message : String(error)); setCatalog({ models: [], tools: [] }); } });
+        tools: [], skills: [], background: false, maxTurns: LOCAL_APP_AGENT_DEFAULT_MAX_TURNS, timeoutMs: LOCAL_APP_AGENT_DEFAULT_TIMEOUT_MS });
+    }).catch(error => { if (current) { setError(error instanceof Error ? error.message : String(error)); setCatalog({ models: [], tools: [], skills: [] }); } });
     return () => { current = false; };
   }, [app.id, app.revision]);
   const selectedModel = catalog?.models.find(model => model.providerId === settings?.model.providerId && model.modelId === settings?.model.modelId);
@@ -45,7 +45,7 @@ export function LocalAppAgentSettingsDialog({ app, onClose, onSaved }: { app: De
         {!selectedModel && <option value={modelKey(settings.model)}>Select an available model</option>}
         {catalog.models.map(model => <option key={modelKey(model)} value={modelKey(model)} disabled={!model.canSelect}>{model.label}{model.canSelect ? '' : ' — not configured'}</option>)}
       </select></label>
-      {selectedModel && <p className="local-app-agent-hint">{selectedModel.supportsImages ? 'Accepts images' : 'Text only'} · {selectedModel.supportsStructuredOutput ? 'Structured results supported' : 'No structured results'}</p>}
+      {selectedModel && <p className="local-app-agent-hint">{selectedModel.supportsAttachments ? 'Accepts files' : 'Text only'} · {selectedModel.supportsVision ? 'Image understanding supported' : 'No image understanding'} · {selectedModel.supportsStructuredOutput ? 'Structured results supported' : 'No structured results'}</p>}
       {!catalog.models.some(model => model.canSelect) && <p className="local-app-agent-hint">Configure a model provider in Settings before enabling Agent access.</p>}
       <fieldset><legend>Requested tools</legend><p className="local-app-agent-hint">Choose each tool you want to allow. Tool actions may still ask for your approval.</p>
         {catalog.tools.map(tool => <label key={tool.id} className="local-app-agent-tool"><input type="checkbox" checked={settings.tools.some(grant => sameTool(grant, tool))} onChange={event => setSettings({ ...settings, tools: event.target.checked ? [...settings.tools.filter(grant => grant.id !== tool.id), tool] : settings.tools.filter(grant => grant.id !== tool.id) })}/><span><strong>{tool.label}</strong><small>{tool.description ?? (tool.kind === 'mcp' ? 'Connected tool' : 'LingXi tool')}</small></span></label>)}
@@ -53,7 +53,12 @@ export function LocalAppAgentSettingsDialog({ app, onClose, onSaved }: { app: De
         {app.manifest.agent?.tools.filter(id => !catalog.tools.some(tool => tool.id === id)).map(id => <p className="local-app-agent-hint" key={id}>Unavailable requested tool: {id}</p>)}
         {settings.tools.some(grant => !catalog.tools.some(tool => sameTool(grant, tool))) && <><p className="local-app-agent-hint">Some previously allowed tools changed or are unavailable. Select their current versions above to renew access, or remove their old permissions.</p><button type="button" onClick={() => setSettings({ ...settings, tools: settings.tools.filter(grant => catalog.tools.some(tool => sameTool(grant, tool))) })}>Remove outdated tool permissions</button></>}
       </fieldset>
-      <div className="local-app-agent-limits"><label>Maximum turns<input type="number" min="1" max="10000" value={settings.maxTurns} onChange={event => setSettings({ ...settings, maxTurns: Number(event.target.value) })}/></label><label>Time limit (minutes)<input type="number" min="1" max="1440" value={settings.timeoutMs / 60000} onChange={event => setSettings({ ...settings, timeoutMs: Number(event.target.value) * 60000 })}/></label></div>
+      <fieldset><legend>Requested Skills</legend><p className="local-app-agent-hint">Skills provide release-local instructions. They do not grant tools or permissions.</p>
+        {(app.manifest.agent?.skills ?? []).map(skill => <label key={skill.id} className="local-app-agent-tool"><input type="checkbox" checked={settings.skills.includes(skill.id)} onChange={event => setSettings({ ...settings, skills: event.target.checked ? [...settings.skills, skill.id] : settings.skills.filter(id => id !== skill.id) })}/><span><strong>{catalog.skills.find(choice => choice.id === skill.id)?.label ?? skill.id}</strong><small>{skill.path}</small></span></label>)}
+        {!app.manifest.agent?.skills.length && <p className="local-app-agent-hint">This app does not declare any Skills.</p>}
+        {settings.skills.some(id => !app.manifest.agent?.skills.some(skill => skill.id === id)) && <><p className="local-app-agent-hint">Some previously allowed Skills are no longer declared.</p><button type="button" onClick={() => setSettings({ ...settings, skills: settings.skills.filter(id => app.manifest.agent?.skills.some(skill => skill.id === id)) })}>Remove outdated Skill permissions</button></>}
+      </fieldset>
+      <div className="local-app-agent-limits"><label>Maximum turns<input type="number" min="1" max={LOCAL_APP_AGENT_MAX_TURNS} value={settings.maxTurns} onChange={event => setSettings({ ...settings, maxTurns: Number(event.target.value) })}/></label><label>Time limit (minutes)<input type="number" min="1" max={LOCAL_APP_AGENT_MAX_TIMEOUT_MS / 60000} value={settings.timeoutMs / 60000} onChange={event => setSettings({ ...settings, timeoutMs: Number(event.target.value) * 60000 })}/></label></div>
       <label className="local-app-agent-check"><input type="checkbox" checked={settings.background} onChange={event => setSettings({ ...settings, background: event.target.checked })}/> Let Agent tasks finish when this app is closed</label>
       <p className="local-app-agent-hint">Closing an app otherwise cancels its Agent task. Updating permissions cancels any task already running.</p>
     </div>}

@@ -19,7 +19,7 @@
 
 ## Mobile Local App presentation (user decision, 2026-10-24)
 
-- The first Android and iOS Local App release opens application pages in the external system browser (for example Chrome or Safari). Do not use an embedded Android WebView or iOS WKWebView as the Mobile product entry point. Desktop keeps its existing application windows.
+- The first Android and iOS Local App release opens application pages in the operating system's resolved external browser handler: use the user's actual default browser or the system resolver, including OEM and third-party browsers. Never hard-code Chrome, Safari, a package name, or an application ID. Do not use an embedded Android WebView or iOS WKWebView as the Mobile product entry point. Desktop keeps its existing application windows. See [the Mobile Local App Agent and lifetime contract](docs/MOBILE_LOCAL_APP_AGENT.md).
 - LingXi owns runtime services, independent Agent tasks, model credentials and trusted native permission/tool approval. Preserve Agent support using an authenticated browser-to-host interface scoped to the installed app and current run; never expose host-administration or approval APIs to app pages.
 - Use browser camera/file selection for the application UI. Verify external-browser navigation, photo return, host lifecycle, Agent requests, cancellation and recovery on physical Android and iOS. Historical WebView checks are not external-browser acceptance.
 - This is a product architecture requirement motivated by store distribution, not a guarantee of store approval. Do not switch back to WebView without an explicit user decision.

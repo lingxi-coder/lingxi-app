@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { LocalAppCoreClient } from './local-apps/coreClient.js';
 import { resolveServerBin } from './bridgeDiscovery.js';
 import { LocalAppHost } from './local-apps/host.js';
+import { resolveDesktopAuthoringBinding } from './local-apps/authoring.js';
 import { LocalAppAgentBroker } from './local-apps/agentBroker.js';
 import { LocalAppAgentExecutor } from './local-apps/agentExecutor.js';
 import { LocalAppAgentError } from './local-apps/agentPolicy.js';
@@ -503,7 +504,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
-    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2', 'desktop-agent');
+    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2');
     const agentExecutor = new LocalAppAgentExecutor({
       configHome: productPaths.configHome,
       root: agentRoot,
@@ -533,30 +534,24 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       accountToken: () => accountService.getIdToken(),
       accountId: () => accountService.snapshot().user?.uid ?? undefined,
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
-      resolveAuthoring: async row => {
-        if (!row.sourcePath) return { ...row, sourceSession: undefined };
-        try { await fs.stat(row.sourcePath); } catch { return { ...row, sourceSession: undefined, sourceMissing: true }; }
-        if (!row.sourceSession) return row;
-        const source = await sessionCatalog.find(row.sourceSession.projectPath, row.sourceSession.sessionId).catch(() => undefined);
-        const actual = source?.workspace_path;
-        const matches = actual && await Promise.all([fs.realpath(actual), fs.realpath(row.sourcePath)]).then(([a, b]) => a === b).catch(() => false);
-        return source && matches ? row : { ...row, sourceSession: undefined };
+      resolveAuthoringBinding: async (_appId, session) => {
+        return resolveDesktopAuthoringBinding(sessionCatalog, session);
       },
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
       mainWindow: () => getMainWindow() ?? createWindow(),
       agentCatalog: () => agentExecutor.catalog(),
-      edit: async row => {
+      edit: async request => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();
         // The renderer owns navigation and must apply the selected chat's bootstrap
         // before placing an edit request in its session-bound composer draft.
-        window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession, sourceMissing: row.sourceMissing });
+        window.webContents.send('lingxi:local-app:edit', request);
       },
     });
     const agentBroker = new LocalAppAgentBroker({
-      root: join(agentRoot, 'ledger'),
+      root: agentRoot,
       authorize: owner => localApps!.authorizeAgent(owner),
       revalidate: (owner, authorization) => localApps!.revalidateAgent(owner, authorization),
       execute: execution => agentExecutor.execute(execution),

@@ -26,6 +26,8 @@ import kotlinx.coroutines.withContext
 @Composable
 fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String) -> Unit, onDetails: (String) -> Unit,
     onAuthoring: (String?, String, String) -> Unit) {
+    val context = LocalContext.current
+    val appsGuestPath = remember(context) { com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath }
     val state by apps.state.collectAsState()
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableIntStateOf(0) }
@@ -104,7 +106,7 @@ fun UnifiedAppsPage(apps: UnifiedLocalApps, onBack: () -> Unit, onOpen: (String)
     }, confirmButton = { TextButton(onClick = { showingArchives = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
     if (creating) AlertDialog(onDismissRequest = { if (!busy) creating = false }, title = { Text(stringResource(R.string.local_app_v2_create)) }, text = {
         Column { Text(stringResource(R.string.local_app_v2_create_note)); OutlinedTextField(name, { name = it }, label = { Text(stringResource(R.string.local_app_v2_name)) }, singleLine = true)
-            OutlinedTextField(sourceDirectory, { sourceDirectory = it }, label = { Text(stringResource(R.string.local_app_v2_source_directory)) }, placeholder = { Text("/home/lingxi/…") }, singleLine = true)
+            OutlinedTextField(sourceDirectory, { sourceDirectory = it }, label = { Text(stringResource(R.string.local_app_v2_source_directory)) }, placeholder = { Text("$appsGuestPath/…") }, singleLine = true)
             Text(stringResource(R.string.local_app_v2_source_directory_note), style = MaterialTheme.typography.bodySmall)
         }
     }, confirmButton = { TextButton(enabled = name.isNotBlank() && !busy, onClick = { action {
@@ -131,12 +133,34 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
     var publicationStatus by remember { mutableStateOf<String?>(null) }
     var agentRelease by remember(appId) { mutableStateOf<AppRelease?>(null) }
     var serving by remember(appId) { mutableStateOf<AppRun?>(null) }
+    var agentTasks by remember(appId) { mutableStateOf<List<AppAgentTask>>(emptyList()) }
+    var agentTasksError by remember(appId) { mutableStateOf<String?>(null) }
     var dataDirectory by remember(appId) { mutableStateOf("") }
     var sourceExport by remember(appId) { mutableStateOf<AppSourceExport?>(null) }
     val context = LocalContext.current
     var permissionRevision by remember { mutableIntStateOf(0) }
-    suspend fun reload() { record = apps.get(appId); releases = apps.releases(appId); runs = apps.runs(appId); serving = (apps.request("status", appId) as org.json.JSONObject).optJSONObject("run")?.appRun()
+    suspend fun reloadAgentTasks(release: AppRelease?) {
+        if (release == null || "agent" !in release.capabilities) {
+            agentTasks = emptyList()
+            agentTasksError = null
+            return
+        }
+        try {
+            agentTasks = apps.agentTasks(appId, release.revision)
+            agentTasksError = null
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            agentTasksError = failure.message ?: failure.toString()
+        }
+    }
+    suspend fun reload() {
+        record = apps.get(appId)
+        releases = apps.releases(appId)
+        runs = apps.runs(appId)
+        serving = (apps.request("status", appId) as org.json.JSONObject).optJSONObject("run")?.appRun()
         dataDirectory = withContext(Dispatchers.IO) { apps.guestPath((apps.request("layout", appId) as org.json.JSONObject).getString("dataPath")) }
+        reloadAgentTasks(releases.firstOrNull { it.revision == record?.currentRevision })
     }
     fun action(block: suspend () -> Unit) { scope.launch { busy = true; error = null; try { block(); reload() } catch (e: Exception) { error = e.message } finally { busy = false } } }
     val exportSource = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
@@ -200,7 +224,22 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
                         val restored = apps.restoreSource(appId, app.marketOrigin?.remixedFrom == null && app.marketOrigin != null)
                         onAuthoring(restored.id, restored.name, restored.authoring?.sourceDirectory.orEmpty())
                     } }) { Text(stringResource(if (app.marketOrigin != null && app.marketOrigin.remixedFrom == null) R.string.local_app_v2_remix else R.string.local_app_v2_restore)) } }
-                    if ("agent" in release.capabilities) item { TextButton(onClick = { agentRelease = release }) { Text("Agent 模型与工具授权") } }
+                    if ("agent" in release.capabilities) {
+                        item {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(stringResource(R.string.local_app_v2_agent_tasks), style = MaterialTheme.typography.titleMedium)
+                                TextButton(enabled = !busy, onClick = { scope.launch { reloadAgentTasks(release) } }) { Text(stringResource(R.string.local_app_v2_agent_tasks_refresh)) }
+                            }
+                            TextButton(onClick = { agentRelease = release }) { Text("Agent 模型与工具授权") }
+                            agentTasksError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                            if (agentTasks.isEmpty() && agentTasksError == null) Text(stringResource(R.string.local_app_v2_agent_tasks_empty), style = MaterialTheme.typography.bodySmall)
+                        }
+                        items(agentTasks, key = { it.runId }) { task ->
+                            AgentTaskCard(task = task, enabled = !busy, onCancel = {
+                                action { apps.cancelAgentTask(appId, release.revision, task.runId) }
+                            })
+                        }
+                    }
                     item { Text(stringResource(R.string.local_app_v2_permissions), style = MaterialTheme.typography.titleMedium) }
                     item { Text("相机、麦克风、照片和文件由外部浏览器处理。请在浏览器的网站权限中管理授权和清除站点数据；灵犀不会代替浏览器授予或撤销这些权限。", style = MaterialTheme.typography.bodySmall) }
                 }
@@ -225,4 +264,38 @@ fun UnifiedAppDetailsPage(apps: UnifiedLocalApps, appId: String, onBack: () -> U
     } }) { Text(stringResource(R.string.local_app_v2_publish_confirm)) } }, dismissButton = { TextButton(enabled = !busy, onClick = { publication = null }) { Text(stringResource(R.string.local_app_v2_cancel)) } }) }
     agentRelease?.let { release -> LocalAppAgentSettingsDialog(apps, release) { agentRelease = null } }
     if (deleting) AlertDialog(onDismissRequest = { deleting = false }, title = { Text(stringResource(R.string.local_app_v2_remove_title)) }, text = { Text(stringResource(R.string.local_app_v2_remove_note)) }, confirmButton = { TextButton(onClick = { deleting = false; scope.launch { try { apps.remove(appId); onBack() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_remove_confirm)) } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text(stringResource(R.string.local_app_v2_cancel)) } })
+}
+
+@Composable
+private fun AgentTaskCard(task: AppAgentTask, enabled: Boolean, onCancel: () -> Unit) {
+    val progress = task.progress
+    val usage = task.usage
+    val error = task.error
+    ElevatedCard(Modifier.fillMaxWidth().testTag("local-app-agent-task-${task.runId}")) {
+        Column(Modifier.padding(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(task.state, style = MaterialTheme.typography.titleSmall)
+                if (task.state == "queued" || task.state == "running") {
+                    TextButton(enabled = enabled, onClick = onCancel) { Text(stringResource(R.string.local_app_v2_agent_task_cancel)) }
+                }
+            }
+            Text(stringResource(R.string.local_app_v2_agent_task_run, task.runId), style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.local_app_v2_agent_task_request, task.requestId), style = MaterialTheme.typography.bodySmall)
+            task.phase?.let { Text(stringResource(R.string.local_app_v2_agent_task_waiting, it), style = MaterialTheme.typography.bodySmall) }
+            progress?.let {
+                Text(stringResource(R.string.local_app_v2_agent_task_turns, it.optInt("completedModelTurns"), it.optInt("turnLimit")), style = MaterialTheme.typography.bodySmall)
+            }
+            usage?.let {
+                Text(stringResource(R.string.local_app_v2_agent_task_usage, it.optLong("inputTokens"), it.optLong("outputTokens"), it.optLong("turns")), style = MaterialTheme.typography.bodySmall)
+                if (it.has("costUsd") && !it.isNull("costUsd")) {
+                    Text(stringResource(R.string.local_app_v2_agent_task_cost, it.optDouble("costUsd"), if (it.optBoolean("costEstimated")) stringResource(R.string.local_app_v2_agent_task_estimated) else ""), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            error?.let {
+                val code = it.optString("code").takeIf(String::isNotBlank)
+                val message = it.optString("message").takeIf(String::isNotBlank)
+                Text(listOfNotNull(code, message).joinToString(": ").ifBlank { it.toString() }, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
 }

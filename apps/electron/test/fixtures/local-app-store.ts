@@ -2,7 +2,7 @@
 import { promises as fs } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { DesktopLocalApp } from '../../src/shared/localApps.js';
+import type { DesktopAuthoringRef, DesktopLocalApp } from '../../src/shared/localApps.js';
 import { parseManifest } from '../../src/main/local-apps/manifest.js';
 import { appId, atomicJson, containedFile, copySource } from '../../src/main/local-apps/store.js';
 export class LocalAppStore {
@@ -51,7 +51,7 @@ export class LocalAppStore {
     const { phase: _phase, error: _error, runningRevision: _running, ...persisted } = row;
     await atomicJson(join(this.directory(row.id), 'app.json'), { ...persisted, phase: 'stopped' });
   }
-  async publish(input: { id?: string; name?: string; summary?: string; html?: string; staged_path?: string; source_path?: string; source_session?: DesktopLocalApp['sourceSession']; expectedRevision?: number }): Promise<DesktopLocalApp> {
+  async publish(input: { id?: string; name?: string; summary?: string; html?: string; staged_path?: string; authoring?: DesktopAuthoringRef; expectedRevision?: number }): Promise<DesktopLocalApp> {
     const previous = input.id ? await this.get(input.id) : undefined;
     const id = previous?.id ?? `a${randomUUID().replaceAll('-', '')}`;
     let latestRevision = previous?.revision ?? 0;
@@ -93,8 +93,8 @@ export class LocalAppStore {
       const now = Date.now();
       const row: DesktopLocalApp = { id, revision, manifest, name: manifest.name, summary: manifest.summary ?? '',
         createdAt: previous?.createdAt ?? now, updatedAt: now, phase: 'stopped', background: previous?.background ?? false, agent: previous?.agent,
-        grants: previous?.grants ?? [], sourcePath: input.source_path ?? previous?.sourcePath,
-        sourceSession: input.source_session ?? previous?.sourceSession };
+        releaseDigest: previous?.releaseDigest,
+        grants: previous?.grants ?? [], authoring: input.authoring ?? previous?.authoring };
       await this.save(row);
       return row;
     } catch (error) {

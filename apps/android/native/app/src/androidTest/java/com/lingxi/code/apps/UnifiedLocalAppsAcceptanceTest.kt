@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.MainActivity
 import com.lingxi.code.bindings.android.*
+import com.lingxi.code.project.MobileUserStorage
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.runBlocking
@@ -31,41 +32,35 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class UnifiedLocalAppsAcceptanceTest {
     @Test
-    fun nativeFilePickerAndRotationKeepTheRunAndDocument() = runBlocking<Unit> {
+    fun externalBrowserPhotoPickerReturnsBrowserFile() = runBlocking<Unit> {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/picker-acceptance-${UUID.randomUUID()}")
-        val fixtures = File(context.filesDir, "local-app-acceptance-fixtures/static")
-        check(fixtures.copyRecursively(source))
-        val manifestFile = File(source, "lingxi-app.json")
-        manifestFile.writeText(JSONObject(manifestFile.readText()).put("capabilities", org.json.JSONArray(listOf("files", "microphone"))).toString())
+        val source = apps.hostFile(MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/picker-acceptance-${UUID.randomUUID()}")
+        check(File(context.filesDir, "local-app-acceptance-fixtures/static").copyRecursively(source))
+        File(source, "index.html").writeText("""
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+            <button id="pick">Choose acceptance photo</button><pre id="result">Waiting</pre>
+            <script>document.getElementById('pick').addEventListener('click',async()=>{
+              try { const [file]=await localApp.files.pick({accept:'image/*'});
+                document.getElementById('result').textContent=file ? `${'$'}{file.name}|${'$'}{file.size}|${'$'}{file.type}` : 'cancelled';
+              } catch(error) { document.getElementById('result').textContent=String(error); }
+            });</script>
+        """.trimIndent())
         val published = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
         val record = published.getJSONObject("record").appRecord()
-        val release = published.getJSONObject("release").appRelease()
-        apps.permissions.grant(record.id, release.digest, setOf("files"))
-        val filename = "LingXi-Local-App-Acceptance-${UUID.randomUUID()}.txt"
-        val bytes = "LOCAL-APP-NATIVE-FILE-OK".toByteArray()
-        val file = context.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+        val filename = "LingXi-External-Browser-${UUID.randomUUID()}.jpg"
+        val bytes = File(context.filesDir, "local-app-acceptance-fixtures/test-photo.jpg").readBytes()
+        val uri = context.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             android.content.ContentValues().apply {
                 put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, filename)
-                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
             }) ?: error("Cannot create the isolated picker fixture")
-        context.contentResolver.openOutputStream(file)!!.use { it.write(bytes) }
-        context.contentResolver.update(file, android.content.ContentValues().apply { put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-        suspend fun evaluate(view: android.webkit.WebView, script: String): String {
-            val result = CompletableDeferred<String>()
-            withContext(Dispatchers.Main.immediate) { view.evaluateJavascript(script) { result.complete(it) } }
-            return withTimeout(15_000) { result.await() }
-        }
-        suspend fun awaitScript(view: android.webkit.WebView, script: String) {
-            try { withTimeout(20_000) { while (evaluate(view, script) != "true") delay(100) } }
-            catch (failure: Exception) {
-                android.util.Log.e("LocalAppAcceptance", "WAIT_FAILED $script state=" + evaluate(view, "JSON.stringify({url:location.href,ready:document.readyState,sdk:!!window.localApp,error:window.__nativeFileError,file:window.__nativeFile,draft:document.querySelector('#rotation-draft')?.value,mic:window.__micDenied})"))
-                throw failure
-            }
-        }
+        context.contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
+        context.contentResolver.update(uri, android.content.ContentValues().apply { put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        val browserPackages = LocalAppBrowser.installedHandlerPackages(context, "http://127.0.0.1/")
+        assertTrue("Install or enable an HTTP browser before this acceptance", browserPackages.isNotEmpty())
         fun find(node: android.view.accessibility.AccessibilityNodeInfo?, text: String): android.view.accessibility.AccessibilityNodeInfo? {
             if (node == null) return null
             if (node.text?.toString() == text) return node
@@ -75,28 +70,29 @@ class UnifiedLocalAppsAcceptanceTest {
         val intent = android.content.Intent().setClassName(context.packageName, "com.lingxi.code.apps.LocalAppAcceptanceActivity")
             .putExtra("appId", record.id).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            NativeAppActivityHost(intent).use {
-                val page = withTimeout(20_000) {
+            NativeAppActivityHost(intent).use { host ->
+                var browserPackage = ""
+                withTimeout(60_000) {
                     while (true) {
-                        val launch = withContext(Dispatchers.Main.immediate) { apps.runtime.launch(record.id) }
-                        if (launch != null) return@withTimeout apps.runtime.open(record.id, launch)
-                        delay(100)
+                        val root = instrumentation.uiAutomation.rootInActiveWindow
+                        browserPackage = root?.packageName?.toString().orEmpty()
+                        if (browserPackage == context.packageName) {
+                            var action = root?.findAccessibilityNodeInfosByText("允许并打开浏览器")
+                                ?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                            while (action != null && !action.isClickable) action = action.parent
+                            action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                        }
+                        if (browserPackage in browserPackages) break
+                        delay(250)
                     }
-                    error("unreachable")
                 }
-                awaitScript(page, "document.readyState === 'complete' && !!window.localApp")
-                val run = apps.runtime.launch(record.id)!!.run.runId
-                evaluate(page, "document.body.insertAdjacentHTML('beforeend','<input id=rotation-draft>'); document.querySelector('#rotation-draft').value='keep-native-picker-draft'")
-                instrumentation.uiAutomation.setRotation(android.app.UiAutomation.ROTATION_FREEZE_90)
-                delay(800)
-                assertEquals(run, apps.runtime.launch(record.id)?.run?.runId)
-                awaitScript(page, "document.querySelector('#rotation-draft')?.value === 'keep-native-picker-draft'")
-                evaluate(page, "localApp.microphone.record().then(() => window.__micDenied=false).catch(() => window.__micDenied=true)")
-                awaitScript(page, "window.__micDenied === true")
-                evaluate(page, "localApp.files.pick().then(value => window.__nativeFile=value).catch(error => window.__nativeFileError=String(error))")
-                withTimeout(15_000) { while (!apps.runtime.deviceRequestActive) delay(100) }
-                instrumentation.uiAutomation.setRotation(android.app.UiAutomation.ROTATION_FREEZE_0)
-                delay(800)
+                assertFalse("Application must leave the native host", host.isResumed())
+                withTimeout(20_000) {
+                    while (find(instrumentation.uiAutomation.rootInActiveWindow, "Choose acceptance photo") == null) delay(250)
+                }
+                var button = find(instrumentation.uiAutomation.rootInActiveWindow, "Choose acceptance photo")
+                while (button != null && !button.isClickable) button = button.parent
+                assertTrue("Browser page should expose its photo picker", button?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true)
                 withTimeout(25_000) {
                     while (true) {
                         var item = find(instrumentation.uiAutomation.rootInActiveWindow, filename)
@@ -107,16 +103,15 @@ class UnifiedLocalAppsAcceptanceTest {
                         delay(250)
                     }
                 }
-                awaitScript(page, "window.__nativeFile?.base64 === '${android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)}'")
-                awaitScript(page, "document.querySelector('#rotation-draft')?.value === 'keep-native-picker-draft'")
-                assertEquals(run, apps.runtime.launch(record.id)?.run?.runId)
-                assertFalse(apps.runtime.deviceRequestActive)
-                android.util.Log.i("LocalAppAcceptance", "NATIVE_PICKER_ROTATION PASS actual OpenDocument selected-own-fixture unchanged-run preserved-input microphone-denial")
+                withTimeout(20_000) {
+                    while (find(instrumentation.uiAutomation.rootInActiveWindow, "$filename|${bytes.size}|image/jpeg") == null) delay(250)
+                }
+                assertTrue(LocalAppProcessService.owns(record.id))
+                android.util.Log.i("LocalAppAcceptance", "EXTERNAL_BROWSER_PHOTO_PICKER PASS browser=$browserPackage system-photo-picker-returned-browser-File")
             }
         } finally {
-            instrumentation.uiAutomation.setRotation(android.app.UiAutomation.ROTATION_UNFREEZE)
-            context.contentResolver.delete(file, null, null)
-            apps.remove(record.id)
+            context.contentResolver.delete(uri, null, null)
+            runCatching { apps.remove(record.id) }
             source.deleteRecursively()
         }
     }
@@ -126,24 +121,17 @@ class UnifiedLocalAppsAcceptanceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/background-acceptance-${UUID.randomUUID()}")
+        val source = apps.hostFile(MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/background-acceptance-${UUID.randomUUID()}")
         check(File(context.filesDir, "local-app-acceptance-fixtures/python").copyRecursively(source))
         val value = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
         val record = value.getJSONObject("record").appRecord()
         val release = value.getJSONObject("release").appRelease()
         apps.grant(record.id, release.digest)
-        val intent = android.content.Intent().setClassName(context.packageName, "com.lingxi.code.apps.LocalAppAcceptanceActivity")
-            .putExtra("appId", record.id).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        val intent = android.content.Intent(context, MainActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
             NativeAppActivityHost(intent).use { host ->
-                val first = withTimeout(30_000) {
-                    while (true) {
-                        val launch = withContext(Dispatchers.Main.immediate) { apps.runtime.launch(record.id) }
-                        if (launch != null && host.isResumed()) return@withTimeout launch
-                        delay(100)
-                    }
-                    error("unreachable")
-                }
+                assertTrue("LingXi must own the foreground before enabling background work", host.isResumed())
+                val first = apps.start(record.id)
                 assertFalse(LocalAppProcessService.owns(record.id))
                 apps.setKeepRunning(record.id, release.digest, true)
                 assertTrue(LocalAppProcessService.owns(record.id))
@@ -167,14 +155,8 @@ class UnifiedLocalAppsAcceptanceTest {
                 assertEquals("suspended", apps.runs(record.id).find { it.runId == first.run.runId }?.phase)
                 assertTrue(runCatching { http(first, "/health") }.isFailure)
                 host.bringToForeground()
-                val resumed = withTimeout(30_000) {
-                    while (true) {
-                        val launch = withContext(Dispatchers.Main.immediate) { apps.runtime.launch(record.id) }
-                        if (launch != null && launch.run.runId != first.run.runId) return@withTimeout launch
-                        delay(100)
-                    }
-                    error("unreachable")
-                }
+                val resumed = apps.start(record.id)
+                assertNotEquals(first.run.runId, resumed.run.runId)
                 assertEquals(first.origin, resumed.origin)
                 assertEquals("PYTHON-READY", http(resumed, "/health").second.decodeToString())
                 assertFalse(LocalAppProcessService.owns(record.id))
@@ -272,27 +254,47 @@ class UnifiedLocalAppsAcceptanceTest {
     }
 
     @Test
-    fun browserSdkAndStorageUseTheInstallationOrigin() = runBlocking<Unit> {
+    fun externalBrowserStorageFollowsInstallationOriginAcrossRestart() = runBlocking<Unit> {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val apps = UnifiedLocalApps.get(context)
         val fixture = File(context.filesDir, "local-app-acceptance-fixtures/static")
         val created = mutableListOf<String>()
         val sources = mutableListOf<File>()
+        val browserPackages = LocalAppBrowser.installedHandlerPackages(context, "http://127.0.0.1/")
+        assertTrue("Install or enable an HTTP browser before this acceptance", browserPackages.isNotEmpty())
         NativeAppActivityHost(android.content.Intent(context, MainActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             suspend fun publish(): AppRecord {
-                val source = apps.hostFile("/home/lingxi/.lingxi/.apps/browser-acceptance-${UUID.randomUUID()}")
+                val guest = MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/browser-acceptance-${UUID.randomUUID()}"
+                val source = apps.hostFile(guest)
                 check(fixture.copyRecursively(source)); sources.add(source)
+                File(source, "dist/index.html").writeText("""
+                    <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+                    <script>
+                      const key='acceptance-note'; const previous=localStorage.getItem(key);
+                      localStorage.setItem(key,'keep-on-restart');
+                      document.body.textContent=previous===null?'first-load':previous;
+                    </script>
+                """.trimIndent())
                 val result = apps.request("publish") { put("sourcePath", source.absolutePath); put("expectedRevision", 0) } as JSONObject
                 return result.getJSONObject("record").appRecord().also { created.add(it.id) }
             }
-            suspend fun evaluate(view: android.webkit.WebView, script: String): String {
-                val result = CompletableDeferred<String>()
-                withContext(Dispatchers.Main.immediate) { view.evaluateJavascript(script) { result.complete(it) } }
-                return withTimeout(10_000) { result.await() }
+            fun visibleText(text: String): Boolean = instrumentation.uiAutomation.rootInActiveWindow
+                ?.findAccessibilityNodeInfosByText(text)?.isNotEmpty() == true
+            suspend fun waitForBrowserText(text: String) = withTimeout(25_000) {
+                while (true) {
+                    val packageName = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString().orEmpty()
+                    if (packageName in browserPackages && visibleText(text)) return@withTimeout
+                    delay(250)
+                }
+                error("unreachable")
             }
-            suspend fun awaitScript(view: android.webkit.WebView, script: String) {
-                withTimeout(15_000) { while (evaluate(view, script) != "true") delay(100) }
+            suspend fun openInBrowser(appId: String): AppLaunch {
+                val app = apps.get(appId)
+                apps.setKeepRunning(appId, apps.release(appId, app.currentRevision).digest, true)
+                val launch = apps.openExternalBrowser(appId)
+                LocalAppBrowser.open(context, launch.url)
+                return launch
             }
             var failure: Throwable? = null
             try {
@@ -308,42 +310,23 @@ class UnifiedLocalAppsAcceptanceTest {
                     assertNotEquals(first.id, imported.id)
                     assertNull(imported.marketOrigin)
                     assertTrue(imported.executionGrants.isEmpty())
-                    val importedRun = apps.start(imported.id)
-                    assertTrue(http(importedRun, "", entry = true).second.decodeToString().contains("html"))
-                    assertEquals(3, apps.sourceArchive(imported.id, importedRun.run.revision, context.cacheDir).use { it.files.size })
+                    val importedLaunch = apps.start(imported.id)
+                    assertTrue(http(importedLaunch, "", entry = true).second.decodeToString().contains("html"))
+                    assertEquals(3, apps.sourceArchive(imported.id, importedLaunch.run.revision, context.cacheDir).use { it.files.size })
                     android.util.Log.i("LocalAppAcceptance", "SOURCE_EXPORT_IMPORT PASS new-installation-id no-market-origin no-execution-grants")
                 } finally { exported.close() }
-                val page = apps.runtime.open(first.id, launch)
-                awaitScript(page, "document.readyState === 'complete' && !!window.localApp")
-                android.util.Log.i("LocalAppAcceptance", "BROWSER_PAGE_READY")
-                assertEquals(launch.origin, org.json.JSONTokener(evaluate(page, "location.origin")).nextValue())
-                evaluate(page, "localApp.info().then(value => window.__acceptanceInfo = value)")
-                awaitScript(page, "window.__acceptanceInfo?.runId === ${JSONObject.quote(launch.run.runId)}")
-                android.util.Log.i("LocalAppAcceptance", "BROWSER_INFO_READY")
-                evaluate(page, "localStorage.setItem('acceptance-note', 'keep-on-restart')")
-                evaluate(page, "localApp.notify('must-not-post').then(() => window.__denied = false).catch(() => window.__denied = true)")
-                awaitScript(page, "window.__denied === true")
-                evaluate(page, """(() => {
-                    const child = document.createElement('iframe');
-                    child.srcdoc = '<script>lingxiNative.onmessage = e => parent.__childDenied = !JSON.parse(e.data).ok; lingxiNative.postMessage(JSON.stringify({id:"child",method:"info"}));</script>';
-                    document.body.appendChild(child);
-                })()""")
-                awaitScript(page, "window.__childDenied === true")
+
+                val browserFirst = openInBrowser(first.id)
+                waitForBrowserText("first-load")
+                assertEquals(launch.origin, browserFirst.origin)
                 apps.stop(first.id)
-                val restarted = apps.start(first.id)
+                val restarted = openInBrowser(first.id)
                 assertEquals(launch.origin, restarted.origin)
-                val reopened = apps.runtime.open(first.id, restarted)
-                awaitScript(reopened, "document.readyState === 'complete' && !!window.localApp")
-                assertEquals(JSONObject.quote("keep-on-restart"), evaluate(reopened, "localStorage.getItem('acceptance-note')"))
-                apps.request("stop", first.id)
-                evaluate(reopened, "localApp.info().then(() => window.__staleDenied = false).catch(() => window.__staleDenied = true)")
-                awaitScript(reopened, "window.__staleDenied === true")
-                val second = publish(); val isolated = apps.start(second.id)
-                assertNotEquals(launch.origin, isolated.origin)
-                val separate = apps.runtime.open(second.id, isolated)
-                awaitScript(separate, "document.readyState === 'complete' && !!window.localApp")
-                assertEquals("null", evaluate(separate, "localStorage.getItem('acceptance-note')"))
-                android.util.Log.i("LocalAppAcceptance", "BROWSER_STORAGE_SDK PASS real WebView info permission-denial child-frame-denial stopped-run-denial persistent-origin isolated-profile")
+                waitForBrowserText("keep-on-restart")
+                val separate = openInBrowser(created.last())
+                assertNotEquals(launch.origin, separate.origin)
+                waitForBrowserText("first-load")
+                android.util.Log.i("LocalAppAcceptance", "EXTERNAL_BROWSER_STORAGE PASS system-selected-handler persistent-origin isolated-installation source-export-import")
             } catch (error: Throwable) { failure = error; throw error
             } finally {
                 for (id in created) runCatching { apps.remove(id) }.onFailure { cleanup ->
@@ -366,13 +349,13 @@ class UnifiedLocalAppsAcceptanceTest {
         NativeAppActivityHost(android.content.Intent(context, MainActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             instrumentation.waitForIdleSync()
             suspend fun publish(name: String): AppRecord {
-                val guest = "/home/lingxi/.lingxi/.apps/acceptance-${UUID.randomUUID()}"
+                val guest = MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/acceptance-${UUID.randomUUID()}"
                 val source = apps.hostFile(guest)
                 check(File(fixtures, name).copyRecursively(source))
                 sources.add(source)
                 val value = apps.request("publish") {
                     put("sourcePath", source.absolutePath); put("expectedRevision", 0)
-                    put("authoring", JSONObject().put("sourceDirectory", guest).put("sourceSessionId", "acceptance-source"))
+                    put("authoring", JSONObject().put("sourceDirectory", guest))
                 } as JSONObject
                 return value.getJSONObject("record").appRecord().also { created.add(it.id) }
             }
@@ -380,14 +363,34 @@ class UnifiedLocalAppsAcceptanceTest {
                 val static = publish("static")
                 val staticLaunch = apps.start(static.id)
                 assertTrue(http(staticLaunch, "", entry = true).second.decodeToString().contains("html"))
+                val sourceDirectory = static.authoring!!.sourceDirectory
+                val authoring = JSONObject()
+                    .put("workspaceId", UUID.randomUUID().toString())
+                    .put("sourceDirectory", sourceDirectory)
+                    .put("projectRef", JSONObject().put("kind", "mobileProject").put("projectId", UUID.randomUUID().toString()))
+                    .put("authoringSessionId", UUID.randomUUID().toString())
+                    .put("appId", static.id)
+                val legacyBinding = apps.request("prepareAuthoring", static.id) {
+                    put("sourceExists", true); put("sessionBindings", JSONObject())
+                } as JSONObject
+                assertEquals("rebindRequired", legacyBinding.getString("action"))
+                apps.request("bindAuthoring", static.id) { put("authoring", authoring) }
+                val sessionContext = JSONObject().put("workspaceId", authoring.getString("workspaceId"))
+                    .put("sourceDirectory", sourceDirectory).put("projectRef", authoring.getJSONObject("projectRef")).put("mode", "code")
+                val resumed = apps.request("prepareAuthoring", static.id) {
+                    put("sourceExists", true)
+                    put("sessionBindings", JSONObject().put(authoring.getString("authoringSessionId"), sessionContext))
+                } as JSONObject
+                assertEquals("resumeSession", resumed.getString("action"))
+                assertEquals(authoring.getString("authoringSessionId"), resumed.getString("authoringSessionId"))
                 val movedSession = apps.request("prepareAuthoring", static.id) {
-                    put("sessionDirectories", JSONObject().put("acceptance-source", "/home/lingxi/other-project"))
+                    put("sourceExists", true)
+                    put("sessionBindings", JSONObject().put(authoring.getString("authoringSessionId"), sessionContext.put("mode", "chat")))
                 } as JSONObject
                 assertEquals("createSession", movedSession.getString("action"))
-                assertEquals(static.authoring!!.sourceDirectory, movedSession.getString("sourceDirectory"))
                 sources.first().deleteRecursively()
                 assertEquals("sourceMissing", (apps.request("prepareAuthoring", static.id) {
-                    put("sessionDirectories", JSONObject())
+                    put("sourceExists", false); put("sessionBindings", JSONObject())
                 } as JSONObject).getString("action"))
                 assertEquals(200, http(staticLaunch, "", entry = true).first)
                 android.util.Log.i("LocalAppAcceptance", "STATIC_SOURCE_INDEPENDENCE PASS appId=${static.id}")
@@ -405,7 +408,8 @@ class UnifiedLocalAppsAcceptanceTest {
                     cwd = null, env = emptyList(), stdin = null, timeoutMs = 30_000uL, allowNetwork = false, mounts = emptyList(),
                 ))
                 assertEquals(tools.stderr, 0, tools.exitCode)
-                assertTrue(tools.stdout, tools.stdout.startsWith("1000\n/home/lingxi\n"))
+                val directories = MobileUserStorage.directories(context)
+                assertTrue(tools.stdout, tools.stdout.startsWith("1000\n${directories.guestHome}\n"))
 
                 val python = publish("python")
                 val node = publish("node")

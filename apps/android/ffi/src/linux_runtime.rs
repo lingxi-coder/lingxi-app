@@ -370,9 +370,12 @@ pub(super) fn android_mobile_linux_runtime(
             Mutex<HashMap<String, Arc<dyn mobile_linux_api::MobileLinuxRuntime>>>,
         > = LazyLock::new(|| Mutex::new(HashMap::new()));
         let key = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             cfg.managed_root,
             cfg.app_sandbox_root,
+            cfg.brand_id,
+            cfg.linux_user,
+            cfg.config_dir_name,
             cfg.abi,
             cfg.rootfs_version,
             cfg.archive_sha256.as_deref().unwrap_or_default(),
@@ -390,6 +393,11 @@ pub(super) fn android_mobile_linux_runtime(
         let runtime = platform_android::AndroidProotRuntime::new(
             platform_android::AndroidProotRuntimeConfig {
                 managed_root: std::path::PathBuf::from(&cfg.managed_root),
+                brand_profile: mobile_linux_api::BrandRuntimeProfile::new(
+                    cfg.brand_id.clone(),
+                    cfg.linux_user.clone(),
+                    cfg.config_dir_name.clone(),
+                ),
                 app_sandbox_root: std::path::PathBuf::from(&cfg.app_sandbox_root),
                 abi: cfg.abi.clone(),
                 rootfs_version: cfg.rootfs_version.clone(),
@@ -423,6 +431,13 @@ pub(super) fn android_mobile_linux_runtime(
 pub(super) fn prepared_android_mobile_linux_runtime(
     config: &AndroidMobileLinuxConfigFfi,
 ) -> Result<Arc<dyn mobile_linux_api::MobileLinuxRuntime>, String> {
+    mobile_linux_api::BrandRuntimeProfile::new(
+        config.brand_id.clone(),
+        config.linux_user.clone(),
+        config.config_dir_name.clone(),
+    )
+    .validate()
+    .map_err(str::to_string)?;
     let runtime = android_mobile_linux_runtime(config);
     let host_path = config
         .workspace_host_path

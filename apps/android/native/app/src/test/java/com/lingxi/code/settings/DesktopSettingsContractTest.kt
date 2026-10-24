@@ -122,18 +122,26 @@ class DesktopSettingsContractTest {
             "{\"layer\":\"user\",\"path\":\"/home/me/.lingxi/settings.json\"}," +
             "{\"layer\":\"project\",\"path\":\"/home/me/work/engine-answer/.lingxi/settings.json\"}," +
             "{\"layer\":\"local\",\"path\":\"/home/me/work/engine-answer/.lingxi/settings.local.json\"}]"
-        assertEquals("/home/me/work/engine-answer", projectDirectoryFromFiles(files))
+        assertEquals("/home/me/work/engine-answer", projectDirectoryFromFiles(files, ".lingxi"))
         assertEquals("engine-answer", projectDisplayName("/home/me/work/engine-answer"))
+    }
+
+    @Test fun projectDirectoryUsesTheResolvedBrandConfigDirectory() {
+        val files = "[{\"layer\":\"project\",\"path\":\"/home/atlas/projects/demo/.atlas/settings.json\"}]"
+        assertEquals("/home/atlas/projects/demo", projectDirectoryFromFiles(files, ".atlas"))
+        assertNull(projectDirectoryFromFiles(files, ".lingxi"))
+        assertNull(projectDirectoryFromFiles(files, "../.atlas"))
+        assertNull(projectDirectoryFromFiles(files, "nested/.atlas"))
     }
 
     // 后缀对不上时必须返回 null 而不是猜一个目录出来 —— 指着 B 写 A 比不显示更糟。
     @Test fun projectDirectoryRefusesToGuessWhenThePathDoesNotMatch() {
-        assertNull(projectDirectoryFromFiles(null))
-        assertNull(projectDirectoryFromFiles("[]"))
-        assertNull(projectDirectoryFromFiles("not json"))
-        assertNull(projectDirectoryFromFiles("[{\"layer\":\"user\",\"path\":\"/home/me/.lingxi/settings.json\"}]"))
+        assertNull(projectDirectoryFromFiles(null, ".lingxi"))
+        assertNull(projectDirectoryFromFiles("[]", ".lingxi"))
+        assertNull(projectDirectoryFromFiles("not json", ".lingxi"))
+        assertNull(projectDirectoryFromFiles("[{\"layer\":\"user\",\"path\":\"/home/me/.lingxi/settings.json\"}]", ".lingxi"))
         for (path in listOf("/work/proj/settings.json", "/work/proj/.claude/settings.json", "/work/proj/.lingxi/settings.local.json", "settings.json")) {
-            assertNull("must not guess a project from $path", projectDirectoryFromFiles("[{\"layer\":\"project\",\"path\":\"$path\"}]"))
+            assertNull("must not guess a project from $path", projectDirectoryFromFiles("[{\"layer\":\"project\",\"path\":\"$path\"}]", ".lingxi"))
         }
     }
 

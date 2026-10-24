@@ -57,7 +57,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
         <div className="local-app-tile-footer"><span className="local-app-phase" data-phase={app.phase}>{phaseLabels[app.phase]}</span><span>v{app.revision}</span></div>
         {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">Update ready — restart to use v{app.revision}</p>}
         {app.error && <p className="local-app-error">{app.error}</p>}
-        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>Details &amp; logs</button><button disabled={Boolean(app.marketOrigin && !app.sourcePath && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.sourcePath ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.sourcePath ? 'Customize' : 'Continue developing'}</button>
+        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>Details &amp; logs</button><button disabled={Boolean(app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.authoring?.sourceDirectory ? 'Customize' : 'Continue developing'}</button>
           {app.manifest.capabilities?.includes('agent') && <button onClick={() => setAgentSettings(app.id)}>Agent</button>}
           <details><summary aria-label={`Manage ${app.name}`}>•••</summary><div className="local-app-menu">
             <button onClick={() => void act(app.id, () => appsApi().restart(app.id))}>Restart</button>
@@ -67,7 +67,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
             <label><input type="checkbox" checked={app.background} onChange={event => void act(app.id, () => appsApi().setBackground(app.id, event.target.checked))}/> Keep running when closed</label>
             <button onClick={() => setPublication(app)}>Publish to market…</button>
             {app.marketOrigin && !app.marketOrigin.remixedFrom && <button onClick={() => void act(app.id, () => appsApi().marketInstall(app.marketOrigin!.appId, app.id, app.revision))}>Check for update</button>}
-            {(!app.marketOrigin || app.sourcePath) && <button onClick={() => void act(app.id, () => appsApi().restoreSource(app.id))}>Restore source copy</button>}
+            {(!app.marketOrigin || app.authoring?.sourceDirectory) && <button onClick={() => void act(app.id, () => appsApi().restoreSource(app.id))}>Restore source copy</button>}
             {app.manifest.remix?.allowed && <button onClick={() => void act(app.id, () => appsApi().remix(app.id))}>Create a custom copy</button>}
             <button onClick={() => void act(app.id, () => appsApi().revoke(app.id))}>Revoke permissions</button>
             <button className="local-app-delete" onClick={() => void act(app.id, () => appsApi().remove(app.id))}>Remove app…</button>

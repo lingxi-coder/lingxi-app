@@ -38,7 +38,7 @@ class LocalAppAccountIndependenceTest {
         NativeAppActivityHost(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
             try {
                 val rows = listOf("static").map { name ->
-                    val source = apps.hostFile("/home/lingxi/.lingxi/.apps/account-$name-${UUID.randomUUID()}")
+                    val source = apps.hostFile(MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/account-$name-${UUID.randomUUID()}")
                     sources.add(source)
                     check(File(context.filesDir, "local-app-acceptance-fixtures/$name").copyRecursively(source))
                     val value = apps.request("publish") { put("sourcePath", source.path); put("expectedRevision", 0) } as JSONObject

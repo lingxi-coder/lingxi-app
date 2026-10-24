@@ -1835,9 +1835,14 @@ final class EngineConversationSource: ConversationSource {
                 routingJson: config.providerRoutingJson
             )
         }
+        let userDirectories = MobileUserStorage.directories()
         let launchConfig = IosEngineLaunchConfigFfi(
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             appAgentHost: false,
+            brandId: userDirectories.brandId,
+            linuxUser: userDirectories.linuxUser,
+            configDirName: userDirectories.configDirName,
+            nativeConfigHome: userDirectories.configHome,
             apiBase: config.apiBase,
             apiKey: config.apiKey,
             model: config.model,
@@ -1853,7 +1858,7 @@ final class EngineConversationSource: ConversationSource {
             hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
         )
         let additionalDirectories = config.additionalWorkspaceDirectories
-        let userHome = MobileUserStorage.directories().home
+        let userHome = userDirectories.home
         let handleBuilder = self.handleBuilder
         handleBuildAttemptID &+= 1
         let attemptID = handleBuildAttemptID

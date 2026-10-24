@@ -13,19 +13,21 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-const LINGXI_DOT_DIR: &str = ".lingxi";
-
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
 /// framework bridge.
 #[derive(Debug, Clone)]
 pub struct IosIshRuntimeConfig {
     /// App-private directory that holds active/staged iSH rootfs state.
     pub managed_root: PathBuf,
-    /// Canonical app sandbox root used to protect `.lingxi` and config trees.
+    /// Brand-owned Linux identity provided by the native client.
+    pub brand_id: String,
+    pub linux_user: String,
+    pub config_dir_name: String,
+    /// Canonical app sandbox root used to protect brand config and provider trees.
     pub app_sandbox_root: PathBuf,
-    /// Host workspace path exposed as the default `/home/lingxi/lingxi/<id>` mount.
+    /// Host workspace path exposed as the default brand workspace mount.
     pub workspace_host_path: PathBuf,
-    /// Stable guest workspace identifier appended under `/home/lingxi/lingxi`.
+    /// Stable guest workspace identifier appended under the selected brand workspace root.
     pub stable_workspace_id: String,
     /// Guest ABI label surfaced in status responses.
     pub abi: String,
@@ -38,11 +40,24 @@ pub struct IosIshRuntimeConfig {
 }
 
 impl IosIshRuntimeConfig {
-    fn lingxi_root(&self) -> PathBuf {
-        mobile_linux_api::guest_paths::home_host_path(&self.managed_root).join(LINGXI_DOT_DIR)
+    fn brand_profile(&self) -> mobile_linux_api::BrandRuntimeProfile {
+        mobile_linux_api::BrandRuntimeProfile::new(
+            self.brand_id.clone(),
+            self.linux_user.clone(),
+            self.config_dir_name.clone(),
+        )
+    }
+
+    fn brand_config_home(&self) -> PathBuf {
+        self.brand_profile()
+            .persistent_home_host_path(&self.managed_root)
+            .join(&self.config_dir_name)
     }
     fn workspace_guest_path(&self) -> String {
-        mobile_linux_api::guest_paths::workspace(&self.stable_workspace_id)
+        mobile_linux_api::guest_paths::workspace_for_profile(
+            &self.brand_profile(),
+            &self.stable_workspace_id,
+        )
     }
 
     #[cfg(test)]
@@ -88,8 +103,13 @@ fn existing_host_resource(override_path: Option<PathBuf>, fallback: PathBuf) -> 
 pub fn linked_runtime(
     config: IosIshRuntimeConfig,
 ) -> Result<Arc<dyn MobileLinuxRuntime>, MobileLinuxError> {
+    let brand_profile = config.brand_profile();
+    brand_profile
+        .validate()
+        .map_err(|error| MobileLinuxError::InvalidRequest(error.to_string()))?;
     let inner = mobile_linux_ios::linked_runtime(mobile_linux_ios::IosIshRuntimeConfig {
         managed_root: config.managed_root.clone(),
+        brand_profile,
         app_sandbox_root: config.app_sandbox_root.clone(),
         workspace_host_path: config.workspace_host_path.clone(),
         stable_workspace_id: config.stable_workspace_id.clone(),
@@ -106,7 +126,7 @@ pub fn linked_runtime(
             config.managed_root.join("resources/default_mount"),
         ),
         rootfs_patch_path: std::env::var_os("LINGXI_IOS_ISH_ROOTFS_PATCH_DIR").map(PathBuf::from),
-        protected_host_roots: vec![config.lingxi_root()],
+        protected_host_roots: vec![config.brand_config_home()],
         // Product policy below validates every requested mount before forwarding.
         // Preserve externally selected, sandbox-authorized workspace directories.
         allowed_mount_roots: vec![PathBuf::from("/")],
@@ -278,11 +298,13 @@ fn validate_mount(
     validate_guest_path(&mount.guest_path, "guest_path", false)?;
     let managed_root = normalize_host_path(&config.managed_root, "managed_root")?;
     let app_root = normalize_host_path(&config.app_sandbox_root, "app_sandbox_root")?;
-    let lingxi_root = normalize_host_path(&config.lingxi_root(), ".lingxi root")?;
+    let brand_config_home = normalize_host_path(&config.brand_config_home(), "brand config home")?;
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
+    let brand_profile = config.brand_profile();
+    let guest_home = mobile_linux_api::guest_paths::home_for_profile(&brand_profile);
 
     if ["/", "/home"].contains(&mount.guest_path.as_str())
-        || (guest_path_has_prefix(&mount.guest_path, mobile_linux_api::guest_paths::HOME)
+        || (guest_path_has_prefix(&mount.guest_path, &guest_home)
             && !matches!(mount.purpose, MountPurpose::Workspace))
         || guest_path_has_prefix(&mount.guest_path, mobile_linux_api::guest_paths::ADMIN_HOME)
     {
@@ -292,21 +314,22 @@ fn validate_mount(
     }
 
     let persistent_workspace =
-        mobile_linux_core::is_persistent_user_workspace(&managed_root, mount);
+        mobile_linux_core::is_persistent_user_workspace(&managed_root, &brand_profile, mount);
     if host_path == app_root
         || host_path == managed_root
-        || host_path == lingxi_root
+        || host_path == brand_config_home
         || (host_path.starts_with(&managed_root) && !persistent_workspace)
         || managed_root.starts_with(&host_path)
-        || host_path.starts_with(&lingxi_root)
-        || lingxi_root.starts_with(&host_path)
+        || host_path.starts_with(&brand_config_home)
+        || brand_config_home.starts_with(&host_path)
     {
         return Err(MobileLinuxError::InvalidRequest(
-            "mount host_path may not target app root, managed_root, or .lingxi".to_string(),
+            "mount host_path may not target app root, managed_root, or brand config home"
+                .to_string(),
         ));
     }
 
-    if path_contains_protected_subtree(&host_path) {
+    if path_contains_protected_subtree(&host_path, &config.config_dir_name) {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target provider/config subtrees".to_string(),
         ));
@@ -423,7 +446,7 @@ fn normalize_host_path(path: &Path, field: &str) -> Result<PathBuf, MobileLinuxE
     }
 }
 
-fn path_contains_protected_subtree(path: &Path) -> bool {
+fn path_contains_protected_subtree(path: &Path, config_dir_name: &str) -> bool {
     let components: Vec<_> = path
         .components()
         .filter_map(|component| match component {
@@ -431,12 +454,11 @@ fn path_contains_protected_subtree(path: &Path) -> bool {
             _ => None,
         })
         .collect();
-    components
-        .iter()
-        .any(|component| matches!(component.as_str(), ".lingxi" | "provider" | "providers"))
-        || components
-            .windows(2)
-            .any(|pair| pair[0] == "library" && pair[1] == "preferences")
+    components.iter().any(|component| {
+        component == config_dir_name || matches!(component.as_str(), "provider" | "providers")
+    }) || components
+        .windows(2)
+        .any(|pair| pair[0] == "library" && pair[1] == "preferences")
 }
 
 #[cfg(test)]
@@ -445,6 +467,9 @@ mod tests {
     fn test_config(root: &Path) -> IosIshRuntimeConfig {
         IosIshRuntimeConfig {
             managed_root: root.join("mobile-linux"),
+            brand_id: "lingxi".to_string(),
+            linux_user: "lingxi".to_string(),
+            config_dir_name: ".lingxi".to_string(),
             app_sandbox_root: root.to_path_buf(),
             workspace_host_path: root.join("workspaces/default"),
             stable_workspace_id: "default".to_string(),
@@ -488,7 +513,7 @@ mod tests {
         let config = test_config(&root);
         fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
         fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+        fs::create_dir_all(config.brand_config_home()).expect("create brand config root");
 
         let mount = validate_mount(&config.default_workspace_mount(), &config).expect("mount");
         assert_eq!(
@@ -500,13 +525,45 @@ mod tests {
     }
 
     #[test]
+    fn second_brand_profile_controls_workspace_guest_and_persistent_host_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("atlas-app");
+        let mut config = test_config(&root);
+        config.brand_id = "atlas".to_string();
+        config.linux_user = "atlas_guest".to_string();
+        config.config_dir_name = ".atlas".to_string();
+        config.workspace_host_path = config
+            .brand_profile()
+            .persistent_home_host_path(&config.managed_root)
+            .join("atlas/projects");
+        config.stable_workspace_id = "projects".to_string();
+        fs::create_dir_all(&config.workspace_host_path).expect("create profile workspace");
+        fs::create_dir_all(&config.managed_root).expect("create managed root");
+        fs::create_dir_all(config.brand_config_home()).expect("create profile config root");
+
+        let workspace = config.default_workspace_mount();
+        assert_eq!(workspace.guest_path, "/home/atlas_guest/atlas/projects");
+        assert_eq!(
+            config
+                .brand_profile()
+                .persistent_home_host_path(&config.managed_root),
+            config.managed_root.join("persistent/atlas_guest")
+        );
+        let mount = validate_mount(&workspace, &config).expect("profile-backed workspace mount");
+        assert_eq!(
+            mount.host_path,
+            config.workspace_host_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn workspace_mount_rejects_guest_path_escape() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("app");
         let config = test_config(&root);
         fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
         fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+        fs::create_dir_all(config.brand_config_home()).expect("create brand config root");
 
         let error = validate_mount(
             &MountSpec {
@@ -529,7 +586,7 @@ mod tests {
         let host = root.join("external");
         fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
         fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+        fs::create_dir_all(config.brand_config_home()).expect("create brand config root");
         fs::create_dir_all(&host).expect("create external");
 
         let error = validate_mount(
@@ -553,7 +610,7 @@ mod tests {
         let alias_root = root.join("aliases");
         fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
         fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
+        fs::create_dir_all(config.brand_config_home()).expect("create brand config root");
         fs::create_dir_all(&alias_root).expect("create aliases");
 
         let alias = alias_root.join("managed-link");

@@ -1,6 +1,5 @@
 package com.lingxi.code.cron
 
-import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import android.content.Context
 import com.lingxi.code.R
 import com.lingxi.code.bindings.runtime.CronTaskDto

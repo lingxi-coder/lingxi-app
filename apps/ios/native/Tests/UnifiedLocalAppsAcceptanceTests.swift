@@ -1,6 +1,5 @@
 import Foundation
 import XCTest
-import WebKit
 @testable import LingxiCode
 
 /// Requires a signed product on a physical iPhone. Simulator success is not Linux proof.
@@ -19,7 +18,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         let marker = "overlay-acceptance-" + UUID().uuidString
         let projectSentinel = projects.appendingPathComponent(marker)
         try Data("keep-workspace-source".utf8).write(to: projectSentinel)
-        let guest = "/home/lingxi/" + marker
+        let guest = storage.guestHome + "/" + marker
         let hidden = try UnifiedLocalApps.hostSourceDirectory(guest)
         let external = URL(fileURLWithPath: ConversationSourceFactory.appSandboxRoot())
             .appendingPathComponent(marker, isDirectory: true)
@@ -32,7 +31,8 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         try Data("cold-external-only".utf8).write(to: external.appendingPathComponent("cold-only.txt"))
         try Data("read-only".utf8).write(to: external.appendingPathComponent("ro/locked.txt"))
         let runtime = try createIosMobileLinuxRuntime(config: IosMobileLinuxConfigFfi(
-            mode: .mobileLinux, managedRoot: LXISHDefaultWorkspace.managedRootPath(),
+            mode: .mobileLinux, brandId: storage.brandId, linuxUser: storage.linuxUser,
+            configDirName: storage.configDirName, managedRoot: LXISHDefaultWorkspace.managedRootPath(),
             workspaceHostPath: projects.path, stableWorkspaceId: LXISHDefaultWorkspace.stableID(),
             abi: "arm64", rootfsVersion: metadata.rootfsVersion, archiveSha256: metadata.archiveSha256,
             authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path,
@@ -84,11 +84,11 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: hidden.appendingPathComponent("soft.txt").path))
             XCTAssertFalse(FileManager.default.fileExists(atPath: hidden.appendingPathComponent("pipe").path))
             _ = try await runtime.configureMounts(mounts: [MobileLinuxMountSpecFfi(
-                hostPath: projects.path, guestPath: "/home/lingxi/lingxi/projects", readOnly: true, purpose: .workspace)])
+                hostPath: projects.path, guestPath: storage.projectsGuestPath, readOnly: true, purpose: .workspace)])
             try await run("""
             import os, errno
             try:
-                os.truncate('/home/lingxi/lingxi/projects/\(marker)', 0)
+                os.truncate('\(storage.projectsGuestPath)/\(marker)', 0)
                 raise AssertionError('default workspace ignored read-only request')
             except OSError as error:
                 assert error.errno == errno.EROFS, str(error)
@@ -119,7 +119,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         #endif
     }
 
-    func testStaticBrowserAndSourceArchiveOnDevice() async throws {
+    func testExternalBrowserLaunchURLAndSourceArchiveOnDevice() async throws {
         #if targetEnvironment(simulator)
         throw XCTSkip("Physical iPhone browser and source roundtrip acceptance")
         #else
@@ -140,42 +140,24 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             XCTAssertNil(imported.record.marketOrigin)
             XCTAssertTrue(imported.record.executionGrants.isEmpty)
             await library.refresh()
-            func awaitPage(_ view: WKWebView) async throws {
-                for _ in 0..<150 {
-                    if (try? await view.evaluateJavaScript("document.readyState === 'complete' && !!window.localApp")) as? Bool == true { return }
-                    try await Task.sleep(for: .milliseconds(100))
-                }
-                throw LocalAppServiceFailure("BROWSER_TIMEOUT", "The actual WKWebView did not load the application SDK.")
-            }
-            let page = try await library.browser.open(published.record.appId) { _ in }
-            try await awaitPage(page)
-            let origin = try await page.evaluateJavaScript("location.origin") as? String
-            let info = try await page.callAsyncJavaScript("return await localApp.info()", arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
-            XCTAssertEqual(info?["runId"] as? String, library.runs[published.record.appId]?.runId)
-            XCTAssertTrue((info?["dataDirectory"] as? String)?.hasPrefix("/home/lingxi/") == true)
-            _ = try await page.evaluateJavaScript("localStorage.setItem('acceptance-note', 'keep-on-restart')")
-            let denied = try await page.callAsyncJavaScript("try { await localApp.notify('must-not-post'); return false; } catch (_) { return true; }", arguments: [:], in: nil, contentWorld: .page) as? Bool
-            XCTAssertEqual(denied, true)
+            let launch = try await library.openExternalBrowser(published.record.appId)
+            XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
+            let (pageBytes, pageResponse) = try await URLSession.shared.data(from: launch.url)
+            XCTAssertEqual((pageResponse as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertTrue(String(decoding: pageBytes, as: UTF8.self).contains("html"))
             try await library.stop(published.record.appId)
-            let reopened = try await library.browser.open(published.record.appId) { _ in }
-            try await awaitPage(reopened)
-            let reopenedOrigin = try await reopened.evaluateJavaScript("location.origin") as? String
-            let retainedNote = try await reopened.evaluateJavaScript("localStorage.getItem('acceptance-note')") as? String
-            XCTAssertEqual(reopenedOrigin, origin)
-            XCTAssertEqual(retainedNote, "keep-on-restart")
-            let other = try await library.browser.open(imported.record.appId) { _ in }
-            try await awaitPage(other)
-            let otherNote = try await other.evaluateJavaScript("localStorage.getItem('acceptance-note')") as? String
-            XCTAssertNil(otherNote)
-            try await library.stop(published.record.appId)
-            try await library.browser.clearData(published.record.appId)
-            print("IOS_LOCAL_APP_BROWSER_SOURCE PASS actual WKWebView stable-origin storage-isolation source-export-import permission-denial data-clear")
+            let restarted = try await library.launch(published.record.appId)
+            XCTAssertTrue(LocalAppExternalBrowserURL.matches(restarted.url, origin: restarted.origin))
+            let (restartedBytes, restartedResponse) = try await URLSession.shared.data(from: restarted.url)
+            XCTAssertEqual((restartedResponse as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertTrue(String(decoding: restartedBytes, as: UTF8.self).contains("html"))
+            print("IOS_LOCAL_APP_EXTERNAL_URL PASS default-browser-url trusted-loopback source-export-import restart")
         } catch {
             for id in created { try? await library.stop(id); try? await library.action("remove", id: id) }
             try? FileManager.default.removeItem(at: folder)
             throw error
         }
-        for id in created { try await library.stop(id); try await library.browser.clearData(id); try await library.action("remove", id: id) }
+        for id in created { try await library.stop(id); try await library.action("remove", id: id) }
         try FileManager.default.removeItem(at: folder)
         #endif
     }
@@ -195,14 +177,14 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         }
         let session = URLSession(configuration: .ephemeral)
         func publish(_ name: String) async throws -> LocalAppPublishResult {
-            let guest = "/home/lingxi/.lingxi/.apps/acceptance-\(UUID().uuidString)"
+            let guest = MobileUserStorage.directories().appsGuestPath + "/acceptance-\(UUID().uuidString.lowercased())"
             let source = try UnifiedLocalApps.hostSourceDirectory(guest)
             try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: fixtures.appendingPathComponent(name), to: source)
             sources.append(source)
             let result: LocalAppPublishResult = try await client.request([
                 "op": .string("publish"), "expectedRevision": .number(0), "sourcePath": .string(source.path),
-                "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest, sourceSessionId: "acceptance-source"))
+                "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest))
             ])
             created.append(result.record.appId)
             return result
@@ -231,7 +213,8 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             XCTAssertTrue(String(decoding: html, as: UTF8.self).contains("html"))
             try FileManager.default.removeItem(at: sources[0])
             let resolution: LocalAppAuthoringResolution = try await client.request([
-                "op": .string("prepareAuthoring"), "appId": .string(document.record.appId), "sessionDirectories": .object([:])
+                "op": .string("prepareAuthoring"), "appId": .string(document.record.appId),
+                "sourceExists": .bool(false), "sessionBindings": .object([:])
             ])
             XCTAssertEqual(resolution.action, "sourceMissing")
             let (_, stillAvailable) = try await session.data(from: staticLaunch.url)

@@ -305,9 +305,12 @@ class ProjectStore private constructor(
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    val paths = MobileUserStorage.directories(appContext)
                     val repository = ProjectRepository(
-                        MobileUserStorage.projects(appContext),
-                        userHome = File(MobileUserStorage.directories(appContext).home),
+                        File(paths.projects),
+                        userHome = File(paths.home),
+                        projectsGuestRoot = paths.projectsGuestPath,
+                        userHomeGuestPath = paths.guestHome,
                         strings = projectStrings(appContext),
                     )
                     return ProjectStore(

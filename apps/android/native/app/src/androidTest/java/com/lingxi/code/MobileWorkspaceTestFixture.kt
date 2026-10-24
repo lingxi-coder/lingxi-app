@@ -12,6 +12,9 @@ internal fun mobileWorkspaceTestConfiguration(root: File): AndroidMobileLinuxCon
     val directories = mobileUserDirectories(managedRoot)
     return AndroidMobileLinuxConfigFfi(
         mode = MobileLinuxRuntimeModeFfi.MOBILE_LINUX,
+        brandId = directories.brandId,
+        linuxUser = directories.linuxUser,
+        configDirName = directories.configDirName,
         managedRoot = managedRoot,
         appSandboxRoot = root.path,
         workspaceHostPath = directories.projects,

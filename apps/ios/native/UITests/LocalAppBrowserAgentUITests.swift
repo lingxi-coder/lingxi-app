@@ -1,44 +1,41 @@
 import XCTest
 
-/// Opt-in physical Safari acceptance, with the real host and previously staged app.
-/// Does not use fixture conversation flags, install keys or replace Agent output.
+/// Verifies the app-scoped foreground handoff UI without assuming which
+/// external browser the person selected in iOS Settings.
 final class LocalAppBrowserAgentUITests: XCTestCase {
     private func stagedAppID() throws -> String {
         let id = ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_APP_ID"] ?? ""
         try XCTSkipUnless(id.range(of: #"^a[0-9a-f]{32}$"#, options: .regularExpression) != nil,
-                          "Stage an isolated calorie app and pass LINGXI_AGENT_BROWSER_APP_ID")
+                          "Stage an isolated Local App and pass LINGXI_AGENT_BROWSER_APP_ID")
         try XCTSkipUnless(ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] == nil,
-                          "Requires physical iPhone")
+                          "Requires an iOS 26 physical device")
         return id
     }
-    private func record(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+
+    private func agentReviewURL(appID: String, requestID: String) throws -> URL {
+        var parts = URLComponents()
+        parts.scheme = "lingxi"
+        parts.host = "apps"
+        parts.path = "/\(appID)"
+        parts.queryItems = [
+            URLQueryItem(name: "review", value: "agent"),
+            URLQueryItem(name: "requestId", value: requestID),
+            URLQueryItem(name: "revision", value: ProcessInfo.processInfo.environment["LINGXI_AGENT_BROWSER_REVISION"] ?? "1")
+        ]
+        return try XCTUnwrap(parts.url)
     }
-    func testExternalBrowserEntryAndPhotoPicker() throws {
+
+    func testNativeForegroundActionIsScopedToOpaqueBrowserRequest() throws {
         continueAfterFailure = false
         let id = try stagedAppID()
+        let requestID = "shortcuts+browser/\(UUID().uuidString)"
         let host = XCUIApplication()
         host.activate()
-        host.open(try XCTUnwrap(URL(string: "lingxi://apps/" + id)))
-        let open = host.buttons["返回浏览器"]
-        XCTAssertTrue(open.waitForExistence(timeout: 20))
-        record(host, "browser-agent-trusted-native-controls")
-        open.tap()
-        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
-        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 15))
-        let choose = safari.buttons["选择照片"]
-        XCTAssertTrue(choose.waitForExistence(timeout: 15), "Safari must show the actual Local App")
-        record(safari, "browser-agent-real-safari-page")
-        choose.tap()
-        let photoLibrary = safari.buttons.matching(NSPredicate(format: "label IN %@", ["Photo Library", "照片图库", "图库"])).firstMatch
-        let chooseFile = safari.buttons.matching(NSPredicate(format: "label IN %@", ["Choose File", "Choose Files", "选取文件", "选择文件"])).firstMatch
-        XCTAssertTrue(photoLibrary.waitForExistence(timeout: 5) || chooseFile.exists,
-                      "The external browser must own photo selection")
-        record(safari, "browser-agent-system-photo-source-chooser")
-        let cancel = safari.buttons.matching(NSPredicate(format: "label IN %@", ["Cancel", "取消"])).firstMatch
-        if cancel.exists { cancel.tap() }
-        XCTAssertTrue(choose.waitForExistence(timeout: 5))
-        print("IOS_BROWSER_UI_ENTRY PASS native-controls external-Safari system-photo-chooser cancel-return")
+        host.open(try agentReviewURL(appID: id, requestID: requestID))
+
+        let start = host.buttons["开始 Agent 并返回应用"]
+        XCTAssertTrue(start.waitForExistence(timeout: 20), "The app should require a foreground action before it returns to the external browser.")
+        XCTAssertTrue(host.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", String(requestID.prefix(8)))).firstMatch.exists)
+        print("IOS_BROWSER_AGENT_HANDOFF_UI PASS opaque-request-id explicit-native-action system-default-browser-neutral")
     }
 }

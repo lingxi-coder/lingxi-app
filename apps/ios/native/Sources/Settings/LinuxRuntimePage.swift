@@ -68,9 +68,13 @@ private enum LinuxRuntimeBridge {
         let workspaceID = LXISHDefaultWorkspace.stableID()
         let workspaceHostPath = LXISHDefaultWorkspace.hostPath()
         let managedRoot = LXISHDefaultWorkspace.managedRootPath()
+        let directories = MobileUserStorage.directories()
         let authorizationFile = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
         return IosMobileLinuxConfigFfi(
             mode: .mobileLinux,
+            brandId: directories.brandId,
+            linuxUser: directories.linuxUser,
+            configDirName: directories.configDirName,
             managedRoot: managedRoot,
             workspaceHostPath: workspaceHostPath,
             stableWorkspaceId: workspaceID,

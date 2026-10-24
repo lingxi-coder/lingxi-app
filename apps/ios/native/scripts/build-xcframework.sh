@@ -51,12 +51,15 @@ case "${PROFILE}" in
   *) echo "ERROR: LINGXI_FFI_PROFILE must be release or debug" >&2; exit 1 ;;
 esac
 
-# Keep Rust's linker target and every vendored C/C++ dependency on the same
-# minimum OS as the XcodeGen project. Without this, current Xcode compiles C
-# objects for the SDK default (for example iOS 26.x) while rustc links for its
-# historical iOS 10 default, which can introduce unavailable symbols such as
-# ___chkstk_darwin.
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-18.0}"
+# Keep Rust's linker target and every vendored C/C++ dependency on the iOS
+# 26.0 minimum in project.yml. Without this, current Xcode compiles C objects
+# for the SDK default while rustc links for a different deployment target,
+# which can introduce unavailable symbols such as ___chkstk_darwin.
+if [[ "${IPHONEOS_DEPLOYMENT_TARGET:-26.0}" != "26.0" ]]; then
+  echo "ERROR: this XCFramework must match the iOS 26.0 deployment target in project.yml" >&2
+  exit 1
+fi
+export IPHONEOS_DEPLOYMENT_TARGET="26.0"
 
 # Stage a complete matching bindings/framework pair without disrupting a live
 # Xcode build; callers can promote both outputs after verification succeeds.

@@ -4,7 +4,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.nio.file.Files
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -32,8 +31,7 @@ internal suspend fun UnifiedLocalApps.legacyEntries(): List<LegacyAppEntry> = wi
 }
 
 internal suspend fun UnifiedLocalApps.importLegacy(entry: LegacyAppEntry): AppRecord = withContext(Dispatchers.IO) {
-    val relative = ".lingxi/.apps/import-${UUID.randomUUID()}"
-    val guest = "/home/lingxi/$relative"
+    val guest = newLegacyImportGuestPath()
     val source = hostFile(guest)
     require(!source.exists()) { "Import directory already exists" }
     val authoring = JSONObject().put("sourceDirectory", guest)

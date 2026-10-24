@@ -11,7 +11,8 @@ use super::callbacks::{
 };
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::configuration::{
-    ios_mobile_config_from_launch_config, validate_mobile_linux_workspace_config,
+    ios_mobile_config_from_launch_config, mobile_brand_profile_from_directories,
+    validate_mobile_linux_workspace_config,
 };
 #[cfg(feature = "uniffi")]
 use super::configuration::{ios_project_cwd, IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi};
@@ -104,11 +105,18 @@ pub fn build_mobile_engine(
         }
         let directories =
             harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+        let brand_profile = mobile_brand_profile_from_directories(
+            &directories,
+            &linux.brand_id,
+            &linux.linux_user,
+            &linux.config_dir_name,
+        )?;
         directories.prepare()?;
         directories
             .validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
         let (cwd, logical_cwd) = directories.resolve_cwd(None)?;
         let cfg = MobileConfig {
+            brand_runtime_profile: brand_profile.clone(),
             build_info: harness_runtime::mobile::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -137,6 +145,7 @@ pub fn build_mobile_engine(
             validate_mobile_linux_workspace_config(&impls.app_sandbox_root, linux)
                 .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
+            brand_profile: brand_profile.clone(),
             app_sandbox_root: std::path::PathBuf::from(impls.app_sandbox_root),
             camera: impls.camera,
             audio: impls.audio,
@@ -267,13 +276,22 @@ pub fn build_ios_engine_with_config(
             device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
-        let linux = config.mobile_linux.as_ref().ok_or_else(|| {
-            MobileEngineError::Internal("iOS requires its Linux runtime user storage".into())
-        })?;
-        let (workspace_host_path, stable_workspace_id) =
-            validate_mobile_linux_workspace_config(&config.app_sandbox_root, linux)
-                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
+            Some(linux) => {
+                let (workspace, stable_id) =
+                    validate_mobile_linux_workspace_config(&config.app_sandbox_root, linux)
+                        .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+                (Some(workspace), Some(stable_id))
+            }
+            None if config.app_agent_host => (None, None),
+            None => {
+                return Err(MobileEngineError::Internal(
+                    "iOS conversations require Mobile Linux".into(),
+                ));
+            }
+        };
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
+            brand_profile: cfg.brand_runtime_profile.clone(),
             app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
             camera: Arc::new(IosCameraBridge { inner: camera }),
             audio,
@@ -296,8 +314,8 @@ pub fn build_ios_engine_with_config(
                     as Arc<dyn lingxi_core::host::LocationProvider>
             }),
             mobile_linux: ios_mobile_linux_runtime(config.mobile_linux.as_ref()),
-            workspace_host_path: Some(workspace_host_path),
-            stable_workspace_id: Some(stable_workspace_id),
+            workspace_host_path,
+            stable_workspace_id,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(IosPermissionSinkBridge { inner: permissions });
@@ -340,10 +358,45 @@ pub fn build_ios_engine(
     secure_storage: Option<Box<dyn IosSecureStorage>>,
     device_control: Option<Box<dyn IosDeviceControl>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    let (brand_id, linux_user, config_dir_name, native_config_home) =
+        if let Some(linux) = mobile_linux.as_ref() {
+            let profile = mobile_linux_api::BrandRuntimeProfile::new(
+                linux.brand_id.clone(),
+                linux.linux_user.clone(),
+                linux.config_dir_name.clone(),
+            );
+            profile
+                .validate()
+                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            let home = profile
+                .persistent_home_host_path(std::path::Path::new(&linux.managed_root))
+                .join(&profile.config_dir_name);
+            (
+                profile.brand_id.clone(),
+                profile.linux_user.clone(),
+                profile.config_dir_name.clone(),
+                home.to_string_lossy().into_owned(),
+            )
+        } else {
+            let profile = mobile_linux_api::BrandRuntimeProfile::default();
+            let home = profile
+                .persistent_home_host_path(std::path::Path::new(&app_sandbox_root))
+                .join(&profile.config_dir_name);
+            (
+                profile.brand_id,
+                profile.linux_user,
+                profile.config_dir_name,
+                home.to_string_lossy().into_owned(),
+            )
+        };
     build_ios_engine_with_config(
         IosEngineLaunchConfigFfi {
             app_agent_host: false,
             app_version: None,
+            brand_id,
+            linux_user,
+            config_dir_name,
+            native_config_home,
             api_base,
             api_key,
             model,

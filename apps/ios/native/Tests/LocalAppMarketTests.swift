@@ -1,5 +1,4 @@
 import XCTest
-import WebKit
 import ZIPFoundation
 @testable import LingxiCode
 
@@ -22,21 +21,97 @@ final class LocalAppMarketTests: XCTestCase {
     }
 
     private var manifest: String { #"{"schema":2,"name":"Fixture","summary":"Fixture","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"}],"package":{"files":["lingxi-app.json","index.html"],"dependencyLocks":[]}}"# }
-    func testStableBrowserIdentityAndOrigin() {
-        XCTAssertEqual(LocalAppBrowserIdentity.storeID("app-a"),LocalAppBrowserIdentity.storeID("app-a"))
-        XCTAssertNotEqual(LocalAppBrowserIdentity.storeID("app-a"),LocalAppBrowserIdentity.storeID("app-b"))
-        let origin = URL(string:"http://127.0.0.1:33001")!
-        XCTAssertTrue(LocalAppBrowserIdentity.matches(URL(string:"http://127.0.0.1:33001/__run/new/index.html"),origin:origin))
-        for value in ["http://127.0.0.1:33002/","http://localhost:33001/","https://127.0.0.1:33001/","http://user@127.0.0.1:33001/"] {
-            XCTAssertFalse(LocalAppBrowserIdentity.matches(URL(string:value),origin:origin))
+    func testExternalBrowserOriginAndExactReadinessMarker() throws {
+        let origin = "http://127.0.0.1:33001"
+        let url = URL(string: origin + "/__run/test/index.html?photo=kept")!
+        XCTAssertTrue(LocalAppExternalBrowserURL.matches(url, origin: origin))
+        let requestID = "request + exact/&unicode-灵犀"
+        let ready = try LocalAppAgentWakeURL.ready(url, origin: origin, requestID: requestID)
+        let query = URLComponents(url: ready, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first(where: { $0.name == "photo" })?.value, "kept")
+        XCTAssertEqual(query?.first(where: { $0.name == "__lingxi_ready" })?.value, requestID)
+        for value in ["http://127.0.0.1:33002/", "http://localhost:33001/", "https://127.0.0.1:33001/", "http://user@127.0.0.1:33001/"] {
+            XCTAssertFalse(LocalAppExternalBrowserURL.matches(URL(string: value)!, origin: origin))
         }
+        XCTAssertThrowsError(try LocalAppAgentWakeURL.ready(url, origin: origin, requestID: "bad\nrequest"))
+    }
+    @MainActor
+    func testAgentHostRuntimeGateMatchesTheSelectedStoreOrFullTarget() {
+        let hasMobileLinuxTarget = UnifiedAppMarket.targets.contains { $0.environment == "mobile-linux" }
+        XCTAssertEqual(LocalAppAgentModelHost.usesMobileLinuxRuntime, hasMobileLinuxTarget)
+    }
+    func testMobileAuthoringReferenceAndTaskWireShape() throws {
+        let authoring = LocalAppAuthoring(
+            sourceDirectory: "/home/user/.lingxi/.apps/app-source",
+            workspaceId: "12345678-1234-4abc-8def-1234567890ab",
+            projectRef: .mobileProject("12345678-1234-4abc-8def-1234567890ab"),
+            authoringSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            appId: "a12345678901234567890123456789012"
+        )
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(authoring)) as? [String: Any])
+        XCTAssertEqual(object["workspaceId"] as? String, "12345678-1234-4abc-8def-1234567890ab")
+        let project = try XCTUnwrap(object["projectRef"] as? [String: Any])
+        XCTAssertEqual(project["kind"] as? String, "mobileProject")
+        XCTAssertEqual(project["projectId"] as? String, "12345678-1234-4abc-8def-1234567890ab")
+        let incomplete = try JSONDecoder().decode(LocalAppAuthoring.self, from: Data(#"{"sourceDirectory":"/home/user/.lingxi/.apps/legacy"}"#.utf8))
+        XCTAssertNil(incomplete.workspaceId)
+        XCTAssertNil(incomplete.projectRef)
+
+        let response = try JSONDecoder().decode(LocalAppAgentTaskListResponse.self, from: Data(#"{"appId":"a12345678901234567890123456789012","revision":7,"tasks":[{"runId":"run-1","requestId":"opaque request","state":"running","sequence":3,"createdAt":1000,"updatedAt":1200,"model":{"providerId":"p","modelId":"m"},"limits":{"maxTurns":20,"timeoutMs":600000},"progress":{"completedModelTurns":2,"turnLimit":20}}]}"#.utf8))
+        XCTAssertEqual(response.revision, 7)
+        XCTAssertEqual(response.tasks.first?.requestId, "opaque request")
+        XCTAssertEqual(response.tasks.first?.progress?.completedModelTurns, 2)
+        XCTAssertEqual(response.tasks.first?.limits.timeoutMs, 600_000)
+    }
+    func testNewAppAuthoringUsesTrustedPendingRegistrationWithCompleteMobileReference() throws {
+        let sourceDirectory = MobileUserStorage.directories().appsGuestPath + "/notes-abcdef12"
+        let authoring = LocalAppAuthoring(
+            sourceDirectory: sourceDirectory,
+            workspaceId: "12345678-1234-4abc-8def-1234567890ab",
+            projectRef: .mobileProject("12345678-1234-4abc-8def-1234567890ab"),
+            authoringSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
+
+        let request = try LocalAppAuthoringHostRequest.registerPending(authoring)
+        XCTAssertEqual(request["op"], .string("registerAuthoring"))
+        let requestBytes = try JSONEncoder().encode(request)
+        XCTAssertFalse(LocalAppAgentHostPolicy.requiresModelHost(String(decoding: requestBytes, as: UTF8.self)))
+        XCTAssertTrue(LocalAppAgentHostPolicy.requiresModelHost(#"{"op":"startNative"}"#))
+        XCTAssertTrue(LocalAppAgentHostPolicy.requiresModelHost("invalid JSON"))
+        guard case .object(let fields)? = request["authoring"] else {
+            return XCTFail("The trusted host request must carry the complete AuthoringRef.")
+        }
+        XCTAssertEqual(fields["workspaceId"], .string("12345678-1234-4abc-8def-1234567890ab"))
+        XCTAssertEqual(fields["sourceDirectory"], .string(sourceDirectory))
+        XCTAssertEqual(fields["authoringSessionId"], .string("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+        XCTAssertNil(fields["appId"], "Pending first-publish registration has no App ID yet.")
+        guard case .object(let project)? = fields["projectRef"] else {
+            return XCTFail("The AuthoringRef must identify the dedicated mobile Project.")
+        }
+        XCTAssertEqual(project["kind"], .string("mobileProject"))
+        XCTAssertEqual(project["projectId"], .string("12345678-1234-4abc-8def-1234567890ab"))
+
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.registerPending(LocalAppAuthoring(
+            sourceDirectory: authoring.sourceDirectory,
+            workspaceId: authoring.workspaceId,
+            projectRef: authoring.projectRef,
+            authoringSessionId: authoring.authoringSessionId,
+            appId: "a12345678901234567890123456789012"
+        )))
+        XCTAssertThrowsError(try LocalAppAuthoringHostRequest.registerPending(LocalAppAuthoring(
+            sourceDirectory: authoring.sourceDirectory,
+            workspaceId: authoring.workspaceId,
+            projectRef: .mobileProject("different-project"),
+            authoringSessionId: authoring.authoringSessionId
+        )))
     }
     @MainActor
     func testAuthoringDirectoryUsesLinuxHomeNotDefaultWorkspaceRoot() throws {
-        let home = URL(fileURLWithPath: MobileUserStorage.directories().home).resolvingSymlinksInPath()
-        XCTAssertEqual(try UnifiedLocalApps.hostSourceDirectory("/home/lingxi/.lingxi/.apps/test").path,
-                       home.appendingPathComponent(".lingxi/.apps/test").path)
-        XCTAssertThrowsError(try UnifiedLocalApps.hostSourceDirectory("/home/lingxi/../../outside"))
+        let paths = MobileUserStorage.directories()
+        let home = URL(fileURLWithPath: paths.home).resolvingSymlinksInPath()
+        XCTAssertEqual(try UnifiedLocalApps.hostSourceDirectory(paths.appsGuestPath + "/test").path,
+                       home.appendingPathComponent(String(paths.appsGuestPath.dropFirst(paths.guestHome.count + 1)) + "/test").path)
+        XCTAssertThrowsError(try UnifiedLocalApps.hostSourceDirectory(paths.guestHome + "/../../outside"))
         XCTAssertThrowsError(try UnifiedLocalApps.hostSourceDirectory("/root/private"))
     }
     func testServiceErrorsRemainExplicit() throws {

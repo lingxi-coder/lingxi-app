@@ -12,6 +12,8 @@
 	<array>
 		<string>com.lingxi.code.cron.reconcile</string>
 		<string>com.lingxi.code.conversation.continued.*</string>
+		<string>com.lingxi.code.local-app.*</string>
+		<string>com.lingxi.code.full.local-app.*</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh-Hans</string>

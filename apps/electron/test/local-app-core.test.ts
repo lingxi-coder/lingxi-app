@@ -15,7 +15,8 @@ test('Desktop adapter uses canonical digest consent and rejects stale authoring 
   let digest = 'first'; const executionGrants: string[] = [];
   const transport: LocalAppCoreTransport = { dispose: async () => undefined, request: async <T>(request: Record<string, unknown>) => {
     calls.push(request);
-    if (request.op === 'get') return { appId: id, currentRevision: 1, latestRevision: 2, name: 'App', summary: '', executionGrants, createdAtMs: 1, updatedAtMs: 2, authoring: { sourceDirectory: '/source/fixed', sourceSessionId: 'session' } } as T;
+    if (request.op === 'get') return { appId: id, currentRevision: 1, latestRevision: 2, name: 'App', summary: '', executionGrants, createdAtMs: 1, updatedAtMs: 2,
+      authoring: { workspaceId: 'workspace-1', sourceDirectory: '/source/fixed', projectRef: { kind: 'desktopPath', path: '/source/fixed' }, authoringSessionId: 'session', appId: id } } as T;
     if (request.op === 'getRelease') return { appId: id, revision: 2, digest, manifest: { ...manifest, install: [{ command: 'npm ci' }] } } as T;
     if (request.op === 'layout') return { sourcePath: '/release/source', dataPath: '/data' } as T;
     if (request.op === 'grant') { executionGrants.push(String(request.digest)); return {} as T; }
@@ -23,7 +24,8 @@ test('Desktop adapter uses canonical digest consent and rejects stale authoring 
   } };
   const store = new CoreLocalAppStore(root, transport);
   const row = await store.get(id);
-  assert.deepEqual(row.sourceSession, { projectPath: '/source/fixed', sessionId: 'session' });
+  assert.deepEqual(row.authoring, { workspaceId: 'workspace-1', sourceDirectory: '/source/fixed',
+    projectRef: { kind: 'desktopPath', path: '/source/fixed' }, authoringSessionId: 'session', appId: id });
   assert.ok(row.manifest.capabilities?.includes('process'));
   row.grants.push('process'); await store.save(row);
   assert.deepEqual(executionGrants, ['first']);

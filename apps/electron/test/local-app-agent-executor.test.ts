@@ -12,7 +12,7 @@ const CHILD = String.raw`
 const readline = require('node:readline'), fs = require('node:fs');
 const mode = process.argv[1]; let runId, sequence=0;
 const out = x => process.stdout.write(JSON.stringify({protocolVersion:1,...(runId ? {runId,sequence:++sequence}:{}),...x})+'\n');
-const finish = () => out({type:'finished',status:'succeeded',text:'done',result:{color:'red'},usage:{inputTokens:7,outputTokens:3,totalUsd:0.02,apiCalls:2,private:'secret'}});
+const finish = () => out({type:'finished',status:'succeeded',text:'done',result:{color:'red'},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,turns:2,costEstimated:true,private:'secret'}});
 readline.createInterface({input:process.stdin}).on('line', raw => {
  const message=JSON.parse(raw);
  if(message.type==='catalog') {
@@ -46,8 +46,9 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, mode='succes
  const executor=new LocalAppAgentExecutor(options);
  t.after(async()=>{for(const child of children) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL');await fs.rm(root,{recursive:true,force:true});});
  const phases:string[]=[], controller=new AbortController();
- const execution:LocalAppAgentExecution={runId:'run-one',owner:{appId:'app-one',revision:1,invocationId:'inv-one'},input:{requestId:'request-one',prompt:'Describe the test image.',outputSchema:{type:'object'}},
-  authorization:{settings:{enabled:true,model:{providerId:'test',modelId:'vision'},tools:[],background:false,maxTurns:4,timeoutMs:10000},requestedTools:[],model:{providerId:'test',modelId:'vision',label:'Test',canSelect:true,supportsImages:true,supportsStructuredOutput:true}},
+const execution:LocalAppAgentExecution={runId:'run-one',owner:{appId:'a11111111111111111111111111111111',releaseDigest:'1'.repeat(64),invocationId:'inv-one'},input:{requestId:'request-one',prompt:'Describe the test image.',outputSchema:{type:'object'}},
+  authorization:{settings:{enabled:true,model:{providerId:'test',modelId:'vision'},tools:[],skills:[],background:false,maxTurns:4,timeoutMs:10000},requestedTools:[],requestedSkills:[],releaseRevision:1,
+    releaseSourceDirectory:'/release/source',skillSpecs:[],releaseFiles:[],model:{providerId:'test',modelId:'vision',label:'Test',canSelect:true,supportsAttachments:true,supportsVision:true,supportsStructuredOutput:true}},
   signal:controller.signal,assertAuthorized:async()=>controller.signal.throwIfAborted(),emit:async event=>{phases.push(event.phase);}};
  return {root,executor,execution,controller,phases,children};
 }
@@ -55,11 +56,12 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, mode='succes
 test('catalog strips private config; execution preserves model, identity, limits and validated output',async t=>{
  const {root,executor,execution,phases}=await fixture(t);
  const catalog=await executor.catalog();assert.ok(!JSON.stringify(catalog).includes('PRIVATE_MCP_HEADER'));assert.equal(catalog.models[0].canSelect,true);
- assert.deepEqual(await executor.execute(execution),{result:{text:'done',output:{color:'red'}},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,turns:2}});
+ assert.deepEqual(await executor.execute(execution),{result:{text:'done',attachments:[],output:{color:'red'}},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,costEstimated:true,turns:2}});
  assert.ok(phases.includes('thinking') && phases.includes('tool'));
- const sent=JSON.parse(await fs.readFile(join(root,'runs/run-one/start.json'),'utf8'));
- assert.equal(sent.model,'test/vision');assert.equal(sent.appId,'app-one');assert.equal(sent.versionId,'1');assert.equal(sent.invocationId,'inv-one');assert.equal(sent.maxTurns,4);assert.equal(sent.timeoutMs,10000);
+ const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/start.json'),'utf8'));
+ assert.equal(sent.model,'test/vision');assert.equal(sent.appId,'a11111111111111111111111111111111');assert.equal(sent.versionId,'1'.repeat(64));assert.equal(sent.invocationId,'inv-one');assert.equal(sent.maxTurns,4);assert.equal(sent.timeoutMs,10000);
  assert.deepEqual(sent.toolPolicy,{builtinTools:[],mcpTools:[]});assert.deepEqual(sent.mcpConfigs,[]);assert.deepEqual(sent.credentials.provider_keys,{test:'TEST_KEY'});
+ assert.deepEqual(sent.modelCapabilities,{vision:true,structuredOutput:true});
 });
 test('changed MCP configuration fails before starting a task',async t=>{
  const {executor,execution,children}=await fixture(t,'changed');const catalog=await executor.catalog();const tool=catalog.tools.find(tool=>tool.kind==='mcp')!;
@@ -74,13 +76,13 @@ test('cancellation aborts permission UI and waits for the child to close',async 
 });
 test('question dismissal sends typed cancellation',async t=>{
  const {root,executor,execution}=await fixture(t,'question');await executor.execute(execution);
- assert.deepEqual(JSON.parse(await fs.readFile(join(root,'runs/run-one/control.json'),'utf8')),{type:'question_cancel',requestId:8});
+ assert.deepEqual(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/control.json'),'utf8')),{type:'question_cancel',requestId:8});
 });
 test('credential refresh keeps the selected provider and sends keys only over stdin',async t=>{
  const requests:unknown[]=[];
  const {root,executor,execution}=await fixture(t,'refresh',{credentials:async(providerId,refresh)=>{requests.push([providerId,refresh??false]);return {providerCredentials:{test:refresh?'NEW_TEST_KEY':'OLD_TEST_KEY'}};}});
  await executor.execute(execution);assert.deepEqual(requests,[['test',false],['test',true]]);
- assert.equal(JSON.parse(await fs.readFile(join(root,'runs/run-one/control.json'),'utf8')).credentials.provider_keys.test,'NEW_TEST_KEY');
+ assert.equal(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/control.json'),'utf8')).credentials.provider_keys.test,'NEW_TEST_KEY');
 });
 for(const [mode,code] of [['wrong_owner','executor_protocol'],['missing_result','invalid_result'],['error','model_execution_failed']] as const) {
  test(`rejects ${mode} without leaking diagnostics`,async t=>{

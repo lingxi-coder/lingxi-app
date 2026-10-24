@@ -25,6 +25,31 @@ test('registered services stream POST, SSE and binary responses; cancellation fe
   assert.equal((await broker.fetch('app', 'second', 'api', port, '/', new Request('http://app'))).status, 200);
 });
 
+test('service proxy replaces renderer cookies with host-selected cookies and returns upstream Set-Cookie for host storage', async t => {
+  const server = createServer((request, response) => {
+    if (request.url === '/set-cookie') {
+      response.setHeader('Set-Cookie', 'app_cookie=fixture; Path=/; HttpOnly');
+      response.end('stored');
+      return;
+    }
+    response.end(request.headers.cookie ?? '');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port, broker = new LocalAppServiceBroker();
+  t.after(async () => { await broker.dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+
+  const setCookie = await broker.fetch('app', 'run', 'api', port, '/set-cookie', new Request('http://app/set-cookie'));
+  assert.equal(setCookie.headers.get('set-cookie'), 'app_cookie=fixture; Path=/; HttpOnly');
+  const cookie = await broker.fetch('app', 'run', 'api', port, '/cookie', new Request('http://app/cookie', {
+    headers: { Cookie: 'renderer_forged=ignored' },
+  }), 'app_cookie=fixture');
+  assert.equal(await cookie.text(), 'app_cookie=fixture');
+  const unselected = await broker.fetch('app', 'run', 'api', port, '/cookie', new Request('http://app/cookie', {
+    headers: { Cookie: 'renderer_forged=ignored' },
+  }));
+  assert.equal(await unselected.text(), '', 'renderer-provided cookies are stripped when the host has no selected cookies');
+});
+
 test('WebSocket gateway validates origin and revokes an already upgraded binary stream', async t => {
   const backend = createServer();
   const backendSockets = new Set<import('node:net').Socket>();

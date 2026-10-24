@@ -93,6 +93,16 @@ export function App() {
         openSession: current.openSession,
         addProject: current.addProject,
         newSession: current.newSession,
+        bindAuthoring: (appId, session) => {
+          const api = window.lingxi?.localApps;
+          if (!api) throw new Error('Desktop application host is unavailable');
+          return api.bindAuthoring(appId, session);
+        },
+        prepareAuthoring: session => {
+          const api = window.lingxi?.localApps;
+          if (!api) throw new Error('Desktop application host is unavailable');
+          return api.prepareAuthoring(session);
+        },
       }, () => localAppNavigation.current === nonce);
       if (!target || localAppNavigation.current !== nonce) return;
       setPage('chat');

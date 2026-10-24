@@ -25,7 +25,7 @@ class LocalAppDistributionChannelTest {
     @Test fun externalBrowserRequiresConsentBoundToPublishedContent() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/browser-consent-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/browser-consent-${UUID.randomUUID()}")
         check(source.mkdirs())
         source.resolve("lingxi-app.json").writeText("""{"schema":2,"name":"Browser consent fixture","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"android","environment":"web"}]}""")
         source.resolve("index.html").writeText("<!doctype html><title>Consent fixture</title>")
@@ -58,7 +58,7 @@ class LocalAppDistributionChannelTest {
         assumeFalse("Requires the actual Play package", BuildConfig.MOBILE_LINUX_FULL)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val apps = UnifiedLocalApps.get(context)
-        val source = apps.hostFile("/home/lingxi/.lingxi/.apps/channel-${UUID.randomUUID()}")
+        val source = apps.hostFile(com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/channel-${UUID.randomUUID()}")
         check(source.mkdirs())
         source.resolve("lingxi-app.json").writeText("""{"schema":2,"name":"Channel refusal fixture","entry":{"type":"server","process":"api"},"targets":[{"platform":"android","environment":"mobile-linux","channels":["direct"],"capabilities":["process"]}],"capabilities":["process"],"processes":[{"name":"api","command":"python3 server.py","ready":{"path":"/","timeoutMs":1000}}]}""")
         source.resolve("server.py").writeText("raise RuntimeError('restricted channel must never execute this')")

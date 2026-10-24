@@ -24,8 +24,14 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
                 decoded
             }
             require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider))$").matches(route))
-            val params = pairs(uri.rawQuery).mapValues { (key, value) -> if (key == "message") value.lowercase(java.util.Locale.ROOT) else value }
-            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            val params = pairs(uri.rawQuery).mapValues { (key, value) ->
+                if (key == "message") value.lowercase(java.util.Locale.ROOT) else value
+            }
+            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "requestId", "revision") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            require(params["review"] == null || (route.startsWith("apps/") && params["review"] == "agent"))
+            require(params["requestId"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params.getValue("requestId").length <= 128))
+            require(params["revision"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params["requestId"] != null &&
+                Regex("^[1-9][0-9]*$").matches(params.getValue("revision")) && params.getValue("revision").toLongOrNull() != null))
             require(params["mode"] == null || params["mode"] in setOf("chat", "code"))
             require(params["message"] == null || (route.startsWith("session/") && Regex("^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$").matches(params.getValue("message"))))
             val payload = if (uri.rawFragment != null) {

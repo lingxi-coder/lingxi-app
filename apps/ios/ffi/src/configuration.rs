@@ -12,12 +12,16 @@ use harness_runtime::mobile::{MobileConfig, MobileEngineError, MobileSessionMode
 pub struct IosMobileLinuxConfigFfi {
     /// Conversations require the mobile-linux backend.
     pub mode: MobileLinuxRuntimeModeFfi,
+    /// Brand-owned guest identity copied from `MobileUserDirectories`.
+    pub brand_id: String,
+    pub linux_user: String,
+    pub config_dir_name: String,
     /// App-private root where rootfs state is managed.
     pub managed_root: String,
     /// Explicit host workspace root exposed to the guest. Must not be the app
-    /// sandbox root, `.lingxi`, or any provider/config subtree.
+    /// sandbox root, the brand config directory, or any provider/config subtree.
     pub workspace_host_path: String,
-    /// Stable guest workspace id used to produce `/home/lingxi/lingxi/<id>`.
+    /// Stable guest workspace id used to produce `/home/<linuxUser>/<brandId>/<id>`.
     pub stable_workspace_id: String,
     /// ABI name for the rootfs payload (`arm64` on device).
     pub abi: String,
@@ -37,7 +41,7 @@ pub struct IosMobileLinuxConfigFfi {
     /// `Library/Application Support`: that yields the iOS *container*, while
     /// the engine's root is `<AppSupport>/LingxiCode` — three components
     /// deeper, and not reachable from `mobile-linux/ios-ish` by any rule. The
-    /// runtime therefore guarded `<container>/.lingxi`, leaving the real
+    /// runtime therefore guarded the wrong container config directory, leaving the real
     /// credential directory unguarded.
     pub app_sandbox_root: String,
 }
@@ -70,6 +74,13 @@ pub struct IosEngineLaunchConfigFfi {
     pub app_version: Option<String>,
     /// Standalone Local App model host; disables personal session startup.
     pub app_agent_host: bool,
+    /// Native brand identity, shared with `MobileUserDirectories` even when the
+    /// Store provider-only Local App host does not initialize Mobile Linux.
+    pub brand_id: String,
+    pub linux_user: String,
+    pub config_dir_name: String,
+    /// Native config directory corresponding to the selected brand profile.
+    pub native_config_home: String,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -185,25 +196,106 @@ pub(super) fn ios_project_cwd(
 pub(super) fn ios_mobile_config_from_launch_config(
     config: &IosEngineLaunchConfigFfi,
 ) -> Result<MobileConfig, MobileEngineError> {
-    let linux = config.mobile_linux.as_ref().ok_or_else(|| {
-        MobileEngineError::Internal("iOS requires its Linux runtime user storage".into())
-    })?;
-    if !matches!(linux.mode, MobileLinuxRuntimeModeFfi::MobileLinux) {
-        return Err(MobileEngineError::Internal(
-            "iOS conversations require Mobile Linux".into(),
-        ));
-    }
-    let directories = harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
-    directories.prepare()?;
-    directories.validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
-    let (cwd, logical_cwd) = directories.resolve_cwd(config.project_cwd.as_deref())?;
+    let (brand_profile, config_home, cwd, logical_cwd) = match config.mobile_linux.as_ref() {
+        Some(linux) => {
+            if !matches!(linux.mode, MobileLinuxRuntimeModeFfi::MobileLinux) {
+                return Err(MobileEngineError::Internal(
+                    "iOS conversations require Mobile Linux".into(),
+                ));
+            }
+            let directories =
+                harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+            let brand_profile = mobile_brand_profile_from_directories(
+                &directories,
+                &config.brand_id,
+                &config.linux_user,
+                &config.config_dir_name,
+            )?;
+            if linux.brand_id != config.brand_id
+                || linux.linux_user != config.linux_user
+                || linux.config_dir_name != config.config_dir_name
+            {
+                return Err(MobileEngineError::Internal(
+                    "iOS launch and Mobile Linux brand profiles do not match".into(),
+                ));
+            }
+            let native_home = resolve_mobile_linux_security_path(
+                std::path::Path::new(&config.native_config_home),
+                "native_config_home",
+            )
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            let selected_home = resolve_mobile_linux_security_path(
+                std::path::Path::new(&directories.config_home),
+                "brand config home",
+            )
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            if native_home != selected_home {
+                return Err(MobileEngineError::Internal(
+                    "native config home does not match MobileUserDirectories".into(),
+                ));
+            }
+            directories.prepare()?;
+            directories
+                .validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
+            let (cwd, logical_cwd) = directories.resolve_cwd(config.project_cwd.as_deref())?;
+            (
+                brand_profile,
+                std::path::PathBuf::from(&directories.config_home),
+                cwd,
+                Some(logical_cwd),
+            )
+        }
+        None if config.app_agent_host => {
+            let brand_profile = mobile_linux_api::BrandRuntimeProfile::new(
+                config.brand_id.clone(),
+                config.linux_user.clone(),
+                config.config_dir_name.clone(),
+            );
+            brand_profile
+                .validate()
+                .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            let config_home = resolve_mobile_linux_security_path(
+                std::path::Path::new(&config.native_config_home),
+                "native_config_home",
+            )
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            let managed_root = config_home
+                .parent()
+                .and_then(std::path::Path::parent)
+                .and_then(std::path::Path::parent)
+                .ok_or_else(|| {
+                    MobileEngineError::Internal(
+                        "native config home does not have a managed-root profile path".into(),
+                    )
+                })?;
+            let expected_home = resolve_mobile_linux_security_path(
+                &brand_profile
+                    .persistent_home_host_path(managed_root)
+                    .join(&brand_profile.config_dir_name),
+                "brand config home",
+            )
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+            if config_home != expected_home {
+                return Err(MobileEngineError::Internal(
+                    "native config home does not match the supplied brand profile".into(),
+                ));
+            }
+            (brand_profile, config_home.clone(), config_home, None)
+        }
+        None => {
+            return Err(MobileEngineError::Internal(
+                "iOS conversations require Mobile Linux".into(),
+            ));
+        }
+    };
     let mut cfg = MobileConfig {
+        brand_runtime_profile: brand_profile,
         app_agent_host: config.app_agent_host,
         startup_catalog: config.app_version.as_ref().map(|version| {
             harness_runtime::StartupCatalog::new(
                 harness_runtime::CatalogPlatform::Ios,
                 version,
-                &std::path::PathBuf::from(&directories.config_home),
+                &config_home,
             )
         }),
         build_info: harness_runtime::mobile::BuildInfo::new(
@@ -211,8 +303,8 @@ pub(super) fn ios_mobile_config_from_launch_config(
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
         ),
         cwd,
-        logical_cwd: Some(logical_cwd),
-        lingxi_home: std::path::PathBuf::from(&directories.config_home),
+        logical_cwd,
+        lingxi_home: config_home,
         session_mode: match config.session_mode {
             SessionModeDto::Chat => MobileSessionMode::Chat,
             SessionModeDto::Code => MobileSessionMode::Code,
@@ -299,6 +391,28 @@ pub(super) fn ios_mobile_config_from_launch_config(
 }
 
 #[cfg(feature = "uniffi")]
+pub(super) fn mobile_brand_profile_from_directories(
+    directories: &harness_runtime::mobile::MobileUserDirectories,
+    brand_id: &str,
+    linux_user: &str,
+    config_dir_name: &str,
+) -> Result<mobile_linux_api::BrandRuntimeProfile, MobileEngineError> {
+    let profile = mobile_linux_api::BrandRuntimeProfile::new(brand_id, linux_user, config_dir_name);
+    profile
+        .validate()
+        .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+    if directories.brand_id != brand_id
+        || directories.linux_user != linux_user
+        || directories.config_dir_name != config_dir_name
+    {
+        return Err(MobileEngineError::Internal(
+            "native MobileUserDirectories and runtime brand profile do not match".into(),
+        ));
+    }
+    Ok(profile)
+}
+
+#[cfg(feature = "uniffi")]
 pub(super) fn validate_mobile_linux_workspace_config(
     app_sandbox_root: &str,
     config: &IosMobileLinuxConfigFfi,
@@ -314,16 +428,32 @@ pub(super) fn validate_mobile_linux_workspace_config(
         std::path::Path::new(&config.managed_root),
         "managed_root",
     )?;
-    let lingxi_root = resolve_mobile_linux_security_path(
-        &mobile_linux_api::guest_paths::home_host_path(&managed_root).join(branding::DOT_DIR),
-        ".lingxi root",
+    let brand_profile = mobile_linux_api::BrandRuntimeProfile::new(
+        config.brand_id.clone(),
+        config.linux_user.clone(),
+        config.config_dir_name.clone(),
+    );
+    brand_profile
+        .validate()
+        .map_err(|error| MobileLinuxOperationFfiError::InvalidRequest {
+            message: error.to_string(),
+        })?;
+    let brand_config_home = resolve_mobile_linux_security_path(
+        &brand_profile
+            .persistent_home_host_path(&managed_root)
+            .join(&config.config_dir_name),
+        "brand config root",
     )?;
 
     let persistent_workspace = mobile_linux_core::is_persistent_user_workspace(
         &managed_root,
+        &brand_profile,
         &mobile_linux_api::MountSpec {
             host_path: workspace_host_path.clone(),
-            guest_path: mobile_linux_api::guest_paths::workspace(&config.stable_workspace_id),
+            guest_path: mobile_linux_api::guest_paths::workspace_for_profile(
+                &brand_profile,
+                &config.stable_workspace_id,
+            ),
             read_only: false,
             purpose: mobile_linux_api::MountPurpose::Workspace,
         },
@@ -331,16 +461,20 @@ pub(super) fn validate_mobile_linux_workspace_config(
     if workspace_host_path == sandbox_root
         || (workspace_host_path.starts_with(&managed_root) && !persistent_workspace)
         || managed_root.starts_with(&workspace_host_path)
-        || workspace_host_path.starts_with(&lingxi_root)
-        || lingxi_root.starts_with(&workspace_host_path)
+        || workspace_host_path.starts_with(&brand_config_home)
+        || brand_config_home.starts_with(&workspace_host_path)
     {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
-            message: "workspace_host_path may not target app root, managed_root, or .lingxi"
-                .to_string(),
+            message:
+                "workspace_host_path may not target app root, managed_root, or brand config home"
+                    .to_string(),
         });
     }
 
-    if mobile_linux_path_contains_protected_config_subtree(&workspace_host_path) {
+    if mobile_linux_path_contains_protected_config_subtree(
+        &workspace_host_path,
+        &config.config_dir_name,
+    ) {
         return Err(MobileLinuxOperationFfiError::InvalidRequest {
             message: "workspace_host_path may not target provider/config subtrees".to_string(),
         });
@@ -426,7 +560,10 @@ pub(super) fn resolve_mobile_linux_security_path(
 }
 
 #[cfg(feature = "uniffi")]
-pub(super) fn mobile_linux_path_contains_protected_config_subtree(path: &std::path::Path) -> bool {
+pub(super) fn mobile_linux_path_contains_protected_config_subtree(
+    path: &std::path::Path,
+    config_dir_name: &str,
+) -> bool {
     let components: Vec<_> = path
         .components()
         .filter_map(|component| match component {
@@ -436,12 +573,11 @@ pub(super) fn mobile_linux_path_contains_protected_config_subtree(path: &std::pa
             _ => None,
         })
         .collect();
-    components
-        .iter()
-        .any(|component| matches!(component.as_str(), ".lingxi" | "provider" | "providers"))
-        || components
-            .windows(2)
-            .any(|pair| pair[0] == "library" && pair[1] == "preferences")
+    components.iter().any(|component| {
+        component == config_dir_name || matches!(component.as_str(), "provider" | "providers")
+    }) || components
+        .windows(2)
+        .any(|pair| pair[0] == "library" && pair[1] == "preferences")
 }
 
 /// The engine data root the runtime enforces its mount rules against.

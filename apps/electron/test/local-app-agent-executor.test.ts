@@ -68,6 +68,16 @@ test('changed MCP configuration fails before starting a task',async t=>{
  execution.authorization.settings.tools=[{...tool,configRevision:'one'} as typeof tool];
  await assert.rejects(executor.execute(execution),{code:'tool_changed'});assert.equal(children.length,2,'only catalogs launched');
 });
+test('File attachments use the strict Rust wire DTO without mutating host metadata', async t => {
+ const {root,executor,execution}=await fixture(t);
+ execution.input.attachments=[{name:'notes.txt',mediaType:'text/plain',base64:Buffer.from('file text').toString('base64')}];
+ const original=structuredClone(execution.input);
+ await executor.execute(execution);
+ const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/start.json'),'utf8'));
+ assert.deepEqual(sent.input.attachments,[{name:'notes.txt',media_type:'text/plain',base64:Buffer.from('file text').toString('base64')}]);
+ assert.equal('mediaType' in sent.input.attachments[0],false);
+ assert.deepEqual(execution.input,original,'the host and page-facing metadata retain camelCase');
+});
 test('cancellation aborts permission UI and waits for the child to close',async t=>{
  let shown!:()=>void;const prompt=new Promise<void>(resolve=>{shown=resolve;});let uiAborted=false;
  const {executor,execution,controller,children}=await fixture(t,'wait',{permission:async(_input,signal)=>{shown();return new Promise(resolve=>signal.addEventListener('abort',()=>{uiAborted=true;resolve(false);},{once:true}));}});

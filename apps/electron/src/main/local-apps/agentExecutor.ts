@@ -210,7 +210,9 @@ export class LocalAppAgentExecutor {
       credentials: credentialEnvelope(credentials), mcpConfigs, toolPolicy: {
         builtinTools: authorization.settings.tools.flatMap(grant => grant.kind === 'builtin' ? [grant.name] : []),
         mcpTools: mcp.map(({ serverConfigId, configRevision, rawToolName, definitionFingerprint }) => ({ serverConfigId, configRevision, rawToolName, definitionFingerprint })),
-      }, input, ...(execution.chat ? { appChat: execution.chat } : {}),
+      }, input: { ...input, ...(input.attachments ? { attachments: input.attachments.map(file => ({
+        name: file.name, media_type: file.mediaType, base64: file.base64,
+      })) } : {}) }, ...(execution.chat ? { appChat: execution.chat } : {}),
       skillSourceDirectory: authorization.releaseSourceDirectory, releaseRevision: authorization.releaseRevision,
       skillSpecs: authorization.skillSpecs, grantedSkills: authorization.settings.skills, releaseFiles,
       modelCapabilities: { vision: model.supportsVision, structuredOutput: model.supportsStructuredOutput },

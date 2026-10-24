@@ -3,6 +3,21 @@ import XCTest
 @testable import LingxiCode
 
 final class MobileUserStorageRecoveryTests: XCTestCase {
+    func testRelocatedContainerRecognitionIsLimitedToTheManagedWorkspace() {
+        let home = "/var/mobile/Containers/Data/Application/11111111-1111-4111-8111-111111111111"
+        let previous = "/private/var/mobile/Containers/Data/Application/22222222-2222-4222-8222-222222222222"
+        let suffix = "/Library/Application Support/mobile-linux/ios-ish/persistent/lingxi/lingxi/projects"
+        let projects = home + suffix
+        XCTAssertTrue(MobileUserStorage.isRelocatedManagedWorkspaceLink(previous + suffix, projects: projects, applicationHome: home))
+        for target in [previous + "/Documents/project", previous + suffix + "/source", home + suffix,
+                       previous + "/../22222222-2222-4222-8222-222222222222" + suffix,
+                       "/var/mobile/Containers/Data/Application/not-a-uuid" + suffix, "/tmp" + suffix] {
+            XCTAssertFalse(MobileUserStorage.isRelocatedManagedWorkspaceLink(target, projects: projects, applicationHome: home), target)
+        }
+        XCTAssertFalse(MobileUserStorage.isRelocatedManagedWorkspaceLink(previous + suffix, projects: projects, applicationHome: previous))
+        XCTAssertFalse(MobileUserStorage.isRelocatedManagedWorkspaceLink(previous + suffix, projects: home + "/Documents/projects", applicationHome: home))
+    }
+
     func testSelfLinkIsPreservedBeforeProjectsDirectoryIsRecreated() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -11,7 +26,7 @@ final class MobileUserStorageRecoveryTests: XCTestCase {
         try FileManager.default.createDirectory(at: projects.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: projects.path, withDestinationPath: projects.path)
         let prepared = try MobileUserStorage.prepareProjectsDirectory(managedRoot: root.path)
-        XCTAssertEqual(prepared.path, projects.path)
+        XCTAssertEqual(prepared.resolvingSymlinksInPath().path, projects.resolvingSymlinksInPath().path)
         XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: prepared.path)[.type] as? FileAttributeType, .typeDirectory)
         let recovery = URL(fileURLWithPath: paths.configHome).appendingPathComponent("recovery")
         let entries = try FileManager.default.contentsOfDirectory(at: recovery, includingPropertiesForKeys: nil)

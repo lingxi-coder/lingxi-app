@@ -90,6 +90,7 @@ class LocalAppAgentAcceptanceTest {
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>()
         val app = publish(apps, sources)
+        configure(apps, app.id)
         val catalog = apps.agentHost(JSONObject().put("op", "catalog")) as JSONObject
         File(context.filesDir, "local-app-agent-interactive-acceptance.json").writeText(
             JSONObject().put("appId", app.id).put("sourcePath", sources.single().absolutePath).toString())
@@ -433,7 +434,13 @@ class LocalAppAgentAcceptanceTest {
                 var browserPackage = ""
                 withTimeout(35_000) {
                     while (true) {
-                        browserPackage = instrumentation.uiAutomation.rootInActiveWindow?.packageName?.toString().orEmpty()
+                        val root = instrumentation.uiAutomation.rootInActiveWindow
+                        browserPackage = root?.packageName?.toString().orEmpty()
+                        if (browserPackage == context.packageName) {
+                            // Exercise the trusted native exact-content consent UI.
+                            root?.findAccessibilityNodeInfosByText("允许并打开浏览器")?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                                ?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                        }
                         if (browserPackage == "com.android.chrome" || browserPackage == "com.sec.android.app.sbrowser" || browserPackage.contains("firefox")) break
                         delay(250)
                     }

@@ -15,7 +15,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 temporary = Path(tempfile.mkdtemp(prefix=".local-app-fixtures-", dir=output.parent))
 try:
     inventory = []
-    for name in ("static", "python", "node", "agent"):
+    for name in ("static", "python", "node", "agent", "calorie-agent"):
         folder = source / name
         manifest = json.loads((folder / "lingxi-app.json").read_text())
         for relative in ["lingxi-app.json"] + manifest["package"]["files"]:

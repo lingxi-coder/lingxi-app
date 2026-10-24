@@ -4,7 +4,8 @@ import WebKit
 import XCTest
 @testable import LingxiCode
 
-/// Real configured provider, signed physical-device host and actual WK page SDK.
+/// Actual configured provider and signed physical-device host.
+/// WK tests are historical transport evidence, not external-browser acceptance.
 /// Never installs credentials or substitutes model output. Only own apps are removed.
 @MainActor
 final class LocalAppAgentAcceptanceTests: XCTestCase {
@@ -154,4 +155,90 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         await clean(owned, created); window?.isHidden = true; previous?.makeKeyAndVisible()
         #endif
     }
+
+    /// Actual product loopback HTTP and configured provider. Safari DOM/camera
+    /// and finite background budget are additional physical UI acceptance.
+    func testRealHTTPImageSchemaUsageAndBrowserBoundaryOnDevice() async throws {
+        #if targetEnvironment(simulator)
+        throw XCTSkip("Requires physical iPhone with a configured model")
+        #else
+        let client = LocalAppServiceClient(), owned = UnifiedLocalApps(client: LocalAppServiceClient())
+        var created: [(LocalAppPublishResult, URL)] = []
+        func call(_ launch: LocalAppLaunch, _ method: String, _ arguments: [String: Any], origin: String? = nil) async throws -> (Int, [String: Any]) {
+            let url = try XCTUnwrap(URL(string: launch.origin + "/__run/" + launch.run.runId + "/__host/agent"))
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"; request.timeoutInterval = 30
+            request.setValue(origin ?? launch.origin, forHTTPHeaderField: "Origin")
+            request.setValue(launch.url.absoluteString, forHTTPHeaderField: "Referer")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("1", forHTTPHeaderField: "X-LingXi-App-Request")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["method": method, "args": arguments])
+            let (bytes, response) = try await URLSession.shared.data(for: request)
+            let status = try XCTUnwrap(response as? HTTPURLResponse).statusCode
+            return (status, (try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]) ?? [:])
+        }
+        do {
+            let app = try await publish(client); created.append(app)
+            let other = try await publish(client); created.append(other)
+            try await configure(client, app.0.record.appId)
+            let launch = try await owned.launch(app.0.record.appId)
+            let image = try Data(contentsOf: app.1.appendingPathComponent("public-apple.jpg"))
+            let input: [String: Any] = ["requestId":"ios-http-" + UUID().uuidString,
+                "prompt":"Identify the visible food in English in food and describe one visible detail in detail. Use the result tool only.",
+                "images":[["media_type":"image/jpeg","base64":image.base64EncodedString()]], "tools":[] as [String],
+                "outputSchema":["type":"object","properties":["food":["type":"string"],"detail":["type":"string"]],"required":["food","detail"],"additionalProperties":false]]
+            let crossOrigin = try await call(launch,"agent.run",input,origin:"https://other.example")
+            XCTAssertEqual(crossOrigin.0,403)
+            let approval = try await call(launch,"answer",[:]); XCTAssertEqual(approval.0,403)
+            let admitted = try await call(launch,"agent.run",input)
+            XCTAssertEqual(admitted.0,200); XCTAssertEqual(admitted.1["ok"] as? Bool,true)
+            let runID = try XCTUnwrap((admitted.1["value"] as? [String: Any])?["runId"] as? String)
+            let retry = try await call(launch,"agent.run",input)
+            XCTAssertEqual((retry.1["value"] as? [String: Any])?["runId"] as? String,runID)
+            let otherLaunch = try await owned.launch(other.0.record.appId)
+            let isolated = try await call(otherLaunch,"agent.get",["runId":runID]); XCTAssertEqual(isolated.1["ok"] as? Bool,false)
+            var task: [String: Any] = [:]
+            let deadline = Date().addingTimeInterval(180)
+            while Date() < deadline {
+                let response = try await call(launch,"agent.get",["runId":runID])
+                task = try XCTUnwrap(response.1["value"] as? [String: Any])
+                if ["succeeded","failed","cancelled","interrupted"].contains(task["state"] as? String ?? "") { break }
+                try await Task.sleep(for: .milliseconds(750))
+            }
+            XCTAssertEqual(task["state"] as? String,"succeeded",String(describing:task["error"]))
+            let output = try XCTUnwrap((task["result"] as? [String: Any])?["output"] as? [String: Any])
+            XCTAssertTrue((output["food"] as? String ?? "").lowercased().contains("apple"))
+            let usage = try XCTUnwrap(task["usage"] as? [String: Any])
+            XCTAssertGreaterThan((usage["outputTokens"] as? NSNumber)?.intValue ?? 0,0)
+            XCTAssertGreaterThan((usage["turns"] as? NSNumber)?.intValue ?? 0,0)
+            let attachment = XCTAttachment(data:try JSONSerialization.data(withJSONObject:task,options:[.prettyPrinted,.sortedKeys]),uniformTypeIdentifier:"public.json")
+            attachment.name = "external-browser-http-agent-result"; attachment.lifetime = .keepAlways; add(attachment)
+            try await owned.action("restart",id:app.0.record.appId)
+            let replacement = try await owned.launch(app.0.record.appId)
+            XCTAssertNotEqual(replacement.run.runId,launch.run.runId)
+            let stale = try await call(launch,"agent.get",["runId":runID]); XCTAssertEqual(stale.0,410)
+            let recovered = try await call(replacement,"agent.get",["runId":runID])
+            XCTAssertEqual((recovered.1["value"] as? [String: Any])?["state"] as? String,"succeeded")
+            print("IOS_AGENT_HTTP PASS actual-model schema positive-usage dedup cross-origin cross-app no-approval-route stale-run terminal-recovery")
+        } catch { await clean(owned,created); throw error }
+        await clean(owned,created)
+        #endif
+    }
+
+
+    /// Explicit runner target. Leaves only this newly created app for Safari UI checks.
+    func testStageCalorieAppForExternalBrowserAcceptance() async throws {
+        let client = LocalAppServiceClient()
+        let source = try UnifiedLocalApps.hostSourceDirectory("/home/lingxi/.lingxi/.apps/browser-meal-" + UUID().uuidString)
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "UnifiedAppFixtures", withExtension: nil))
+        try FileManager.default.copyItem(at: fixture.appendingPathComponent("calorie-agent"), to: source)
+        let app: LocalAppPublishResult = try await client.request(["op":.string("publish"),"sourcePath":.string(source.path),"expectedRevision":.number(0)])
+        try await configure(client,app.record.appId)
+        let receipt = try JSONSerialization.data(withJSONObject:["appId":app.record.appId,"sourcePath":source.path],options:[.prettyPrinted,.sortedKeys])
+        let attachment = XCTAttachment(data:receipt,uniformTypeIdentifier:"public.json")
+        attachment.name = "external-browser-interactive-app"; attachment.lifetime = .keepAlways; add(attachment)
+        try receipt.write(to:URL(fileURLWithPath:MobileUserStorage.directories().configHome).appendingPathComponent("external-browser-interactive-acceptance.json"))
+        print("IOS_BROWSER_INTERACTIVE appId=\(app.record.appId)")
+    }
+
 }

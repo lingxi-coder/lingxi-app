@@ -1,0 +1,84 @@
+{
+  "schema": 2,
+  "name": "Node streaming acceptance",
+  "entry": {
+    "type": "server",
+    "process": "api"
+  },
+  "targets": [
+    {
+      "platform": "android",
+      "environment": "mobile-linux",
+      "channels": [
+        "direct"
+      ]
+    },
+    {
+      "platform": "ios",
+      "environment": "mobile-linux",
+      "channels": [
+        "full"
+      ]
+    },
+    {
+      "platform": "macos",
+      "environment": "native",
+      "channels": [
+        "desktop"
+      ]
+    },
+    {
+      "platform": "windows",
+      "environment": "native",
+      "channels": [
+        "desktop"
+      ]
+    },
+    {
+      "platform": "linux",
+      "environment": "native",
+      "channels": [
+        "desktop"
+      ]
+    }
+  ],
+  "package": {
+    "files": [
+      "server.mjs",
+      "index.html",
+      "client.js",
+      "package.json",
+      "package-lock.json"
+    ],
+    "dependencyLocks": [
+      "package-lock.json"
+    ]
+  },
+  "dataSchema": {
+    "version": 1,
+    "compatibleFrom": 1
+  },
+  "remix": {
+    "allowed": true,
+    "license": "MIT"
+  },
+  "capabilities": [
+    "process",
+    "network"
+  ],
+  "install": [
+    {
+      "command": "npm ci --ignore-scripts --no-audit --no-fund"
+    }
+  ],
+  "processes": [
+    {
+      "name": "api",
+      "command": "node server.mjs",
+      "ready": {
+        "path": "/health",
+        "timeoutMs": 15000
+      }
+    }
+  ]
+}

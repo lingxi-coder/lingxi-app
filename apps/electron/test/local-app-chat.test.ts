@@ -4,7 +4,7 @@ import { localAppChatTarget, localAppDraftDisposition, type LocalAppChatNavigati
 
 const source = { projectPath: '/project/a', sessionId: 'chat-a' };
 const active = { projectPath: '/project/b', sessionId: 'chat-b' };
-const app = { id: 'a12345678901234567890', name: 'Reading garden', sourceSession: source };
+const app = { id: 'a12345678901234567890123456789012', name: 'Reading garden', sourceSession: source };
 function navigation(overrides: Partial<LocalAppChatNavigation> = {}): LocalAppChatNavigation {
   return {
     hasProject: () => true,
@@ -137,4 +137,19 @@ test('drafts wait during navigation and apply only to their exact settled sessio
   assert.equal(localAppDraftDisposition(draft, active, false), 'discard');
   assert.equal(localAppDraftDisposition(draft, { ...source, projectPath: '/other' }, false), 'discard');
   assert.equal(localAppDraftDisposition(draft, undefined, false), 'discard');
+});
+
+test('moving a session cannot move the fixed authoring directory or receive its prompt', async () => {
+  const fixed = { ...app, sourcePath: '/project/app-source' };
+  const calls: string[] = [];
+  const target = await localAppChatTarget(fixed, navigation({
+    openSession: async () => ({ ...source, projectPath: '/unrelated' }),
+    newSession: async path => { calls.push(path); return { projectPath: path, sessionId: 'fresh' }; },
+  }), () => true);
+  assert.deepEqual(calls, ['/project/app-source']);
+  assert.deepEqual(target, { projectPath: '/project/app-source', sessionId: 'fresh' });
+});
+
+test('missing authoring source requires explicit recovery and never opens another chat', async () => {
+  await assert.rejects(localAppChatTarget({ ...app, sourcePath: '/missing', sourceMissing: true }, navigation(), () => true), /source is missing/);
 });

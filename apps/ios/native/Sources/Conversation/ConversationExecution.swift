@@ -1299,7 +1299,7 @@ struct PublishedLocalApp: Equatable {
               let output = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               (output["action"] as? String ?? "publish") == "publish",
               let id = output["id"] as? String,
-              id.range(of: "^[a-z0-9]{1,32}$", options: .regularExpression) != nil,
+              id.range(of: "^a[a-f0-9]{32}$", options: .regularExpression) != nil,
               let revision = output["revision"] as? Int, revision >= 1,
               let name = output["name"] as? String,
               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

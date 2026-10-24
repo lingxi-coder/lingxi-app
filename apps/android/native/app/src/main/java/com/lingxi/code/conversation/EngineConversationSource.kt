@@ -10,7 +10,6 @@ import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.client.PromptModeDto
-import com.lingxi.code.bindings.runtime.LocalAppHost
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
@@ -324,6 +323,11 @@ class EngineConversationSource private constructor(
         handle.submit(ClientCommand.NewSession(cwd = null, model = null))
     }
 
+    override suspend fun newSession(cwd: String) {
+        durableTurns.clear()
+        handle.submit(ClientCommand.NewSession(cwd = cwd, model = null))
+    }
+
     override suspend fun setModel(id: String) {
         if (id.isBlank()) return
         // Let the caller surface delivery/rejection errors; only ModelChanged
@@ -384,10 +388,6 @@ class EngineConversationSource private constructor(
 
     override val visualizationHost: VisualizationHost? by lazy {
         runCatching { handle.visualizationHost(VISUALIZATION_ORIGIN) }.getOrNull()
-    }
-
-    override val localAppHost: LocalAppHost? by lazy {
-        runCatching { handle.localAppHost() }.getOrNull()
     }
 
     override fun submit(
@@ -517,6 +517,41 @@ class EngineConversationSource private constructor(
         )
 
         private fun nextFallbackTurnId(): Long = fallbackTurnIds.incrementAndGet()
+
+        /** Claim reusable sources on the UI lane; only a new native engine is
+         * constructed in IO. Cancellation owns and closes only that new handle.
+         */
+        internal suspend fun createInBackground(
+            context: Context,
+            projectWorkspace: ProjectWorkspace? = null,
+            workspaceKey: String? = null,
+            sessionMode: SessionMode = SessionMode.Code,
+            linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
+            reuseProcessSource: Boolean = true,
+            currentSource: ConversationSource? = null,
+        ): ConversationSource {
+            val spec = ConversationRecoverySpec(
+                projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
+                hostPath = projectWorkspace?.hostPath,
+                sessionMode = sessionMode,
+                linuxRuntimeMode = linuxRuntimeMode,
+                workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
+                guestPath = projectWorkspace?.guestPath,
+                additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
+            )
+            if (reuseProcessSource) {
+                if (currentSource?.recoverySpec == spec) return currentSource
+                when (val claim = ConversationHeadlessRecovery.acquireForUi(spec, conversationStrings(context))) {
+                    is ConversationHeadlessRecovery.UiSourceClaim.Existing -> return claim.source
+                    is ConversationHeadlessRecovery.UiSourceClaim.Pending -> return claim.source
+                    ConversationHeadlessRecovery.UiSourceClaim.Build -> Unit
+                }
+            }
+            return prepareConversationSource {
+                create(context, projectWorkspace, workspaceKey, sessionMode, linuxRuntimeMode,
+                    reuseProcessSource = reuseProcessSource, replaceProcessSource = true)
+            }
+        }
 
         /**
          * Build the engine + register the event-bridging listener, or return an

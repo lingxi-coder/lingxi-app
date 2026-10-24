@@ -685,19 +685,22 @@ struct RootView: View {
             .fullScreenCover(
                 item: Binding(
                     get: { navigation.runningAppID.map(RunningApp.init) },
-                    set: { navigation.runningAppID = $0?.id }
+                    set: {
+                        if let previous = navigation.runningAppID, previous != $0?.id { LocalApps.library.browser.deactivate(previous) }
+                        navigation.runningAppID = $0?.id
+                    }
                 )
             ) { running in
-                if let market = LocalApps.market {
+                Group {
                     AppRuntimeView(
-                        market: market,
-                        chat: LocalApps.chat,
+                        library: LocalApps.library,
                         info: LocalApps.info,
                         appId: running.id,
-                        onClose: { navigation.runningAppID = nil },
+                        onClose: { LocalApps.library.browser.deactivate(running.id); navigation.runningAppID = nil },
                         onShowDetails: { appID in
+                            LocalApps.library.browser.deactivate(running.id)
                             navigation.runningAppID = nil
-                            navigation.openMarketApp(appID)
+                            navigation.openLocalApp(appID)
                         }
                     )
                     .environment(\.theme, theme)
@@ -799,8 +802,7 @@ struct RootView: View {
             onOpenSession: openRecentSession,
             onToggleSessionPinned: toggleSessionPinned,
             onContinueInMode: requestContinueInMode,
-            appMarket: LocalApps.market,
-            chatApps: LocalApps.chat,
+            appLibrary: LocalApps.library,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
             openApp: { navigation.runApp($0) }
@@ -857,8 +859,8 @@ struct RootView: View {
                 }
             )
             .environment(\.openLocalApp, { id in
-                navigation.runApp(AppsModel.chatAppKey(id))
-                Task { await LocalApps.chat.refresh() }
+                navigation.runApp(id)
+                Task { await LocalApps.library.refresh() }
             })
             .id(sourceGeneration)
             ConversationProjectBridge(
@@ -1073,22 +1075,15 @@ struct RootView: View {
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .apps:
-            AppsPage(
-                market: LocalApps.market,
-                chat: LocalApps.chat,
-                info: LocalApps.info,
-                onOpenApp: { navigation.runApp($0) },
-                onShowDetails: { navigation.openMarketApp($0) }
-            )
+            AppsPage(library: LocalApps.library, market: LocalApps.market,
+                onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) }, onShowMarketDetails: { navigation.openMarketApp($0) },
+                onDevelop: beginLocalAppDevelopment)
+        case .localApp(let appID):
+            LocalAppDetailPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
+                onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment)
         case .marketApp(let appID):
-            if let market = LocalApps.market {
-                MarketAppPage(
-                    market: market,
-                    info: LocalApps.info,
-                    appId: appID,
-                    onOpenApp: { navigation.runApp($0) }
-                )
-            }
+            MarketAppDetailPage(market: LocalApps.market, appId: appID,
+                onOpenApp: { navigation.runApp($0) }, onDevelop: beginLocalAppDevelopment)
         case .projects:
             ProjectsPage(
                 projectStore: projectStore,
@@ -1904,6 +1899,7 @@ struct RootView: View {
     }
 
     private func handleScenePhase(_ oldPhase: ScenePhase, _ phase: ScenePhase) {
+        if phase != .inactive { LocalApps.library.sceneChanged(background: phase == .background) }
         conversationBackgroundAlerts.setScenePhase(phase)
         switch phase {
         case .background:
@@ -2111,14 +2107,9 @@ struct RootView: View {
             let requestID = externalAsyncRouteID
             Task { @MainActor in
                 await LocalApps.initializeOnce()
-                let chatID = AppsModel.chatAppID(of: id) ?? id
-                let chatExists = await LocalApps.chat.exists(chatID) == true
+                await LocalApps.library.refresh()
                 guard requestID == externalAsyncRouteID else { return }
-                let marketExists = LocalApps.market?.installed.contains(where: { $0.appId == id && !$0.removing }) == true
-                if AppsModel.chatAppID(of: id) != nil, chatExists { navigation.runApp(id) }
-                else if chatExists && marketExists { externalLinkError = "Several local apps match this ID. Open a link with its app source." }
-                else if chatExists { navigation.runApp(AppsModel.chatAppKey(chatID)) }
-                else if marketExists { navigation.runApp(id) }
+                if LocalApps.library.record(id) != nil { navigation.runApp(id) }
                 else { _ = missingLinkedResource("installed app") }
             }
         case "market": navigation.openMarketApp(id)
@@ -2206,6 +2197,62 @@ struct RootView: View {
         draft = draftText
         source.startNewConversation()
         return true
+    }
+
+    private func continueLocalAppDevelopment(_ app: UnifiedAppRecord) {
+        Task { @MainActor in
+            do {
+                var sessions: [String: String] = [:]
+                for row in projectStore.globalSessions { if let cwd = row.workspaceDirectory { sessions[row.sessionId] = cwd } }
+                for project in projectStore.projects { for row in project.sessions { if let cwd = row.workspaceDirectory { sessions[row.sessionId] = cwd } } }
+                let result = try await LocalApps.library.prepareAuthoring(app.appId, sessions: sessions)
+                guard result.action != "sourceMissing" else { throw LocalAppServiceFailure("SOURCE_MISSING", "Source folder is missing. Import an editable copy before continuing development.") }
+                beginLocalAppDevelopment(.init(appId: app.appId, name: app.name, sourceDirectory: result.sourceDirectory,
+                    sourceSessionID: result.action == "resumeSession" ? result.sessionId : nil, prompt: "继续开发这个应用。"))
+            } catch { externalLinkError = error.localizedDescription }
+        }
+    }
+
+    private func beginLocalAppDevelopment(_ request: LocalAppDevelopmentRequest) {
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia,
+              !projectSwitching, !source.model.streaming, !source.model.sessionTransitionPending else {
+            externalLinkError = "Finish or save the current conversation draft before opening app development."; return
+        }
+        let match = request.sourceSessionID.flatMap { id in
+            projectStore.projects.first(where: { $0.sessions.contains(where: { $0.sessionId == id }) })
+        }
+        let scope: ConversationScope = match.map { .project($0.id) } ?? .global
+        guard switchScope(to: scope, mode: .code, resumeSessionID: request.sourceSessionID) else {
+            externalLinkError = "The conversation cannot switch right now."; return
+        }
+        Task { @MainActor in
+            do {
+                for _ in 0..<400 {
+                    if !projectSwitching, activeScope == scope, !source.model.sessionTransitionPending { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                guard !projectSwitching, activeScope == scope else { throw LocalAppServiceFailure("ROUTE_TIMEOUT", "The authoring workspace did not open.") }
+                guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia else { throw LocalAppServiceFailure("DRAFT_EXISTS", "Save the destination workspace draft before starting app development.") }
+                #if canImport(harness_runtimeFFI)
+                guard let engine = source as? EngineConversationSource else { throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.") }
+                let sessionID: String
+                if let existing = request.sourceSessionID {
+                    guard engine.model.activeSessionId == existing, engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_MOVED", "The source session moved. Refresh the app details before continuing.") }
+                    sessionID = existing
+                } else { sessionID = try await engine.startLocalAppAuthoringSession(cwd: request.sourceDirectory) }
+                guard source === engine, engine.model.activeSessionId == sessionID,
+                      engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
+                if let appId = request.appId {
+                    try await LocalApps.library.bindAuthoring(appId, authoring: .init(sourceDirectory: request.sourceDirectory, sourceSessionId: sessionID, projectId: scope.projectID))
+                }
+                guard source === engine, engine.model.activeSessionId == sessionID else { return }
+                draft = "Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.\n\n\(request.prompt)"
+                navigation.path.removeAll(); navigation.focusDetail()
+                #else
+                throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+                #endif
+            } catch { externalLinkError = error.localizedDescription }
+        }
     }
 
     private func syncConversationBackgroundSurfaces() {

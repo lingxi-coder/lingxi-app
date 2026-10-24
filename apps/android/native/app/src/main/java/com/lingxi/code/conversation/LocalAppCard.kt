@@ -37,7 +37,7 @@ import org.json.JSONObject
 @Immutable
 data class PublishedLocalApp(val id: String, val name: String, val revision: Int)
 
-private val LocalAppId = Regex("[a-z0-9]{1,32}")
+private val LocalAppId = Regex("a[a-f0-9]{32}")
 
 /**
  * The card a `LocalApp` result draws, or null. Only a publish has one: `list`

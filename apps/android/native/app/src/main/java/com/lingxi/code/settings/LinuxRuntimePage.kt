@@ -168,6 +168,10 @@ fun LinuxRuntimePage(
             )
         }
 
+        runtime.lastActionMessage?.takeIf { it.isNotBlank() }?.let { message ->
+            Text(message, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), color = LingXiTheme.palette.text2)
+        }
+
         SettingsSection(label = stringResource(R.string.settings_linux_section_workspace)) {
             SettingsRow(
                 label = stringResource(R.string.settings_linux_terminal_entry),

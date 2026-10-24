@@ -170,15 +170,20 @@ if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   done
   log "Reusing validated Swift bindings in ${GEN_DIR} …"
 else
-  # Build both targets before replacing existing bindings. The generator has
-  # no runtime dependency and shares only the pinned UniFFI format.
-  log "Building host staticlib and standalone bindings generator…"
-  # UniFFI reads metadata directly from archives. Build only that artifact:
-  # binding generation needs neither a linked host dylib nor its strip pass.
-  cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --lib --crate-type staticlib
-  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen
-
-  HOST_LIBRARY_PATH="${CARGO_TARGET_DIR}/debug/${STATICLIB}"
+  if [[ -n "${LINGXI_FFI_METADATA_LIBRARY:-}" ]]; then
+    # UniFFI reads object metadata without executing target code. A freshly
+    # built device archive can therefore supply its own matching bindings,
+    # avoiding an additional host runtime build during device-only acceptance.
+    HOST_LIBRARY_PATH="${LINGXI_FFI_METADATA_LIBRARY}"
+    BINDGEN_PATH="${LINGXI_BINDGEN_PATH:-${CARGO_TARGET_DIR}/debug/uniffi-bindgen}"
+    log "Reading binding metadata from ${HOST_LIBRARY_PATH} …"
+  else
+    log "Building host staticlib and standalone bindings generator…"
+    cargo rustc --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --lib --crate-type staticlib
+    cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p native-bindgen --bin uniffi-bindgen
+    HOST_LIBRARY_PATH="${CARGO_TARGET_DIR}/debug/${STATICLIB}"
+    BINDGEN_PATH="${CARGO_TARGET_DIR}/debug/uniffi-bindgen"
+  fi
   [[ -s "${HOST_LIBRARY_PATH}" ]] || { echo "ERROR: host archive not produced: ${HOST_LIBRARY_PATH}" >&2; exit 1; }
 
   log "Generating Swift bindings into ${GEN_DIR} …"
@@ -186,7 +191,6 @@ else
   mkdir -p "${GEN_DIR}"
   # The preceding builds produce the host library and matching generator.
   # Invoke it directly so generation does not queue a second Cargo build.
-  BINDGEN_PATH="${CARGO_TARGET_DIR}/debug/uniffi-bindgen"
   [[ -x "${BINDGEN_PATH}" ]] || { echo "ERROR: bindings generator not produced: ${BINDGEN_PATH}" >&2; exit 1; }
   "${BINDGEN_PATH}" generate \
   --library "${HOST_LIBRARY_PATH}" \
@@ -442,6 +446,21 @@ fi
 # 2. Per-arch staticlib builds
 # ---------------------------------------------------------------------------
 for t in "${BUILD_TARGETS[@]}"; do
+  if [[ "${LINGXI_REUSE_RUST_STATICLIBS:-0}" == "1" ]]; then
+    # A device archive can be compiled once, then paired with fresh bindings
+    # after reclaiming its rebuildable dependency cache on a small host disk.
+    # Always inspect the exact archive; never pair it with reused bindings.
+    arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"
+    [[ "${LINGXI_DEVICE_ONLY:-0}" == "1" && "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" != "1" &&
+       -f "${arch_lib}" && ! -L "${arch_lib}" && -n "${LINGXI_FFI_METADATA_LIBRARY:-}" ]] || {
+      echo "ERROR: archive reuse requires a device-only build and fresh bindings from its metadata archive" >&2; exit 1;
+    }
+    cmp -s "${arch_lib}" "${LINGXI_FFI_METADATA_LIBRARY}" || {
+      echo "ERROR: prebuilt device archive differs from the archive used to generate bindings" >&2; exit 1;
+    }
+    log "Reusing already built ${t} archive with bindings generated from the same bytes"
+    continue
+  fi
   log "Building staticlib (${PROFILE}) for ${t} …"
   if [[ "${t}" == "aarch64-apple-ios-sim" ]]; then
     # rquickjs-sys 0.6 passes Rust's `*-ios-sim` triple directly to libclang,

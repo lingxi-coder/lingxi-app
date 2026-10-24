@@ -12,16 +12,29 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { DesktopLocalApp, DesktopAppManifest, LocalAppLog, LocalAppPhase, LocalAppStep, LocalAppProcess } from '../../shared/localApps.js';
+import { CoreLocalAppStore } from './coreStore.js';
+import { guardedProcessArguments } from './processGuardian.js';
 import { LocalAppStore, atomicJson, containedFile } from './store.js';
 
 interface Invocation {
-  id: string; revision: number; controller: AbortController; phase: LocalAppPhase;
+  id: string; operationId: string; revision: number; releaseDigest?: string; controller: AbortController; phase: LocalAppPhase;
   children: Set<ChildProcess>; services: Map<string, { port: number; url: string }>;
   manifest: DesktopAppManifest;
   readiness: Map<string, { needle: string; matched: boolean; stdout: string; stderr: string }>;
-  workspace: string; error?: string;
+  workspace: string; preparationDataPath?: string; error?: string; retired?: Invocation[];
 }
-export interface RuntimeOptions { nodeExecutable?: string; bunExecutable?: string; shell?: string; environment?: NodeJS.ProcessEnv }
+export interface RuntimeOptions { onRunEnded?: (appId: string, runId: string, reason: string) => Promise<void> | void; nodeExecutable?: string; bunExecutable?: string; shell?: string; environment?: NodeJS.ProcessEnv }
+
+export function orderedProcesses(processes: LocalAppProcess[]): LocalAppProcess[] {
+  const remaining = [...processes], sorted: LocalAppProcess[] = [];
+  while (remaining.length) {
+    const next = remaining.findIndex(spec => (spec.dependsOn ?? []).every(dep => sorted.some(p => p.name === dep)));
+    if (next < 0) throw new Error('Unknown or cyclic application process dependency');
+    sorted.push(remaining.splice(next, 1)[0]!);
+  }
+  return sorted;
+}
+
 export function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 export function appEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -43,7 +56,10 @@ async function freePort(): Promise<number> {
 const stoppingChildren = new WeakMap<ChildProcess, Promise<void>>();
 function stopTree(child: ChildProcess): Promise<void> {
   let pending = stoppingChildren.get(child);
-  if (!pending) { pending = terminateTree(child); stoppingChildren.set(child, pending); }
+  if (!pending) {
+    pending = terminateTree(child).catch(error => { stoppingChildren.delete(child); throw error; });
+    stoppingChildren.set(child, pending);
+  }
   return pending;
 }
 async function terminateTree(child: ChildProcess): Promise<void> {
@@ -59,6 +75,10 @@ async function terminateTree(child: ChildProcess): Promise<void> {
   const signal = (s: NodeJS.Signals | 0): boolean => { try { process.kill(-pid, s); return true; } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ESRCH' || (code === 'EPERM' && (child.exitCode !== null || child.signalCode !== null))) return false;
+    // On macOS an exiting group can briefly be owned by init before libuv
+    // delivers the root's exit event. EPERM from a probe means it still exists;
+    // keep polling. An actual TERM/KILL denial remains a cleanup failure.
+    if (code === 'EPERM' && s === 0) return true;
     throw error;
   } };
   if (!signal('SIGTERM')) return;
@@ -69,6 +89,7 @@ async function terminateTree(child: ChildProcess): Promise<void> {
 }
 
 export class LocalAppRuntime {
+  private readonly preparing = new Map<string, Invocation>();
   private readonly invocations = new Map<string, Invocation>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly output = new Map<string, LocalAppLog[]>();
@@ -80,8 +101,8 @@ export class LocalAppRuntime {
   private readonly cancellations = new CancellationTombstones(1000);
   constructor(readonly store: LocalAppStore, private readonly changed: () => void, private readonly options: RuntimeOptions = {}) {}
   status(row: DesktopLocalApp): DesktopLocalApp {
-    const run = this.invocations.get(row.id);
-    return { ...row, phase: run?.phase ?? 'stopped', runningRevision: run?.revision, error: run?.error };
+    const run = this.preparing.get(row.id) ?? this.invocations.get(row.id);
+    return { ...row, phase: run?.phase ?? 'stopped', runningRevision: run?.revision, runId: run?.id, error: run?.error };
   }
   hasRunning(): boolean { return [...this.invocations.values()].some(run => ['running', 'installing', 'building', 'starting'].includes(run.phase)); }
   logs(id: string): LocalAppLog[] { return [...(this.output.get(id) ?? [])]; }
@@ -89,10 +110,14 @@ export class LocalAppRuntime {
   workspace(id: string): string | undefined { return this.invocations.get(id)?.workspace; }
   revision(id: string): number | undefined { return this.invocations.get(id)?.revision; }
   invocationId(id: string): string | undefined { return this.invocations.get(id)?.id; }
+  owner(id: string): { appId: string; runId: string; revision: number; releaseDigest: string } | undefined {
+    const run = this.invocations.get(id);
+    return run?.phase === 'running' && run.releaseDigest ? { appId: id, runId: run.id, revision: run.revision, releaseDigest: run.releaseDigest } : undefined;
+  }
   phase(id: string): LocalAppPhase { return this.invocations.get(id)?.phase ?? 'stopped'; }
   manifest(id: string): DesktopAppManifest | undefined { return this.invocations.get(id)?.manifest; }
   private log(id: string, run: Invocation, process: string, text: string, stream: LocalAppLog['stream'] = 'host'): void {
-    if (this.invocations.get(id) !== run) return;
+    if (this.invocations.get(id) !== run && this.preparing.get(id) !== run) return;
     const readiness = run.readiness.get(process);
     if (readiness && !readiness.matched && stream !== 'host') {
       const combined = readiness[stream] + text;
@@ -103,7 +128,11 @@ export class LocalAppRuntime {
     const lines = this.output.get(id) ?? [];
     lines.push({ sequence, time: Date.now(), runId: run.id, process, stream, text: text.slice(-8192) });
     if (lines.length > 500) lines.splice(0, lines.length - 500);
-    this.output.set(id, lines); this.changed();
+    this.output.set(id, lines);
+    if (this.store instanceof CoreLocalAppStore && run.id !== run.operationId) {
+      void this.store.appendLog(id, run.id, JSON.stringify(lines.at(-1))).catch(error => { run.error = `Could not persist application log: ${String(error)}`; this.changed(); });
+    }
+    this.changed();
   }
   async exclusive<T>(id: string, operation: () => Promise<T>): Promise<T> {
     if (this.disposed || this.deleting.has(id)) throw new Error('Application service is stopping or application is being deleted');
@@ -113,12 +142,12 @@ export class LocalAppRuntime {
     try { return await pending; }
     finally { if (this.queues.get(id) === pending) this.queues.delete(id); }
   }
-  async start(id: string, repair = false, signal?: AbortSignal): Promise<void> {
+  async start(id: string, repair = false, signal?: AbortSignal, replace = false, revision?: number, expectedCurrentRevision?: number): Promise<void> {
     signal?.throwIfAborted();
     if (!repair && this.starts.has(id)) return this.starts.get(id)!;
     // Cancellation is owned by the invocation, not the currently selected UI.
     const existing = this.invocations.get(id);
-    if (existing && ['installing', 'building', 'starting', 'running'].includes(existing.phase) && !repair) {
+    if (existing && ['installing', 'building', 'starting', 'running'].includes(existing.phase) && !repair && !replace) {
       await this.queues.get(id); return;
     }
     const ref = createInvocationRef("local-app", id, { next: () => randomUUID() });
@@ -126,29 +155,34 @@ export class LocalAppRuntime {
     requests.add(ref); this.requests.set(id, requests);
     const cancel = () => {
       this.cancellations.add(ref);
-      const run = this.invocations.get(id);
-      if (run?.id === ref.operationId) run.controller.abort();
+      const run = this.preparing.get(id) ?? this.invocations.get(id);
+      if (run?.operationId === ref.operationId) run.controller.abort();
     };
     signal?.addEventListener('abort', cancel, { once: true });
-    if (repair) existing?.controller.abort();
     const operation = this.exclusive(id, async () => {
+      if (this.preparing.has(id)) throw new Error('An application update is still stopping; retry Stop before starting it');
+      if (this.invocations.get(id)?.phase === 'stopping') throw new Error('The previous application is still stopping; retry Stop');
       if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
-      await this.stopCurrent(id);
+      const previous = this.invocations.get(id);
       if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
-      const row = await this.store.get(id);
+      const row = revision !== undefined && this.store instanceof CoreLocalAppStore ? await this.store.getRevision(id, revision) : await this.store.get(id);
+      if (expectedCurrentRevision !== undefined && row.currentRevision !== expectedCurrentRevision) throw new Error('The current version changed; refresh before switching versions');
       if (this.cancellations.has(ref)) throw new Error("Application operation cancelled");
-      const missing = (row.manifest.capabilities ?? []).filter(c => !row.grants.includes(c));
+      if (this.store instanceof CoreLocalAppStore) await this.store.assertTarget(row);
+      const missing = (row.manifest.capabilities ?? []).filter(c => c !== 'agent' && !row.grants.includes(c));
       if (missing.length) throw new Error(`Application permission required: ${missing.join(', ')}`);
-      const run: Invocation = { id: ref.operationId, revision: row.revision, controller: new AbortController(), phase: 'starting', children: new Set(), services: new Map(), workspace: '', manifest: row.manifest, readiness: new Map() };
-      this.invocations.set(id, run); this.changed();
+      const run: Invocation = { id: ref.operationId, operationId: ref.operationId, revision: row.revision, releaseDigest: row.releaseDigest, controller: new AbortController(), phase: 'starting', children: new Set(), services: new Map(), workspace: '', manifest: row.manifest, readiness: new Map() };
+      if (previous?.phase === 'running') this.preparing.set(id, run); else this.invocations.set(id, run);
+      this.changed();
       try {
-        run.workspace = await this.store.prepareWorkspace(row);
+        run.workspace = await (this.store instanceof CoreLocalAppStore ? this.store.prepareWorkspace(row, repair) : this.store.prepareWorkspace(row));
+        if (this.store instanceof CoreLocalAppStore) { run.id = this.store.run(id)!.runId; run.preparationDataPath = this.store.preparationDataPath(id); }
         const marker = join(run.workspace, '.lingxi-prepared.json');
         let prepared = false;
         try { prepared = JSON.parse(await fs.readFile(marker, 'utf8')).revision === row.revision; } catch { /* first install */ }
         if (repair || !prepared) {
           for (const [phase, steps] of [['installing', row.manifest.install ?? []], ['building', row.manifest.build ?? []]] as const) {
-            run.phase = phase; this.changed();
+            run.phase = phase; await this.syncRun(id, run); this.changed();
             for (const step of steps) {
               run.controller.signal.throwIfAborted();
               this.log(id, run, phase, step.command);
@@ -160,33 +194,57 @@ export class LocalAppRuntime {
           await atomicJson(marker, { revision: row.revision });
         }
         run.phase = 'starting'; this.changed();
-        for (const spec of row.manifest.processes ?? []) {
+        for (const spec of orderedProcesses(row.manifest.processes ?? [])) {
           run.controller.signal.throwIfAborted();
           const port = await freePort();
           run.services.set(spec.name, { port, url: `http://127.0.0.1:${port}` });
           const serviceEnv: NodeJS.ProcessEnv = { PORT: String(port), HOST: '127.0.0.1' };
-          for (const [name, service] of run.services) serviceEnv[`LOCAL_APP_${name.toUpperCase().replaceAll('-', '_')}_URL`] = service.url;
+          for (const [name, service] of run.services) {
+            const key = name.toUpperCase().replace(/[-.]/g, '_');
+            serviceEnv[`LOCAL_APP_${key}_URL`] = service.url;
+            serviceEnv[`LOCAL_APP_${key}_PORT`] = String(service.port);
+          }
           if (spec.ready?.output) run.readiness.set(spec.name, { needle: spec.ready.output, matched: false, stdout: '', stderr: '' });
           const child = await this.launch(id, run, spec, spec.name, serviceEnv, false);
           child.once('exit', (code, signal) => {
-            if (this.invocations.get(id) !== run || run.controller.signal.aborted) return;
+            if ((this.invocations.get(id) !== run && this.preparing.get(id) !== run) || run.controller.signal.aborted) return;
             run.error = `${spec.name} exited (${code ?? signal})`; run.phase = 'failed';
             this.log(id, run, spec.name, run.error, 'stderr'); run.controller.abort(); this.changed();
-            void this.killChildren(run).catch(error => this.log(id, run, 'host', String(error)));
+            void Promise.resolve(this.options.onRunEnded?.(id, run.id, 'failed')).then(() => this.killChildren(run)).then(() => this.syncRun(id, run)).catch(error => this.log(id, run, 'host', String(error)));
           });
           await this.waitReady(id, run, spec, child, port);
         }
         if (row.manifest.entry.type === 'static' && !(await fs.stat(await containedFile(run.workspace, row.manifest.entry.path))).isFile()) throw new Error('The application entry is not a file');
         run.controller.signal.throwIfAborted();
-        run.phase = 'running'; this.log(id, run, 'host', 'Application is ready'); this.changed();
+        run.phase = 'running';
+        await this.syncRun(id, run);
+        // Commit the version while the previous run still serves. The commit
+        // is a transaction boundary: an abandoned waiter cannot undo it.
+        signal?.removeEventListener('abort', cancel);
+        run.controller.signal.throwIfAborted();
+        if (this.store instanceof CoreLocalAppStore) await this.store.activate(id, run.revision);
+        this.preparing.delete(id); this.invocations.set(id, run);
+        if (previous && previous !== run && previous.phase === 'running') {
+          run.retired = [previous];
+          try { await this.stopInvocation(id, previous); run.retired = []; }
+          catch (error) {
+            run.error = `Previous application cleanup needs retry: ${String(error)}`;
+            this.log(id, run, 'host', run.error, 'stderr');
+          }
+        }
+        this.log(id, run, 'host', 'Application is ready'); this.changed();
       } catch (error) {
         const failure = run.error;
         const canceled = run.controller.signal.aborted && !failure;
         run.controller.abort();
+        run.phase = 'stopping';
         await this.killChildren(run);
         run.phase = canceled ? 'stopped' : 'failed';
         run.error = canceled ? undefined : failure ?? String(error instanceof Error ? error.message : error);
         if (run.error) this.log(id, run, 'host', run.error, 'stderr');
+        await this.syncRun(id, run);
+        this.preparing.delete(id);
+        await this.options.onRunEnded?.(id, run.id, canceled ? 'stopped' : 'failed');
         this.changed();
         throw failure ? new Error(failure, { cause: error }) : error;
       }
@@ -200,7 +258,11 @@ export class LocalAppRuntime {
   }
   private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean): Promise<ChildProcess> {
     const cwd = await containedFile(run.workspace, step.cwd ?? '.');
-    const env: NodeJS.ProcessEnv = { ...appEnvironment(this.options.environment), ...step.env, ...extra, LOCAL_APP_DATA_DIR: this.store.dataPath(id), LOCAL_APP_ID: id };
+    const preparing = name === 'installing' || name === 'building';
+    const dataDirectory = preparing ? run.preparationDataPath ?? join(run.workspace, '.lingxi-prepare-data') : this.store.dataPath(id);
+    if (preparing) await fs.mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+    const env: NodeJS.ProcessEnv = { ...appEnvironment(this.options.environment), ...step.env, ...extra, LOCAL_APP_DATA_DIR: dataDirectory, LOCAL_APP_ID: id, LOCAL_APP_RUN_ID: run.id, LOCAL_APP_BASE_PATH: '/' };
+    // Build scripts get a disposable preparation location, never the live data alias.
     // Finder/Dock launches have a minimal PATH. Reuse the same installed tools
     // Bash provisions, and fall back to the already packaged Node/Bun runtimes.
     const home = env.HOME ?? env.USERPROFILE;
@@ -237,7 +299,8 @@ export class LocalAppRuntime {
   private spawn(id: string, run: Invocation, name: string, command: string, cwd: string, env: NodeJS.ProcessEnv): ChildProcess {
     run.controller.signal.throwIfAborted();
     const shell = this.options.shell ?? (process.platform === 'win32' ? 'bash.exe' : '/bin/bash');
-    const child = spawn(shell, ['-c', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true });
+    const guarded = process.platform !== 'win32';
+    const child = spawn(shell, guarded ? guardedProcessArguments(command) : ['-c', command], { cwd, env, stdio: guarded ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'], detached: guarded, windowsHide: true });
     run.children.add(child);
     // Drain descendants as soon as the root closes, then discard its pid.
     // Keeping exited roots until a later restart risks signaling a recycled pid.
@@ -277,15 +340,41 @@ export class LocalAppRuntime {
     }
     throw new Error(`${spec.name} did not become ready; see its logs`);
   }
+  private async syncRun(id: string, run: Invocation): Promise<void> {
+    if (this.store instanceof CoreLocalAppStore) await this.store.updateRun(id, run.id, run.phase, [...run.services].map(([name, value]) => ({ name, port: value.port })), run.error);
+  }
   private async killChildren(run: Invocation): Promise<void> { await Promise.all([...run.children].map(stopTree)); run.children.clear(); run.services.clear(); }
-  private async stopCurrent(id: string): Promise<void> {
-    const run = this.invocations.get(id); if (!run) return;
-    run.controller.abort(); run.phase = 'stopping'; this.changed();
-    await this.killChildren(run); run.phase = 'stopped'; this.changed();
+  private async stopInvocation(id: string, run: Invocation): Promise<void> {
+    run.controller.abort();
+    const errors: unknown[] = [], pending: Invocation[] = [];
+    for (const retired of run.retired ?? []) {
+      try { await this.stopInvocation(id, retired); } catch (error) { errors.push(error); pending.push(retired); }
+    }
+    run.retired = pending;
+    run.phase = 'stopping'; this.changed();
+    // Always attempt process cleanup even if closing a broker connection fails.
+    try { await this.options.onRunEnded?.(id, run.id, 'stopped'); } catch (error) { errors.push(error); }
+    try { await this.killChildren(run); } catch (error) { errors.push(error); }
+    run.phase = errors.length ? 'stopping' : 'stopped';
+    run.error = errors.length ? errors.map(String).join('; ') : undefined;
+    try { await this.syncRun(id, run); } catch (error) { errors.push(error); }
+    this.changed();
+    if (errors.length) throw new AggregateError(errors, 'Application cleanup needs retry');
+  }
+  private async stopCurrent(id: string, includePreparing = true): Promise<void> {
+    const errors: unknown[] = [];
+    const preparing = includePreparing ? this.preparing.get(id) : undefined;
+    if (preparing) {
+      try { await this.stopInvocation(id, preparing); this.preparing.delete(id); } catch (error) { errors.push(error); }
+    }
+    const run = this.invocations.get(id);
+    if (run && run !== preparing) { try { await this.stopInvocation(id, run); } catch (error) { errors.push(error); } }
+    if (errors.length) throw new AggregateError(errors, 'Application cleanup needs retry');
   }
   async stop(id: string): Promise<void> {
     // Abort before waiting for the queue: Stop must interrupt an in-progress install/readiness wait.
     for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
+    this.preparing.get(id)?.controller.abort();
     this.invocations.get(id)?.controller.abort();
     await this.exclusive(id, () => this.stopCurrent(id));
   }
@@ -299,6 +388,7 @@ export class LocalAppRuntime {
   }
   async remove(id: string): Promise<void> {
     for (const ref of this.requests.get(id) ?? []) this.cancellations.add(ref);
+    this.preparing.get(id)?.controller.abort();
     this.invocations.get(id)?.controller.abort();
     const removal = this.exclusive(id, async () => { await this.stopCurrent(id); await this.store.remove(id); this.invocations.delete(id); this.output.delete(id); this.changed(); });
     this.deleting.add(id);
@@ -307,6 +397,7 @@ export class LocalAppRuntime {
   async dispose(): Promise<void> {
     this.disposed = true;
     for (const requests of this.requests.values()) for (const ref of requests) this.cancellations.add(ref);
+    for (const run of this.preparing.values()) run.controller.abort();
     for (const run of this.invocations.values()) run.controller.abort();
     await Promise.allSettled([...this.queues.values()]);
     await Promise.all([...this.invocations.keys()].map(id => this.stopCurrent(id)));

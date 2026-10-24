@@ -292,8 +292,8 @@ final class AskUserQuestionSummaryTests: XCTestCase {
 final class LocalAppCardParseTests: XCTestCase {
     func testAPublishResultIsTheCard() {
         XCTAssertEqual(
-            PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"publish","id":"a1b2c3d4e5f","revision":2,"name":"喝水记录","warnings":[]}"#),
-            PublishedLocalApp(id: "a1b2c3d4e5f", name: "喝水记录", revision: 2)
+            PublishedLocalApp.parse(tool: "LocalApp", json: #"{"action":"publish","id":"a0123456789abcdef0123456789abcdef","revision":2,"name":"喝水记录","warnings":[]}"#),
+            PublishedLocalApp(id: "a0123456789abcdef0123456789abcdef", name: "喝水记录", revision: 2)
         )
     }
     func testListReadOtherToolsAndMalformedResultsHaveNoCard() {

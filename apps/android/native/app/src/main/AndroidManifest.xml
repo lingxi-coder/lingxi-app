@@ -80,6 +80,7 @@
     <application
         android:name=".push.LingxiApplication"
         android:allowBackup="true"
+        android:networkSecurityConfig="@xml/local_app_network_security"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.LingXiCode">
@@ -102,6 +103,10 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-started LLM inference and agent tool execution" />
+        </service>
+
+        <service android:name=".apps.LocalAppProcessService" android:exported="false" android:foregroundServiceType="specialUse" android:stopWithTask="false">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-authorized local application services" />
         </service>
 
         <activity

@@ -87,12 +87,10 @@ import com.lingxi.code.conversation.WorkspacePickerSheet
 import com.lingxi.code.conversation.permissionModeLabel
 import com.lingxi.code.project.ProjectPage
 import com.lingxi.code.project.ProjectsPage
-import com.lingxi.code.apps.AppRuntimePage
-import com.lingxi.code.apps.AppsPage
-import com.lingxi.code.apps.LocalApps
-import com.lingxi.code.apps.MarketAppPage
-import com.lingxi.code.apps.chatAppKey
-import com.lingxi.code.apps.myApps
+import com.lingxi.code.apps.UnifiedAppRuntimePage
+import com.lingxi.code.apps.UnifiedAppsPage
+import com.lingxi.code.apps.UnifiedLocalApps
+import com.lingxi.code.apps.UnifiedAppDetailsPage
 import com.lingxi.code.conversation.LocalAppCardLinks
 import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.model.ConversationScope
@@ -318,18 +316,9 @@ fun RootScreen(
         factory = viewModelFactory {
             initializer {
                 ChatViewModel(
-                    source = EngineConversationSource.create(
-                        context = appContext,
-                        projectWorkspace = projectState.activeProject?.workspace,
-                        workspaceKey = projectState.activeProject?.record?.id
-                            ?.let { "project.$it" }
-                            ?: "global",
-                        sessionMode = activeSessionMode,
-                        linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
-                            ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
-                    ),
+                    source = com.lingxi.code.conversation.ConnectingConversationSource(conversationStrings(appContext)),
                     savedState = createSavedStateHandle(),
-                    sourceGeneration = reconnectToken,
+                    sourceGeneration = reconnectToken - 1,
                     strings = conversationStrings(appContext),
                     backgroundExecution = AndroidConversationBackgroundExecution(appContext),
                 )
@@ -338,7 +327,8 @@ fun RootScreen(
     )
     LaunchedEffect(chatViewModel, reconnectToken) {
         if (viewModel == null) {
-                chatViewModel.ensureSource(reconnectToken) {
+                val replacing = chatViewModel.engineSource.value !is com.lingxi.code.conversation.ConnectingConversationSource
+                chatViewModel.ensureSourceInBackground(reconnectToken) {
                     EngineConversationSource.create(
                         context = appContext,
                         projectWorkspace = projectState.activeProject?.workspace,
@@ -348,7 +338,7 @@ fun RootScreen(
                         sessionMode = activeSessionMode,
                         linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
                             ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
-                        replaceProcessSource = true,
+                        replaceProcessSource = replacing,
                     )
             }
         }
@@ -872,6 +862,7 @@ fun RootScreen(
         project: ProjectSnapshot?,
         target: SessionRef?,
         newSession: Boolean,
+        newSessionDirectory: String? = null,
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
         allowInactiveWaitingRecovery: Boolean = false,
@@ -889,12 +880,13 @@ fun RootScreen(
             projectId = (engineScope as? ConversationScope.Project)?.projectId,
             target = destination,
             newSession = newSession,
+            newSessionDirectory = newSessionDirectory,
             resumeEmpty = resumeEmpty,
             replacePendingTransition = replacePendingTransition,
             allowInactiveWaitingRecovery = allowInactiveWaitingRecovery,
             scope = engineScope,
             createSource = {
-                EngineConversationSource.create(
+                EngineConversationSource.createInBackground(
                     context = appContext,
                     projectWorkspace = when (engineScope) {
                         ConversationScope.Global -> null
@@ -905,6 +897,7 @@ fun RootScreen(
                     sessionMode = sessionModeOverride,
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
                     reuseProcessSource = true,
+                    currentSource = chatViewModel.engineSource.value,
                 )
             },
             persistSelection = {
@@ -1095,7 +1088,7 @@ fun RootScreen(
             return
         }
         pendingForkRequest = request
-        val forkSource = EngineConversationSource.create(
+        val forkSource = EngineConversationSource.createInBackground(
             context = appContext,
             projectWorkspace = workspaceForScope(sessionScope),
             workspaceKey = sessionScope.persistenceKey(),
@@ -1548,22 +1541,9 @@ fun RootScreen(
     var appsPageOpen by rememberSaveable { mutableStateOf(false) }
     var marketAppId by rememberSaveable { mutableStateOf<String?>(null) }
     var runtimeAppId by rememberSaveable { mutableStateOf<String?>(null) }
-    val localApps = remember(appContext) { LocalApps.get(appContext) }
-    // Every engine of this process serves the one library the `LocalApp` tool
-    // publishes to; the pages and the chat cards read it through this host.
-    val localAppHost = conversationSource.localAppHost
-    LaunchedEffect(localApps, localAppHost) { localApps.chat.attach(localAppHost) }
-    val chatApps by localApps.chat.state.collectAsState()
-    // The drawer needs only what is installed and what is known about it, so a
-    // download's progress never recomposes this screen; the pages collect the
-    // whole market state themselves.
-    val installedApps by remember(localApps) {
-        localApps.market.store.state.map { it.installed }.distinctUntilChanged()
-    }.collectAsState(initial = localApps.market.store.state.value.installed)
-    val installedAppInfo by localApps.info.state.collectAsState()
-    val drawerApps = remember(installedApps, installedAppInfo, chatApps) {
-        myApps(installedApps, installedAppInfo, updates = emptyList(), operations = emptyMap(), chatApps = chatApps)
-    }
+    val localApps = remember(appContext) { UnifiedLocalApps.get(appContext) }
+    val appLibrary by localApps.state.collectAsState()
+    val drawerApps = remember(appLibrary.apps, appLibrary.openedRevision) { localApps.drawerApps(appLibrary.apps) }
     var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
     var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
     var linkedDetailKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1676,10 +1656,10 @@ fun RootScreen(
                                 ?: error("Project does not exist on this device.")
                             projectPageId = project
                         }
-                        "market" -> { marketAppId = id }
+                        "market" -> { appsPageOpen = true }
                         "apps" -> {
-                            check(installedApps.any { it.appId == id } || localApps.chat.exists(id) == true) { "App is not installed on this device." }
-                            runtimeAppId = if (localApps.chat.exists(id) == true) chatAppKey(id) else id
+                            check(appLibrary.apps.any { it.id == id }) { "App is not installed on this device. Import legacy apps from the archive first." }
+                            runtimeAppId = id
                         }
                         "runtime" -> {
                             when (parts[1]) {
@@ -1726,15 +1706,14 @@ fun RootScreen(
             dismissButton = { androidx.compose.material3.TextButton(onClick = { val reviewed = draftLinkReview; draftLinkReview = null; reviewed?.let(onDeepLinkHandled) }) { androidx.compose.material3.Text("Keep existing draft") } },
         )
     }
-    val localAppCardLinks = remember(localApps, chatApps) {
+    val localAppCardLinks = remember(localApps, appLibrary.apps) {
         LocalAppCardLinks(
             open = { id ->
-                runtimeAppId = chatAppKey(id)
-                // The drawer lists it among the recent apps from now on.
-                localApps.chat.refresh()
+                runtimeAppId = id
+                scope.launch { localApps.refresh() }
             },
-            exists = { id -> localApps.chat.exists(id) },
-            generation = chatApps,
+            exists = { id -> localApps.refresh(); localApps.state.value.apps.any { it.id == id } },
+            generation = appLibrary.apps,
         )
     }
     // Leaves the projects pages, e.g. once a project was created or imported from
@@ -1881,6 +1860,57 @@ fun RootScreen(
     /** Start a new conversation in a project, in [mode] (default: the current mode). */
     fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) =
         startNewSessionIn(ConversationScope.Project(projectId), mode)
+
+    fun openAppAuthoring(appId: String?, name: String, createdDirectory: String) {
+        scope.launch {
+            try {
+                check(!state.streaming && !state.sessionTransitioning) { "当前会话正在执行，请先停止或等待完成。" }
+                val sessions = projectStore.state.value.projects.flatMap { project ->
+                    project.sessions.map { it.sessionId to (it.workspaceDirectory ?: project.record.activeDirectory) }
+                }.toMap()
+                val resolution = appId?.let { localApps.prepareAuthoring(it, sessions) }
+                check(resolution?.action != "sourceMissing") { "源码目录已不可用，请从应用管理中恢复源码或创建获许可的副本。" }
+                val directory = resolution?.sourceDirectory ?: createdDirectory
+                val existingOwner = resolution?.sessionId?.let { sessionId -> projectStore.state.value.projects.firstOrNull { project ->
+                    project.sessions.any { it.sessionId == sessionId && (it.workspaceDirectory ?: project.record.activeDirectory) == directory }
+                } }
+                val ownedProject = existingOwner ?: projectStore.registerAuthoringWorkspace(name, directory)
+                val project = ownedProject.copy(workspace = com.lingxi.code.project.ProjectWorkspace(ownedProject.record.id, localApps.hostFile(directory).absolutePath, directory))
+                val target = resolution?.sessionId?.let { id -> project.sessions.firstOrNull { it.sessionId == id } }
+                val mode = target?.mode ?: SessionMode.Code
+                scopeStore.persistDraft(sourceScope.sessionStateKey(activeSessionMode), draft)
+                check(switchEngineScope(ConversationScope.Project(project.record.id), project,
+                    target?.let { SessionRef(it.sessionId, it.title) }, target == null,
+                    newSessionDirectory = directory.takeIf { target == null }, sessionModeOverride = mode)) { "无法切换到应用源码会话。" }
+                setConversationMode(mode)
+                val authoringSource = chatViewModel.engineSource.value
+                val confirmed = chatViewModel.awaitAppAuthoringSession(directory, target?.sessionId)
+                check(chatViewModel.engineSource.value === authoringSource &&
+                    chatViewModel.sourceScope.value == ConversationScope.Project(project.record.id)) { "开发会话已切换，请重新打开应用源码。" }
+                // Empty confirmed sessions also need the existing catalog
+                // entry so reopening the app can reuse this recovery UUID.
+                projectStore.recordStartedSession(project.record.id, confirmed.sessionId, name, mode)
+                projectStore.recordWorkspace(project.record.id, confirmed)
+                if (appId != null) {
+                    localApps.request("bindAuthoring", appId) {
+                        put("authoring", org.json.JSONObject().put("sourceDirectory", directory)
+                            .put("sourceSessionId", canonicalSessionId(confirmed.sessionId)).put("projectId", project.record.id))
+                    }
+                }
+                check(chatViewModel.engineSource.value === authoringSource &&
+                    authoringSource.workspaceState.value == confirmed &&
+                    canonicalSessionId(chatViewModel.state.value.session.id) == canonicalSessionId(confirmed.sessionId)) { "开发目录已变化，没有插入草稿。" }
+                if (appId == null) {
+                    val prompt = "请在这个源码项目中创建应用：$name。使用 LocalApp schema 2，完成后发布到本机应用库。"
+                    val key = ConversationScope.Project(project.record.id).sessionStateKey(mode)
+                    scopeStore.persistDraft(key, prompt)
+                    draft = prompt; draftScopeKey = key; chatViewModel.onDraftChanged(prompt)
+                }
+                appsPageOpen = false; marketAppId = null; runtimeAppId = null
+                closeDrawer(); closeProjectPages()
+            } catch (error: Exception) { chatViewModel.reportHostError(error.message ?: "无法打开应用源码会话。") }
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         AdaptiveConversationDrawer(
@@ -2316,11 +2346,12 @@ fun RootScreen(
             exit = slideOutHorizontally(targetOffsetX = { it }),
         ) {
             BackHandler { appsPageOpen = false }
-            AppsPage(
-                localApps = localApps,
+            UnifiedAppsPage(
+                apps = localApps,
                 onBack = { appsPageOpen = false },
-                onOpenApp = { runtimeAppId = it },
-                onShowDetails = { marketAppId = it },
+                onOpen = { runtimeAppId = it },
+                onDetails = { marketAppId = it },
+                onAuthoring = ::openAppAuthoring,
             )
         }
         // Like the project page, these keep their last app while sliding out.
@@ -2334,11 +2365,12 @@ fun RootScreen(
             val shownId = marketAppId ?: lastMarketAppId
             if (shownId != null) {
                 BackHandler { marketAppId = null }
-                MarketAppPage(
-                    localApps = localApps,
+                UnifiedAppDetailsPage(
+                    apps = localApps,
                     appId = shownId,
                     onBack = { marketAppId = null },
-                    onOpenApp = { runtimeAppId = it },
+                    onOpen = { runtimeAppId = it },
+                    onAuthoring = ::openAppAuthoring,
                 )
             }
         }
@@ -2352,8 +2384,8 @@ fun RootScreen(
             val shownId = runtimeAppId ?: lastRuntimeAppId
             if (shownId != null) {
                 // Its own back handler goes back inside the app first.
-                AppRuntimePage(
-                    localApps = localApps,
+                UnifiedAppRuntimePage(
+                    apps = localApps,
                     appId = shownId,
                     onClose = { runtimeAppId = null },
                     onShowDetails = { appId ->

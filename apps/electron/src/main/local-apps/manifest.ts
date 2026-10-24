@@ -1,5 +1,5 @@
 import { isAbsolute, posix } from 'node:path';
-import type { DesktopAppManifest, LocalAppCapability, LocalAppProcess, LocalAppStep } from '../../shared/localApps.js';
+import type { DesktopAppManifest, LocalAppTarget, LocalAppCapability, LocalAppProcess, LocalAppStep } from '../../shared/localApps.js';
 
 export function relativePath(value: unknown, label = 'path'): string {
   if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\') || isAbsolute(value)
@@ -34,13 +34,14 @@ function steps(value: unknown): LocalAppStep[] {
 }
 export function parseManifest(value: unknown): DesktopAppManifest {
   const v = object(value);
-  if (v.schema !== 1) throw new Error('Application manifest schema must be 1');
+  if (v.schema !== 2) throw new Error('Application manifest schema must be 2; explicitly import legacy apps first');
   const e = object(v.entry);
   const entry: DesktopAppManifest['entry'] = e.type === 'static'
     ? { type: 'static', path: relativePath(e.path, 'entry') }
     : e.type === 'server'
-      ? { type: 'server', process: text(e.process, 'entry process', 80), ...(e.path ? { path: relativePath(e.path) } : {}) }
+      ? { type: 'server', process: text(e.process, 'entry process', 80), ...(e.path ? { path: text(e.path, 'server entry path', 2048) } : {}) }
       : (() => { throw new Error('Application entry must be static or server'); })();
+  if (entry.type === 'server' && entry.path && (!entry.path.startsWith('/') || entry.path.startsWith('//') || /[\\\r\n\0]/.test(entry.path))) throw new Error('Server entry must be a local URL path');
   const processes: LocalAppProcess[] = [];
   if (v.processes !== undefined) {
     if (!Array.isArray(v.processes)) throw new Error('Application processes must be an array');
@@ -80,7 +81,7 @@ export function parseManifest(value: unknown): DesktopAppManifest {
   }
   if (entry.type === 'server' && !processes.some(p => p.name === entry.process)) throw new Error('Entry process does not exist');
   const capabilities = new Set<LocalAppCapability>();
-  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone'];
+  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'photos', 'share', 'agent', 'background'];
   if (v.capabilities !== undefined) {
     if (!Array.isArray(v.capabilities)) throw new Error('capabilities must be an array');
     for (const cap of v.capabilities) {
@@ -90,6 +91,18 @@ export function parseManifest(value: unknown): DesktopAppManifest {
   }
   const install = steps(v.install), build = steps(v.build);
   if (install.length || build.length || processes.length) capabilities.add('process');
-  return { schema: 1, name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',
+  if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Application targets must be a nonempty array');
+  const targets = v.targets.map(raw => {
+    const t = object(raw);
+    if (!['android', 'ios', 'macos', 'windows', 'linux', 'web'].includes(String(t.platform)) || !['web', 'native', 'mobile-linux'].includes(String(t.environment))) throw new Error('Invalid application target');
+    if (t.capabilities !== undefined && (!Array.isArray(t.capabilities) || t.capabilities.some(c => !supported.includes(c as LocalAppCapability)))) throw new Error('Unsupported target capability');
+    return t as unknown as LocalAppTarget;
+  });
+  const agent = v.agent === undefined ? undefined : object(v.agent);
+  if (agent && (!Array.isArray(agent.tools) || agent.tools.some(t => typeof t !== 'string' || !t.trim()) || Object.keys(agent).some(k => k !== 'tools'))) throw new Error('Invalid agent requirements');
+  return { schema: 2, targets, ...(agent ? { agent: { tools: agent.tools as string[] } } : {}),
+    ...(v.dataSchema ? { dataSchema: v.dataSchema as DesktopAppManifest['dataSchema'] } : {}),
+    ...(v.remix ? { remix: v.remix as DesktopAppManifest['remix'] } : {}),
+    ...(v.package ? { package: v.package as DesktopAppManifest['package'] } : {}), name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',
     entry, install, build, processes: sorted, capabilities: [...capabilities].sort() };
 }

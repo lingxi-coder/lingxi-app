@@ -114,7 +114,6 @@ interface ConversationSource {
     val visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? get() = null
 
     /** The app library the `LocalApp` tool publishes to; null without an engine. */
-    val localAppHost: com.lingxi.code.bindings.runtime.LocalAppHost? get() = null
 
     /**
      * Cancel the in-flight turn (the composer's Stop affordance). Fires the
@@ -257,6 +256,9 @@ interface ConversationSource {
      * from [activeSessionState].
      */
     suspend fun newSession() {}
+    suspend fun newSession(cwd: String) {
+        submitClientCommand(ClientCommand.NewSession(cwd = cwd, model = null))
+    }
 
     /** Release native handles and event pumps owned by this source. Idempotent. */
     fun close() {}
@@ -296,6 +298,15 @@ internal interface BackgroundRetainableConversationSource {
  * Explicit no-engine source. Production uses this when the engine cannot be
  * built instead of falling back to branded mock sessions/messages.
  */
+/** Loading an ordinary engine never blocks the native app library or navigation. */
+internal class ConnectingConversationSource(private val strings: ConversationStrings) : ConversationSource {
+    override val sessionState: StateFlow<EngineSessionState> = MutableStateFlow(EngineSessionState.loading()).asStateFlow()
+    override fun submit(text: String): Flow<ReplyEvent> = flow {
+        emit(ReplyEvent.Error(strings.resolve(R.string.chat_status_reconnecting, "正在重新连接…")))
+        emit(ReplyEvent.End)
+    }
+}
+
 class UnavailableConversationSource(
     explicitReason: String? = null,
     strings: ConversationStrings = DefaultConversationStrings,

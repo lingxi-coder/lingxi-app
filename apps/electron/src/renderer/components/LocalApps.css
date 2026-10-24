@@ -57,3 +57,21 @@
   .local-app-chat-card { border-color: var(--apps-text); }
   .local-app-chat-card button { outline: 1px solid currentColor; outline-offset: -1px; }
 }
+.local-app-tabs { display: flex; gap: 6px; margin-bottom: 24px; }
+.local-app-tabs button[aria-current=page] { background: var(--apps-surface); color: var(--apps-accent); border-color: var(--apps-accent); }
+.local-app-market-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.local-app-market-controls .local-app-search { margin: 0; }
+.local-app-market-controls label { font-size: 13px; }
+.local-app-market > .local-app-update { margin: 18px 0 26px; }
+.local-app-market .local-app-tile p { color: var(--apps-muted); font-size: 13px; }
+.local-app-archives { border-top: 1px solid var(--apps-border); margin-top: 30px; padding-top: 18px; color: var(--apps-muted); font-size: 13px; }
+.local-app-archives summary { cursor: pointer; color: var(--apps-text); }
+.local-app-archives > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 10px 0; }
+.local-app-publish { color: var(--apps-text); background: var(--apps-surface); border: 1px solid var(--apps-border); border-radius: 16px; width: min(90vw,520px); max-height: 85vh; padding: 24px; }
+.local-app-publish::backdrop { background: #0008; }
+.local-app-publish h2 { margin-top: 0; font-size: 20px; }
+.local-app-publish p { font-size: 13px; line-height: 1.5; color: var(--apps-muted); }
+.local-app-publish label { display: grid; gap: 7px; font-size: 13px; margin: 14px 0; }
+.local-app-publish input, .local-app-publish textarea, .local-app-publish select { font: inherit; color: inherit; background: var(--apps-background); border: 1px solid var(--apps-border); border-radius: 7px; padding: 9px; min-width: 0; }
+.local-app-publish textarea { min-height: 70px; resize: vertical; }
+.local-app-publish footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }

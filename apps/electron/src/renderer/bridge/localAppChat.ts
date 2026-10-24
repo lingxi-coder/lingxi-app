@@ -22,19 +22,21 @@ export async function localAppChatTarget(
   isCurrent: () => boolean,
 ): Promise<SessionRef | undefined> {
   if (!isCurrent()) return;
+  if (app?.sourceMissing) throw new Error(`Application source is missing: ${app.sourcePath}. Restore this directory or explicitly create a source copy from its published release.`);
   const source = app?.sourceSession;
   let project: string | undefined;
   if (source && navigation.hasProject(source.projectPath)) {
     const opened = await navigation.openSession(source.projectPath, source.sessionId);
     // A failed or superseded navigation must never draft into an unrelated chat.
     if (!isCurrent()) return;
-    if (opened) return opened;
+    if (opened && (!app?.sourcePath || opened.projectPath === app.sourcePath)) return opened;
     // The application survives deletion of its authoring chat. Keep its project
     // but establish a new explicit target before adding any text.
-    project = source.projectPath;
+    project = app?.sourcePath ?? source.projectPath;
   }
   // New and imported apps, or a removed source project, need an explicit
   // authoring workspace. Never reuse an unrelated active repository.
+  project ??= app?.sourcePath;
   if (!project) {
     const selected = await navigation.addProject('local-app');
     if (!selected?.path || !isCurrent()) return;

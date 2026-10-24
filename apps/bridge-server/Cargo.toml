@@ -81,6 +81,7 @@ telemetry = { workspace = true }
 core = { workspace = true }
 provider-config = { workspace = true }
 llm-runtime = { workspace = true }
+local-app = { workspace = true }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"

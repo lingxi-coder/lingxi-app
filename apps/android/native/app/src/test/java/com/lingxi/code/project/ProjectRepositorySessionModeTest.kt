@@ -217,4 +217,31 @@ class ProjectRepositorySessionModeTest {
         assertFalse(File(temp.root, "projects/deleted").exists())
     }
 
+    @Test
+    fun `registering an application source preserves its owned directory and reuses the project`() {
+        val home = temp.newFolder("linux-home")
+        val projects = File(home, "lingxi/projects")
+        val source = File(home, ".lingxi/.apps/counter").apply { mkdirs() }
+        File(source, "index.html").writeText("unchanged")
+        val repo = ProjectRepository(projects, userHome = home)
+        val first = repo.registerAuthoringWorkspace("Counter", "/home/lingxi/.lingxi/.apps/counter")
+        val second = repo.registerAuthoringWorkspace("Counter", "/home/lingxi/.lingxi/.apps/counter")
+        assertEquals(first.record.id, second.record.id)
+        assertEquals(source.canonicalPath, first.workspace.hostPath)
+        assertEquals("unchanged", File(source, "index.html").readText())
+        assertTrue(first.sessions.isEmpty())
+    }
+
+    @Test
+    fun `application source registration rejects an escaped user directory`() {
+        val home = temp.newFolder("linux-home")
+        val outside = temp.newFolder("outside")
+        java.nio.file.Files.createSymbolicLink(File(home, "escape").toPath(), outside.toPath())
+        val repo = ProjectRepository(File(home, "lingxi/projects"), userHome = home)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            repo.registerAuthoringWorkspace("Escape", "/home/lingxi/escape")
+        }
+        assertTrue(repo.load().projects.isEmpty())
+    }
+
 }

@@ -17,7 +17,8 @@ enum LXISHDefaultWorkspace {
 
     static func hostPath() -> String {
         let url = MobileUserStorage.projectsURL
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        do { return try MobileUserStorage.prepareProjectsDirectory().path }
+        catch { NSLog("Linux workspace preparation failed: %@", error.localizedDescription) }
         return url.path
     }
 

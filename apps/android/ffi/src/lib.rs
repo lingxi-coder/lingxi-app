@@ -92,6 +92,13 @@ mod configuration;
 mod host;
 mod linux_conversion;
 mod linux_runtime;
+#[cfg(feature = "uniffi")]
+mod local_apps;
+#[cfg(feature = "uniffi")]
+pub use local_apps::{
+    build_android_local_app_service, MobileLocalAppError, MobileLocalAppServiceHandle,
+};
+
 mod linux_types;
 mod probes;
 #[cfg(feature = "uniffi")]
@@ -182,6 +189,8 @@ pub use linux_runtime::build_android_mobile_linux_runtime_handle;
 pub use linux_runtime::AndroidMobileLinuxRuntimeHandle;
 #[cfg(feature = "uniffi")]
 pub use linux_types::AndroidMobileLinuxEventSink;
+#[cfg(feature = "uniffi")]
+pub use linux_types::AndroidMobileLinuxRootfsStager;
 #[cfg(feature = "uniffi")]
 pub use linux_types::AndroidMobileLinuxStreamSink;
 #[cfg(feature = "uniffi")]

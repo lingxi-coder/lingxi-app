@@ -1,0 +1,49 @@
+{
+  "schema": 2,
+  "name": "Static storage acceptance",
+  "entry": {
+    "type": "static",
+    "path": "dist/index.html"
+  },
+  "targets": [
+    {
+      "platform": "android",
+      "environment": "web"
+    },
+    {
+      "platform": "ios",
+      "environment": "web"
+    },
+    {
+      "platform": "macos",
+      "environment": "web"
+    },
+    {
+      "platform": "windows",
+      "environment": "web"
+    },
+    {
+      "platform": "linux",
+      "environment": "web"
+    },
+    {
+      "platform": "web",
+      "environment": "web"
+    }
+  ],
+  "package": {
+    "files": [
+      "dist/index.html",
+      "dist/client.js"
+    ],
+    "dependencyLocks": []
+  },
+  "dataSchema": {
+    "version": 1,
+    "compatibleFrom": 1
+  },
+  "remix": {
+    "allowed": true,
+    "license": "MIT"
+  }
+}

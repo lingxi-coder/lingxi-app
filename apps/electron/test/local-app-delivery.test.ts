@@ -14,7 +14,7 @@ import type { ToolRunItem } from '../src/renderer/model/runItem';
 const shell: ToolRunItem = { type: 'tool', id: 'install', tool: 'Bash', status: 'done', view: { verb: 'shell', label: 'Shell command', title: 'npm ci' } };
 const published: ToolRunItem = {
   type: 'tool', id: 'publish', tool: 'LocalApp', status: 'done', view: { verb: 'other', label: 'LocalApp', title: 'Publish reading garden' },
-  nativeOutput: { action: 'publish', id: 'a12345678901234567890', name: 'Reading garden', revision: 1 },
+  nativeOutput: { action: 'publish', id: 'a12345678901234567890123456789012', name: 'Reading garden', revision: 1 },
 };
 function render(items: ToolRunItem[], running = false): string {
   return renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
@@ -23,7 +23,7 @@ function render(items: ToolRunItem[], running = false): string {
 }
 
 test('a completed publish remains visible beside collapsed installation and start tools', () => {
-  const items = [shell, { ...shell, id: 'build' }, published, { ...published, id: 'start', nativeOutput: { action: 'start', id: 'a12345678901234567890', phase: 'running' } }];
+  const items = [shell, { ...shell, id: 'build' }, published, { ...published, id: 'start', nativeOutput: { action: 'start', id: 'a12345678901234567890123456789012', phase: 'running' } }];
   const html = render(items);
   assert.match(html, /class="tool-group-trigger"|class="transcript-disclosure-trigger tool-group-trigger"/);
   assert.match(html, /aria-expanded="false"/);

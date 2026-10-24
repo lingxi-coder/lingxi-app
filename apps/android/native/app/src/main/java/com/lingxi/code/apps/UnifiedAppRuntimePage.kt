@@ -28,6 +28,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     var error by remember(appId) { mutableStateOf<String?>(null) }
     var busy by remember(appId) { mutableStateOf(false) }
     var needsConsent by remember(appId) { mutableStateOf(false) }
+    var needsBrowserConsent by remember(appId) { mutableStateOf(false) }
     var opened by rememberSaveable(appId) { mutableStateOf(apps.consumeBrowserReview(appId)) }
     fun display(value: AppLaunch) {
         // ACTION_VIEW delegates the page to the user's external browser.
@@ -41,6 +42,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             val app = apps.get(appId)
             val current = apps.release(appId, app.currentRevision); release = current
             if (current.executesCode && current.digest !in app.executionGrants) { needsConsent = true; return }
+            if (!apps.keepRunning(appId, current.digest)) { needsBrowserConsent = true; return }
             val value = apps.openExternalBrowser(appId)
             launch = value; apps.markOpened(appId)
             if (openBrowser) display(value)
@@ -62,6 +64,16 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     }
     if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId)
     val selected = release
+    if (needsBrowserConsent && selected != null) AlertDialog(
+        onDismissRequest = { needsBrowserConsent = false; onClose() },
+        title = { Text("允许浏览器使用期间运行") },
+        text = { Text("灵犀需要在后台保留此应用的本地服务，并显示持续运行通知。可从通知或管理页面停止应用与 Agent 任务。授权仅适用于版本 ${selected.revision}（${selected.digest.take(16)}）；更新内容后需要重新允许。") },
+        confirmButton = { TextButton(onClick = { scope.launch {
+            try { apps.setKeepRunning(appId, selected.digest, true); needsBrowserConsent = false; prepare(true) }
+            catch (failure: Exception) { error = failure.message }
+        } }) { Text("允许并打开浏览器") } },
+        dismissButton = { TextButton(onClick = { needsBrowserConsent = false; onClose() }) { Text("取消") } },
+    )
     if (needsConsent && selected != null) AlertDialog(onDismissRequest = onClose, title = { Text("授权此版本运行") }, text = { Text("此版本将运行应用代码。版本 ${selected.revision}，内容 ${selected.digest.take(16)}。") }, confirmButton = {
         TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; prepare(true) } catch (failure: Exception) { error = failure.message } } }) { Text("允许此版本") }
     }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })

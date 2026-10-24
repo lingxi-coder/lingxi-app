@@ -71,6 +71,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     suspend fun openExternalBrowser(id: String): AppLaunch {
         val app = get(id)
         val release = release(id, app.currentRevision)
+        check(keepRunning(id, release.digest)) { "请先允许此版本在浏览器使用期间保持本地服务与运行通知。" }
         if ("agent" in release.capabilities) ensureAgentHost()
         // Start a user-visible foreground lease while LingXi is still visible;
         // browser foreground must not cancel its independently owned tasks.

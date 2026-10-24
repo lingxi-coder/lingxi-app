@@ -41,7 +41,8 @@ class LocalAppAccountIndependenceTest {
                     val release = value.getJSONObject("release").appRelease()
                     created.add(record.id)
                     if (release.executesCode) apps.grant(record.id, release.digest)
-                    Triple(record, release, apps.start(record.id))
+                    val launch = apps.start(record.id)
+                    Triple(apps.get(record.id), release, launch)
                 }
                 val sentinels = rows.map { (record, _, _) ->
                     val layout = apps.request("layout", record.id) as JSONObject

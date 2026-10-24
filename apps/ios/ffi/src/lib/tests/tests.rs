@@ -545,6 +545,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     std::fs::create_dir_all(&workspace).expect("workspace");
 
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+        app_agent_host: false,
         app_version: Some("2.4.1".into()),
         api_base: "https://example.invalid".to_string(),
         api_key: "sk-test".to_string(),
@@ -610,6 +611,7 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
 fn ios_host_environment_maps_stable_native_facts_without_model_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
+        app_agent_host: false,
         app_version: None,
         api_base: String::new(),
         api_key: String::new(),

@@ -52,6 +52,10 @@ private final class LocalAppBrowserSession: NSObject, WKNavigationDelegate, WKUI
     var isCurrent: Bool { !closed && service.runs[launch.run.appId]?.runId == launch.run.runId && service.runs[launch.run.appId]?.phase == "running" }
     func activate() { activePage = true }
     func deactivate() {
+        if activePage {
+            let client = service.client, appID = launch.run.appId, invocationID = launch.run.runId
+            Task { try? await client.agentClosed(appID: appID, invocationID: invocationID) }
+        }
         activePage = false
         picker?.cancel(); recording?.cancel()
         permissionAlert?.dismiss(animated: false)
@@ -75,6 +79,8 @@ private final class LocalAppBrowserSession: NSObject, WKNavigationDelegate, WKUI
         webView.load(URLRequest(url: launch.url))
     }
     func close() {
+        let client = service.client, appID = launch.run.appId, invocationID = launch.run.runId
+        Task { try? await client.agentClosed(appID: appID, invocationID: invocationID) }
         closed = true
         deactivate()
         permissionAlert?.dismiss(animated: false)
@@ -129,6 +135,19 @@ private final class LocalAppBrowserSession: NSObject, WKNavigationDelegate, WKUI
         let frame = message.frameInfo
         Task { @MainActor in
             do {
+                if ["agent.run", "agent.get", "agent.cancel"].contains(method) {
+                    try authorize("", frame: frame)
+                    guard capabilities.contains("agent"), try await service.runIsCurrent(appID: launch.run.appId, runID: launch.run.runId) else { throw LocalAppServiceFailure("AGENT_NOT_DECLARED", "This app invocation cannot call an Agent.") }
+                    if method == "agent.run", !(activePage && webView.window != nil && UIApplication.shared.applicationState == .active) { throw LocalAppServiceFailure("INACTIVE_APP_PAGE", "Open this application before starting an Agent task.") }
+                    let data = try JSONSerialization.data(withJSONObject: args)
+                    guard data.count <= 24 * 1024 * 1024 else { throw LocalAppServiceFailure("AGENT_INPUT_TOO_LARGE", "Resize images before sending them to the Agent.") }
+                    let result = try await service.client.agentPage(appID: launch.run.appId, invocationID: launch.run.runId, method: method, arguments: String(decoding: data, as: UTF8.self))
+                    try authorize("", frame: frame)
+                    guard try await service.runIsCurrent(appID: launch.run.appId, runID: launch.run.runId) else { throw LocalAppServiceFailure("STALE_APP_CALL", "The application has stopped.") }
+                    let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(result), options: .fragmentsAllowed)
+                    replyHandler(value, nil)
+                    return
+                }
                 let capability = method.split(separator: ".").first.map(String.init) ?? ""
                 let required = ["info", "serviceSocketUrl"].contains(method) ? "" : (method == "notify" ? "notifications" : capability)
                 guard try await service.runIsCurrent(appID: launch.run.appId, runID: launch.run.runId) else { throw LocalAppServiceFailure("STALE_APP_CALL", "The application has stopped.") }
@@ -223,8 +242,12 @@ private final class LocalAppBrowserSession: NSObject, WKNavigationDelegate, WKUI
       return url.href;
     };
     const invoke = (method, args = {}) => window.webkit.messageHandlers.localApp.postMessage({method,args});
+    const agent=Object.freeze({run:input=>invoke('agent.run',input),get:runId=>invoke('agent.get',{runId}),cancel:runId=>invoke('agent.cancel',{runId}),subscribe:(runId,listener)=>{
+      if(typeof listener!=='function')throw new TypeError('A listener is required');let active=true,timer,last=0;
+      const poll=async()=>{try{const run=await invoke('agent.get',{runId});if(active&&run.sequence>last){last=run.sequence;listener({type:'state',runId,sequence:run.sequence,time:run.updatedAt,run});}if(['succeeded','failed','cancelled','interrupted'].includes(run.state))active=false;}catch(error){if(active)console.warn('Agent subscription:',error.message);}if(active)timer=setTimeout(poll,750);};poll();return()=>{active=false;clearTimeout(timer);};
+    }});
     Object.defineProperty(window, 'localApp', {value: Object.freeze({
-      info:()=>invoke('info'), notify:body=>invoke('notify',{body}), serviceUrl,
+      info:()=>invoke('info'), agent, notify:body=>invoke('notify',{body}), serviceUrl,
       serviceSocketUrl:(name,path='/')=>invoke('serviceSocketUrl',{name,path}),
       clipboard: Object.freeze({read:()=>invoke('clipboard.read'),write:text=>invoke('clipboard.write',{text})}),
       files: Object.freeze({pick:()=>invoke('files.pick')}), photos: Object.freeze({pick:()=>invoke('photos.pick')}),
@@ -240,9 +263,12 @@ private final class LocalAppBrowserSession: NSObject, WKNavigationDelegate, WKUI
 private final class LocalAppMediaPicker: NSObject, PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate {
     private var continuation: CheckedContinuation<[String: String], Error>?
     private weak var controller: UIViewController?
+    private var requestID: UUID?
     func pick(method: String, presenter: UIViewController) async throws -> [String: String] {
-        try await withCheckedThrowingContinuation { continuation in
+        guard continuation == nil else { throw LocalAppServiceFailure("DEVICE_BUSY", "A device picker is already open.") }
+        return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
+            self.requestID = UUID()
             let picker: UIViewController
             if method == "photos.pick" {
                 var config = PHPickerConfiguration(); config.filter = .images; config.selectionLimit = 1
@@ -259,15 +285,16 @@ private final class LocalAppMediaPicker: NSObject, PHPickerViewControllerDelegat
     }
     func cancel() { finish(.failure(CancellationError())) }
     private func finish(_ result: Result<[String: String], Error>) {
-        guard let pending = continuation else { return }; continuation = nil
+        guard let pending = continuation else { return }; continuation = nil; requestID = nil
         controller?.dismiss(animated: true); controller = nil; pending.resume(with: result)
     }
     private func value(_ data: Data, name: String, type: String) throws -> [String: String] {
         guard data.count <= 16 * 1024 * 1024 else { throw LocalAppServiceFailure("FILE_TOO_LARGE", "Select a file smaller than 16 MB.") }
         return ["name": name, "mimeType": type, "base64": data.base64EncodedString()]
     }
-    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { cancel() }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { if self.controller === controller { cancel() } }
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard self.controller === controller else { return }
         guard let url = urls.first else { cancel(); return }
         do {
             let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -276,21 +303,27 @@ private final class LocalAppMediaPicker: NSObject, PHPickerViewControllerDelegat
             finish(.success(try value(Data(contentsOf: url), name: url.lastPathComponent, type: attributes.contentType?.preferredMIMEType ?? "application/octet-stream")))
         } catch { finish(.failure(error)) }
     }
-    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { cancel() }
+    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { if controller === picker { cancel() } }
     func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+        guard controller === picker else { return }
         guard let image = info[.originalImage] as? UIImage, let data = image.jpegData(compressionQuality: 0.85) else { cancel(); return }
         do { finish(.success(try value(data, name: "photo.jpg", type: "image/jpeg"))) } catch { finish(.failure(error)) }
     }
     func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        guard controller === picker, let expected = requestID else { return }
         guard let provider = results.first?.itemProvider else { cancel(); return }
         provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { [weak self] data, error in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.requestID == expected else { return }
                 do {
                     if let error { throw error }
                     guard let data else { throw LocalAppServiceFailure("PHOTO_UNAVAILABLE", "The selected photo could not be loaded.") }
-                    self.finish(.success(try self.value(data, name: "photo", type: "image/*")))
-                } catch { self.finish(.failure(error)) }
+                    let jpeg = try await Task.detached(priority: .userInitiated) { try LocalAppPhotoEncoding.jpeg(data) }.value
+                    guard self.requestID == expected else { return }
+                    self.finish(.success(try self.value(jpeg, name: "photo.jpg", type: "image/jpeg")))
+                } catch {
+                    if self.requestID == expected { self.finish(.failure(error)) }
+                }
             }
         }
     }

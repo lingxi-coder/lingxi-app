@@ -1573,6 +1573,10 @@ fun RootScreen(
     }
     LaunchedEffect(requestedDeepLink, projectState.loading, state.sessionReady, state.sessionTransitioning, state.streaming, approvedDraftLink, sourceScope, currentEngineSource, runtimeAppId, flowActive, voiceActive, captureState.phase, attachment, showCreateProject, activeProjectSyncing, workspacePickerOpen, routingDeepLink, draftLinkReview, linkedTargetError, linkedMessageUuid) {
         val link = requestedDeepLink ?: return@LaunchedEffect
+        if (runtimeAppId != null && link.route == "apps/$runtimeAppId" && link.params["review"] == "agent") {
+            onDeepLinkHandled(link)
+            return@LaunchedEffect
+        }
         if (routingDeepLink || draftLinkReview != null || linkedTargetError != null || linkedMessageUuid != null) return@LaunchedEffect
         if (projectState.loading || !state.sessionReady || state.sessionTransitioning || state.streaming || runtimeAppId != null || flowActive || voiceActive || attachment != null || showCreateProject || activeProjectSyncing || workspacePickerOpen) return@LaunchedEffect
         if (captureState.phase in setOf(com.lingxi.code.voice.VoiceCapturePhase.Starting, com.lingxi.code.voice.VoiceCapturePhase.Listening, com.lingxi.code.voice.VoiceCapturePhase.Stopping)) return@LaunchedEffect
@@ -1658,7 +1662,11 @@ fun RootScreen(
                         }
                         "market" -> { appsPageOpen = true }
                         "apps" -> {
-                            check(appLibrary.apps.any { it.id == id }) { "App is not installed on this device. Import legacy apps from the archive first." }
+                            // Initial library refresh can still be in flight
+                            // when a cold-start link reaches this route.
+                            // Resolve against the durable owner, not UI cache.
+                            localApps.get(id)
+                            if (link.params["review"] == "agent") localApps.browserReviewAppId = id
                             runtimeAppId = id
                         }
                         "runtime" -> {

@@ -1,14 +1,8 @@
 package com.lingxi.code.apps
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.util.Base64
-import android.webkit.WebView
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -16,185 +10,59 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
-import com.lingxi.code.R
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.blockTouchesBehind
 import com.lingxi.code.theme.LingXiTheme
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.io.File
-import java.util.UUID
 
+/** Trusted run controls only. Application content is displayed by the external browser. */
 @Composable
 fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> Unit, onShowDetails: (String) -> Unit) {
     val context = LocalContext.current
-    val lifecycle = LocalLifecycleOwner.current
-    val activity = remember(context) {
-        var owner: android.content.Context? = context
-        while (owner is android.content.ContextWrapper && owner !is android.app.Activity) owner = owner.baseContext
-        owner as? android.app.Activity
-    }
     val scope = rememberCoroutineScope()
-    var view by remember(appId) { mutableStateOf<WebView?>(null) }
-    var error by remember(appId) { mutableStateOf<String?>(null) }
+    var launch by remember(appId) { mutableStateOf<AppLaunch?>(null) }
     var release by remember(appId) { mutableStateOf<AppRelease?>(null) }
+    var error by remember(appId) { mutableStateOf<String?>(null) }
+    var busy by remember(appId) { mutableStateOf(false) }
     var needsConsent by remember(appId) { mutableStateOf(false) }
-    var paused by remember(appId) { mutableStateOf(false) }
-    var starting by remember(appId) { mutableStateOf(false) }
-    var request by remember(appId) { mutableStateOf(apps.runtime.pendingDeviceRequest(appId)) }
-    var cameraUri by rememberSaveable(appId) { mutableStateOf<String?>(null) }
-    var cameraFile by rememberSaveable(appId) { mutableStateOf<String?>(null) }
-    var external by remember { mutableStateOf<String?>(null) }
-    var menuOpen by remember { mutableStateOf(false) }
-    suspend fun open() {
-        if (starting) return
-        starting = true; error = null
+    var opened by rememberSaveable(appId) { mutableStateOf(apps.consumeBrowserReview(appId)) }
+    fun display(value: AppLaunch) {
+        // ACTION_VIEW delegates the page to the user's external browser.
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(value.url)).addCategory(Intent.CATEGORY_BROWSABLE))
+        opened = true
+    }
+    suspend fun prepare(openBrowser: Boolean) {
+        if (busy) return
+        busy = true; error = null
         try {
-            val record = apps.get(appId)
-            val current = apps.release(appId, record.currentRevision); release = current
-            if (current.executesCode && current.digest !in record.executionGrants) { needsConsent = true; return }
-            val operation = if (paused) "resume" else "start"
-            paused = false
-            val launch = apps.start(appId, operation)
-            view = apps.runtime.open(appId, launch)
-            if (lifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) apps.runtime.resume(appId)
-            else apps.runtime.pause(appId)
-            apps.markOpened(appId); paused = false
-        } catch (e: Exception) { error = e.message }
-        finally { starting = false }
+            val app = apps.get(appId)
+            val current = apps.release(appId, app.currentRevision); release = current
+            if (current.executesCode && current.digest !in app.executionGrants) { needsConsent = true; return }
+            val value = apps.openExternalBrowser(appId)
+            launch = value; apps.markOpened(appId)
+            if (openBrowser) display(value)
+        } catch (failure: Exception) { error = failure.message }
+        finally { busy = false }
     }
-    fun finishPicker(uri: Uri?) {
-        val pending = request ?: return
-        val temporaryPhoto = cameraFile.takeIf { pending.kind == "camera.capture" }
-        request = null
-        scope.launch {
-            try {
-                val value = uri?.let { selected -> withContext(Dispatchers.IO) {
-                    val mime = context.contentResolver.getType(selected) ?: "application/octet-stream"
-                    val bytes = context.contentResolver.openInputStream(selected)?.use { input ->
-                        val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(32768)
-                        while (true) { val count = input.read(buffer); if (count < 0) break
-                            require(output.size() + count <= 8 * 1024 * 1024) { "所选文件超过 8 MB，请选择较小文件。" }
-                            output.write(buffer, 0, count)
-                        }; output.toByteArray()
-                    } ?: kotlin.error("无法读取所选文件")
-                    JSONObject().put("mimeType", mime).put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP)).toString()
-                } }
-                pending.reply.complete(value)
-            } catch (e: Exception) { pending.reply.completeExceptionally(e); error = e.message }
-            finally {
-                temporaryPhoto?.let { path -> withContext(Dispatchers.IO) { File(path).delete() }; cameraFile = null; cameraUri = null }
-            }
-        }
+    LaunchedEffect(appId) { prepare(!opened) }
+    BackHandler(onBack = onClose)
+    Column(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).padding(24.dp).testTag(UiTags.APP_RUNTIME_PAGE), verticalArrangement = Arrangement.spacedBy(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("本地应用", style = MaterialTheme.typography.headlineSmall)
+        Text("应用页面在外部浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
+        if (busy) CircularProgressIndicator()
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        Button(enabled = !busy, onClick = { scope.launch { prepare(true) } }) { Text(if (launch == null) "启动并在浏览器打开" else "返回浏览器") }
+        TextButton(enabled = !busy, onClick = { onShowDetails(appId) }) { Text("应用设置与 Agent 授权") }
+        TextButton(enabled = !busy, onClick = { scope.launch { try { apps.stop(appId); onClose() } catch (failure: Exception) { error = failure.message } } }) { Text("停止应用与 Agent 任务") }
+        TextButton(onClick = onClose) { Text("关闭管理页面") }
+        Text("关闭此管理页面不会停止浏览器中的应用。可通过此处或运行通知停止应用。", style = MaterialTheme.typography.bodySmall)
     }
-    val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { finishPicker(it) }
-    val sharePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        request?.reply?.complete(null); request = null
-    }
-    val photoCapture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { accepted -> finishPicker(if (accepted) cameraUri?.let(Uri::parse) else null) }
-    fun capture() {
-        val pending = request ?: return
-        scope.launch {
-            try {
-                apps.runtime.authorizeDeviceRequest(pending)
-                val file = File(context.cacheDir, "shared_images/local-app-${UUID.randomUUID()}.jpg")
-                file.parentFile!!.mkdirs()
-                cameraFile = file.absolutePath
-                cameraUri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file).toString()
-                photoCapture.launch(Uri.parse(cameraUri))
-            } catch (failure: Exception) {
-                pending.reply.completeExceptionally(failure); request = null; error = failure.message
-            }
-        }
-    }
-    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
-        if (allowed) capture() else { request?.reply?.completeExceptionally(IllegalStateException("相机权限未获允许")); request = null }
-    }
-    LaunchedEffect(appId) { open() }
-    LaunchedEffect(appId) {
-        apps.runtime.deviceRequests.collect { next ->
-            if (next.appId != appId) { next.reply.completeExceptionally(IllegalStateException("应用窗口不可用")); return@collect }
-            request = next
-            if (next.kind == "share") {
-                sharePicker.launch(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, next.text), null))
-            } else if (next.kind == "camera.capture") {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) capture()
-                else cameraPermission.launch(Manifest.permission.CAMERA)
-            } else if (next.kind != "microphone.record") documentPicker.launch(arrayOf(if (next.kind == "photos.pick") "image/*" else "*/*"))
-        }
-    }
-    LaunchedEffect(paused, starting) {
-        if (paused && !starting && lifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) open()
-    }
-    DisposableEffect(appId, lifecycle) {
-        apps.runtime.externalNavigation = { external = it }
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> apps.runtime.resume(appId)
-                Lifecycle.Event.ON_PAUSE -> apps.runtime.pause(appId)
-                Lifecycle.Event.ON_STOP -> {
-                    apps.runtime.pause(appId)
-                    if (activity?.isChangingConfigurations != true && !apps.runtime.deviceRequestActive && !apps.keepRunning(appId, release?.digest)) scope.launch {
-                        try { apps.suspend(appId); view = null; paused = true } catch (e: Exception) { error = e.message }
-                    }
-                }
-                Lifecycle.Event.ON_START -> if (paused) scope.launch { open() }
-                else -> Unit
-            }
-        }
-        lifecycle.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycle.lifecycle.removeObserver(observer)
-            apps.runtime.externalNavigation = null
-            if (activity?.isChangingConfigurations != true) {
-                request?.reply?.completeExceptionally(IllegalStateException("应用窗口已关闭"))
-                apps.scope.launch { apps.runtime.close(appId) }
-            }
-        }
-    }
-    BackHandler { if (view?.canGoBack() == true) view?.goBack() else onClose() }
-    Box(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg).blockTouchesBehind().windowInsetsPadding(WindowInsets.systemBars).testTag(UiTags.APP_RUNTIME_PAGE)) {
-        view?.let { web -> AndroidView(factory = { web }, modifier = Modifier.fillMaxSize(), onRelease = { (it.parent as? android.view.ViewGroup)?.removeView(it) }) }
-        if (view == null && !needsConsent) Column(Modifier.align(Alignment.Center).padding(24.dp)) {
-            if (starting) CircularProgressIndicator()
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error); TextButton(onClick = { scope.launch { open() } }) { Text(stringResource(R.string.local_app_v2_retry)) } }
-            if (paused) Text(stringResource(R.string.local_app_v2_paused))
-        }
-        Surface(Modifier.align(Alignment.TopEnd).padding(8.dp), shape = MaterialTheme.shapes.large, tonalElevation = 4.dp) {
-            Row {
-                Box {
-                    TextButton(onClick = { menuOpen = true }) { Text(stringResource(R.string.local_app_v2_manage)) }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.local_app_v2_manage)) }, onClick = { menuOpen = false; onShowDetails(appId) })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.local_app_v2_refresh)) }, onClick = { menuOpen = false; view?.reload() })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.local_app_v2_stop)) }, onClick = {
-                            menuOpen = false
-                            scope.launch { try { apps.stop(appId); view = null; onClose() } catch (failure: Exception) { error = failure.message } }
-                        })
-                    }
-                }
-                TextButton(onClick = onClose) { Text(stringResource(R.string.local_app_v2_close)) }
-            }
-        }
-    }
+    if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId)
     val selected = release
-    request?.takeIf { it.kind == "microphone.record" }?.let { pending ->
-        LocalAppRecordingDialog(apps, pending) { if (request === pending) request = null }
-    }
-    if (needsConsent && selected != null) AlertDialog(onDismissRequest = onClose, title = { Text(stringResource(R.string.local_app_v2_allow_title)) }, text = {
-        Text(stringResource(R.string.local_app_v2_execution_note, selected.revision, selected.digest.take(16)))
-    }, confirmButton = { TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; open() } catch (e: Exception) { error = e.message } } }) { Text(stringResource(R.string.local_app_v2_allow_release)) } }, dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.local_app_v2_cancel)) } })
-    external?.let { url -> AlertDialog(onDismissRequest = { external = null }, title = { Text(stringResource(R.string.local_app_v2_external_title)) }, text = { Text(url) }, confirmButton = { TextButton(onClick = { external = null; runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } }) { Text(stringResource(R.string.local_app_v2_open)) } }, dismissButton = { TextButton(onClick = { external = null }) { Text(stringResource(R.string.local_app_v2_cancel)) } }) }
+    if (needsConsent && selected != null) AlertDialog(onDismissRequest = onClose, title = { Text("授权此版本运行") }, text = { Text("此版本将运行应用代码。版本 ${selected.revision}，内容 ${selected.digest.take(16)}。") }, confirmButton = {
+        TextButton(onClick = { scope.launch { try { apps.grant(appId, selected.digest); needsConsent = false; prepare(true) } catch (failure: Exception) { error = failure.message } } }) { Text("允许此版本") }
+    }, dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
 }

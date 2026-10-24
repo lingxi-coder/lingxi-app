@@ -256,6 +256,66 @@ export class LocalAppRuntime {
       requests.delete(ref); if (!requests.size) this.requests.delete(id);
     }
   }
+  /** Resume services for an expressly retained background Agent invocation. */
+  async resume(id: string, revision: number, invocationId: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.starts.has(id)) await this.starts.get(id);
+    const run = this.invocations.get(id);
+    if (!run || run.revision !== revision || run.id !== invocationId) throw new Error('Application invocation changed before resume');
+    if (run.phase === 'running') return;
+    const ref = createInvocationRef('local-app', id, { next: () => randomUUID() });
+    const requests = this.requests.get(id) ?? new Set<InvocationRef>(); requests.add(ref); this.requests.set(id, requests);
+    const cancel = () => { this.cancellations.add(ref); if (this.invocations.get(id) === run) run.controller.abort(); };
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+    const operation = this.exclusive(id, async () => {
+      if (this.cancellations.has(ref)) throw new Error('Application operation cancelled');
+      const row = this.store instanceof CoreLocalAppStore ? await this.store.getRevision(id, revision) : await this.store.get(id);
+      if (this.cancellations.has(ref)) throw new Error('Application operation cancelled');
+      if (this.invocations.get(id) !== run || row.revision !== revision || run.phase !== 'stopped') throw new Error('Application invocation changed before resume');
+      const missing = (run.manifest.capabilities ?? []).filter(capability => !row.grants.includes(capability));
+      if (missing.length) throw new Error(`Application permission required: ${missing.join(', ')}`);
+      run.controller = new AbortController(); run.error = undefined; run.readiness.clear();
+      try { await this.startServices(id, run); await this.syncRun(id, run); }
+      catch (error) {
+        const failure = run.error, canceled = run.controller.signal.aborted && !failure;
+        run.controller.abort(); await this.killChildren(run);
+        run.phase = canceled ? 'stopped' : 'failed'; run.error = canceled ? undefined : failure ?? String(error instanceof Error ? error.message : error);
+        if (run.error) this.log(id, run, 'host', run.error, 'stderr');
+        this.changed(); throw failure ? new Error(failure, { cause: error }) : error;
+      }
+    });
+    this.starts.set(id, operation);
+    try { await operation; }
+    finally {
+      if (this.starts.get(id) === operation) this.starts.delete(id);
+      signal?.removeEventListener('abort', cancel);
+      requests.delete(ref); if (!requests.size) this.requests.delete(id);
+    }
+  }
+  private async startServices(id: string, run: Invocation): Promise<void> {
+    run.phase = 'starting'; this.changed();
+    const controller = run.controller;
+    for (const spec of orderedProcesses(run.manifest.processes ?? [])) {
+      controller.signal.throwIfAborted();
+      const port = await freePort();
+      run.services.set(spec.name, { port, url: `http://127.0.0.1:${port}` });
+      const serviceEnv: NodeJS.ProcessEnv = { PORT: String(port), HOST: '127.0.0.1' };
+      for (const [name, service] of run.services) { const key = name.toUpperCase().replace(/[-.]/g, '_'); serviceEnv[`LOCAL_APP_${key}_URL`] = service.url; serviceEnv[`LOCAL_APP_${key}_PORT`] = String(service.port); }
+      if (spec.ready?.output) run.readiness.set(spec.name, { needle: spec.ready.output, matched: false, stdout: '', stderr: '' });
+      const child = await this.launch(id, run, spec, spec.name, serviceEnv, false);
+      child.once('exit', (code, signal) => {
+        if (this.invocations.get(id) !== run || run.controller !== controller || controller.signal.aborted) return;
+        run.error = `${spec.name} exited (${code ?? signal})`; run.phase = 'failed';
+        this.log(id, run, spec.name, run.error, 'stderr'); controller.abort(); this.changed();
+        void Promise.resolve(this.options.onRunEnded?.(id, run.id, 'failed')).then(() => this.killChildren(run)).then(() => this.syncRun(id, run)).catch(error => this.log(id, run, 'host', String(error)));
+      });
+      await this.waitReady(id, run, spec, child, port);
+    }
+    if (run.manifest.entry.type === 'static' && !(await fs.stat(await containedFile(run.workspace, run.manifest.entry.path))).isFile()) throw new Error('The application entry is not a file');
+    controller.signal.throwIfAborted();
+    run.phase = 'running'; this.log(id, run, 'host', 'Application is ready'); this.changed();
+  }
   private async launch(id: string, run: Invocation, step: LocalAppStep, name: string, extra: NodeJS.ProcessEnv, createEnvironment: boolean): Promise<ChildProcess> {
     const cwd = await containedFile(run.workspace, step.cwd ?? '.');
     const preparing = name === 'installing' || name === 'building';

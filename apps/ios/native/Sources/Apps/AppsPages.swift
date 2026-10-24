@@ -215,13 +215,13 @@ struct LocalAppDetailPage: View {
     @State private var dataPath = ""
     @State private var error: String?
     @State private var consent: UnifiedAppRelease?
+    @State private var agentRelease: UnifiedAppRelease?
     @State private var deleting = false
     @State private var publication: LocalAppMarketPublication?
     @State private var preparingPublication = false
     @State private var exportingSource = false
     @State private var sourceDocument: LocalAppSourceDocument?
     @State private var restoring = false
-    @State private var clearingBrowserData = false
     var body: some View {
         List {
             if let app = library.record(appId) {
@@ -247,19 +247,11 @@ struct LocalAppDetailPage: View {
                     Text("执行授权按发布摘要保存；撤销会停止当前应用。").font(.footnote)
                     Button("撤销执行授权",role:.destructive) { operation("revoke") }
                     if let release = releases.first(where: { $0.revision == app.currentRevision }) {
-                        ForEach((release.manifest.capabilities ?? []).filter { LocalAppDevicePermissions.supported.contains($0) }, id: \.self) { capability in
-                            Toggle(capability, isOn: Binding(get: {
-                                library.devicePermissions.allows(capability, appID: appId, digest: release.digest)
-                            }, set: { value in
-                                library.devicePermissions.set(capability, allowed: value, appID: appId, digest: release.digest)
-                                if !value { library.browser.close(appId) }
-                            }))
+                        if (release.manifest.capabilities ?? []).contains("agent") {
+                            Button("Agent 模型与工具授权") { agentRelease = release }
                         }
                     }
-                    Text("设备能力另行授权，只对当前发布有效；系统权限仍单独管理。").font(.footnote)
-                    Button("撤销全部设备授权", role: .destructive) {
-                        library.devicePermissions.revoke(appID: appId); library.browser.close(appId)
-                    }
+                    Text("相机、麦克风、照片和文件由外部浏览器处理。请在浏览器的网站权限中管理授权；灵犀不会代替浏览器授予或撤销这些权限。").font(.footnote)
                 }
                 Section("数据") {
                     Text(dataPath).font(.caption.monospaced()).textSelection(.enabled)
@@ -269,7 +261,7 @@ struct LocalAppDetailPage: View {
                         sourceDocument = .init(bytes: source.bytes); exportingSource = true
                     } catch { self.error = error.localizedDescription } } }
                     Text("源码包不包含运行数据库、浏览器数据、账号凭据或授权。").font(.footnote).foregroundStyle(.secondary)
-                    Button("清除浏览器数据",role:.destructive) { clearingBrowserData = true }
+                    Text("浏览器中的餐食记录等站点数据，请在 Safari／默认浏览器的站点数据设置中清除。停止或移除灵犀应用不会自动清除浏览器数据。").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("日志") { Text(logs.isEmpty ? "当前没有日志" : logs).font(.caption.monospaced()).textSelection(.enabled); Button("刷新日志") { Task { await load() } } }
                 Section("发布") {
@@ -309,11 +301,8 @@ struct LocalAppDetailPage: View {
                 }
             }
         }
+        .sheet(item: $agentRelease) { release in LocalAppAgentSettingsView(client: library.client, appID: appId, release: release) }
         .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await runRelease(release) } catch { self.error = error.localizedDescription; consent = nil } } } }
-        .confirmationDialog("清除浏览器数据？", isPresented: $clearingBrowserData, titleVisibility: .visible) {
-            Button("停止并清除浏览器数据", role: .destructive) { Task { do { try await library.stop(appId); try await library.browser.clearData(appId) } catch { self.error = error.localizedDescription } } }
-            Button("取消", role: .cancel) { }
-        } message: { Text("将清除这个应用的登录状态、localStorage 和 IndexedDB。服务数据目录保留。") }
         .confirmationDialog("恢复可编辑源码副本？", isPresented: $restoring, titleVisibility: .visible) {
             Button("恢复副本并继续开发") { Task { do { guard let app = library.record(appId) else { return }; onDevelop(try await library.restoreAuthoring(app)) } catch { self.error = error.localizedDescription } } }
             Button("取消", role: .cancel) { }
@@ -344,6 +333,7 @@ struct LocalAppDetailPage: View {
     }
 }
 
+/// Trusted run controls; downloaded application pages live in Safari/default browser.
 struct AppRuntimeView: View {
     @Environment(\.openURL) private var openURL
     let library: UnifiedLocalApps
@@ -351,56 +341,55 @@ struct AppRuntimeView: View {
     let appId: String
     let onClose: () -> Void
     let onShowDetails: (String) -> Void
-    @State private var webView: WKWebView?
+    @State private var launch: LocalAppLaunch?
     @State private var error: String?
-    @State private var externalURL: URL?
+    @State private var hasAgent = false
+    @State private var opened = false
+    @State private var busy = false
     @State private var consent: UnifiedAppRelease?
     var body: some View {
-        VStack(spacing:0) {
-            HStack {
-                Text(library.record(appId)?.name ?? "应用").font(.headline).lineLimit(1); Spacer()
-                Menu {
-                    Button("应用详情", systemImage: "info.circle") { onShowDetails(appId) }
-                    Button("刷新", systemImage: "arrow.clockwise") { webView?.reload() }
-                    Button("停止", systemImage: "stop.circle", role: .destructive) {
-                        Task { do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription } }
-                    }
-                } label: { Image(systemName:"ellipsis") }.accessibilityLabel("应用菜单")
-                Button(action:onClose) { Image(systemName:"xmark") }.accessibilityLabel("关闭应用窗口")
-            }.padding()
-            if library.isPaused(appId) {
-                ContentUnavailableView { Label("应用已暂停",systemImage:"pause.circle") } description: { Text("系统后台运行时间已结束。返回应用后可恢复运行。")} actions: { Button("恢复") { Task { await load() } } }
-            } else if let webView { HostedWebView(webView:webView) }
-            else if let error { ContentUnavailableView { Label("无法运行",systemImage:"exclamationmark.triangle") } description: { Text(error) } actions: { Button("重试") { Task { await load() } }; Button("详情") { onShowDetails(appId) } } }
-            else { ProgressView().frame(maxWidth:.infinity,maxHeight:.infinity) }
+        VStack(spacing: 20) {
+            Text(library.record(appId)?.name ?? "本地应用").font(.title2)
+            Text("应用页面在外部浏览器打开。模型凭据、Agent 授权和工具审批由灵犀管理。")
+            Text("识别提交后可返回灵犀等待结果或处理审批。iOS 后台运行时间由系统限制；应用暂停后，请返回灵犀恢复，再重新打开浏览器页面。")
+                .font(.footnote).foregroundStyle(.secondary)
+            if busy { ProgressView() }
+            if let error { Text(error).foregroundStyle(.red) }
+            Button(launch == nil ? "启动并在浏览器打开" : "返回浏览器") { Task { await load(openBrowser: true) } }.disabled(busy)
+            Button("应用设置与 Agent 授权") { onShowDetails(appId) }
+            Button("停止应用与 Agent 任务", role: .destructive) { Task {
+                do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
+            } }
+            Button("关闭管理页面", action: onClose)
+            Text("关闭此管理页面不会停止浏览器中的应用。").font(.footnote).foregroundStyle(.secondary)
         }
-        .task(id:appId) { await load() }
-        // A picker or camera may present above this view. Its return must not
-        // tear down the app, change navigation, or clear its document state.
-        .sheet(item:$consent) { release in LocalAppConsentSheet(manifest:release.manifest,digest:release.digest,title:"授权此版本运行") { Task { do { try await library.grant(appId,digest:release.digest); consent = nil; await load() } catch { self.error = error.localizedDescription; consent = nil } } } }
-        .alert("打开外部链接？",isPresented:Binding(get:{externalURL != nil},set:{if !$0 { externalURL = nil }}),presenting:externalURL) { url in Button("打开") { openURL(url) }; Button("取消",role:.cancel) {} } message: { url in Text(url.absoluteString) }
+        .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: appId) { await load(openBrowser: !opened && !library.consumeBrowserReview(appId)) }
+        .sheet(item: $consent) { release in
+            LocalAppConsentSheet(manifest: release.manifest, digest: release.digest, title: "授权此版本运行") {
+                Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true) }
+                catch { self.error = error.localizedDescription; consent = nil } }
+            }
+        }
+        .background { if hasAgent { LocalAppAgentInteractions(client: library.client, appID: appId) } }
         .accessibilityIdentifier("app-runtime")
     }
-    private func load() async {
-        error = nil
+    private func load(openBrowser: Bool) async {
+        guard !busy else { return }
+        busy = true; error = nil
+        defer { busy = false }
         do {
             await library.refresh()
-            guard let app = library.record(appId) else { throw LocalAppServiceFailure("APP_NOT_FOUND","The local app was not found.") }
-            let release = try await library.release(appId,revision:app.currentRevision)
+            guard let app = library.record(appId) else { throw LocalAppServiceFailure("APP_NOT_FOUND", "The local app was not found.") }
+            let release = try await library.release(appId, revision: app.currentRevision)
+            hasAgent = (release.manifest.capabilities ?? []).contains("agent")
             if release.manifest.executesCode && !app.executionGrants.contains(release.digest) { consent = release; return }
-            webView = try await library.browser.open(appId) { externalURL = $0 }; info.markOpened(app)
+            let value = try await library.openExternalBrowser(appId)
+            launch = value; info.markOpened(app); opened = true
+            if openBrowser {
+                openURL(value.url) { accepted in if !accepted { self.error = "无法打开外部浏览器。请检查默认浏览器设置。" } }
+            }
         } catch { self.error = error.localizedDescription }
-    }
-}
-
-private struct HostedWebView: UIViewRepresentable {
-    let webView: WKWebView
-    func makeUIView(context:Context) -> UIView { let container = UIView(); attach(to:container); return container }
-    func updateUIView(_ view:UIView,context:Context) { attach(to:view) }
-    private func attach(to container:UIView) {
-        guard webView.superview !== container else { return }
-        webView.removeFromSuperview(); container.addSubview(webView); webView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([webView.leadingAnchor.constraint(equalTo:container.leadingAnchor),webView.trailingAnchor.constraint(equalTo:container.trailingAnchor),webView.topAnchor.constraint(equalTo:container.topAnchor),webView.bottomAnchor.constraint(equalTo:container.bottomAnchor)])
     }
 }
 

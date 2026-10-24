@@ -1,0 +1,5 @@
+Test image: Red Apple.jpg by Abhijit Tembhekar, CC BY 2.0.
+Source: https://commons.wikimedia.org/wiki/File:Red_Apple.jpg
+Original: https://upload.wikimedia.org/wikipedia/commons/1/15/Red_Apple.jpg
+License: https://creativecommons.org/licenses/by/2.0/
+Used only as an acceptance fixture. The sample app resizes and re-encodes it before model submission.

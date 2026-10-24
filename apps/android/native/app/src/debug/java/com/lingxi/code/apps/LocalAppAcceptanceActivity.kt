@@ -5,7 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import com.lingxi.code.theme.LingXiTheme
 
-/** Non-exported, direct-debug-only host for the real native application page. */
+/** Non-exported, debug-only host for the real native application page in both distributions. */
 class LocalAppAcceptanceActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

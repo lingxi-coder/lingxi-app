@@ -101,7 +101,7 @@ class UnifiedAppWebRuntime(private val context: Context, private val apps: Unifi
         }
         WebViewCompat.addWebMessageListener(view, "lingxiNative", setOf(launch.origin)) { sourceView, message, sourceOrigin, mainFrame, reply ->
             val raw = message.data ?: return@addWebMessageListener
-            if (raw.length > 64 * 1024) return@addWebMessageListener
+            if (raw.length > 24 * 1024 * 1024) return@addWebMessageListener
             val input = runCatching { JSONObject(raw) }.getOrNull() ?: return@addWebMessageListener
             val requestId = input.optionalString("id") ?: return@addWebMessageListener
             apps.scope.launch {
@@ -133,6 +133,11 @@ class UnifiedAppWebRuntime(private val context: Context, private val apps: Unifi
             check(page != null && capability in page.capabilities && apps.permissions.allowed(id, launch.run.digest, capability)) { "Native capability required: $capability" }
         }
         when (method) {
+            "agent.run", "agent.get", "agent.cancel" -> {
+                check("agent" in (views[id]?.capabilities ?: emptySet())) { "Agent capability is not declared" }
+                if (method == "agent.run") check(devicePageActive(id)) { "Open this application before starting an Agent task" }
+                return apps.agentPage(launch, method, args)
+            }
             "info" -> {
                 val app = apps.get(id)
                 val layout = apps.request("layout", id) as JSONObject
@@ -201,13 +206,19 @@ class UnifiedAppWebRuntime(private val context: Context, private val apps: Unifi
         val run = (apps.request("status", id) as JSONObject).optJSONObject("run")
         return run?.optString("runId") == launch.run.runId && run.optString("phase") == "running"
     }
-    suspend fun close(id: String) = withContext(Dispatchers.Main.immediate) {
-        activeDeviceRequest?.takeIf { it.appId == id }?.reply?.completeExceptionally(IllegalStateException("Application run closed"))
-        views.remove(id)?.view?.let { view ->
-            (view.parent as? android.view.ViewGroup)?.removeView(view)
-            WebViewCompat.removeWebMessageListener(view, "lingxiNative")
-            view.stopLoading(); view.loadUrl("about:blank"); view.destroy()
-        }
+    suspend fun close(id: String, expectedView: WebView? = null) = withContext(Dispatchers.Main.immediate) {
+        val closing = views[id] ?: return@withContext
+        if (expectedView != null && closing.view !== expectedView) return@withContext
+        // Detach this exact owner before native cancellation can suspend. A
+        // concurrent reopen must never be removed by the old page's teardown.
+        views.remove(id)
+        activeDeviceRequest?.takeIf { it.appId == id && it.runId == closing.launch.run.runId }
+            ?.reply?.completeExceptionally(IllegalStateException("Application run closed"))
+        val view = closing.view
+        (view.parent as? android.view.ViewGroup)?.removeView(view)
+        WebViewCompat.removeWebMessageListener(view, "lingxiNative")
+        view.stopLoading(); view.loadUrl("about:blank"); view.destroy()
+        if ("agent" in closing.capabilities) apps.agentClosed(closing.launch)
         Unit
     }
     suspend fun clearData(id: String) = withContext(Dispatchers.Main.immediate) {

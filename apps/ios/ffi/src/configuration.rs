@@ -68,6 +68,8 @@ pub struct IosProviderConfigFfi {
 pub struct IosEngineLaunchConfigFfi {
     /// Actual native app version; None disables catalog networking for embedders.
     pub app_version: Option<String>,
+    /// Standalone Local App model host; disables personal session startup.
+    pub app_agent_host: bool,
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -196,6 +198,7 @@ pub(super) fn ios_mobile_config_from_launch_config(
     directories.validate_projects_mount(&linux.workspace_host_path, &linux.stable_workspace_id)?;
     let (cwd, logical_cwd) = directories.resolve_cwd(config.project_cwd.as_deref())?;
     let mut cfg = MobileConfig {
+        app_agent_host: config.app_agent_host,
         startup_catalog: config.app_version.as_ref().map(|version| {
             harness_runtime::StartupCatalog::new(
                 harness_runtime::CatalogPlatform::Ios,

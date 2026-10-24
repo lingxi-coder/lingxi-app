@@ -4,6 +4,7 @@ import type { DesktopLocalApp, LocalAppLog, LocalAppPhase, LocalAppVersion } fro
 import type { ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { useT } from '../theme/ThemeContext';
+import { LocalAppAgentQuestions, LocalAppAgentSettingsDialog } from './LocalAppAgentSettings';
 
 function appsApi() { const api = window.lingxi?.localApps; if (!api) throw new Error('Desktop application host is unavailable'); return api; }
 const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'Ready to open', installing: 'Installing dependencies', building: 'Building', starting: 'Starting', running: 'Running', stopping: 'Stopping', failed: 'Needs attention' };
@@ -19,6 +20,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [agentSettings, setAgentSettings] = useState<string | null>(null);
   const [logs, setLogs] = useState<LocalAppLog[]>([]);
   const [versions, setVersions] = useState<LocalAppVersion[]>([]);
   const request = useRef(0);
@@ -56,6 +58,7 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
         {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">Update ready — restart to use v{app.revision}</p>}
         {app.error && <p className="local-app-error">{app.error}</p>}
         <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>Details &amp; logs</button><button disabled={Boolean(app.marketOrigin && !app.sourcePath && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.sourcePath ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.sourcePath ? 'Customize' : 'Continue developing'}</button>
+          {app.manifest.capabilities?.includes('agent') && <button onClick={() => setAgentSettings(app.id)}>Agent</button>}
           <details><summary aria-label={`Manage ${app.name}`}>•••</summary><div className="local-app-menu">
             <button onClick={() => void act(app.id, () => appsApi().restart(app.id))}>Restart</button>
             <button onClick={() => void act(app.id, () => appsApi().stop(app.id))}>Stop</button>
@@ -81,6 +84,8 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
     <LegacyLocalApps visible={visible && tab === 'mine'} onImported={() => void refresh()}/>
     </div>
     {publication && <LocalAppPublish key={publication.id} app={publication} onClose={() => setPublication(undefined)}/>}
+    {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}
+    <LocalAppAgentQuestions/>
   </section>;
 }
 

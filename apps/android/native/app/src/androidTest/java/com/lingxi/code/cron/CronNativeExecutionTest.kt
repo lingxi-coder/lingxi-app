@@ -56,6 +56,7 @@ class CronNativeExecutionTest {
                 val engine = buildAndroidEngine(
                     config = AndroidEngineLaunchConfigFfi(
                         appVersion = null,
+                        appAgentHost = false,
                         apiBase = server.baseUrl, apiKey = "test-only-local", model = "anthropic/claude-sonnet-4-6", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":["anthropic"]}"""),

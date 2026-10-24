@@ -29,15 +29,62 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow(AppLibraryState())
     val state: StateFlow<AppLibraryState> = mutableState.asStateFlow()
+    internal fun recordRuntimeFailure(failure: Exception) {
+        mutableState.value = mutableState.value.copy(error = failure.message ?: failure.toString())
+    }
     private val creation = Mutex()
     private var handle: MobileLocalAppServiceHandle? = null
     private var linuxBound = false
+    private val agentCreation = Mutex()
+    private var agentModelHost: com.lingxi.code.bindings.runtime.MobileEngineHandle? = null
+    private var agentConfiguration: Pair<String, String?>? = null
+    private suspend fun ensureAgentHost() = agentCreation.withLock {
+        while (true) {
+            val configured = withContext(Dispatchers.IO) {
+                com.lingxi.code.settings.ProviderSettingsRepository(context).engineLaunchConfig()
+            }
+            // A chat's default model/thinking choice is not this app's model.
+            val identity = configured.providerProfilesJson to configured.routingJson
+            if (agentModelHost != null && agentConfiguration == identity) return@withLock
+            withContext(Dispatchers.IO) {
+                agentModelHost = com.lingxi.code.voice.buildVoiceEngine(
+                    context = context, model = configured.defaultModel,
+                    providerProfilesJson = configured.providerProfilesJson, routingJson = configured.routingJson,
+                    appAgentHost = true, onEvent = {}, onPermission = {},
+                ) ?: error("无法初始化应用的模型服务，请检查模型配置。")
+                agentConfiguration = identity
+            }
+            // Re-read after construction; a concurrent settings change must
+            // not let the first page request use the previous configuration.
+        }
+    }
+
     val permissions = AppDevicePermissions(context)
     val runtime = UnifiedAppWebRuntime(context, this)
     val market = UnifiedAppMarket(context, this)
     private val opened = context.getSharedPreferences("local-app-v2-opened", Context.MODE_PRIVATE)
     private val visible = mutableSetOf<android.app.Activity>()
     private val backgroundSettings = Mutex()
+    private val browserRuns = mutableMapOf<String, AppLaunch>()
+    var browserReviewAppId: String? = null
+    fun consumeBrowserReview(id: String): Boolean = (browserReviewAppId == id).also { if (it) browserReviewAppId = null }
+    suspend fun openExternalBrowser(id: String): AppLaunch {
+        val app = get(id)
+        val release = release(id, app.currentRevision)
+        if ("agent" in release.capabilities) ensureAgentHost()
+        // Start a user-visible foreground lease while LingXi is still visible;
+        // browser foreground must not cancel its independently owned tasks.
+        withContext(Dispatchers.Main.immediate) { LocalAppProcessService.acquire(context, id) }
+        try {
+            val launch = start(id)
+            browserRuns[id] = launch
+            LocalAppProcessService.ready(id)
+            return launch
+        } catch (failure: Throwable) {
+            if (browserRuns[id] == null) LocalAppProcessService.release(context, id)
+            throw failure
+        }
+    }
 
     init {
         scope.launch { refresh() }
@@ -54,9 +101,10 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                     try {
                         for (app in (request("list") as JSONArray).let { list -> (0 until list.length()).map { list.getJSONObject(it).appRecord() } }) {
                             if (visible.isNotEmpty()) break
-                            if (runtime.pendingDeviceRequest(app.id) != null) continue
+                            if (runtime.pendingDeviceRequest(app.id) != null || browserRuns.containsKey(app.id)) continue
                             val running = (request("status", app.id) as JSONObject).optJSONObject("run") ?: continue
                             val release = release(app.id, running.getLong("revision"))
+                            if ("agent" in release.capabilities) runtime.launch(app.id)?.let { runCatching { agentClosed(it) } }
                             if (visible.isEmpty() && runtime.pendingDeviceRequest(app.id) == null && release.executesCode && !keepRunning(app.id, release.digest)) runCatching { suspend(app.id) }
                         }
                     } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -79,6 +127,19 @@ class UnifiedLocalApps private constructor(private val context: Context) {
                 decodeAppResponse(created.requestJson(JSONObject().put("op", "configureTarget").put("target", appTarget(if (BuildConfig.MOBILE_LINUX_FULL) "mobile-linux" else "web")).toString()))
             }
         }.also { handle = it }
+    }
+    suspend fun agentPage(launch: AppLaunch, method: String, args: JSONObject): Any? = withContext(Dispatchers.IO) {
+        ensureAgentHost()
+        decodeAppResponse(service().agentPageJson(launch.run.appId, launch.run.runId, method, args.toString()))
+    }
+    /** Trusted app-details UI only; no WebView message can reach this method. */
+    suspend fun agentHost(request: JSONObject): Any? = withContext(Dispatchers.IO) {
+        ensureAgentHost()
+        decodeAppResponse(service().agentHostJson(request.toString()))
+    }
+    suspend fun agentClosed(launch: AppLaunch) = withContext(Dispatchers.IO) {
+        decodeAppResponse(service().agentPageClosed(launch.run.appId, launch.run.runId))
+        Unit
     }
     private suspend fun bindLinux() = creation.withLock {
         check(BuildConfig.MOBILE_LINUX_FULL) { "此发行渠道不支持 Linux 应用代码执行。" }
@@ -112,6 +173,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     suspend fun release(id: String, revision: Long) = (request("getRelease", id) { put("revision", revision) } as JSONObject).appRelease()
     suspend fun grant(id: String, digest: String) { request("grant", id) { put("digest", digest) }; refresh() }
     suspend fun revoke(id: String) {
+        browserRuns.remove(id)
         runtime.close(id)
         request("stop", id)
         LocalAppProcessService.release(context, id)
@@ -145,8 +207,8 @@ class UnifiedLocalApps private constructor(private val context: Context) {
         LocalAppProcessService.ready(id)
         return launch
     }
-    suspend fun stop(id: String) { runtime.close(id); request("stop", id); LocalAppProcessService.release(context, id); refresh() }
-    suspend fun suspend(id: String) { runtime.close(id); request("suspend", id); LocalAppProcessService.release(context, id) }
+    suspend fun stop(id: String) { browserRuns.remove(id); runtime.close(id); request("stop", id); LocalAppProcessService.release(context, id); refresh() }
+    suspend fun suspend(id: String) { browserRuns.remove(id); runtime.close(id); request("suspend", id); LocalAppProcessService.release(context, id) }
     suspend fun repair(id: String) {
         val launch = start(id, "repair")
         if (runtime.launch(id) != null) runtime.open(id, launch)
@@ -166,7 +228,7 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             item?.optionalString("text") ?: value.get(index).toString()
         } else value?.toString().orEmpty()
     }
-    suspend fun remove(id: String) { stop(id); runtime.clearData(id); request("remove", id); permissions.revoke(id); refresh() }
+    suspend fun remove(id: String) { stop(id); request("remove", id); permissions.revoke(id); refresh() }
     suspend fun prepareAuthoring(id: String, sessions: Map<String, String>): AppAuthoringResolution {
         val app = get(id)
         val source = app.authoring?.sourceDirectory
@@ -266,4 +328,4 @@ internal fun appTarget(environment: String): JSONObject = JSONObject().put("plat
     .put("architecture", canonicalAppArchitecture(Build.SUPPORTED_ABIS.firstOrNull()))
     .put("runtimeVersion", BuildConfig.MOBILE_LINUX_SDK_VERSION)
     .put("channels", JSONArray(listOf(BuildConfig.FLAVOR)))
-    .put("capabilities", JSONArray((AppDevicePermissions.supported + setOf("network") + if (BuildConfig.MOBILE_LINUX_FULL) setOf("process", "background") else emptySet()).toList()))
+    .put("capabilities", JSONArray((setOf("camera", "photos", "files", "microphone", "clipboard", "share", "network", "agent") + if (BuildConfig.MOBILE_LINUX_FULL) setOf("process", "background") else emptySet()).toList()))

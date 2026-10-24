@@ -186,6 +186,7 @@ import XCTest
 
             let config = IosEngineLaunchConfigFfi(
                 appVersion: nil,
+                appAgentHost: false,
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: snapshot.defaultModelID ?? "",

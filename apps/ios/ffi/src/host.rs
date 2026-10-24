@@ -342,6 +342,7 @@ pub fn build_ios_engine(
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     build_ios_engine_with_config(
         IosEngineLaunchConfigFfi {
+            app_agent_host: false,
             app_version: None,
             api_base,
             api_key,

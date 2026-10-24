@@ -68,7 +68,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             // Exercise external overlays at an allowed temporary guest location,
             // while checking both the hidden guest file and persistent HOME.
             phase = "external-overlay-command"
-            try await run("import os; os.makedirs('\(guest)', exist_ok=True); open('\(guest)/same.txt', 'w').write('hidden-guest-value')")
+            try await run("import os; os.makedirs('\(guest)', exist_ok=True); os.chmod('\(guest)', 0o700); open('\(guest)/same.txt', 'w').write('hidden-guest-value')")
             let mounts = [
                 MobileLinuxMountSpecFfi(hostPath: external.path, guestPath: guest, readOnly: false, purpose: .external),
                 MobileLinuxMountSpecFfi(hostPath: external.appendingPathComponent("ro").path, guestPath: guest + "/ro", readOnly: true, purpose: .external),
@@ -131,7 +131,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             _ = try await runtime.configureMounts(mounts: [child])
             try await run("assert open('same.txt').read() == 'ext'", cwd: child.guestPath)
             _ = try await runtime.configureMounts(mounts: [])
-            try await run("import shutil; assert open('\(guest)/same.txt').read() == 'hidden-guest-value'; shutil.rmtree('\(guest)')")
+            try await run("import os, shutil; assert os.stat('\(guest)').st_mode & 0o777 == 0o700; assert open('\(guest)/same.txt').read() == 'hidden-guest-value'; shutil.rmtree('\(guest)')")
             XCTAssertEqual(try Data(contentsOf: hidden.appendingPathComponent("same.txt")), original)
             XCTAssertEqual(try Data(contentsOf: projectSentinel), Data("keep-workspace-source".utf8))
             XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: projects.path)[.type] as? FileAttributeType, .typeDirectory)

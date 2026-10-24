@@ -4,6 +4,23 @@ import ZIPFoundation
 @testable import LingxiCode
 
 final class LocalAppMarketTests: XCTestCase {
+    func testServiceEnvelopePreservesNullSuccessAndFailure() throws {
+        let decoder = JSONDecoder()
+        let success = try decoder.decode(LocalAppServiceEnvelope<LocalAppJSON>.self,
+            from: Data(#"{"ok":true,"value":null}"#.utf8))
+        XCTAssertEqual(try success.result(), .null)
+        let missing = try decoder.decode(LocalAppServiceEnvelope<LocalAppJSON>.self,
+            from: Data(#"{"ok":true}"#.utf8))
+        XCTAssertThrowsError(try missing.result()) { error in
+            XCTAssertEqual((error as? LocalAppServiceFailure)?.code, "INVALID_RESPONSE")
+        }
+        let failure = try decoder.decode(LocalAppServiceEnvelope<UnifiedAppRecord>.self,
+            from: Data(#"{"ok":false,"value":null,"error":{"code":"DENIED","message":"Denied"}}"#.utf8))
+        XCTAssertThrowsError(try failure.result()) { error in
+            XCTAssertEqual((error as? LocalAppServiceFailure)?.code, "DENIED")
+        }
+    }
+
     private var manifest: String { #"{"schema":2,"name":"Fixture","summary":"Fixture","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"}],"package":{"files":["lingxi-app.json","index.html"],"dependencyLocks":[]}}"# }
     func testStableBrowserIdentityAndOrigin() {
         XCTAssertEqual(LocalAppBrowserIdentity.storeID("app-a"),LocalAppBrowserIdentity.storeID("app-a"))

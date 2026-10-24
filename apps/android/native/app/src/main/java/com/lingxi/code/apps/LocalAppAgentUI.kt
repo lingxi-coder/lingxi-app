@@ -42,7 +42,10 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
             val models = current.getJSONArray("models")
             val model = (0 until models.length()).map { models.getJSONObject(it) }.firstOrNull { key(it) == selected && it.optBoolean("canSelect") }
             val tools = JSONObject(); granted.filter { it in declared && current.getJSONObject("tools").has(it) }.forEach { tools.put(it, current.getJSONObject("tools").getJSONObject(it)) }
-            val settings = if (revoke) JSONObject.NULL else JSONObject().put("model", model ?: throw IllegalStateException("请选择可用模型")).put("tools", tools)
+            // Catalog labels/capabilities are presentation metadata. The
+            // strict native settings contract accepts only the model identity.
+            val modelRef = model?.let { JSONObject().put("providerId", it.getString("providerId")).put("modelId", it.getString("modelId")) }
+            val settings = if (revoke) JSONObject.NULL else JSONObject().put("model", modelRef ?: throw IllegalStateException("请选择可用模型")).put("tools", tools)
                 .put("background", false).put("maxTurns", turns).put("timeoutMs", minutes * 60_000)
             apps.agentHost(JSONObject().put("op", "configure").put("appId", release.appId).put("settings", settings))
             onDismiss()
@@ -57,6 +60,9 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
             if (current != null) {
                 Text("模型", style = MaterialTheme.typography.titleSmall)
                 val models = current.getJSONArray("models")
+                if ((0 until models.length()).none { models.getJSONObject(it).optBoolean("canSelect") }) {
+                    Text("尚无可用模型。请先在灵犀设置中配置模型和账号。", style = MaterialTheme.typography.bodySmall)
+                }
                 (0 until models.length()).map { models.getJSONObject(it) }.filter { it.optBoolean("canSelect") }.forEach { model ->
                     Row(Modifier.fillMaxWidth().clickable { selected = key(model) }) {
                         RadioButton(selected == key(model), onClick = { selected = key(model) })

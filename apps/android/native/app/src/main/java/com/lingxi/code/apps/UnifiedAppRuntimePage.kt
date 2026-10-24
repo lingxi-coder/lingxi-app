@@ -89,14 +89,18 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             try {
                 val value = uri?.let { selected -> withContext(Dispatchers.IO) {
                     val mime = context.contentResolver.getType(selected) ?: "application/octet-stream"
+                    val photo = pending.kind == "photos.pick" || pending.kind == "camera.capture"
+                    val maximumBytes = (if (photo) 16 else 8) * 1024 * 1024
                     val bytes = context.contentResolver.openInputStream(selected)?.use { input ->
                         val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(32768)
                         while (true) { val count = input.read(buffer); if (count < 0) break
-                            require(output.size() + count <= 8 * 1024 * 1024) { "所选文件超过 8 MB，请选择较小文件。" }
+                            require(output.size() + count <= maximumBytes) { "所选文件过大，请选择较小文件。" }
                             output.write(buffer, 0, count)
                         }; output.toByteArray()
                     } ?: kotlin.error("无法读取所选文件")
-                    JSONObject().put("mimeType", mime).put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP)).toString()
+                    val normalized = if (photo) LocalAppPhotoEncoding.jpeg(bytes) else bytes
+                    JSONObject().put("mimeType", if (photo) "image/jpeg" else mime)
+                        .put("base64", Base64.encodeToString(normalized, Base64.NO_WRAP)).toString()
                 } }
                 pending.reply.complete(value)
             } catch (e: Exception) { pending.reply.completeExceptionally(e); error = e.message }
@@ -166,7 +170,12 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             apps.runtime.externalNavigation = null
             if (activity?.isChangingConfigurations != true) {
                 request?.reply?.completeExceptionally(IllegalStateException("应用窗口已关闭"))
-                apps.scope.launch { apps.runtime.close(appId) }
+                val closingView = view
+                if (closingView != null) apps.scope.launch {
+                    try { apps.runtime.close(appId, closingView) }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (failure: Exception) { apps.recordRuntimeFailure(failure) }
+                }
             }
         }
     }

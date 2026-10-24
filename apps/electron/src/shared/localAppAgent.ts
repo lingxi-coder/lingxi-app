@@ -48,6 +48,8 @@ export interface LocalAppAgentUsage {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /** False when some used model has no pricing; costUsd is then incomplete. */
+  costEstimated?: boolean;
   turns?: number;
 }
 export interface LocalAppAgentResult {

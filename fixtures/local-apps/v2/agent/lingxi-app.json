@@ -1,0 +1,36 @@
+{
+  "schema": 2,
+  "name": "Agent device acceptance",
+  "entry": {
+    "type": "static",
+    "path": "index.html"
+  },
+  "capabilities": [
+    "agent"
+  ],
+  "agent": {
+    "tools": []
+  },
+  "targets": [
+    {
+      "platform": "ios",
+      "environment": "web"
+    },
+    {
+      "platform": "android",
+      "environment": "web"
+    }
+  ],
+  "package": {
+    "files": [
+      "index.html",
+      "public-apple.jpg",
+      "ATTRIBUTION.txt"
+    ],
+    "dependencyLocks": []
+  },
+  "dataSchema": {
+    "version": 1,
+    "compatibleFrom": 1
+  }
+}

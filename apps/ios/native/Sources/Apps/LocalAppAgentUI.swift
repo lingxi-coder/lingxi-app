@@ -59,6 +59,9 @@ struct LocalAppAgentSettingsView: View {
                                 Text("\(choice.label) · \(choice.providerId)").tag(choice.id)
                             }
                         }
+                        if !catalog.models.contains(where: { $0.canSelect }) {
+                            Text("尚无可用模型。请先在灵犀设置中配置模型和账号。").foregroundStyle(.secondary)
+                        }
                         Text("任务独立运行，只读取本次输入；使用你在灵犀配置的模型账号。").font(.footnote)
                     }
                     if !catalog.servers.isEmpty {

@@ -23,7 +23,7 @@ const unsubscribe = localApp.agent.subscribe(runId, event => {
 
 Native camera/photo pickers return `{mimeType, base64}`. Convert the MIME field to `media_type` for the Agent request. Resize images before submitting: the native bridge limits the complete request to 24 MiB. The runtime additionally validates image signatures, decode budgets, and a maximum of four images.
 
-iOS photo-library selections are normalized off the main thread to an oriented JPEG with a maximum dimension of 2048 pixels. This includes HEIC/PNG selections; the MIME is `image/jpeg`, never `image/*`. Inputs over 16 MiB or 64 megapixels are rejected. The file picker preserves original bytes. Cancelled photo callbacks cannot complete a later picker request.
+Android camera/photo selections and iOS photo-library selections are normalized off the main thread to an oriented JPEG with a maximum dimension of 2048 pixels. This includes device-supported HEIC/PNG selections; the MIME is `image/jpeg`, never `image/*`. Inputs over 16 MiB or 64 megapixels are rejected. File pickers preserve original bytes (Android limits files to 8 MiB). Cancelled iOS photo callbacks cannot complete a later picker request.
 
 Subscriptions poll the durable current task with monotonically increasing sequence numbers. Reconnecting reads the current snapshot. Unsubscribing suppresses late responses. The page has no generic Agent host, configuration, permission approval or question-answer API.
 
@@ -44,6 +44,8 @@ The host stores input hashes, request deduplication, grants, task state, results
 
 Structured output uses the internal result tool with offline Draft-7 validation (`jsonschema 0.46.10`, formats disabled). Remote schema references and other dialects are rejected. Text resembling JSON is not a structured success. Usage comes from the runtime; it is not a hard monetary-budget guarantee.
 
+Every task has a separate cost-accounting session. `inputTokens`, `outputTokens` and `turns` describe that task's provider responses. If `costEstimated` is false, at least one model lacks pricing and `costUsd` is incomplete; clients must not present it as the full bill or a zero-cost call.
+
 ## Acceptance fixture
 
 `fixtures/local-apps/v2/calorie-agent` uses native camera/photos, image compression, a structured nutrition result, editable portions and explicit save confirmation. Nutrition estimates remain application behavior, outside the generic Agent interface.
@@ -51,3 +53,9 @@ Structured output uses the internal result tool with offline Draft-7 validation 
 The current source checks, device coordination, build constraints and outstanding acceptance cases are recorded in `/Users/luolingfeng/lingxi/acceptance/mobile-app-agent-20261023/report.html`.
 
 The current Mobile implementation executes locally through its native host. Selecting a paired Desktop Agent and the dedicated cross-device app-task transport remain unimplemented; the ordinary Remote Control chat gateway is not exposed to Local Apps.
+
+## Physical acceptance fixtures
+
+`LocalAppAgentAcceptanceTest` on Android exercises the real native bridge, configured model, public image, validated result, positive per-task usage, independent app scope, request retry/conflict, reload, cancellation and revocation. The meal example test also exercises its image decoding and click handlers, edits the returned portion, saves and reloads the actual application. Native picker and photo-codec checks are recorded separately. The optional MCP test uses a loopback-only fixture and a unique temporary server config, restores that config, compares a nonce not included in the model prompt, and verifies pending approval revocation. It never substitutes a provider response.
+
+iOS `LocalAppAgentAcceptanceTests` requires a signed physical iPhone with the explicit vision/tool model configured. It uses a visible real WKWebView and the shared reviewed `fixtures/local-apps/v2/agent` bundle; simulator success does not satisfy this gate. The public apple includes its CC BY 2.0 attribution. Source parse/type checks and earlier SDK checkpoints must not be reported as final native package or device acceptance. Current receipts and remaining checks live in the task acceptance report.

@@ -29,6 +29,9 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutableState = MutableStateFlow(AppLibraryState())
     val state: StateFlow<AppLibraryState> = mutableState.asStateFlow()
+    internal fun recordRuntimeFailure(failure: Exception) {
+        mutableState.value = mutableState.value.copy(error = failure.message ?: failure.toString())
+    }
     private val creation = Mutex()
     private var handle: MobileLocalAppServiceHandle? = null
     private var linuxBound = false

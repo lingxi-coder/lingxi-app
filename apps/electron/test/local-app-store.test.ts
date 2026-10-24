@@ -5,7 +5,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalAppStore, copySource } from '../src/main/local-apps/store.ts';
+import { copySource } from '../src/main/local-apps/store.ts';
+import { LocalAppStore } from './fixtures/local-app-store.ts';
 
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const root = await fs.mkdtemp(join(tmpdir(), 'lingxi-local-app-store-'));
@@ -16,7 +17,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
 test('an incomplete first publish does not hide other apps, while damaged metadata identifies the app', async t => {
   const { store } = await fixture(t);
   const row = await store.publish({ name: 'Existing', html: '<!doctype html>' });
-  const incomplete = 'a11111111111111111111';
+  const incomplete = 'a11111111111111111111111111111111';
   await fs.mkdir(store.directory(incomplete));
   assert.deepEqual((await store.list()).map(app => app.id), [row.id]);
   await fs.writeFile(join(store.directory(incomplete), 'app.json'), '{broken');
@@ -40,7 +41,7 @@ test('published executable scripts still run after snapshot and workspace creati
   const { store } = await fixture(t);
   const source = join(store.root, 'imports', 'scripts');
   await fs.mkdir(source, { recursive: true });
-  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 1, name: 'Scripts', entry: { type: 'static', path: 'index.html' }, install: [{ command: './install.sh' }] }));
+  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Scripts', entry: { type: 'static', path: 'index.html' }, install: [{ command: './install.sh' }] }));
   await fs.writeFile(join(source, 'index.html'), '<!doctype html>');
   await fs.writeFile(join(source, 'install.sh'), '#!/bin/sh\nprintf ready\n', { mode: 0o755 });
   const row = await store.publish({ staged_path: source });
@@ -53,7 +54,7 @@ test('a copied preparation marker cannot skip installation in a fresh workspace'
   const { store } = await fixture(t);
   const source = join(store.root, 'imports', 'prepared');
   await fs.mkdir(source, { recursive: true });
-  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 1, name: 'Prepared source', entry: { type: 'static', path: 'index.html' } }));
+  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Prepared source', entry: { type: 'static', path: 'index.html' } }));
   await fs.writeFile(join(source, 'index.html'), '<!doctype html>');
   await fs.writeFile(join(source, '.lingxi-prepared.json'), '{"revision":1}');
   const row = await store.publish({ staged_path: source });
@@ -68,7 +69,7 @@ test('custom Python environments are excluded using a regular marker without ski
   const { store } = await fixture(t);
   const source = join(store.root, 'imports', 'custom-python');
   await fs.mkdir(join(source, '.python-env', 'bin'), { recursive: true });
-  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 1, name: 'Python', entry: { type: 'static', path: 'index.html' }, install: [{ command: 'python -V', venv: '.python-env' }] }));
+  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Python', entry: { type: 'static', path: 'index.html' }, install: [{ command: 'python -V', venv: '.python-env' }] }));
   await fs.writeFile(join(source, 'index.html'), '<!doctype html>');
   await fs.writeFile(join(source, 'pyvenv.cfg'), 'project-owned root file');
   await fs.writeFile(join(source, '.python-env', 'pyvenv.cfg'), 'home = /python');

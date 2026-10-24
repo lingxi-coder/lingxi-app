@@ -11,11 +11,12 @@ use super::linux_conversion::{
 };
 #[cfg(feature = "uniffi")]
 use super::linux_types::{
-    AndroidMobileLinuxEventSink, MobileLinuxApiErrorFfi, MobileLinuxCapabilityFfi,
-    MobileLinuxCommandRequestFfi, MobileLinuxCommandResultFfi, MobileLinuxEventFfi,
-    MobileLinuxEventKindFfi, MobileLinuxMountSpecFfi, MobileLinuxProcessHandleFfi,
-    MobileLinuxPtyOpenRequestFfi, MobileLinuxPtySessionHandleFfi, MobileLinuxPtySizeFfi,
-    MobileLinuxStatusFfi, MobileLinuxTaskSnapshotFfi, MobileLinuxTaskStateFfi,
+    AndroidMobileLinuxEventSink, AndroidMobileLinuxRootfsStager, MobileLinuxApiErrorFfi,
+    MobileLinuxCapabilityFfi, MobileLinuxCommandRequestFfi, MobileLinuxCommandResultFfi,
+    MobileLinuxEventFfi, MobileLinuxEventKindFfi, MobileLinuxMountSpecFfi,
+    MobileLinuxProcessHandleFfi, MobileLinuxPtyOpenRequestFfi, MobileLinuxPtySessionHandleFfi,
+    MobileLinuxPtySizeFfi, MobileLinuxStatusFfi, MobileLinuxTaskSnapshotFfi,
+    MobileLinuxTaskStateFfi,
 };
 #[cfg(feature = "uniffi")]
 use mobile_linux_api::MAX_MOBILE_LINUX_EVENT_BATCH;
@@ -145,6 +146,25 @@ impl AndroidMobileLinuxRuntimeHandle {
             .await
             .map(status_to_ffi)
             .map_err(mobile_linux_error_to_ffi)
+    }
+
+    /// The independent maintenance owner outlives cancellation of the host UI.
+    pub async fn stage_and_repair_rootfs(
+        &self,
+        stager: Box<dyn AndroidMobileLinuxRootfsStager>,
+    ) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        harness_runtime::mobile::linux_maintenance::repair_rootfs_with_preparation(
+            self.runtime.clone(),
+            move || async move {
+                stager
+                    .stage()
+                    .await
+                    .map_err(|error| mobile_linux_api::MobileLinuxError::Io(error.to_string()))
+            },
+        )
+        .await
+        .map(status_to_ffi)
+        .map_err(mobile_linux_error_to_ffi)
     }
 
     pub async fn reset_rootfs(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
@@ -376,7 +396,10 @@ pub(super) fn android_mobile_linux_runtime(
                 archive_sha256: cfg.archive_sha256.clone(),
             },
         );
-        let runtime = Arc::new(runtime) as Arc<dyn mobile_linux_api::MobileLinuxRuntime>;
+        let runtime = harness_runtime::mobile::linux_maintenance::coordinate_runtime(
+            std::path::Path::new(&cfg.managed_root),
+            Arc::new(runtime),
+        );
         RUNTIMES
             .lock()
             .expect("Android MobileLinux runtime registry")

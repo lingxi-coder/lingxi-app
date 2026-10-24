@@ -7,7 +7,7 @@ export function createMarketGateway({ origin, secret, fetcher = fetch }) {
   if (upstream.protocol !== 'https:') throw new Error('HTTPS market origin required');
   return async (req, res) => {
     const incoming = new URL(req.originalUrl || req.url, 'https://hosting.internal');
-    if (!incoming.pathname.startsWith('/api/v1/')) return res.status(404).send('Not found');
+    if (!/^\/api\/v[12]\//.test(incoming.pathname)) return res.status(404).send('Not found');
     const headers = new Headers();
     for (const name of requestHeaders) if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name]);
     headers.set('X-Market-Proxy', secret());

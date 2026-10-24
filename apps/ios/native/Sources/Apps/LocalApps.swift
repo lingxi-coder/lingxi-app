@@ -1,117 +1,249 @@
-import Combine
 import Foundation
+import Observation
+import UIKit
 
-/// The app market's anonymous API. The market's web front end proxies `/api/*`
-/// to its backend; while that backend is not deployed every call fails with the
-/// server's own error, which the pages show as is.
-enum LocalAppMarketConfig {
-    static let apiRoot = URL(string: "https://local-app-market.luolingfeng-lingxi.workers.dev/api/v1")!
+/// One service for the local Linux user, independent of Firebase and chat engines.
+actor LocalAppServiceClient {
+    private var handle: MobileLocalAppServiceHandle?
+    private var linuxAttached = false
+
+    func request<T: Decodable & Sendable>(_ fields: [String: LocalAppJSON], as type: T.Type = T.self) async throws -> T {
+        if handle == nil {
+            let service = try buildIosLocalAppService(configHome: MobileUserStorage.directories().configHome, runtime: nil)
+            let target = await MainActor.run { UnifiedAppMarket.targets.last! }
+            let _: LocalAppJSON = try await send(service, ["op": .string("configureTarget"), "target": try .encode(target)])
+            handle = service
+        }
+        guard var service = handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
+        if !linuxAttached, ["start", "resume", "restart", "repair"].contains(fields["op"]?.text ?? ""), let id = fields["appId"]?.text {
+            let record: UnifiedAppRecord = try await send(service, ["op": .string("get"), "appId": .string(id)])
+            let revision = fields["revision"] ?? .number(Double(record.currentRevision))
+            let release: UnifiedAppRelease = try await send(service, ["op": .string("getRelease"), "appId": .string(id), "revision": revision])
+            // Never even prepare the Linux adapter before exact-content consent.
+            if release.manifest.executesCode, record.executionGrants.contains(release.digest) {
+                LXISHRuntimeResourceBootstrap.prepare()
+                let metadata = LXISHRuntimeBundleMetadata.current()
+                let workspace = try MobileUserStorage.prepareProjectsDirectory()
+                let config = IosMobileLinuxConfigFfi(mode: .mobileLinux, managedRoot: LXISHDefaultWorkspace.managedRootPath(),
+                    workspaceHostPath: workspace.path, stableWorkspaceId: LXISHDefaultWorkspace.stableID(),
+                    abi: "arm64", rootfsVersion: metadata.rootfsVersion, archiveSha256: metadata.archiveSha256,
+                    authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path,
+                    appSandboxRoot: ConversationSourceFactory.appSandboxRoot())
+                let runtime = try createIosMobileLinuxRuntime(config: config)
+                service = try buildIosLocalAppService(configHome: MobileUserStorage.directories().configHome, runtime: runtime)
+                handle = service; linuxAttached = true
+            }
+        }
+        return try await send(service, fields)
+    }
+    private func send<T: Decodable & Sendable>(_ service: MobileLocalAppServiceHandle, _ fields: [String: LocalAppJSON]) async throws -> T {
+        let data = try JSONEncoder().encode(fields)
+        let response = try await service.requestJson(request: String(decoding: data, as: UTF8.self))
+        return try JSONDecoder().decode(LocalAppServiceEnvelope<T>.self, from: Data(response.utf8)).result()
+    }
 }
 
-/// The process's one Local App Market (its README asks for one long-lived
-/// instance per root), the apps made in chat, and what the pages remember
-/// about both.
+@MainActor
+@Observable
+final class UnifiedLocalApps {
+    private(set) var records: [UnifiedAppRecord] = []
+    private(set) var runs: [String: UnifiedAppRun] = [:]
+    private(set) var legacyArchives: [LocalAppLegacyArchive] = []
+    private(set) var legacyEntries: [LocalAppLegacyEntry] = []
+    private(set) var busy = Set<String>()
+    private(set) var error: String?
+    private(set) var initialized = false
+    let devicePermissions = LocalAppDevicePermissions()
+    @ObservationIgnored let client: LocalAppServiceClient
+    @ObservationIgnored lazy var browser = UnifiedLocalAppBrowser(service: self)
+    @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var backgroundGeneration = UUID()
+    @ObservationIgnored private var pausedApps = Set<String>()
+    @ObservationIgnored private var sceneIsBackground = false
+
+    init(client: LocalAppServiceClient = LocalAppServiceClient()) { self.client = client }
+    func initialize() async { await refresh(); initialized = true }
+    func refresh() async {
+        do {
+            let rows: [UnifiedAppRecord] = try await client.request(["op": .string("list")])
+            records = rows.filter { !$0.removed }.sorted { $0.updatedAtMs > $1.updatedAtMs }
+            let coreArchives: [LocalAppLegacyArchive] = try await client.request(["op": .string("legacyArchives")])
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            let nativeArchives = ["LocalAppMarket", "chat-apps.json", "local-app-info.json"].compactMap { name -> LocalAppLegacyArchive? in
+                guard let path = support?.appendingPathComponent(name).path, FileManager.default.fileExists(atPath: path) else { return nil }
+                return LocalAppLegacyArchive(path: path, kind: "nativeArchive", status: "preservedNotMigrated")
+            }
+            legacyArchives = coreArchives + nativeArchives
+            legacyEntries = try await client.request(["op": .string("legacyEntries")])
+            runs = runs.filter { key, _ in records.contains(where: { $0.appId == key }) }
+            for record in records {
+                let status: LocalAppRuntimeStatus = try await client.request(["op": .string("status"), "appId": .string(record.appId)])
+                if let current = status.run { runs[record.appId] = current }
+                else {
+                    let history: [UnifiedAppRun] = try await client.request(["op": .string("runs"), "appId": .string(record.appId)])
+                    runs[record.appId] = history.max(by: { $0.startedAtMs < $1.startedAtMs })
+                }
+            }
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+    func runIsCurrent(appID: String, runID: String) async throws -> Bool {
+        // A failed/newer preparation is history, not the serving owner. The
+        // previous release keeps its page and device capabilities while it runs.
+        let status: LocalAppRuntimeStatus = try await client.request(["op": .string("status"), "appId": .string(appID)])
+        guard let current = status.run else { runs.removeValue(forKey: appID); return false }
+        runs[appID] = current
+        return current.runId == runID && current.phase == "running"
+    }
+    func record(_ id: String) -> UnifiedAppRecord? { records.first { $0.appId == id } }
+    func releases(_ id: String) async throws -> [UnifiedAppRelease] {
+        try await client.request(["op": .string("releases"), "appId": .string(id)])
+    }
+    func release(_ id: String, revision: UInt64) async throws -> UnifiedAppRelease {
+        try await client.request(["op": .string("getRelease"), "appId": .string(id), "revision": .number(Double(revision))])
+    }
+    func launch(_ id: String) async throws -> LocalAppLaunch {
+        guard busy.insert(id).inserted else { throw LocalAppServiceFailure("APP_BUSY", "An operation is already in progress.") }
+        defer { busy.remove(id) }
+        let result: LocalAppLaunch = try await client.request(["op": .string("start"), "appId": .string(id)])
+        runs[id] = result.run
+        pausedApps.remove(id)
+        if sceneIsBackground { beginBackgroundLease() }
+        return result
+    }
+    func stop(_ id: String) async throws {
+        let _: LocalAppJSON = try await client.request(["op": .string("stop"), "appId": .string(id)])
+        browser.close(id)
+        await refresh()
+    }
+    func action(_ operation: String, id: String, extra: [String: LocalAppJSON] = [:]) async throws {
+        guard busy.insert(id).inserted else { throw LocalAppServiceFailure("APP_BUSY", "An operation is already in progress.") }
+        defer { busy.remove(id) }
+        var request = extra; request["op"] = .string(operation); request["appId"] = .string(id)
+        let _: LocalAppJSON = try await client.request(request)
+        if ["stop", "revoke", "remove", "restart", "repair"].contains(operation) { browser.close(id) }
+        if operation == "remove" { devicePermissions.revoke(appID: id) }
+        await refresh()
+    }
+    func grant(_ id: String, digest: String) async throws {
+        try await action("grant", id: id, extra: ["digest": .string(digest)])
+    }
+    func logs(_ id: String, runID: String) async throws -> String {
+        let value: LocalAppJSON = try await client.request(["op": .string("logs"), "appId": .string(id), "runId": .string(runID)])
+        if let text = value.text { return text }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(value), as: UTF8.self)
+    }
+    func layout(_ id: String) async throws -> LocalAppLayout {
+        try await client.request(["op": .string("layout"), "appId": .string(id)])
+    }
+    func prepareAuthoring(_ id: String, sessions: [String: String]) async throws -> LocalAppAuthoringResolution {
+        guard let app = record(id), let authoring = app.authoring else {
+            throw LocalAppServiceFailure("SOURCE_MISSING", "Choose or import an editable source copy before continuing development.")
+        }
+        let host = try Self.hostSourceDirectory(authoring.sourceDirectory)
+        var directory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: host.path, isDirectory: &directory) && directory.boolValue
+        return try await client.request(["op": .string("prepareAuthoring"), "appId": .string(id), "sourceExists": .bool(exists), "sessionDirectories": .object(sessions.mapValues(LocalAppJSON.string))])
+    }
+    func bindAuthoring(_ id: String, authoring: LocalAppAuthoring) async throws {
+        try await action("bindAuthoring", id: id, extra: ["authoring": try .encode(authoring)])
+    }
+    static func hostSourceDirectory(_ source: String) throws -> URL {
+        let paths = MobileUserStorage.directories()
+        let guestHome = LXISHGuestPaths.home
+        guard source == guestHome || source.hasPrefix(guestHome + "/") else {
+            throw LocalAppServiceFailure("SOURCE_OUTSIDE_USER_HOME", "Select a source folder in the local Linux user home.")
+        }
+        let relative = String(source.dropFirst(guestHome.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let base = URL(fileURLWithPath: paths.home, isDirectory: true).resolvingSymlinksInPath()
+        let url = base.appendingPathComponent(relative, isDirectory: true).resolvingSymlinksInPath()
+        guard url.path == base.path || url.path.hasPrefix(base.path + "/") else { throw LocalAppServiceFailure("INVALID_SOURCE", "Source path escaped the local user home.") }
+        return url
+    }
+    static func newAuthoringDirectory(name: String, create: Bool = true) throws -> String {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count <= 100 else { throw LocalAppServiceFailure("INVALID_NAME", "Enter an app name of 1–100 characters.") }
+        let slug = clean.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? String($0) : "-" }.joined()
+        let guest = LXISHGuestPaths.home + "/.lingxi/.apps/" + slug + "-" + UUID().uuidString.prefix(8).lowercased()
+        if create { try FileManager.default.createDirectory(at: hostSourceDirectory(guest), withIntermediateDirectories: true) }
+        return guest
+    }
+    func importLegacy(_ entry: LocalAppLegacyEntry) async throws -> UnifiedAppRecord {
+        let guest = try Self.newAuthoringDirectory(name: entry.name, create: false)
+        let result: LocalAppPublishResult = try await client.request(["op": .string("importLegacy"), "legacyId": .string(entry.legacyId), "sourcePath": .string(try Self.hostSourceDirectory(guest).path), "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest))])
+        await refresh(); return result.record
+    }
+    func restoreAuthoring(_ app: UnifiedAppRecord) async throws -> UnifiedAppRecord {
+        let guest = try Self.newAuthoringDirectory(name: app.name, create: false)
+        let result: UnifiedAppRecord = try await client.request(["op": .string("restoreAuthoring"), "appId": .string(app.appId), "sourcePath": .string(try Self.hostSourceDirectory(guest).path), "authoring": try .encode(LocalAppAuthoring(sourceDirectory: guest))])
+        await refresh(); return result
+    }
+
+    func sceneChanged(background: Bool) {
+        sceneIsBackground = background
+        if background { beginBackgroundLease() }
+        else {
+            endBackgroundLease()
+            Task { await refresh() }
+        }
+    }
+    func isPaused(_ id: String) -> Bool { pausedApps.contains(id) || runs[id]?.phase == "suspended" }
+    private func beginBackgroundLease() {
+        guard backgroundTask == .invalid, runs.values.contains(where: \.isLive) else { return }
+        backgroundGeneration = UUID()
+        let generation = backgroundGeneration
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "LocalApps") { [weak self] in
+            guard let self, self.backgroundGeneration == generation else { return }
+            self.expireBackgroundLease()
+        }
+        if backgroundTask == .invalid { expireBackgroundLease() }
+    }
+    private func expireBackgroundLease() {
+        let active = runs.values.filter(\.isLive).map(\.appId)
+        pausedApps.formUnion(active)
+        for id in active { browser.close(id) }
+        Task {
+            for id in active {
+                do { let _: LocalAppJSON = try await client.request(["op": .string("suspend"), "appId": .string(id)]) }
+                catch { self.error = error.localizedDescription }
+            }
+            endBackgroundLease()
+            await refresh()
+        }
+    }
+    private func endBackgroundLease() {
+        backgroundGeneration = UUID()
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+}
+
 @MainActor
 enum LocalApps {
-    /// nil only when the market cannot be created at all (no Application
-    /// Support directory); the 应用 page then says the market is unavailable.
-    static let market: LocalAppMarket? = try? LocalAppMarket(baseURL: LocalAppMarketConfig.apiRoot)
-    /// The engine's library; every engine handle attaches its host here.
-    static let chat = ChatApps()
+    static let library = UnifiedLocalApps()
     static let info = InstalledAppInfoStore()
-    private static var initialized = false
-
-    /// Restores the installed registry and finishes interrupted uninstalls,
-    /// once, before anything opens an app.
-    static func initializeOnce() async {
-        guard !initialized, let market else { return }
-        initialized = true
-        await market.initialize()
-    }
+    static let market = UnifiedAppMarket(library: library)
+    static func initializeOnce() async { if !library.initialized { await library.initialize() } }
 }
 
-extension AppOperation {
-    init?(_ phase: LocalAppMarket.Phase) {
-        switch phase {
-        case .downloading(let progress): self = .downloading(progress)
-        case .verifying, .committing: self = .installing
-        case .removing: self = .removing
-        case .failed(let message): self = .failed(message)
-        case .idle: return nil
-        }
-    }
-}
-
-extension LocalAppMarket {
-    /// The installed apps and [chatApps] as the pages show them, with what [info] remembers.
-    func myApps(info: [String: InstalledAppInfo], chatApps: [ChatApp]) -> [MyApp] {
-        AppsModel.myApps(
-            installedIDs: installed.filter { !$0.removing }.map(\.appId),
-            info: info,
-            updatable: Set(updates.filter { $0.status == .update_available }.map(\.appId)),
-            operations: operations.compactMapValues(AppOperation.init),
-            chatApps: chatApps
-        )
-    }
-
-    func action(for appId: String, current: MarketVersion?) -> AppAction {
-        let update = updates.first { $0.appId == appId && $0.status == .update_available }
-        return AppsModel.action(
-            currentVersionID: current?.id,
-            currentSequence: current?.sequence,
-            installedSequence: installed.first { $0.appId == appId && !$0.removing }?.sequence,
-            updateVersionID: update?.currentVersionId,
-            operation: operations[appId].flatMap(AppOperation.init)
-        )
-    }
-}
-
-/// [InstalledAppInfo] per app id, kept in one JSON file in Application Support.
 @MainActor
-final class InstalledAppInfoStore: ObservableObject {
-    @Published private(set) var apps: [String: InstalledAppInfo] = [:]
+@Observable
+final class InstalledAppInfoStore {
+    private(set) var apps: [String: InstalledAppInfo] = [:]
     private let file: URL?
-
-    init(file: URL? = InstalledAppInfoStore.defaultFile()) {
-        self.file = file
-        if let file, let data = try? Data(contentsOf: file),
-           let stored = try? JSONDecoder().decode([InstalledAppInfo].self, from: data) {
-            apps = Dictionary(stored.map { ($0.appId, $0) }, uniquingKeysWith: { _, last in last })
-        }
+    init(file: URL? = nil) {
+        self.file = file ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("local-app-info-v2.json")
+        if let file = self.file, let bytes = try? Data(contentsOf: file), let rows = try? JSONDecoder().decode([InstalledAppInfo].self, from: bytes) { apps = Dictionary(rows.map { ($0.appId, $0) }, uniquingKeysWith: { _, last in last }) }
     }
-
-    nonisolated static func defaultFile() -> URL? {
-        try? FileManager.default
-            .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("local-app-info.json")
+    func markOpened(_ record: UnifiedAppRecord) {
+        apps[record.appId] = InstalledAppInfo(appId: record.appId, name: record.name, summary: record.summary, lastOpenedAt: Date())
+        persist()
     }
-
-    /// Keeps the market's name, summary and category of an app being installed or already installed.
-    func remember(_ app: MarketApp) {
-        var known = apps[app.id] ?? InstalledAppInfo(appId: app.id, name: app.name)
-        known.name = app.name
-        known.summary = app.summary
-        known.category = app.category
-        apps[app.id] = known
-        save()
-    }
-
-    func markOpened(_ appId: String, at date: Date = Date()) {
-        var known = apps[appId] ?? InstalledAppInfo(appId: appId, name: appId)
-        known.lastOpenedAt = date
-        apps[appId] = known
-        save()
-    }
-
-    func forget(_ appId: String) {
-        apps.removeValue(forKey: appId)
-        save()
-    }
-
-    private func save() {
-        guard let file else { return }
-        let items = apps.values.sorted { $0.appId < $1.appId }
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        try? data.write(to: file, options: .atomic)
+    func forget(_ id: String) { apps.removeValue(forKey: id); persist() }
+    private func persist() {
+        guard let file, let bytes = try? JSONEncoder().encode(Array(apps.values)) else { return }
+        try? bytes.write(to: file, options: .atomic)
     }
 }

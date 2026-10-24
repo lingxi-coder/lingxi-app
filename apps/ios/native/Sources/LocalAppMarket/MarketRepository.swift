@@ -2,102 +2,8 @@ import Foundation
 import CryptoKit
 import ZIPFoundation
 
-struct MarketInstallation: Codable, Equatable, Identifiable {
-    var id: String { appId }
-    let source: URL
-    let appId: String
-    let versionId: String
-    let sequence: Int
-    let installationID: UUID
-    let directory: String
-    var port: UInt16?
-    var removing: Bool = false
-}
-/// Actor serializes registry commits. Downloads for distinct apps may run concurrently.
-actor MarketRepository {
-    private let root: URL
-    private var records: [String: MarketInstallation]
-    private var busy = Set<String>()
-    private var blocked = Set<String>()
-    private let fm = FileManager.default
-    init(root: URL) throws {
-        self.root = root
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let registry = root.appendingPathComponent("registry.json")
-        records = FileManager.default.fileExists(atPath: registry.path) ? try JSONDecoder().decode([String: MarketInstallation].self, from: Data(contentsOf: registry)) : [:]
-        let staging = root.appendingPathComponent("staging")
-        if FileManager.default.fileExists(atPath: staging.path) { try FileManager.default.removeItem(at: staging) }
-        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        let versions = root.appendingPathComponent("versions")
-        try FileManager.default.createDirectory(at: versions, withIntermediateDirectories: true)
-        let referenced = Set(records.values.map(\.directory))
-        for directory in try FileManager.default.contentsOfDirectory(at: versions, includingPropertiesForKeys: nil) where !referenced.contains(directory.lastPathComponent) { try FileManager.default.removeItem(at: directory) }
-    }
-    func installations() -> [MarketInstallation] { records.values.sorted { $0.appId < $1.appId } }
-    func acquire(_ appId: String) throws {
-        guard busy.insert(appId).inserted else { throw MarketFailure("OPERATION_IN_PROGRESS") }
-    }
-    func release(_ appId: String) { busy.remove(appId); blocked.remove(appId) }
-    func installation(_ appId: String) throws -> MarketInstallation {
-        guard !blocked.contains(appId), let record = records[appId], !record.removing else { throw MarketFailure("APP_NOT_INSTALLED_OR_BUSY") }
-        return record
-    }
-    func resources(_ record: MarketInstallation) -> URL { root.appendingPathComponent("versions").appendingPathComponent(record.directory) }
-    func blockOpen(_ appId: String) { blocked.insert(appId) }
-    func savePort(_ appId: String, installationID: UUID, port: UInt16) throws {
-        guard var record = records[appId], record.installationID == installationID, !record.removing, !blocked.contains(appId) else { throw MarketFailure("APP_NOT_INSTALLED_OR_BUSY") }
-        record.port = port
-        var next = records; next[appId] = record
-        try persist(next)
-    }
-    private func persist(_ next: [String: MarketInstallation]) throws {
-        try JSONEncoder().encode(next).write(to: root.appendingPathComponent("registry.json"), options: .atomic)
-        records = next
-    }
-    func stage(_ distribution: MarketDistribution, api: MarketAPI, progress: @escaping @Sendable (Double) async -> Void, verifying: @escaping @Sendable () async -> Void = {}) async throws -> URL {
-        let folder = root.appendingPathComponent("staging").appendingPathComponent(UUID().uuidString)
-        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        do {
-            let download = folder.appendingPathComponent("artifact")
-            try await api.download(distribution.artifact, to: download, progress: progress)
-            try Task.checkCancellation()
-            await verifying()
-            let digest = SHA256.hash(data: try Data(contentsOf: download)).map { String(format: "%02x", $0) }.joined()
-            guard digest == distribution.artifact.sha256.lowercased() else { throw MarketFailure("HASH_MISMATCH") }
-            let content = folder.appendingPathComponent("content")
-            try fm.createDirectory(at: content, withIntermediateDirectories: true)
-            switch distribution.artifact.format {
-            case "html": try fm.moveItem(at: download, to: content.appendingPathComponent("index.html"))
-            case "zip": try Self.extract(download, to: content)
-            default: throw MarketFailure("UNSUPPORTED_FORMAT")
-            }
-            return folder
-        } catch { try? fm.removeItem(at: folder); throw error }
-    }
-    func discard(_ staging: URL) { try? fm.removeItem(at: staging) }
-    func commit(_ distribution: MarketDistribution, staged: URL, source: URL) throws -> MarketInstallation {
-        let old = records[distribution.appId]
-        guard old?.removing != true else { throw MarketFailure("UNINSTALL_PENDING") }
-        let name = UUID().uuidString
-        let target = root.appendingPathComponent("versions").appendingPathComponent(name)
-        try fm.moveItem(at: staged.appendingPathComponent("content"), to: target)
-        let record = MarketInstallation(source: source, appId: distribution.appId, versionId: distribution.versionId, sequence: distribution.sequence, installationID: old?.installationID ?? UUID(), directory: name, port: old?.port)
-        var next = records; next[record.appId] = record
-        do { try persist(next) } catch { try? fm.removeItem(at: target); throw error }
-        try? fm.removeItem(at: staged)
-        if let old { try? fm.removeItem(at: resources(old)) }
-        return record
-    }
-    func beginRemoval(_ appId: String) throws -> MarketInstallation {
-        guard var record = records[appId] else { throw MarketFailure("APP_NOT_INSTALLED") }
-        record.removing = true
-        var next = records; next[appId] = record; try persist(next)
-        return record
-    }
-    func finishRemoval(_ record: MarketInstallation) throws {
-        if fm.fileExists(atPath: resources(record).path) { try fm.removeItem(at: resources(record)) }
-        var next = records; next.removeValue(forKey: record.appId); try persist(next)
-    }
+/// Validates staging only; never reads, deletes or rewrites an old installation registry.
+enum MarketPackageFiles {
     static func safePath(_ input: String) throws -> String {
         let path = input.precomposedStringWithCanonicalMapping
         let stripped = path.hasSuffix("/") ? String(path.dropLast()) : path
@@ -158,7 +64,7 @@ actor MarketRepository {
             let components = path.split(separator: "/")
             for count in 1..<components.count where files.contains(components.prefix(count).joined(separator: "/")) { throw MarketFailure("PATH_CONFLICT") }
         }
-        guard entries.contains(where: { $0.path == "index.html" && $0.type == .file }) else { throw MarketFailure("INDEX_REQUIRED") }
+        guard entries.contains(where: { $0.path == "lingxi-app.json" && $0.type == .file }) else { throw MarketFailure("MANIFEST_REQUIRED") }
         var actual: UInt64 = 0
         for entry in entries {
             let target = destination.appendingPathComponent(try safePath(entry.path))
@@ -177,6 +83,8 @@ actor MarketRepository {
             }
             guard entryActual == entry.uncompressedSize else { throw MarketFailure("SIZE_MISMATCH") }
             guard crc == entry.checksum else { throw MarketFailure("CRC_MISMATCH") }
+            let executable = entry.fileAttributes[.posixPermissions].flatMap { $0 as? NSNumber }.map { $0.intValue & 0o111 != 0 } ?? false
+            try FileManager.default.setAttributes([.posixPermissions: executable ? 0o700 : 0o600], ofItemAtPath: target.path)
         }
     }
 }

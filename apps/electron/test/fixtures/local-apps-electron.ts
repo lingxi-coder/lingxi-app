@@ -1,3 +1,5 @@
+import { LocalAppCoreClient } from '../../src/main/local-apps/coreClient';
+import { resolveServerBin } from '../../src/main/bridgeDiscovery';
 import { app, BrowserWindow, protocol, dialog, session, type Session } from 'electron';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
@@ -21,7 +23,7 @@ async function main() {
   await app.whenReady();
   trace('await app.whenReady();');
   const library = new BrowserWindow({ show: true, width: 1100, height: 800, webPreferences: { preload: join(root, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
-  host = new LocalAppHost({ configHome: join(root, 'config'), preload: join(root, 'localApp.cjs'), nodeExecutable: process.execPath, mainWindow: () => library, edit: async () => undefined });
+  host = new LocalAppHost({ configHome: join(root, 'config'), core: new LocalAppCoreClient(resolveServerBin(), join(root, 'config')), preload: join(root, 'localApp.cjs'), nodeExecutable: process.execPath, mainWindow: () => library, edit: async () => undefined });
   await host.initialize();
   trace('await host.initialize();');
   host.registerMainWindow(library, process.env.LINGXI_TEST_LIBRARY_URL!);
@@ -156,8 +158,8 @@ async function main() {
   // Fixture-only dialog choice; production authorization logic is exercised unchanged.
   let grants = 0;
   dialog.showMessageBox = (async (...args: any[]) => { const options = args.at(-1); assert.ok(options.detail.includes('local programs') || options.message.startsWith('Delete')); grants++; return { response: 1, checkboxChecked: false }; }) as typeof dialog.showMessageBox;
-  const source = join(host.store.root, 'imports', 'server'); await fs.mkdir(source);
-  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 1, name: 'Local backend', summary: 'Node service, installed and managed by LingXi', entry: { type: 'static', path: 'index.html' }, capabilities: ['files', 'clipboard'], install: [{ command: 'node -e "console.log(process.versions.node)"' }], processes: [{ name: 'api', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] }));
+  const source = join(host.store.importsRoot, 'server'); await fs.mkdir(source);
+  await fs.writeFile(join(source, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Local backend', summary: 'Node service, installed and managed by LingXi', entry: { type: 'static', path: 'index.html' }, capabilities: ['files', 'clipboard'], install: [{ command: 'node -e "console.log(process.versions.node)"' }], processes: [{ name: 'api', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] }));
   await fs.writeFile(join(source, 'index.html'), '<!doctype html><title>Local backend</title><h1 id="result">Loading…</h1><script>fetch("/__services/api/hello").then(r=>r.text()).then(t=>document.querySelector("h1").textContent=t)</script>');
   await fs.writeFile(join(source, 'server.cjs'), `const server=require('http').createServer((req,res)=>{if(req.url==='/exit'){res.end('bye');setTimeout(()=>process.exit(7),10)}else if(req.url==='/set-cookie'){res.setHeader('Set-Cookie','private_app_cookie=app-a; Path=/');res.end('set')}else if(req.url==='/cookie'){res.end(req.headers.cookie||'')}else res.end('Backend is running')}); server.on('upgrade',(req,socket)=>{const key=require('crypto').createHash('sha1').update(req.headers['sec-websocket-key']+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: '+key+'\\r\\n\\r\\n');socket.write(Buffer.concat([Buffer.from([129,12]),Buffer.from('socket ready')]));socket.on('data',()=>socket.end(Buffer.from([136,0])));});server.listen(process.env.PORT,'127.0.0.1')`);
   const backend = await tool({ action: 'publish', staged_path: source });
@@ -227,8 +229,8 @@ async function main() {
 
   // Server landing paths must retain their browser base URL. Exercise actual
   // relative scripts/fetches, URL escaping, compression and an in-place reload.
-  const nestedSource = join(host.store.root, 'imports', 'nested-server'); await fs.mkdir(nestedSource);
-  const nestedManifest = { schema: 1, name: 'Nested backend', entry: { type: 'server', process: 'web', path: 'ui nested/识字 #?.html' },
+  const nestedSource = join(host.store.importsRoot, 'nested-server'); await fs.mkdir(nestedSource);
+  const nestedManifest = { schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Nested backend', entry: { type: 'server', process: 'web', path: '/ui nested/识字 #?.html' },
     processes: [{ name: 'web', command: 'node server.cjs', ready: { path: '/health', timeoutMs: 10000 } }] };
   await fs.writeFile(join(nestedSource, 'lingxi-app.json'), JSON.stringify(nestedManifest));
   await fs.writeFile(join(nestedSource, 'server.cjs'), `const http=require('http'),zlib=require('zlib');
@@ -268,9 +270,9 @@ async function main() {
   await until(() => nestedWindow.webContents.executeJavaScript(`document.querySelector('h1')?.textContent === 'Nested compressed backend works'`));
   await host.request({ action: 'stop', id: nested.id });
 
-  const cancelSource = join(host.store.root, 'imports', 'cancel'); await fs.mkdir(cancelSource);
+  const cancelSource = join(host.store.importsRoot, 'cancel'); await fs.mkdir(cancelSource);
   await fs.writeFile(join(cancelSource, 'index.html'), '<!doctype html>cancel');
-  await fs.writeFile(join(cancelSource, 'lingxi-app.json'), JSON.stringify({ schema: 1, name: 'Canceled install', entry: { type: 'static', path: 'index.html' }, install: [{ command: `node -e "console.log('cancellable-begun');setInterval(()=>{},1000)"` }] }));
+  await fs.writeFile(join(cancelSource, 'lingxi-app.json'), JSON.stringify({ schema: 2, targets: [{ platform: 'macos', environment: 'native' }], name: 'Canceled install', entry: { type: 'static', path: 'index.html' }, install: [{ command: `node -e "console.log('cancellable-begun');setInterval(()=>{},1000)"` }] }));
   const cancelApp = await tool({ action: 'publish', staged_path: cancelSource });
   const abort = new AbortController();
   const abandoned = assert.rejects(fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${discovery.token}` }, body: JSON.stringify({ action: 'start', id: cancelApp.id }), signal: abort.signal }));
@@ -280,7 +282,7 @@ async function main() {
   // Optional acceptance project exercises real dependency installation and a
   // production Vite/TypeScript build; ordinary CI stays network-independent.
   if (process.env.LINGXI_TEST_VITE_PROJECT) {
-    const staged = join(host.store.root, 'imports', 'vite');
+    const staged = join(host.store.importsRoot, 'vite');
     await fs.cp(process.env.LINGXI_TEST_VITE_PROJECT, staged, { recursive: true });
     const framework = await tool({ action: 'publish', staged_path: staged });
     await tool({ action: 'start', id: framework.id });

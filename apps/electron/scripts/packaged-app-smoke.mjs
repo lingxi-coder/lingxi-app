@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { constants as fsConstants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -517,6 +517,7 @@ function copyPackagedApp(appPath, tempRoot) {
     dereference: false,
     errorOnExist: true,
     force: false,
+    mode: fsConstants.COPYFILE_FICLONE,
     preserveTimestamps: true,
     recursive: true,
     verbatimSymlinks: true,
@@ -772,13 +773,18 @@ async function customProviderProbe() {
     const preparationReturned = payload.messages?.some(message => message.tool_call_id === 'local-app-preparation');
     const appReturned = payload.messages?.some(message => message.tool_call_id === 'local-app-smoke');
     if (wantsApp && !preparationReturned && payload.tools?.some(tool => tool.function?.name === 'Bash')) {
-      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'local-app-preparation', type: 'function', function: { name: 'Bash', arguments: JSON.stringify({ command: "printf 'LocalApp package check\\n'" }) } }] } }] })}\n\n`);
+      const manifest = JSON.parse(readFileSync(join(repoRoot, 'fixtures/local-apps/v2/static/lingxi-app.json'), 'utf8'));
+      manifest.name = 'Packaged Local App'; manifest.summary = 'Created through the packaged model tool';
+      const command = ['mkdir -p dist', "cat > lingxi-app.json <<'LINGXI_MANIFEST'", JSON.stringify(manifest), 'LINGXI_MANIFEST',
+        "cat > dist/index.html <<'LINGXI_HTML'", '<!doctype html><meta charset="utf-8"><title>Packaged Local App</title><h1>LocalApp tool connected</h1>', 'LINGXI_HTML',
+        "printf '%s' '/* Packaged acceptance */' > dist/client.js", "printf 'LocalApp package check\\n'"].join('\n');
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'local-app-preparation', type: 'function', function: { name: 'Bash', arguments: JSON.stringify({ command }) } }] } }] })}\n\n`);
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
       response.end('data: [DONE]\n\n');
       return;
     }
     if (wantsApp && !appReturned && payload.tools?.some(tool => tool.function?.name === 'LocalApp')) {
-      const args = { name: 'Packaged Local App', summary: 'Created through the packaged model tool', html: '<!doctype html><meta charset="utf-8"><title>Packaged Local App</title><h1>LocalApp tool connected</h1>' };
+      const args = { bundle_path: '.' };
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'local-app-smoke', type: 'function', function: { name: 'LocalApp', arguments: JSON.stringify(args) } }] } }] })}\n\n`);
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
       response.end('data: [DONE]\n\n');
@@ -1046,7 +1052,7 @@ async function assertPackagedLocalApps(page, probe, sessionId, cdpPort) {
   }, { label: 'second chat for LocalApp modification' });
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
-  await evaluate(page, `Array.from(document.querySelectorAll('.local-app-tile button')).find(button => button.textContent.trim() === 'Modify')?.click()`);
+  await evaluate(page, `Array.from(document.querySelectorAll('.local-app-tile button')).find(button => button.textContent.trim() === 'Continue developing')?.click()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the authoring session, transcript and app draft' });
   // These fixture sessions are not persisted in the sidebar catalog. Navigate
   // through the real New chat action and verify the composer follows that chat.
@@ -1221,7 +1227,13 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   const workspace = createAdversarialWorkspace(tempRoot);
   const runtimePaths = runtimePathsForHome(tempHome);
   writeJson(runtimePaths.settingsPath, createPackagedSettings({ workspace }));
-  const copiedAppPath = realpathSync.native(copyPackagedApp(appPath, join(tempRoot, 'app-copy')));
+  let copiedAppPath;
+  try {
+    copiedAppPath = realpathSync.native(copyPackagedApp(appPath, join(tempRoot, 'app-copy')));
+  } catch (error) {
+    rmSync(tempRoot, { recursive: true, force: true });
+    throw error;
+  }
   const rendererUrl = pathToFileURL(join(copiedAppPath, 'Contents', 'Resources', 'app.asar', 'out', 'renderer', 'index.html')).href;
   const copiedAppBundleId = packagedAppBundleId(copiedAppPath);
   const cdpPort = await reserveLoopbackPort();

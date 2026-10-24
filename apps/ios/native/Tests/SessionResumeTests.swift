@@ -1759,7 +1759,6 @@ visionDelegationEnabled: true)
     }
 
     private final class TestMobileEngineHandle: MobileEngineHandle, @unchecked Sendable {
-        private let apps = TestLocalAppHost(noHandle: .init())
         private let submitHandler: (ClientCommand) async throws -> Void
 
         required init(unsafeFromHandle handle: UInt64) {
@@ -1773,21 +1772,11 @@ visionDelegationEnabled: true)
         }
 
         override func visualizationHost(origin: String) -> VisualizationHost? { nil }
-        override func localAppHost() -> LocalAppHost { apps }
         override func audioSessionContext() async -> String { "{}" }
 
 
         override func submit(command: ClientCommand) async throws {
             try await submitHandler(command)
-        }
-    }
-
-    private final class TestLocalAppHost: LocalAppHost, @unchecked Sendable {
-        override func list() -> [LocalAppDto] { [] }
-        override func get(id: String) -> LocalAppDto? { nil }
-        override func delete(id: String) -> Bool { false }
-        override func serve(id: String, path: String) -> LocalAppResponseDto {
-            LocalAppResponseDto(status: 404, mimeType: "text/plain", headers: [], body: Data())
         }
     }
 

@@ -1,102 +1,31 @@
 import XCTest
-
 @testable import LingxiCode
 
 final class AppsModelTests: XCTestCase {
-    private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
-
-    func testMyAppsPutsTheLastOpenedFirstThenSortsByName() {
-        let info: [String: InstalledAppInfo] = [
-            "a": InstalledAppInfo(appId: "a", name: "Beta", lastOpenedAt: t0),
-            "b": InstalledAppInfo(appId: "b", name: "alpha"),
-            "c": InstalledAppInfo(appId: "c", name: "Gamma", lastOpenedAt: t0.addingTimeInterval(10)),
-        ]
-        let apps = AppsModel.myApps(installedIDs: ["a", "b", "c", "d"], info: info, updatable: [], operations: [:])
-        XCTAssertEqual(apps.map(\.appId), ["c", "a", "b", "d"])
-        // Nothing known about "d" yet: it is shown by its id.
-        XCTAssertEqual(apps.last?.name, "d")
+    private func app(_ id:String,name:String,removed:Bool = false) -> UnifiedAppRecord {
+        .init(appId:id,name:name,summary:"",currentRevision:1,latestRevision:1,authoring:nil,marketOrigin:nil,originPort:32100,dataSchemaVersion:1,executionGrants:[],createdAtMs:1,updatedAtMs:1,removed:removed)
     }
-
-    func testAppsMadeInChatJoinTheListUnderTheirOwnKeys() {
-        let info: [String: InstalledAppInfo] = [
-            "a": InstalledAppInfo(appId: "a", name: "Market app", lastOpenedAt: t0),
-            "chat:a1": InstalledAppInfo(appId: "chat:a1", name: "chat:a1", lastOpenedAt: t0.addingTimeInterval(10)),
-        ]
-        let apps = AppsModel.myApps(
-            installedIDs: ["a"],
-            info: info,
-            updatable: [],
-            operations: [:],
-            chatApps: [
-                ChatApp(id: "a1", name: "Water", summary: "", revision: 3, updatedAt: t0),
-                ChatApp(id: "b2", name: "Abacus", summary: "", revision: 1, updatedAt: t0),
-            ]
-        )
-        XCTAssertEqual(apps.map(\.appId), ["chat:a1", "a", "chat:b2"])
-        // The library's name wins over what the pages recorded when it was opened.
-        XCTAssertEqual(apps.first?.name, "Water")
-        XCTAssertEqual(apps.map(\.source), [.chat, .market, .chat])
-        XCTAssertEqual(apps.first?.updateAvailable, false)
+    func testLibraryIdentityDoesNotDependOnSourceOrMarketPrefix() {
+        let rows = AppsModel.myApps([app("local-a",name:"Beta"),app("local-b",name:"Alpha")],info:[:])
+        XCTAssertEqual(rows.map(\.appId),["local-b","local-a"])
+        XCTAssertFalse(rows.contains { $0.appId.hasPrefix("chat:") })
     }
-
-    func testChatAppKeysRoundTripAndNeverMatchMarketIDs() {
-        XCTAssertEqual(AppsModel.chatAppKey("a1"), "chat:a1")
-        XCTAssertEqual(AppsModel.chatAppID(of: AppsModel.chatAppKey("a1")), "a1")
-        XCTAssertNil(AppsModel.chatAppID(of: "a1"))
-        XCTAssertNil(AppsModel.chatAppID(of: "chat:"))
+    func testRemovedRowsNeverResurrectFromPresentationHistory() {
+        let rows = AppsModel.myApps([app("gone",name:"Gone",removed:true)],info:["gone":.init(appId:"gone",name:"Gone",lastOpenedAt:Date())])
+        XCTAssertTrue(rows.isEmpty)
     }
-
-    func testMyAppsMarksUpdatesAndOnlyRunningOperations() {
-        let apps = AppsModel.myApps(
-            installedIDs: ["a", "b", "c"],
-            info: [:],
-            updatable: ["a"],
-            operations: ["b": .downloading(0.5), "c": .failed("HTTP_503")]
-        )
-        let byID = Dictionary(uniqueKeysWithValues: apps.map { ($0.appId, $0) })
-        XCTAssertEqual(byID["a"]?.updateAvailable, true)
-        XCTAssertEqual(byID["b"]?.activeOperation, .downloading(0.5))
-        XCTAssertNil(byID["c"]?.activeOperation)
+    func testRecentAppsUseStableLocalIdentityAndOpenTime() {
+        let old = Date(timeIntervalSince1970:1), fresh = Date(timeIntervalSince1970:2)
+        let rows = AppsModel.myApps([app("a",name:"A"),app("b",name:"B"),app("c",name:"C")],info:["b":.init(appId:"b",name:"Old cached title",lastOpenedAt:old),"c":.init(appId:"c",name:"C",lastOpenedAt:fresh)])
+        XCTAssertEqual(AppsModel.recentApps(rows).map(\.appId),["c","b"])
+        XCTAssertEqual(rows.first { $0.appId == "b" }?.name,"B")
     }
-
-    func testRecentAppsAreTheLastThreeOpened() {
-        func app(_ id: String, _ offset: TimeInterval?) -> MyApp {
-            MyApp(appId: id, name: id, category: "", lastOpenedAt: offset.map(t0.addingTimeInterval),
-                  updateAvailable: false, activeOperation: nil)
-        }
-        let apps = [app("a", 1), app("b", nil), app("c", 3), app("d", 4), app("e", 2)]
-        XCTAssertEqual(AppsModel.recentApps(apps).map(\.appId), ["d", "c", "e"])
-    }
-
-    func testMatchingAppsAndInitials() {
-        let apps = AppsModel.myApps(
-            installedIDs: ["a", "b"],
-            info: ["a": InstalledAppInfo(appId: "a", name: "Water Tracker"), "b": InstalledAppInfo(appId: "b", name: "记账本")],
-            updatable: [],
-            operations: [:]
-        )
-        XCTAssertTrue(AppsModel.matchingApps(apps, query: " ").isEmpty)
-        XCTAssertEqual(AppsModel.matchingApps(apps, query: "water").map(\.appId), ["a"])
-        XCTAssertEqual(AppsModel.matchingApps(apps, query: "账").map(\.appId), ["b"])
-        XCTAssertEqual(AppsModel.initial("记账本"), "记")
-        XCTAssertEqual(AppsModel.initial("  calculator"), "C")
-        XCTAssertEqual(AppsModel.initial(" "), "?")
-    }
-
-    func testActionFollowsInstallStateVersionsAndOperations() {
-        func action(_ current: (String, Int)?, installed: Int?, update: String? = nil, op: AppOperation? = nil) -> AppAction {
-            AppsModel.action(currentVersionID: current?.0, currentSequence: current?.1,
-                             installedSequence: installed, updateVersionID: update, operation: op)
-        }
-        XCTAssertEqual(action(("v1", 1), installed: nil), .get)
-        XCTAssertEqual(action(nil, installed: nil), .unavailable)
-        XCTAssertEqual(action(("v1", 1), installed: 1), .open)
-        XCTAssertEqual(action(("v2", 2), installed: 1), .update(versionID: "v2"))
-        XCTAssertEqual(action(("v2", 2), installed: 1, update: "v3"), .update(versionID: "v3"))
-        XCTAssertEqual(action(("v1", 1), installed: nil, op: .downloading(0.25)), .downloading(0.25))
-        XCTAssertEqual(action(("v1", 1), installed: nil, op: .installing), .installing)
-        XCTAssertEqual(action(("v1", 1), installed: 1, op: .removing), .removing)
-        // A failed operation leaves the button as it was.
-        XCTAssertEqual(action(("v1", 1), installed: nil, op: .failed("HASH_MISMATCH")), .get)
+    func testSearchAndInitials() {
+        let rows = AppsModel.myApps([app("a",name:"Water Tracker"),app("b",name:"记账本")],info:[:])
+        XCTAssertEqual(AppsModel.matchingApps(rows,query:"water").map(\.appId),["a"])
+        XCTAssertEqual(AppsModel.matchingApps(rows,query:"账").map(\.appId),["b"])
+        XCTAssertTrue(AppsModel.matchingApps(rows,query:" ").isEmpty)
+        XCTAssertEqual(AppsModel.initial("  calculator"),"C")
+        XCTAssertEqual(AppsModel.initial(" "),"?")
     }
 }

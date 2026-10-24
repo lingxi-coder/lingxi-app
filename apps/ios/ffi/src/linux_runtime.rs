@@ -212,17 +212,22 @@ pub(super) fn linked_ios_mobile_linux_runtime(
         archive_sha256: cfg.archive_sha256.clone(),
         authorization_file: cfg.authorization_file.clone(),
     });
-    Some(runtime.unwrap_or_else(|error| {
-        Arc::new(
-            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
-                mobile_linux_api::SandboxBackend::IosIsh,
-                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
-                "ios",
-                cfg.abi.clone(),
-                error.to_string(),
-            ),
-        )
-    }))
+    Some(
+        harness_runtime::mobile::linux_maintenance::coordinate_runtime(
+            std::path::Path::new(&cfg.managed_root),
+            runtime.unwrap_or_else(|error| {
+                Arc::new(
+                    mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                        mobile_linux_api::SandboxBackend::IosIsh,
+                        mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
+                        "ios",
+                        cfg.abi.clone(),
+                        error.to_string(),
+                    ),
+                )
+            }),
+        ),
+    )
 }
 
 #[cfg(feature = "uniffi")]

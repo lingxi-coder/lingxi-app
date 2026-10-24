@@ -8,10 +8,10 @@ class LocalAppCardTest {
     @Test
     fun aPublishResultIsTheCard() {
         assertEquals(
-            PublishedLocalApp("a1b2c3d4e5f", "喝水记录", 2),
+            PublishedLocalApp("a0123456789abcdef0123456789abcdef", "喝水记录", 2),
             parseLocalAppResult(
                 "LocalApp",
-                """{"action":"publish","id":"a1b2c3d4e5f","revision":2,"name":"喝水记录","warnings":[]}""",
+                """{"action":"publish","id":"a0123456789abcdef0123456789abcdef","revision":2,"name":"喝水记录","warnings":[]}""",
             ),
         )
     }
@@ -28,8 +28,13 @@ class LocalAppCardTest {
     }
 
     @Test
+    fun legacyPublishIsAnArchiveRatherThanAnExecutableV2Card() {
+        assertNull(parseLocalAppResult("LocalApp", """{"action":"publish","id":"a1","revision":1,"name":"Old app"}"""))
+    }
+
+    @Test
     fun theCardSurvivesRunToTranscriptProjection() {
-        val app = PublishedLocalApp("a1", "Timer", 1)
+        val app = PublishedLocalApp("a0123456789abcdef0123456789abcdef", "Timer", 1)
         assertEquals(
             app,
             AgentToolRunState(id = "t", tool = "LocalApp", status = AgentToolStatus.Completed, localApp = app)

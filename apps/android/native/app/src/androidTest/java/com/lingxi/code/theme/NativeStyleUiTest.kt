@@ -127,11 +127,11 @@ class NativeStyleUiTest {
     @Test fun primaryPagesInBothAppearances() {
         val dark = mutableStateOf(false)
         val apps = mutableStateOf(false)
-        val localApps = com.lingxi.code.apps.LocalApps.get(context)
+        val localApps = com.lingxi.code.apps.UnifiedLocalApps.get(context)
         rule.setContent {
             LingXiTheme(darkTheme = dark.value) {
                 Surface(Modifier.fillMaxSize()) {
-                    if (apps.value) com.lingxi.code.apps.AppsPage(localApps, {}, {}, {})
+                    if (apps.value) com.lingxi.code.apps.UnifiedAppsPage(localApps, {}, {}, {}, { _, _, _ -> })
                     else com.lingxi.code.project.ProjectsPage(emptyList(), emptyMap(), null, {}, {}, {}, {})
                 }
             }

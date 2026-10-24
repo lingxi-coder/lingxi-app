@@ -53,6 +53,11 @@ class ProjectStore private constructor(
             created
         }
 
+    suspend fun registerAuthoringWorkspace(name: String, directory: String): ProjectSnapshot =
+        runSuspendingOperation(ProjectOperationKind.Create, message = appContext.getString(R.string.project_creating_message)) {
+            repository.registerAuthoringWorkspace(name, directory).also { _state.value = repository.load() }
+        }
+
     suspend fun importSaf(name: String, treeUri: Uri): ProjectSnapshot =
         runSuspendingOperation(
             ProjectOperationKind.Import,

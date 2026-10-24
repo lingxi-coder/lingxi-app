@@ -91,6 +91,11 @@ mod configuration;
 mod host;
 mod linux_conversion;
 mod linux_runtime;
+#[cfg(feature = "uniffi")]
+mod local_apps;
+#[cfg(feature = "uniffi")]
+pub use local_apps::{build_ios_local_app_service, MobileLocalAppError, MobileLocalAppServiceHandle};
+
 mod linux_types;
 #[cfg(feature = "uniffi")]
 pub use callbacks::CameraFfiError;

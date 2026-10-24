@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import com.lingxi.code.bindings.android.AndroidMobileLinuxConfigFfi
 import com.lingxi.code.bindings.android.AndroidMobileLinuxEventSink
+import com.lingxi.code.bindings.android.AndroidMobileLinuxRootfsStager
 import com.lingxi.code.bindings.android.AndroidMobileLinuxRuntimeHandle
 import com.lingxi.code.bindings.android.MobileLinuxCommandRequestFfi
 import com.lingxi.code.bindings.android.MobileLinuxCommandResultFfi
@@ -132,11 +133,36 @@ object LinuxRuntimeBridge {
                 capability = capability,
                 status = status,
                 lastAction = LinuxRuntimeAction.Refresh,
-                tasks = runCatching {
-                    runtime.listTasks()
-                }.getOrDefault(emptyList()),
+                tasks = runtime.listTasks(),
             )
         }
+
+    /** Advisory UI check; FFI repeats the check under its maintenance lease. */
+    private suspend fun requireMaintenanceIdle(context: Context, runtime: AndroidMobileLinuxRuntimeHandle) {
+        val apps = com.lingxi.code.apps.UnifiedLocalApps.get(context)
+        val records = apps.request("list") as org.json.JSONArray
+        val blockers = mutableListOf<String>()
+        for (index in 0 until records.length()) {
+            val record = records.getJSONObject(index)
+            val appId = record.getString("appId")
+            for (run in apps.runs(appId)) {
+                if (run.phase in setOf("preparing", "starting", "running", "stopping") && apps.release(appId, run.revision).executesCode) {
+                    blockers.add("${record.getString("name")} · appId=$appId · runId=${run.runId} · ${run.phase}")
+                }
+            }
+        }
+        val activeStates = setOf(
+            com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.QUEUED,
+            com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.RUNNING,
+            com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.BACKGROUNDED,
+        )
+        for (task in runtime.listTasks().filter { it.status in activeStates }) {
+            blockers.add("SDK taskId=${task.taskId} · ${task.command} · ${task.status}")
+        }
+        check(blockers.isEmpty()) {
+            context.getString(com.lingxi.code.R.string.local_app_v2_maintenance_blocked) + "\n\n" + blockers.joinToString("\n")
+        }
+    }
 
     suspend fun verify(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
@@ -161,8 +187,12 @@ object LinuxRuntimeBridge {
             check(before.state == MobileLinuxRootfsStateFfi.MISSING) {
                 "Rootfs installation requires MISSING state; current state is ${before.state}"
             }
-            stageBundledRootfs(context.applicationContext, config(context, mode))
-            val status = runtime.repairRootfs()
+            requireMaintenanceIdle(context, runtime)
+            val status = runtime.stageAndRepairRootfs(object : AndroidMobileLinuxRootfsStager {
+                override suspend fun stage() = withContext(Dispatchers.IO) {
+                    stageBundledRootfs(context.applicationContext, config(context, mode))
+                }
+            })
             val capability = runtime.capability()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Install)
         }
@@ -208,7 +238,14 @@ object LinuxRuntimeBridge {
             val config = config(context, mode)
             val runtime = runtime(config)
             val capability = runtime.capability()
-            val status = runtime.repairRootfs()
+            requireMaintenanceIdle(context, runtime)
+            val status = runtime.stageAndRepairRootfs(object : AndroidMobileLinuxRootfsStager {
+                override suspend fun stage() = withContext(Dispatchers.IO) {
+                    // Recreate the pinned manifest too: status can report a
+                    // runnable shell even when that manifest is missing.
+                    stageBundledRootfs(context.applicationContext, config)
+                }
+            })
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Repair)
         }
 
@@ -217,6 +254,7 @@ object LinuxRuntimeBridge {
             val config = config(context, mode)
             val runtime = runtime(config)
             val capability = runtime.capability()
+            requireMaintenanceIdle(context, runtime)
             val status = runtime.resetRootfs()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Reset)
         }
@@ -234,6 +272,7 @@ object LinuxRuntimeBridge {
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
             val runtime = runtime(config)
+            requireMaintenanceIdle(context, runtime)
             runtime.shutdown()
             val capability = runtime.capability()
             val status = runtime.status()
@@ -319,7 +358,9 @@ object LinuxRuntimeBridge {
         mode: LinuxRuntimeMode,
         mounts: List<MobileLinuxMountSpecFfi>,
     ): MobileLinuxStatusFfi = withContext(Dispatchers.IO) {
-        mobileRuntime(context, mode).configureMounts(mounts)
+        val runtime = mobileRuntime(context, mode)
+        requireMaintenanceIdle(context, runtime)
+        runtime.configureMounts(mounts)
     }
 
     suspend fun readEvents(

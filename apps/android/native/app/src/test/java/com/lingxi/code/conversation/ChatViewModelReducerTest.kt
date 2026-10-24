@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -183,6 +184,8 @@ class ChatViewModelReducerTest {
     ) : ConversationSource {
         val operations = mutableListOf<String>()
         val active = MutableStateFlow<ActivatedSession?>(null)
+        val workspace = MutableStateFlow<com.lingxi.code.project.SessionWorkspaceState?>(null)
+        override val workspaceState = workspace.asStateFlow()
         private val never = MutableSharedFlow<ReplyEvent>()
         var submitCount = 0
         var closed = false
@@ -208,9 +211,8 @@ class ChatViewModelReducerTest {
             resumeFailure?.let { throw it }
         }
 
-        override suspend fun newSession() {
-            operations += "new"
-        }
+        override suspend fun newSession() { operations += "new" }
+        override suspend fun newSession(cwd: String) { operations += "new:$cwd" }
 
         override fun close() {
             closed = true
@@ -2174,6 +2176,78 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun enginePreparationReturnsBeforeNativeConstructionAndAdoptsOnMain() = runTest(dispatcher) {
+        val original = CloseTrackingSource(); val prepared = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = -1)
+        var calls = 0
+        vm.ensureSourceInBackground(0, StandardTestDispatcher(testScheduler)) { calls++; prepared }
+        assertEquals("UI caller must return before native construction", 0, calls)
+        assertSame(original, vm.engineSource.value)
+        runCurrent()
+        assertEquals(1, calls)
+        assertSame(prepared, vm.engineSource.value)
+        assertEquals(1, original.closeCount)
+    }
+
+    @Test
+    fun obsoleteBackgroundPreparationIsClosedWithoutReplacingTheNewGeneration() = runTest(dispatcher) {
+        val original = CloseTrackingSource(); val obsolete = CloseTrackingSource(); val latest = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = -1)
+        val io = StandardTestDispatcher(testScheduler)
+        vm.ensureSourceInBackground(0, io) { obsolete }
+        vm.ensureSourceInBackground(1, io) { latest }
+        runCurrent()
+        assertSame(latest, vm.engineSource.value)
+        assertEquals(1, obsolete.closeCount)
+        assertEquals(1, original.closeCount)
+        assertEquals(0, latest.closeCount)
+    }
+
+    @Test
+    fun nativeHandleReturnedAfterViewModelDestructionIsClosed() = runTest(dispatcher) {
+        val original = CloseTrackingSource(); val abandoned = CloseTrackingSource()
+        val vm = ChatViewModel(source = original, sourceGeneration = -1)
+        val store = androidx.lifecycle.ViewModelStore().apply { put("chat", vm) }
+        vm.ensureSourceInBackground(0, StandardTestDispatcher(testScheduler)) { abandoned }
+        store.clear()
+        runCurrent()
+        assertEquals(1, original.closeCount)
+        assertEquals(1, abandoned.closeCount)
+    }
+
+    @Test
+    fun cancelledPreparationClosesTheReturnedOwnedHandle() = runTest(dispatcher) {
+        val abandoned = CloseTrackingSource()
+        lateinit var pending: kotlinx.coroutines.Deferred<ConversationSource>
+        pending = async(start = CoroutineStart.LAZY) {
+            prepareConversationSource(dispatcher = StandardTestDispatcher(testScheduler)) {
+                pending.cancel()
+                abandoned
+            }
+        }
+        pending.start()
+        runCurrent()
+        assertTrue(pending.isCancelled)
+        assertEquals(1, abandoned.closeCount)
+    }
+
+    @Test
+    fun cancelledPreparationKeepsABorrowedProcessSourceOpen() = runTest(dispatcher) {
+        val borrowed = CloseTrackingSource()
+        lateinit var pending: kotlinx.coroutines.Deferred<ConversationSource>
+        pending = async(start = CoroutineStart.LAZY) {
+            prepareConversationSource(borrowed, StandardTestDispatcher(testScheduler)) {
+                pending.cancel()
+                borrowed
+            }
+        }
+        pending.start()
+        runCurrent()
+        assertTrue(pending.isCancelled)
+        assertEquals(0, borrowed.closeCount)
+    }
+
+    @Test
     fun reconnect_handedTheLiveSourceBack_keepsItOpen() = runTest(dispatcher) {
         val original = CloseTrackingSource()
         val vm = ChatViewModel(source = original, sourceGeneration = 1)
@@ -2592,4 +2666,44 @@ class ChatViewModelReducerTest {
         sessionDurationSecs = 0u,
         formatted = "$0.00",
     )
+    @Test fun appAuthoringWaitsForConfirmedSessionAndWorkspace() = runTest {
+        val source = SessionControlSource()
+        val vm = ChatViewModel(source = source)
+        vm.startNewSession()
+        runCurrent()
+        val pending = async { vm.awaitAppAuthoringSession("/home/lingxi/source") }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        source.active.value = ActivatedSession("restored-app-session", emptyList(), SessionActivationKind.Started)
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        source.workspace.value = com.lingxi.code.project.SessionWorkspaceState("restored-app-session", "/home/lingxi/source", "/home/lingxi/source", emptyList(), "/transcript")
+        testScheduler.advanceTimeBy(50)
+        runCurrent()
+        assertEquals("restored-app-session", pending.await().sessionId)
+        assertEquals("restored-app-session", vm.awaitAppAuthoringSession("/home/lingxi/source", "restored-app-session").sessionId)
+    }
+
+    @Test fun appAuthoringRejectsConfirmedSessionInAnotherDirectory() = runTest {
+        val source = SessionControlSource()
+        val vm = ChatViewModel(source = source)
+        source.active.value = ActivatedSession("app-session", emptyList(), SessionActivationKind.Started)
+        source.workspace.value = com.lingxi.code.project.SessionWorkspaceState("app-session", "/home/lingxi/other", "/home/lingxi/other", emptyList(), "/transcript")
+        runCurrent()
+        val failure = runCatching { vm.awaitAppAuthoringSession("/home/lingxi/source", "app-session") }.exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        assertTrue(failure!!.message!!.contains("切换目录"))
+    }
+
+    @Test fun recoveredAuthoringSessionPassesExplicitDirectoryToOrdinaryEngine() = runTest {
+        val previous = SessionControlSource()
+        val reused = SessionControlSource()
+        reused.workspace.value = com.lingxi.code.project.SessionWorkspaceState("old-session", "/home/lingxi/moved", "/home/lingxi/source", emptyList(), "/transcript")
+        val vm = ChatViewModel(source = previous)
+        assertTrue(vm.switchWorkspaceSource(projectId = "authoring-project", newSessionDirectory = "/home/lingxi/source", createSource = { reused }))
+        runCurrent()
+        assertTrue(reused.operations.contains("new:/home/lingxi/source"))
+        assertFalse(vm.state.value.sessionReady)
+    }
+
 }

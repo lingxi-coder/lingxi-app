@@ -127,6 +127,14 @@ internal class ProjectRepository(
     fun createInternal(name: String): ProjectSnapshot =
         createProject(name, ProjectStorageKind.Internal, null, null)
 
+    /** Register an existing owned source directory without copying or relocating it. */
+    fun registerAuthoringWorkspace(name: String, guestDirectory: String): ProjectSnapshot {
+        val workspace = workspaceForDirectory("authoring", guestDirectory)
+        load().projects.firstOrNull { it.record.directory == guestDirectory }?.let { return it }
+        val created = createInternal(name)
+        return updateProject(created.record.copy(directory = guestDirectory, activeDirectory = guestDirectory))
+    }
+
     fun createSafMirror(
         name: String,
         sourceTreeUri: String,

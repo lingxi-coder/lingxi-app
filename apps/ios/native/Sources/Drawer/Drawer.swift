@@ -33,16 +33,13 @@ struct Drawer: View {
     let onOpenSession: (ConversationScope, SessionMode, String) -> Void
     let onToggleSessionPinned: (String) -> Void
     let onContinueInMode: (ConversationScope, String, SessionMode, SessionMode) -> Void
-    /// Read on each render rather than observed, so a download's progress
-    /// never redraws the sidebar; installs and opens change [appInfo] anyway.
-    let appMarket: LocalAppMarket?
-    /// The apps made in chat; observed, since the library changes rarely.
-    let chatApps: ChatApps?
+    /// The independent app library remains available without a chat engine.
+    let appLibrary: UnifiedLocalApps?
     let openApps: () -> Void
     let openApp: (String) -> Void
 
     @ObservedObject private var convo: ConversationModel
-    @ObservedObject private var appInfo: InstalledAppInfoStore
+    private let appInfo: InstalledAppInfoStore
     @Binding private var filter: RecentsFilter
     @State private var query = ""
     @FocusState private var searchFocused: Bool
@@ -67,8 +64,7 @@ struct Drawer: View {
         onOpenSession: @escaping (ConversationScope, SessionMode, String) -> Void,
         onToggleSessionPinned: @escaping (String) -> Void = { _ in },
         onContinueInMode: @escaping (ConversationScope, String, SessionMode, SessionMode) -> Void = { _, _, _, _ in },
-        appMarket: LocalAppMarket? = nil,
-        chatApps: ChatApps? = nil,
+        appLibrary: UnifiedLocalApps? = nil,
         appInfo: InstalledAppInfoStore,
         openApps: @escaping () -> Void = {},
         openApp: @escaping (String) -> Void = { _ in }
@@ -92,8 +88,7 @@ struct Drawer: View {
         self.onOpenSession = onOpenSession
         self.onToggleSessionPinned = onToggleSessionPinned
         self.onContinueInMode = onContinueInMode
-        self.appMarket = appMarket
-        self.chatApps = chatApps
+        self.appLibrary = appLibrary
         self.appInfo = appInfo
         self.openApps = openApps
         self.openApp = openApp
@@ -171,7 +166,7 @@ struct Drawer: View {
     }
 
     private var installedApps: [MyApp] {
-        appMarket?.myApps(info: appInfo.apps, chatApps: chatApps?.apps ?? []) ?? []
+        AppsModel.myApps(appLibrary?.records ?? [], info: appInfo.apps)
     }
 
     private var matchingCrons: [CronScopedTask] {

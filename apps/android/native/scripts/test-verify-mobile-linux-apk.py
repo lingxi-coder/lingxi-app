@@ -25,8 +25,9 @@ class ApkArchitectureTest(unittest.TestCase):
                         path.parent.mkdir(parents=True, exist_ok=True)
                         path.write_bytes(payload)
                         archive.writestr(f"lib/{abi}/{name}", payload)
-            with patch.object(verifier.native, "verify"), patch.object(verifier, "staged_assets", return_value={}):
+            with patch.object(verifier.native, "verify") as native_check, patch.object(verifier, "staged_assets", return_value={}):
                 verifier.verify_apk(apk, root, root / "host", root / "assets", requested)
+                native_check.assert_called_once_with(root, root / "host", set(verifier.native.ABIS if requested is None else requested))
 
     def test_single_abi_verifies_its_exact_native_payloads(self):
         self.verify(["arm64-v8a"], ["arm64-v8a"])

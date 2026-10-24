@@ -1,3 +1,6 @@
+import { promises as fs } from 'node:fs';
+import { LocalAppCoreClient } from './local-apps/coreClient.js';
+import { resolveServerBin } from './bridgeDiscovery.js';
 import { LocalAppHost } from './local-apps/host.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks } from './deepLinks.js';
@@ -468,9 +471,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
-  host.attachAccount(new AccountService(firebaseConfig, credentialBroker
+  const accountService = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker)
-    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
+    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
+  host.attachAccount(accountService);
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
@@ -496,6 +500,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   if (productPaths) {
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
+      accountToken: () => accountService.getIdToken(),
+      accountId: () => accountService.snapshot().user?.uid ?? undefined,
+      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
+      resolveAuthoring: async row => {
+        if (!row.sourcePath) return { ...row, sourceSession: undefined };
+        try { await fs.stat(row.sourcePath); } catch { return { ...row, sourceSession: undefined, sourceMissing: true }; }
+        if (!row.sourceSession) return row;
+        const source = await sessionCatalog.find(row.sourceSession.projectPath, row.sourceSession.sessionId).catch(() => undefined);
+        const actual = source?.workspace_path;
+        const matches = actual && await Promise.all([fs.realpath(actual), fs.realpath(row.sourcePath)]).then(([a, b]) => a === b).catch(() => false);
+        return source && matches ? row : { ...row, sourceSession: undefined };
+      },
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
@@ -505,7 +521,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         window.show(); window.focus();
         // The renderer owns navigation and must apply the selected chat's bootstrap
         // before placing an edit request in its session-bound composer draft.
-        window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession });
+        window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession, sourceMissing: row.sourceMissing });
       },
     });
     await localApps.initialize();

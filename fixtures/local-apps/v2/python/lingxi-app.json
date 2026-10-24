@@ -1,0 +1,72 @@
+{
+  "schema": 2,
+  "name": "Python service acceptance",
+  "entry": {
+    "type": "server",
+    "process": "api"
+  },
+  "targets": [
+    {
+      "platform": "android",
+      "environment": "mobile-linux",
+      "channels": [
+        "direct"
+      ]
+    },
+    {
+      "platform": "ios",
+      "environment": "mobile-linux",
+      "channels": [
+        "full"
+      ]
+    },
+    {
+      "platform": "macos",
+      "environment": "native",
+      "channels": [
+        "desktop"
+      ]
+    },
+    {
+      "platform": "windows",
+      "environment": "native",
+      "channels": [
+        "desktop"
+      ]
+    },
+    {
+      "platform": "linux",
+      "environment": "native",
+      "channels": [
+        "desktop"
+      ]
+    }
+  ],
+  "package": {
+    "files": [
+      "server.py"
+    ],
+    "dependencyLocks": []
+  },
+  "dataSchema": {
+    "version": 1,
+    "compatibleFrom": 1
+  },
+  "remix": {
+    "allowed": true,
+    "license": "MIT"
+  },
+  "capabilities": [
+    "process"
+  ],
+  "processes": [
+    {
+      "name": "api",
+      "command": "python3 server.py",
+      "ready": {
+        "path": "/health",
+        "timeoutMs": 15000
+      }
+    }
+  ]
+}

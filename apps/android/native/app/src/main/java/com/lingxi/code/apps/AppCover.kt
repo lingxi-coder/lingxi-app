@@ -41,4 +41,3 @@ internal fun AppCover(name: String, category: String, size: Dp, modifier: Modifi
         Text(appInitial(name), color = color, fontSize = (size.value * 0.42f).sp, fontWeight = FontWeight.Bold)
     }
 }
-

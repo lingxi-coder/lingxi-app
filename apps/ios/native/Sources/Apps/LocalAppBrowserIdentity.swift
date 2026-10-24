@@ -12,4 +12,3 @@ enum LocalAppBrowserIdentity {
         return url.scheme == "http" && url.host == "127.0.0.1" && url.port == origin.port && url.user == nil && url.password == nil
     }
 }
-

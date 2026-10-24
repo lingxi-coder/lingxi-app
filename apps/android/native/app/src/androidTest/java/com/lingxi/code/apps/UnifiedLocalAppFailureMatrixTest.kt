@@ -64,15 +64,18 @@ class UnifiedLocalAppFailureMatrixTest {
                 }
                 // A schema without a compatible data/migration transaction must
                 // never replace the still-serving code or rewrite user data.
-                manifestFile.writeText(JSONObject(original).put("dataSchema", JSONObject().put("version", 2).put("compatibleFrom", 2)).toString())
-                val schema = apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", latest) } as JSONObject
-                val next = schema.getJSONObject("release").appRelease()
-                apps.grant(record.id, next.digest)
-                val schemaFailure = runCatching { apps.start(record.id, revision = next.revision) }.exceptionOrNull()
-                assertEquals("dataMigrationRequired", (schemaFailure as? AppServiceException)?.code)
-                assertEquals(record.currentRevision, apps.get(record.id).currentRevision)
-                assertEquals("PYTHON-READY", health(serving))
-                assertEquals("keep-transaction-data", data.readText())
+                for ((compatibleFrom, expectedCode) in listOf(2 to "dataIncompatible", 1 to "dataMigrationRequired")) {
+                    manifestFile.writeText(JSONObject(original).put("dataSchema", JSONObject().put("version", 2).put("compatibleFrom", compatibleFrom)).toString())
+                    val schema = apps.request("publish", record.id) { put("sourcePath", source.path); put("expectedRevision", latest) } as JSONObject
+                    val next = schema.getJSONObject("release").appRelease()
+                    latest = next.revision
+                    apps.grant(record.id, next.digest)
+                    val schemaFailure = runCatching { apps.start(record.id, revision = next.revision) }.exceptionOrNull()
+                    assertEquals(expectedCode, (schemaFailure as? AppServiceException)?.code)
+                    assertEquals(record.currentRevision, apps.get(record.id).currentRevision)
+                    assertEquals("PYTHON-READY", health(serving))
+                    assertEquals("keep-transaction-data", data.readText())
+                }
                 android.util.Log.i("LocalAppAcceptance", "FAILURE_MATRIX PASS candidate-ENOSPC-injection unavailable-download incompatible-schema old-run old-revision user-data-retained")
             } finally { apps.remove(record.id); source.deleteRecursively() }
         }

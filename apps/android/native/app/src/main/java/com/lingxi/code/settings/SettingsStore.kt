@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.graphics.Color
 import com.lingxi.code.R
 import com.lingxi.code.bindings.client.ProviderModelCatalogEntryDto
+import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
@@ -158,15 +159,45 @@ class SettingsStore(
         )
     )
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
+    private var credentialBindingGeneration = 0L
+    private val credentialRevisions = mutableMapOf<String, Long>()
 
-    init {
-        if (providerRepo != null) {
-            viewModelScope.launch {
-                val result = providerRepo.refreshLlmStatuses(_state.value.llmProviders)
-                _state.update { it.copy(llmProviders = mergeProviderStatuses(it.llmProviders, result.providers)) }
-                providerRepo.persistProviders(ProviderKind.Llm, _state.value.llmProviders)
-            }
+    private fun credentialRevision(provider: GenericProvider): Long =
+        credentialRevisions[ProviderSettingsRepository.engineCredentialIdFor(provider)] ?: 0L
+
+    private fun credentialChanged(provider: GenericProvider) {
+        val id = ProviderSettingsRepository.engineCredentialIdFor(provider) ?: return
+        credentialRevisions[id] = (credentialRevisions[id] ?: 0L) + 1L
+    }
+
+    internal data class ProviderConnectionAttempt(
+        val provider: GenericProvider,
+        val bindingGeneration: Long,
+        val credentialRevision: Long,
+    )
+
+    internal fun beginProviderConnectionTest(provider: GenericProvider) =
+        ProviderConnectionAttempt(provider, credentialBindingGeneration, credentialRevision(provider))
+
+    internal fun recordProviderConnectionTest(attempt: ProviderConnectionAttempt, result: ProviderConnectionTestResult): Boolean {
+        val provider = attempt.provider
+        val current = _state.value.llmProviders.firstOrNull { it.id == provider.id } ?: return false
+        if (credentialBindingGeneration != attempt.bindingGeneration ||
+            credentialRevision(provider) != attempt.credentialRevision ||
+            current.url.trim() != provider.url.trim() || current.model.trim() != provider.model.trim()
+        ) return false
+        _state.update { state ->
+            state.copy(llmProviders = state.llmProviders.map {
+                if (it.id == provider.id) providerAfterConnectionTest(it, result.connected, result.usedStoredCredential) else it
+            })
         }
+        return true
+    }
+
+    fun bindProviderCredentialSource(source: ConversationSource?) {
+        credentialBindingGeneration += 1
+        providerRepo?.bindSource(source)
+        if (source != null && providerRepo != null) refreshProviderStatuses()
     }
 
     // --- simple toggles / radios (A6) --------------------------------------
@@ -404,7 +435,16 @@ class SettingsStore(
 
     fun updateProvider(kind: ProviderKind, id: String, mutate: (GenericProvider) -> GenericProvider) {
         val before = _state.value.providers(kind).firstOrNull { it.id == id }
-        val updated = _state.value.providers(kind).map { if (it.id == id) mutate(it) else it }
+        val updated = _state.value.providers(kind).map {
+            if (it.id != id) it else {
+                val next = mutate(it)
+                if (kind == ProviderKind.Llm && ProviderSettingsRepository.engineCredentialIdFor(it) != ProviderSettingsRepository.engineCredentialIdFor(next)) {
+                    credentialChanged(it)
+                    credentialChanged(next)
+                    next.copy(credentialConfigured = false, status = ConnStatus.Idle)
+                } else next
+            }
+        }
         setProviders(kind, updated)
         val after = updated.firstOrNull { it.id == id }
         if (
@@ -436,16 +476,27 @@ class SettingsStore(
         if (kind == ProviderKind.Llm && repo == null && provider.credentialConfigured) {
             return onDone("provider repository unavailable; saved credential was not deleted")
         }
+        if (kind == ProviderKind.Llm) credentialChanged(provider)
         viewModelScope.launch {
             val error = removeProviderCredentialFirst(
                 kind = kind,
                 provider = provider,
                 deleteCredential = { target ->
-                    repo?.deleteCredential(target) ?: ProviderCredentialSnapshot(
-                        configuredProviderIds = emptySet(),
-                        unavailableProviderIds = emptySet(),
-                        storageEncrypted = false,
-                    )
+                    val snapshot = try {
+                        repo?.deleteCredential(target) ?: ProviderCredentialSnapshot(
+                            configuredProviderIds = emptySet(),
+                            unavailableProviderIds = emptySet(),
+                            storageEncrypted = false,
+                        )
+                    } finally {
+                        credentialChanged(target)
+                    }
+                    if (snapshot.error == null) {
+                        recordSavedProviderCredential(
+                            kind, id, snapshot, ProviderSettingsRepository.engineCredentialIdFor(target),
+                        )
+                    }
+                    snapshot
                 },
                 removePersistedProvider = {
                     setProviders(kind, _state.value.providers(kind).filter { it.id != id })
@@ -489,8 +540,11 @@ class SettingsStore(
         )
     }
 
-    fun markLlmConfigurationApplied() {
+    /** A busy host may reject reconnecting; keep saved changes available to retry. */
+    fun applyLlmConfiguration(reconnect: () -> Boolean): Boolean {
+        if (!reconnect()) return false
         _state.update { it.copy(pendingLlmProviderChanges = emptySet()) }
+        return true
     }
 
     fun setVisionDelegationEnabled(enabled: Boolean) {
@@ -510,8 +564,17 @@ class SettingsStore(
         }
     }
 
+    /** Generic credential pages share storage with provider editors and their probes. */
+    fun refreshAfterProviderCredentialMutation() {
+        _state.value.llmProviders.forEach(::credentialChanged)
+        refreshProviderStatuses()
+    }
+
     fun refreshProviderStatuses(onDone: (String?) -> Unit = {}) {
         val repo = providerRepo ?: return onDone("provider repository unavailable")
+        val bindingGeneration = credentialBindingGeneration
+        val providers = _state.value.llmProviders
+        val revisions = providers.associate { it.id to credentialRevision(it) }
         _state.update { current ->
             current.copy(
                 llmProviders = current.llmProviders.map { provider ->
@@ -524,9 +587,12 @@ class SettingsStore(
             )
         }
         viewModelScope.launch {
-            val result = repo.refreshLlmStatuses(_state.value.llmProviders)
+            val result = repo.refreshLlmStatuses(providers)
+            if (credentialBindingGeneration != bindingGeneration) return@launch
             _state.update {
-                it.copy(llmProviders = mergeProviderStatuses(it.llmProviders, result.providers))
+                it.copy(llmProviders = mergeProviderStatuses(it.llmProviders, result.providers.filter { provider ->
+                    revisions[provider.id] == credentialRevision(provider)
+                }))
             }
             repo.persistProviders(ProviderKind.Llm, _state.value.llmProviders)
             onDone(result.error)
@@ -579,6 +645,7 @@ class SettingsStore(
                 ),
             )
         }
+        val attempt = beginProviderConnectionTest(provider)
         _state.update { current ->
             current.copy(
                 llmProviders = current.llmProviders.map {
@@ -588,24 +655,7 @@ class SettingsStore(
         }
         viewModelScope.launch {
             val result = repo.testConnection(provider, credentialOverride)
-            val stillSameConfiguration = _state.value.llmProviders
-                .firstOrNull { it.id == id }
-                ?.let {
-                    it.url.trim() == provider.url.trim() &&
-                        it.model.trim() == provider.model.trim()
-                } == true
-            if (stillSameConfiguration) {
-                _state.update { current ->
-                    current.copy(
-                        llmProviders = current.llmProviders.map {
-                            if (it.id == id) {
-                                it.copy(status = if (result.connected) ConnStatus.Connected else ConnStatus.Error)
-                            } else {
-                                it
-                            }
-                        },
-                    )
-                }
+            if (recordProviderConnectionTest(attempt, result)) {
                 if (result.usedStoredCredential) {
                     repo.persistProviders(ProviderKind.Llm, _state.value.llmProviders)
                 }
@@ -644,27 +694,36 @@ class SettingsStore(
         val repo = providerRepo ?: return onDone("provider repository unavailable")
         val provider = _state.value.providers(kind).firstOrNull { it.id == id }
             ?: return onDone("provider not found")
+        credentialChanged(provider)
         viewModelScope.launch {
-            val snapshot = repo.setCredential(provider, secret)
+            val snapshot = try { repo.setCredential(provider, secret) } finally { credentialChanged(provider) }
             if (snapshot.error != null) {
                 onDone(snapshot.error)
                 return@launch
             }
-            val configured = ProviderSettingsRepository.engineCredentialIdFor(provider)
-                ?.let(snapshot.configuredProviderIds::contains) == true
-            updateProvider(kind, id) {
-                it.copy(
-                    credentialConfigured = configured,
-                    status = ProviderSettingsRepository.statusFor(
-                        it,
-                        configured,
-                        snapshot.storageEncrypted,
-                        unavailable = false,
-                    ),
-                )
-            }
+            val credentialID = ProviderSettingsRepository.engineCredentialIdFor(provider)
+                ?: return@launch onDone("provider credential identity unavailable")
+            recordSavedProviderCredential(kind, id, snapshot, credentialID)
+            if (_state.value.providers(kind).firstOrNull { it.id == id }
+                    ?.let(ProviderSettingsRepository::engineCredentialIdFor) != credentialID
+            ) return@launch onDone(resolveString(R.string.settings_provider_config_changed_retest))
             onDone(null)
         }
+    }
+
+    internal fun recordSavedProviderCredential(
+        kind: ProviderKind, id: String, snapshot: ProviderCredentialSnapshot, savedCredentialID: String? = null,
+    ) {
+        val credentialID = savedCredentialID ?: _state.value.providers(kind).firstOrNull { it.id == id }
+            ?.let(ProviderSettingsRepository::engineCredentialIdFor) ?: return
+        credentialRevisions[credentialID] = (credentialRevisions[credentialID] ?: 0L) + 1L
+        val configured = credentialID in snapshot.configuredProviderIds
+        setProviders(kind, _state.value.providers(kind).map {
+            if (ProviderSettingsRepository.engineCredentialIdFor(it) != credentialID) it else it.copy(
+                credentialConfigured = configured,
+                status = ProviderSettingsRepository.statusFor(it, configured, snapshot.storageEncrypted, unavailable = false),
+            )
+        })
     }
 
     fun clearProviderCredential(
@@ -675,23 +734,19 @@ class SettingsStore(
         val repo = providerRepo ?: return onDone("provider repository unavailable")
         val provider = _state.value.providers(kind).firstOrNull { it.id == id }
             ?: return onDone("provider not found")
+        credentialChanged(provider)
         viewModelScope.launch {
-            val snapshot = repo.deleteCredential(provider)
+            val snapshot = try { repo.deleteCredential(provider) } finally { credentialChanged(provider) }
             if (snapshot.error != null) {
                 onDone(snapshot.error)
                 return@launch
             }
-            updateProvider(kind, id) {
-                it.copy(
-                    credentialConfigured = false,
-                    status = ProviderSettingsRepository.statusFor(
-                        it,
-                        credentialConfigured = false,
-                        encrypted = snapshot.storageEncrypted,
-                        unavailable = false,
-                    ),
-                )
-            }
+            val credentialID = ProviderSettingsRepository.engineCredentialIdFor(provider)
+                ?: return@launch onDone("provider credential identity unavailable")
+            recordSavedProviderCredential(kind, id, snapshot, credentialID)
+            if (_state.value.providers(kind).firstOrNull { it.id == id }
+                    ?.let(ProviderSettingsRepository::engineCredentialIdFor) != credentialID
+            ) return@launch onDone(resolveString(R.string.settings_provider_config_changed_retest))
             onDone(null)
         }
     }
@@ -772,7 +827,7 @@ internal fun providerLaunchConfigurationChanged(
     before.url.trim() != after.url.trim() ||
         before.model.trim() != after.model.trim() ||
         before.enabled != after.enabled ||
-        before.credentialConfigured != after.credentialConfigured
+        before.connections != after.connections
 
 internal fun mergeProviderStatuses(
     current: List<GenericProvider>,
@@ -807,3 +862,17 @@ internal suspend fun removeProviderCredentialFirst(
     removePersistedProvider()
     return null
 }
+
+/** Only testing the stored credential can verify and configure the saved provider. */
+internal fun providerAfterConnectionTest(
+    provider: GenericProvider,
+    connected: Boolean,
+    usedStoredCredential: Boolean,
+): GenericProvider = provider.copy(
+    credentialConfigured = provider.credentialConfigured || (connected && usedStoredCredential),
+    status = when {
+        !usedStoredCredential -> if (provider.credentialConfigured) ConnStatus.Configured else ConnStatus.Idle
+        connected -> ConnStatus.Connected
+        else -> ConnStatus.Error
+    },
+)

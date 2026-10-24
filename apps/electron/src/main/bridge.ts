@@ -92,6 +92,7 @@ import type {
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
 import {
+  configuredCredentialProviderIds,
   fusionCredentialSelection,
   resolveFusionCredentialProviderIds,
   resolveModelCredentialProviderIds,
@@ -222,6 +223,9 @@ export class SessionRuntime {
   private nextCredentialOperationId = 1;
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
   private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
+  private readonly providerCredentialEpochs = new Map<string, number>();
+  private readonly providerCredentialWrites = new Map<string, Promise<void>>();
+  private readonly invalidatedProviderCredentials = new Set<string>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private readonly pendingModUiRequests = new SessionEventCorrelator<Extract<ClientEvent, { type: 'ui_control_result' }>>();
   private outstandingModUiRequests = 0;
@@ -472,7 +476,7 @@ export class SessionRuntime {
   private readonly customProviderWaiters = new Map<string, Set<() => void>>();
 
   async ensureCustomProviderConfigured(providerId: string): Promise<void> {
-    if (this.configuredCustomProviderIds.includes(providerId)) return;
+    if (this.configuredCredentialIds.includes(providerId)) return;
     const client = this.requireClient();
     await new Promise<void>((resolve, reject) => {
       const waiters = this.customProviderWaiters.get(providerId) ?? new Set<() => void>();
@@ -503,6 +507,10 @@ export class SessionRuntime {
 
   get customProviderIds(): readonly string[] {
     return [...this.configuredCustomProviderIds];
+  }
+
+  get configuredCredentialIds(): readonly string[] {
+    return configuredCredentialProviderIds(this.credentialRoutingSettings);
   }
 
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
@@ -1555,6 +1563,12 @@ export class SessionRuntime {
       });
     }
     assertCurrentConnection();
+    // A transport reconnect can reuse a living sidecar whose keys changed
+    // while it was offline. Reconcile those keys before exposing readiness.
+    for (const providerId of this.invalidatedProviderCredentials) {
+      await this.ensureProviderCredentialCached(providerId);
+    }
+    assertCurrentConnection();
     if (this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0) this.requireClient().sendCommand({ type: 'side_chat_list' });
     if (publishConnected) this.setState({ status: 'connected' });
     this.startupDiagnostic('bridge_connect_completed', {
@@ -2021,7 +2035,7 @@ export class SessionRuntime {
           this.pendingCredentialSettings?.reject(new Error('Invalid provider settings snapshot.'));
           // An invalid snapshot must not keep stale credential authorization.
         }
-        for (const providerId of this.configuredCustomProviderIds) {
+        for (const providerId of this.configuredCredentialIds) {
           for (const resolve of this.customProviderWaiters.get(providerId) ?? []) resolve();
         }
       }
@@ -2786,18 +2800,40 @@ export class SessionRuntime {
   private nextFusionResolutionId = Date.now();
 
   private async ensureProviderCredentialCached(providerId: string): Promise<void> {
-    if (this.runtimeCredentialProviders.has(providerId) || !this.opts.resolveProviderCredential) return;
+    if (!this.opts.resolveProviderCredential) return;
     const existing = this.pendingRuntimeCredentialLoads.get(providerId);
     if (existing) return existing;
     const generation = this.generation;
     const client = this.requireClient();
     let loading!: Promise<void>;
     loading = (async () => {
-      const credential = await this.opts.resolveProviderCredential!(providerId);
-      if (generation !== this.generation || client !== this.client) {
-        throw new Error('provider credential loading was interrupted');
+      for (;;) {
+        const writing = this.providerCredentialWrites.get(providerId);
+        if (writing) await writing;
+        if (generation !== this.generation || client !== this.client) {
+          throw new Error('provider credential loading was interrupted');
+        }
+        if (this.runtimeCredentialProviders.has(providerId) && !this.invalidatedProviderCredentials.has(providerId)) return;
+        const epoch = this.providerCredentialEpochs.get(providerId) ?? 0;
+        let credential: string | undefined;
+        try { credential = await this.opts.resolveProviderCredential!(providerId); }
+        catch (error) {
+          if (epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) continue;
+          throw error;
+        }
+        if (generation !== this.generation || client !== this.client) {
+          throw new Error('provider credential loading was interrupted');
+        }
+        if (epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) continue;
+        try {
+          if (credential) await this.cacheProviderCredential(providerId, credential);
+          else if (this.invalidatedProviderCredentials.has(providerId)) await this.clearCachedProviderCredential(providerId);
+        } catch (error) {
+          if (epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) continue;
+          throw error;
+        }
+        if (epoch === (this.providerCredentialEpochs.get(providerId) ?? 0)) return;
       }
-      if (credential) await this.cacheProviderCredential(providerId, credential);
     })().finally(() => {
       if (this.pendingRuntimeCredentialLoads.get(providerId) === loading) {
         this.pendingRuntimeCredentialLoads.delete(providerId);
@@ -2902,25 +2938,60 @@ export class SessionRuntime {
     return this.runtimeCredentialProviders.has(providerId);
   }
 
+  /** Invalidate slow reads as well as keys already acknowledged by the engine. */
+  async refreshCachedProviderCredential(providerId: string, credential?: string): Promise<void> {
+    this.providerCredentialEpochs.set(providerId, (this.providerCredentialEpochs.get(providerId) ?? 0) + 1);
+    this.invalidatedProviderCredentials.add(providerId);
+    // Keep the invalidation across transport loss; connectBridgeClient reconciles
+    // a cached key before a recovered living engine can accept another prompt.
+    if (this.state.status !== 'connected') return;
+    if (credential !== undefined) await this.cacheProviderCredential(providerId, credential);
+    else await this.clearCachedProviderCredential(providerId);
+  }
+
+  private writeCachedProviderCredential(providerId: string, credential: string | undefined): Promise<void> {
+    const generation = this.generation;
+    const client = this.client;
+    if (!client) throw new Error(`bridge client not connected (state=${this.state.status})`);
+    const epoch = this.providerCredentialEpochs.get(providerId) ?? 0;
+    const assertCurrent = (): void => {
+      if (generation !== this.generation || client !== this.client
+        || epoch !== (this.providerCredentialEpochs.get(providerId) ?? 0)) {
+        throw new Error('provider credential update was interrupted');
+      }
+    };
+    const previous = this.providerCredentialWrites.get(providerId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(async () => {
+      assertCurrent();
+      const status = credential === undefined
+        ? await this.deleteProviderCredential(providerId)
+        : await this.setProviderCredential(providerId, credential);
+      assertCurrent();
+      if (status.configured_provider_ids.includes(providerId) !== (credential !== undefined)) {
+        throw new Error('provider credential update was not confirmed');
+      }
+      this.persistedCredentialProviders.delete(providerId);
+      if (credential === undefined) this.runtimeCredentialProviders.delete(providerId);
+      else this.runtimeCredentialProviders.add(providerId);
+      this.invalidatedProviderCredentials.delete(providerId);
+      this.activeCredentialProviders = new Set([
+        ...this.runtimeCredentialProviders,
+        ...this.persistedCredentialProviders,
+      ]);
+    });
+    const completion = operation.finally(() => {
+      if (this.providerCredentialWrites.get(providerId) === completion) this.providerCredentialWrites.delete(providerId);
+    });
+    this.providerCredentialWrites.set(providerId, completion);
+    return completion;
+  }
+
   async cacheProviderCredential(providerId: string, credential: string): Promise<void> {
-    await this.setProviderCredential(providerId, credential);
-    this.persistedCredentialProviders.delete(providerId);
-    this.runtimeCredentialProviders.add(providerId);
-    this.activeCredentialProviders = new Set([
-      ...this.runtimeCredentialProviders,
-      ...this.persistedCredentialProviders,
-    ]);
+    await this.writeCachedProviderCredential(providerId, credential);
   }
 
   async clearCachedProviderCredential(providerId: string): Promise<void> {
-    if (!this.runtimeCredentialProviders.has(providerId)) return;
-    await this.deleteProviderCredential(providerId);
-    this.runtimeCredentialProviders.delete(providerId);
-    this.persistedCredentialProviders.delete(providerId);
-    this.activeCredentialProviders = new Set([
-      ...this.runtimeCredentialProviders,
-      ...this.persistedCredentialProviders,
-    ]);
+    await this.writeCachedProviderCredential(providerId, undefined);
   }
 
   /** Remember a host-verified selection when reusing a connected runtime. */
@@ -3188,6 +3259,7 @@ export class SessionRuntime {
     }
     this.pendingCredentialOperations.clear();
     this.pendingRuntimeCredentialLoads.clear();
+    this.providerCredentialWrites.clear();
     for (const pending of this.pendingProviderConnectionTests.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('provider connection test was interrupted'));

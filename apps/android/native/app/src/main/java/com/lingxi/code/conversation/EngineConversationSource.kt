@@ -10,6 +10,8 @@ import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.client.PromptModeDto
+import com.lingxi.code.bindings.runtime.ProviderConnectionTestDto
+import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
 import com.lingxi.code.bindings.runtime.LocalAppHost
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
@@ -148,6 +150,16 @@ class EngineConversationSource private constructor(
 
     override suspend fun submitClientCommand(command: ClientCommand) {
         handle.submit(command)
+    }
+
+    override suspend fun testProviderConnection(
+        providerId: String,
+        providerPreset: String,
+        apiBase: String,
+        model: String,
+        credentialOverride: ProviderCredentialSecretDto?,
+    ): ProviderConnectionTestDto {
+        return handle.testProviderConnection(providerId, providerPreset, apiBase, model, credentialOverride)
     }
 
     override suspend fun refreshExecutionStatus() {

@@ -95,6 +95,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   ));
   const [pendingModelReference, setPendingModelReference] = useState<string | null>(requestedModelReference ?? null);
   const [connecting, setConnecting] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [modelApplying, setModelApplying] = useState(false);
@@ -323,6 +324,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   };
 
   const clearCredential = async () => {
+    if (connecting || clearing || modelApplying || testingConnection) return;
+    const generation = ++transactionGenerationRef.current;
+    setClearing(true);
     ++connectionTestGenerationRef.current;
     setConnectionTestResult(null);
     setConnectionTestError(null);
@@ -330,9 +334,11 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     try {
       await bridge.clearProviderCredential(selectedProvider.id);
     } catch (cause) {
-      if (mountedRef.current) {
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) {
         setSaveError(cause instanceof Error ? cause.message : '无法删除该 Provider 凭据。');
       }
+    } finally {
+      if (isCurrentCredentialTransaction(mountedRef.current, generation, transactionGenerationRef.current)) setClearing(false);
     }
   };
 
@@ -345,9 +351,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   };
 
   const statusMessage = saveError ?? applyError;
-  const busy = connecting || modelApplying;
+  const busy = connecting || clearing || modelApplying;
   const transactionLocked = busy || testingConnection;
-  const credentialWriteDisabled = transactionLocked || bridge.running;
+  const credentialWriteDisabled = transactionLocked || (isCodexAuth && bridge.running);
   const canTestConnection = selectedProvider.available
     && bridge.connected
     && !bridge.running
@@ -446,6 +452,9 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
         )}
         {statusKind === 'runtime' && (
           <Row title="来源" desc="正在运行的引擎从外部运行时来源接收了该凭据；LingXi 未存储它。" align="center"><span /></Row>
+        )}
+        {selectedMetadata?.environmentOverride && (
+          <Row title="环境变量覆盖" desc="当前使用启动时明确设置的环境变量凭据；保存或删除只影响安全存储中的凭据。" align="center"><span /></Row>
         )}
         {statusKind === 'secure' && (
           <Row title="存储方式" desc="已安全保存在 macOS Data Protection Keychain 中，由签名凭据代理统一管理。" align="center"><span /></Row>

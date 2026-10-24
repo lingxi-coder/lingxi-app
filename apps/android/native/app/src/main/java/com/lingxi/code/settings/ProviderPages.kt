@@ -173,7 +173,6 @@ fun ProviderListPage(
                                     enabled = true,
                                     onClick = {
                                         onReconnectEngine()
-                                        store.markLlmConfigurationApplied()
                                     },
                                 )
                             },
@@ -526,6 +525,57 @@ fun ProviderEditPage(
             },
         )
 
+        if (kind == ProviderKind.Llm) {
+            SettingsSection(
+                label = stringResource(R.string.settings_provider_apply),
+                footer = when {
+                    keyDraft.isNotBlank() || !editing.credentialConfigured -> credentialMessage
+                    providerId in state.pendingLlmProviderChanges ->
+                        stringResource(R.string.settings_provider_apply_footer_pending)
+                    else -> stringResource(R.string.settings_provider_apply_footer_applied)
+                },
+            ) {
+                SettingsRow(
+                    label = stringResource(R.string.settings_provider_apply_config_reconnect),
+                    sub = stringResource(R.string.settings_provider_apply_config_sub),
+                    chevron = false,
+                    isLast = true,
+                    trailing = {
+                        ProviderTextAction(
+                            label = stringResource(applyState.labelRes),
+                            enabled = applyState.enabled,
+                            onClick = {
+                                applying = true
+                                if (applyState.saveCredential) {
+                                    val submittedDraft = keyDraft
+                                    credentialMessage = resources.getString(R.string.settings_provider_saving_applying)
+                                    store.saveProviderCredential(kind, providerId, submittedDraft) { error ->
+                                        if (error != null) {
+                                            credentialMessage = resources.getString(R.string.settings_provider_save_failed_fmt, error)
+                                            applying = false
+                                        } else {
+                                            val unchangedDraft = keyDraft == submittedDraft
+                                            if (unchangedDraft) keyDraft = ""
+                                            credentialMessage = resources.getString(if (unchangedDraft) R.string.settings_provider_credential_saved_secure else R.string.settings_provider_credential_not_saved)
+                                            // Structural edits can be applied alongside the key. A
+                                            // newer draft must remain available instead of closing it.
+                                            if (unchangedDraft && store.state.value.pendingLlmProviderChanges.isNotEmpty()) {
+                                                onReconnectEngine()
+                                            }
+                                            applying = false
+                                        }
+                                    }
+                                } else {
+                                    onReconnectEngine()
+                                    applying = false
+                                }
+                            },
+                        )
+                    },
+                )
+            }
+        }
+
         if (preset.needsCx) {
             FieldLabel("Custom Search Engine ID (cx)")
             SettingsField(
@@ -712,54 +762,6 @@ fun ProviderEditPage(
 
         if (kind == ProviderKind.Llm) {
             SettingsSection(
-                label = stringResource(R.string.settings_provider_apply),
-                footer = if (providerId in state.pendingLlmProviderChanges) {
-                    stringResource(R.string.settings_provider_apply_footer_pending)
-                } else {
-                    stringResource(R.string.settings_provider_apply_footer_applied)
-                },
-            ) {
-                SettingsRow(
-                    label = stringResource(R.string.settings_provider_apply_config_reconnect),
-                    sub = stringResource(R.string.settings_provider_apply_config_sub),
-                    chevron = false,
-                    isLast = true,
-                    trailing = {
-                        ProviderTextAction(
-                            label = stringResource(applyState.labelRes),
-                            enabled = applyState.enabled,
-                            onClick = {
-                                applying = true
-                                if (applyState.saveCredential) {
-                                    credentialMessage = resources.getString(R.string.settings_provider_saving_applying)
-                                    store.saveProviderCredential(kind, providerId, keyDraft) { error ->
-                                        if (error != null) {
-                                            credentialMessage = resources.getString(R.string.settings_provider_save_failed_fmt, error)
-                                            applying = false
-                                        } else {
-                                            keyDraft = ""
-                                            credentialMessage = resources.getString(R.string.settings_provider_saved_applied)
-                                            // A first credential also makes this profile routable. Read
-                                            // the state after the asynchronous save updated eligibility.
-                                            if (store.state.value.pendingLlmProviderChanges.isNotEmpty()) {
-                                                onReconnectEngine()
-                                                store.markLlmConfigurationApplied()
-                                            }
-                                            applying = false
-                                        }
-                                    }
-                                } else {
-                                    onReconnectEngine()
-                                    store.markLlmConfigurationApplied()
-                                    applying = false
-                                }
-                            },
-                        )
-                    },
-                )
-            }
-
-            SettingsSection(
                 label = stringResource(R.string.settings_section_credentials),
                 footer = credentialMessage,
             ) {
@@ -783,10 +785,14 @@ fun ProviderEditPage(
                                         !connectionBusy,
                                 ) {
                                     credentialBusy = true
-                                    store.saveProviderCredential(kind, providerId, keyDraft) { error ->
+                                    val submittedDraft = keyDraft
+                                    store.saveProviderCredential(kind, providerId, submittedDraft) { error ->
                                         credentialMessage =
                                             error?.let { resources.getString(R.string.settings_provider_save_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_saved_secure)
-                                        if (error == null) keyDraft = ""
+                                        if (error == null) {
+                                            if (keyDraft == submittedDraft) keyDraft = ""
+                                            else credentialMessage = resources.getString(R.string.settings_provider_credential_not_saved)
+                                        }
                                         credentialBusy = false
                                     }
                                 }
@@ -844,7 +850,6 @@ fun ProviderEditPage(
                     store.setDefaultProvider(kind, providerId)
                     if (kind == ProviderKind.Llm) {
                         onReconnectEngine()
-                        store.markLlmConfigurationApplied()
                     }
                 },
                 trailing = {
@@ -874,7 +879,6 @@ fun ProviderEditPage(
                         if (error == null) {
                             if (kind == ProviderKind.Llm) {
                                 onReconnectEngine()
-                                store.markLlmConfigurationApplied()
                             }
                             onPop()
                         }

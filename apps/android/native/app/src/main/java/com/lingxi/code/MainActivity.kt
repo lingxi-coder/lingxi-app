@@ -480,9 +480,11 @@ class MainActivity : ComponentActivity() {
                             onReconnectEngine = {
                                 if (activeConversationBusy) {
                                     android.widget.Toast.makeText(applicationContext, getString(R.string.voice_session_busy_retry), android.widget.Toast.LENGTH_SHORT).show()
+                                    false
                                 } else {
                                     engineReconnect += 1
                                     settingsOpen = false
+                                    true
                                 }
                             },
                             onOpenTerminal = {

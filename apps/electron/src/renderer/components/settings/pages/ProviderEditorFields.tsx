@@ -5,10 +5,10 @@ import { renameProviderModel, removeProviderModel, canRemoveProviderModel, addPr
 import { ghostButtonStyle } from './ghostButton';
 
 /** Shared editor keeps unknown provider/model properties while changing the visible fields. */
-export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft, apiKey, onApiKey, credentialConfigured, envOnly = false }: {
+export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft, apiKey, onApiKey, credentialConfigured, envOnly = false, hostManagedCredentials = false }: {
   name: string; onName(value: string): void; nameLocked?: boolean;
   draft: CustomProviderDraft; onDraft(value: CustomProviderDraft): void;
-  apiKey: string; onApiKey(value: string): void; credentialConfigured?: boolean; envOnly?: boolean;
+  apiKey: string; onApiKey(value: string): void; credentialConfigured?: boolean; envOnly?: boolean; hostManagedCredentials?: boolean;
 }) {
   const t = useT();
   const pricingIds = useRef(draft.models.map((model) => typeof model.id === 'string' ? model.id.trim() : ''));
@@ -35,12 +35,16 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
       <label style={field}>认证方式<select aria-label="认证方式" value={authMode} onChange={(event) => {
         setAuthMode(event.target.value);
         if (event.target.value === 'key') onDraft({ ...draft, apiKeyEnv: undefined }); else onApiKey('');
-      }} style={input}>{!envOnly && <option value="key">直接填写 API Key</option>}<option value="env">环境变量</option></select></label>
-      {envOnly && <span style={{ color: t.text3, fontSize: 12 }}>此旧版 Profile ID 仅支持环境变量认证，名称保持不变。</span>}
+      }} style={input}>{!envOnly && <option value="key">直接填写 API Key</option>}<option value="env" disabled={hostManagedCredentials}>环境变量</option></select></label>
+      {envOnly && <span style={{ color: t.text3, fontSize: 12 }}>{hostManagedCredentials
+        ? '此 Profile 的环境变量认证不适用于本应用；请用新 Profile 保存 API Key。'
+        : '此旧版 Profile ID 仅支持环境变量认证，名称保持不变。'}</span>}
       {authMode === 'key' ? <label style={field}>API Key<input aria-label="API Key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => onApiKey(event.target.value)} placeholder={credentialConfigured ? '•••••••• 已保存，留空保持不变' : '输入 API Key'} style={input} /></label>
-        : <label style={field}>环境变量名称<input aria-label="apiKeyEnv" value={typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} onChange={(event) => onDraft({ ...draft, apiKeyEnv: event.target.value || undefined })} placeholder="MY_PROVIDER_API_KEY" spellCheck={false} style={input} /></label>}
-      {authMode === 'key' && draft.apiKeyEnv && <span style={{ color: t.text3, fontSize: 12 }}>API Key 将优先使用，环境变量 {typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} 保留为回退。</span>}
-      <span style={{ color: t.text4, fontSize: 12 }}>凭据按 Profile 名称保存在当前设备，跨配置层共享。已保存凭据优先于环境变量。</span>
+        : <label style={field}>环境变量名称<input aria-label="apiKeyEnv" disabled={hostManagedCredentials} value={typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} onChange={(event) => onDraft({ ...draft, apiKeyEnv: event.target.value || undefined })} placeholder="MY_PROVIDER_API_KEY" spellCheck={false} style={input} /></label>}
+      {!hostManagedCredentials && authMode === 'key' && draft.apiKeyEnv && <span style={{ color: t.text3, fontSize: 12 }}>API Key 将优先使用，环境变量 {typeof draft.apiKeyEnv === 'string' ? draft.apiKeyEnv : ''} 保留为回退。</span>}
+      <span style={{ color: t.text4, fontSize: 12 }}>{hostManagedCredentials
+        ? '此应用不读取自定义环境变量。请保存 API Key，或用 credentialIds 引用已保存凭据。'
+        : '凭据按 Profile 名称保存在当前设备，跨配置层共享。已保存凭据优先于环境变量。'}</span>
     </div>
     <div style={{ display: 'grid', gap: 12 }}>
       <strong style={{ fontSize: 13 }}>连接方式</strong>
@@ -61,7 +65,7 @@ export function ProviderEditorFields({ name, onName, nameLocked, draft, onDraft,
               <option value="">沿用 {draft.type}</option>
               {SUPPORTED_PROVIDER_TYPES.map((type) => <option value={type} key={type}>{type}</option>)}
             </select></label>
-            <label style={field}>环境变量名称<input aria-label={`连接 ${index + 1} apiKeyEnv`} value={typeof connection.apiKeyEnv === 'string' ? connection.apiKeyEnv : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { apiKeyEnv: event.target.value || undefined }))} placeholder="MY_PROVIDER_CN_API_KEY" spellCheck={false} style={input} /></label>
+            <label style={field}>环境变量名称<input aria-label={`连接 ${index + 1} apiKeyEnv`} disabled={hostManagedCredentials} value={typeof connection.apiKeyEnv === 'string' ? connection.apiKeyEnv : ''} onChange={(event) => onDraft(updateProviderConnection(draft, index, { apiKeyEnv: event.target.value || undefined }))} placeholder="MY_PROVIDER_CN_API_KEY" spellCheck={false} style={input} /></label>
           </div>
           <span style={{ color: t.text4, fontSize: 11.5 }}>默认使用「{name || 'provider'}」上保存的凭据；需要不同的 Key 时在该连接上填写 credentialIds。</span>
         </div>)}

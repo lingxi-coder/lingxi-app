@@ -1129,11 +1129,13 @@ final class EngineConversationSource: ConversationSource {
     }
 
     private func submitCommand(_ command: ClientCommand) async throws {
+        try Task.checkCancellation()
         if let testCommandSubmitter {
             try await testCommandSubmitter(command)
             return
         }
         let handle = try await ensureHandle()
+        try Task.checkCancellation()
         do {
             if let sideID {
                 guard !sideEnded else { throw CancellationError() }
@@ -1145,11 +1147,12 @@ final class EngineConversationSource: ConversationSource {
             if isSideChat {
                 Self.turnLog.error("side command submission failed")
             } else {
-                let errorDescription = String(describing: error)
+                // Commands may carry API keys or other settings secrets.
+                // Log the failure category without serializing their payload.
+                let errorType = String(reflecting: type(of: error))
                 Self.turnLog.error(
-                    "submit command failed command=\(String(describing: command), privacy: .public) error=\(errorDescription, privacy: .public)"
+                    "submit command failed errorType=\(errorType, privacy: .public)"
                 )
-                print("[LingxiCode] submitCommand failed command=\(command) error=\(errorDescription)")
             }
             throw error
         }
@@ -1552,6 +1555,10 @@ final class EngineConversationSource: ConversationSource {
 
     func submitEngineCommand(_ command: ClientCommand) async throws {
         try await submitCommand(command)
+        if case .listModels = command {
+            await listener?.waitUntilIdle()
+            try Task.checkCancellation()
+        }
     }
 
     func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws {
@@ -1832,10 +1839,12 @@ final class EngineConversationSource: ConversationSource {
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    let handle = try await self.ensureHandle()
+                    _ = try await self.ensureHandle()
                     guard Self.settingsOwner === self, generation == self.settingsGeneration else { return }
-                    DesktopSettingsRepository.shared.configure(submitter: { command in
-                        try await handle.submit(command: command)
+                    DesktopSettingsRepository.shared.configure(submitter: { [weak self] command in
+                        guard let self, Self.settingsOwner === self,
+                              generation == self.settingsGeneration else { throw CancellationError() }
+                        try await self.submitEngineCommand(command)
                     })
                 } catch {
                     guard Self.settingsOwner === self, generation == self.settingsGeneration else { return }
@@ -1959,6 +1968,7 @@ final class EngineConversationSource: ConversationSource {
                 thread.stackSize = 8 * 1024 * 1024
                 thread.start()
             }
+            try await migrateLegacyAnthropicCredential(on: handle)
             let owner = await handle.workspaceState().sessionId
             for directory in additionalDirectories where directory == LXISHGuestPaths.home || directory.hasPrefix(LXISHGuestPaths.home + "/") {
                 let native = URL(fileURLWithPath: userHome).appendingPathComponent(String(directory.dropFirst(LXISHGuestPaths.home.count + 1)))

@@ -660,6 +660,102 @@ notification can lower the entry: {published:?}"
 }
 
 #[tokio::test]
+async fn packaged_credential_delete_cannot_resurrect_a_native_stored_key() {
+    for provider_id in ["deepseek", "anthropic"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            PlainTextSecureStorage::new(temp.path().join("credentials"))
+                .await
+                .expect("storage"),
+        );
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage.clone(),
+            Arc::new(NativeClock::new()),
+            Arc::new(NativeHttp::new()),
+        ));
+        credentials
+            .set_provider_key(provider_id, "native-stored-key")
+            .await
+            .expect("native key");
+        assert!(credentials
+            .get_provider_key(provider_id)
+            .await
+            .unwrap()
+            .is_some());
+        credentials
+            .set_provider_key_ephemeral(provider_id, "host-injected-key")
+            .await;
+        let router = router_with_credentials(
+            credentials.clone(),
+            true,
+            harness_runtime::desktop::FusionCatalogRegistry::default(),
+        )
+        .await;
+        let sink = Arc::new(TaskMessageSink::default());
+        router
+            .route(
+                ClientCommand::DeleteProviderCredential {
+                    operation_id: 1,
+                    provider_id: provider_id.into(),
+                },
+                sink.clone(),
+            )
+            .await;
+        assert!(credentials
+            .get_provider_key(provider_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!credentials.has_provider_key(provider_id).await.unwrap());
+        assert!(matches!(
+            sink.0.lock().unwrap().last(),
+            Some(ClientEvent::ProviderCredentialStatus {
+                operation_id: 1,
+                error: None,
+                configured_provider_ids,
+                ..
+            }) if configured_provider_ids.is_empty()
+        ));
+
+        // The parent owns persistence. Deleting this sidecar's access must not
+        // erase another host's stored key, or let that key leak back into it.
+        let independent = secret::CredentialManager::new(
+            storage,
+            Arc::new(NativeClock::new()),
+            Arc::new(NativeHttp::new()),
+        );
+        assert_eq!(
+            independent
+                .get_provider_key(provider_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "native-stored-key"
+        );
+        router
+            .route(
+                ClientCommand::SetProviderCredential {
+                    operation_id: 2,
+                    provider_id: provider_id.into(),
+                    credential: ProviderCredentialSecretDto::new("replacement-key".into()),
+                },
+                sink,
+            )
+            .await;
+        assert_eq!(
+            credentials
+                .get_provider_key(provider_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "replacement-key"
+        );
+    }
+}
+
+#[tokio::test]
 async fn side_chat_errors_are_correlated_and_do_not_touch_parent_controls() {
     let router = EngineCommandRouter::new(
         Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),

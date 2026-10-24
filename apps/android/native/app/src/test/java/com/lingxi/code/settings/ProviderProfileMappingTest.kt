@@ -64,7 +64,7 @@ class ProviderProfileMappingTest {
     }
 
     @Test
-    fun engineLaunchConfig_emitsOnlyConfiguredEnabledProfilesInMobileAllowlist() {
+    fun engineLaunchConfig_keepsEnabledProfilesIndependentOfCredentialPresence() {
         val enabled = provider(
             id = "l_openai",
             preset = "openai",
@@ -87,7 +87,7 @@ class ProviderProfileMappingTest {
 
         assertTrue("configured enabled builtin is retained", "openai" in allowlist)
         assertFalse("disabled builtin is excluded", "deepseek" in allowlist)
-        assertFalse("provider without a credential is excluded", "anthropic" in allowlist)
+        assertTrue("enabled provider accepts a credential injected after boot", "anthropic" in allowlist)
     }
 
     @Test

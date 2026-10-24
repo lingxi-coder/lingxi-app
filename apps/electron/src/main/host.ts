@@ -52,6 +52,7 @@ import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
+  readProviderEnvironmentCredential,
   resolveCodexOAuthSession,
   resolveProviderTestCredential,
   type CredentialBrokerStatus,
@@ -88,6 +89,8 @@ export interface CredentialMetadata {
   credentialPreview?: string;
   /** The running engine received a credential from an external runtime source. */
   runtimeOnly?: true;
+  /** An explicit process environment key currently overrides secure storage. */
+  environmentOverride?: true;
   /** Display-safe reason why the signed credential broker is unavailable. */
   storageError?: string;
   /**
@@ -420,6 +423,8 @@ export class HostController {
   private codexAccountEmail: string | undefined;
   private credentialStatusPromise?: Promise<void>;
   private credentialStatusCacheExpiresAt = 0;
+  private credentialStatusGeneration = 0;
+  private readonly credentialMutations = new Map<string, Promise<unknown>>();
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
@@ -1038,10 +1043,9 @@ export class HostController {
       const provider = await this.requireCredentialProvider(providerId);
       if (provider.id === CODEX_PROVIDER_ID) throw new Error('请使用 Codex 账号登录。');
       if (typeof credential !== 'string') throw new Error('invalid credential');
-      this.assertNoActiveTurn();
-      const credentialMetadata = this.credentialBroker
-        ? await this.setCredentialThroughBroker(provider.id, credential)
-        : await this.setCredentialThroughRuntime(provider.id, credential);
+      const credentialMetadata = await this.enqueueCredentialMutation(provider.id, () => this.credentialBroker
+        ? this.setCredentialThroughBroker(provider.id, credential)
+        : this.setCredentialThroughRuntime(provider.id, credential));
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
     this.ipc.handle(CH_CODEX_LOGIN, async (event: IpcMainInvokeEvent) => {
@@ -1080,8 +1084,8 @@ export class HostController {
     this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = await this.requireCredentialProvider(providerId);
-      this.assertNoActiveTurn();
       if (provider.id === CODEX_PROVIDER_ID) {
+        this.assertNoActiveTurn();
         this.codexLoginAbort?.abort();
         if (!this.credentialBroker) throw new Error('Codex 安全凭据存储不可用。');
         await this.requireCodexTokens().signOut();
@@ -1091,12 +1095,14 @@ export class HostController {
         this.bridge.invalidateLaunchConfigCache();
         return this.providerCredentialMetadata(CODEX_PROVIDER_ID);
       }
-      if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
-      else {
-        this.requireWorkspace();
-        await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
-        this.bridge.invalidateLaunchConfigCache();
-      }
+      await this.enqueueCredentialMutation(provider.id, async () => {
+        if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
+        else {
+          this.requireWorkspace();
+          await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
+          this.bridge.invalidateLaunchConfigCache();
+        }
+      });
       return this.providerCredentialMetadata(provider.id);
     });
     this.ipc.handle(CH_PROVIDER_CONNECTION_TEST, async (
@@ -1481,6 +1487,7 @@ export class HostController {
       const codexEmail = providerId === CODEX_PROVIDER_ID && this.codexAccountEmail
         ? { codexAccountEmail: this.codexAccountEmail }
         : {};
+      const environmentOverride = readProviderEnvironmentCredential(providerId) ? { environmentOverride: true as const } : {};
       if (persistedProviders.has(providerId)) {
         return {
           providerId,
@@ -1490,6 +1497,7 @@ export class HostController {
             ? { credentialPreview: credentialPreviews[providerId] }
             : {}),
           ...codexEmail,
+          ...environmentOverride,
         };
       }
       if (activeProviders.has(providerId)) {
@@ -1502,6 +1510,7 @@ export class HostController {
             : {}),
           runtimeOnly: true,
           ...codexEmail,
+          ...environmentOverride,
         };
       }
       return {
@@ -1534,11 +1543,13 @@ export class HostController {
 
   private async refreshCredentialBrokerStatusUncached(previewProviderId?: string): Promise<void> {
     if (!this.credentialBroker) return;
+    const generation = this.credentialStatusGeneration;
     const nextConfigured = new Set(
       (await this.credentialBroker.listStatus(this.credentialProviderIds()))
         .filter((entry: CredentialBrokerStatus) => entry.configured)
         .map((entry: CredentialBrokerStatus) => entry.providerId),
     );
+    if (generation !== this.credentialStatusGeneration) return this.refreshCredentialBrokerStatusUncached(previewProviderId);
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.clear();
     for (const providerId of nextConfigured) this.brokerConfiguredProviders.add(providerId);
@@ -1558,6 +1569,7 @@ export class HostController {
     }
     if (!previewProviderId || previewProviderId === CODEX_PROVIDER_ID) return;
     const preview = await this.credentialBroker.preview(previewProviderId);
+    if (generation !== this.credentialStatusGeneration) return this.refreshCredentialBrokerStatusUncached(previewProviderId);
     if (!preview.configured) {
       this.brokerConfiguredProviders.delete(previewProviderId);
       this.brokerCredentialPreviews.delete(previewProviderId);
@@ -1569,6 +1581,7 @@ export class HostController {
   }
 
   private invalidateCredentialBrokerStatus(): void {
+    this.credentialStatusGeneration += 1;
     this.credentialStatusCacheExpiresAt = 0;
   }
 
@@ -1592,36 +1605,48 @@ export class HostController {
   private async setCredentialThroughBroker(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
     const stored = await this.credentialBroker!.set(providerId, credential);
     if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
-    await this.bridge.refreshCachedProviderCredential(providerId, credential);
     this.bridge.invalidateLaunchConfigCache();
+    const environmentCredential = readProviderEnvironmentCredential(providerId);
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.add(providerId);
     this.invalidateCredentialBrokerStatus();
     if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
     else this.brokerCredentialPreviews.delete(providerId);
-    // Settings can contain a newly saved custom profile before this engine's
-    // provider registry does. Reassemble the owned session with the saved
-    // configuration, retaining the existing session and active-work guards.
-    if (!providerById(providerId)) await this.restartIfConfigured();
+    await this.bridge.refreshCachedProviderCredential(providerId, environmentCredential ?? credential);
     return {
       providerId,
       configured: true,
       encryptionAvailable: true,
+      ...(environmentCredential ? { environmentOverride: true } : {}),
       ...(stored.maskedValue ? { credentialPreview: stored.maskedValue } : {}),
     };
   }
 
   private async clearCredentialThroughBroker(providerId: string): Promise<void> {
-    await this.bridge.clearCachedProviderCredential(providerId);
     await this.credentialBroker!.delete(providerId);
+    this.bridge.invalidateLaunchConfigCache();
     this.brokerConfiguredProviders.delete(providerId);
     this.brokerCredentialPreviews.delete(providerId);
     this.brokerStorageError = undefined;
     this.invalidateCredentialBrokerStatus();
+    const environmentCredential = readProviderEnvironmentCredential(providerId);
+    if (environmentCredential) await this.bridge.refreshCachedProviderCredential(providerId, environmentCredential);
+    else await this.bridge.clearCachedProviderCredential(providerId);
+  }
+
+  private enqueueCredentialMutation<T>(providerId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.credentialMutations.get(providerId) ?? Promise.resolve();
+    const mutation = previous.catch(() => undefined).then(operation);
+    const completion = mutation.finally(() => {
+      if (this.credentialMutations.get(providerId) === completion) this.credentialMutations.delete(providerId);
+    });
+    this.credentialMutations.set(providerId, completion);
+    return completion;
   }
 
   private credentialProviderIds(): string[] {
-    return [...new Set([...PROVIDER_IDS, ...(this.currentRuntime()?.customProviderIds ?? [])])];
+    const runtime = this.currentRuntime();
+    return [...new Set([...PROVIDER_IDS, ...(runtime?.configuredCredentialIds ?? runtime?.customProviderIds ?? [])])];
   }
 
   private async requireCredentialProvider(providerId: unknown): Promise<{ id: string }> {
@@ -1630,10 +1655,11 @@ export class HostController {
     }
     if (providerById(providerId)) return this.requireProvider(providerId);
     const runtime = this.currentRuntime();
-    if (!runtime?.customProviderIds?.includes(providerId)) {
+    if (!(runtime?.configuredCredentialIds ?? runtime?.customProviderIds)?.includes(providerId)) {
       if (!runtime?.ensureCustomProviderConfigured) throw new Error('unsupported provider');
       await runtime.ensureCustomProviderConfigured(providerId);
-      if (runtime !== this.currentRuntime() || !runtime.customProviderIds.includes(providerId)) throw new Error('unsupported provider');
+      if (runtime !== this.currentRuntime()
+        || !(runtime.configuredCredentialIds ?? runtime.customProviderIds).includes(providerId)) throw new Error('unsupported provider');
     }
     return { id: providerId };
   }

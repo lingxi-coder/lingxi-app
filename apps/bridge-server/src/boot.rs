@@ -2125,6 +2125,11 @@ pub async fn assemble_with_credentials(
     )
     .await
     .map_err(|error| error.to_string())?;
+    if provider_credentials_ephemeral {
+        // The parent is the only provider-key authority. Keep the shared native
+        // store for MCP/OAuth, but never revive a legacy provider key from it.
+        shared.credentials.use_host_managed_provider_keys();
+    }
     // A desktop that owns credential persistence refreshes its one Codex
     // session itself and serves every engine only access tokens, so any
     // number of them use the account at once. This engine never refreshes
@@ -4130,6 +4135,77 @@ mod fusion_catalog_refresh_budget_tests {
     use super::{seed_parent_supplied_provider_keys, FUSION_CATALOG_REFRESH_BUDGET};
     use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn fresh_host_managed_boot_uses_only_parent_provider_keys() {
+        #[cfg(unix)]
+        use platform_posix::{
+            PlainTextSecureStorage, PosixClock as NativeClock, PosixHttp as NativeHttp,
+        };
+        #[cfg(windows)]
+        use platform_windows::{
+            PlainTextSecureStorage, WindowsClock as NativeClock, WindowsHttp as NativeHttp,
+        };
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            PlainTextSecureStorage::new(temp.path().join("credentials"))
+                .await
+                .unwrap(),
+        );
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage.clone(),
+            Arc::new(NativeClock::new()),
+            Arc::new(NativeHttp::new()),
+        ));
+        credentials
+            .set_provider_key("anthropic", "old-native-key")
+            .await
+            .unwrap();
+        credentials
+            .set_provider_key("deepseek", "old-native-key")
+            .await
+            .unwrap();
+        credentials.use_host_managed_provider_keys();
+        assert!(credentials
+            .get_provider_key("anthropic")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(credentials
+            .get_provider_key("deepseek")
+            .await
+            .unwrap()
+            .is_none());
+
+        let keys = BTreeMap::from([("anthropic".to_string(), "host-current-key".to_string())]);
+        seed_parent_supplied_provider_keys(
+            &harness_runtime::desktop::FusionCatalogRegistry::default(),
+            &credentials,
+            &keys,
+        )
+        .await;
+        assert_eq!(
+            credentials
+                .get_provider_key("anthropic")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "host-current-key"
+        );
+        assert!(!credentials.has_provider_key("deepseek").await.unwrap());
+        let independent = secret::CredentialManager::new(
+            storage,
+            Arc::new(NativeClock::new()),
+            Arc::new(NativeHttp::new()),
+        );
+        assert!(
+            independent.has_provider_key("deepseek").await.unwrap(),
+            "other hosts retain their native credentials"
+        );
+    }
 
     /// The packaged Electron host hands N provider keys over the credential
     /// stdin boundary; each one triggers a re-probe of EVERY credential source

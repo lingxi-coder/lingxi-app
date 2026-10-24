@@ -670,6 +670,10 @@ fun RootScreen(
         chatViewModel.setNotificationPreferences(settingsState.notifs)
     }
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
+    DisposableEffect(resolvedSettingsStore, currentEngineSource) {
+        resolvedSettingsStore.bindProviderCredentialSource(currentEngineSource)
+        onDispose { resolvedSettingsStore.bindProviderCredentialSource(null) }
+    }
     LaunchedEffect(currentEngineSource, settingsState.voice, settingsState.llmProviders, state.session.id, state.model.id, appInForeground) {
         val audioSource = currentEngineSource as? com.lingxi.code.conversation.EngineConversationSource
         if (audioSource != null) audioSource.activateAudioContext() else com.lingxi.code.voice.audio.AndroidAudioSessionContext.clear()

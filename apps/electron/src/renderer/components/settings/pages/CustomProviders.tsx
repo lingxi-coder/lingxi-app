@@ -30,6 +30,7 @@ export type { CustomProviderDraft, CustomProviderModelDraft, SupportedProviderTy
 import { validateCustomProvider, validateProfileName, parseProviderImport, validateImportEntry, mergeProviderImport, type CustomProviderDraft, type CustomProviderModelDraft, type ProviderImportEntry, connectionsCarryAuth } from './customProviderImport';
 import { trimProviderDraft, editableProviderDraft } from './customProviderDraft';
 import { ProviderEditorFields } from './ProviderEditorFields';
+import { equalProviderSettings } from '../../../bridge/providerSettingsSave';
 
 /**
  * `settings.providers` as `editingLayer`'s OWN raw value — NOT
@@ -195,10 +196,11 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
     if (busy) return false;
     const token = generation.current;
     setSaving(true); onLayerLockChange?.(true); setSaveError(null);
-    let configSaved = next === null;
+    const configurationChanged = next !== null && !equalProviderSettings(providers, next);
+    let configSaved = !configurationChanged;
     const remaining = { ...credentials };
     try {
-      if (next) await bridge.updateProviderSettings(editingLayer, { providers: next });
+      if (configurationChanged) await bridge.updateProviderSettings(editingLayer, { providers: next });
       if (generation.current !== token) return false;
       configSaved = true;
       // Continue only in the page/session that initiated this save.
@@ -360,7 +362,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
         </div>}
       {editorOpen && <Card title={originalName ? `编辑 ${originalName}` : '新增 Provider'}>
         <fieldset disabled={busy} style={{ border: 0, padding: 20, margin: 0, minWidth: 0 }}>
-          <ProviderEditorFields envOnly={originalName !== null && validateProfileName(originalName) !== null} key={originalName ?? "new"} name={profileName} onName={setProfileName} nameLocked={originalName !== null} draft={draft} onDraft={setDraft} apiKey={apiKey} onApiKey={setApiKey} credentialConfigured={bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === profileName && entry.configured)} />
+          <ProviderEditorFields hostManagedCredentials={bridge.bootstrap?.credentialBrokerAvailable !== undefined} envOnly={originalName !== null && validateProfileName(originalName) !== null} key={originalName ?? "new"} name={profileName} onName={setProfileName} nameLocked={originalName !== null} draft={draft} onDraft={setDraft} apiKey={apiKey} onApiKey={setApiKey} credentialConfigured={bridge.bootstrap?.providerCredentials?.some((entry) => entry.providerId === profileName && entry.configured)} />
           {formError && <p role="alert" style={{ color: t.danger }}>{formError}</p>}
           <div style={{ display: 'flex', gap: 8, marginTop: 20, flexWrap: 'wrap' }}>
             <button onClick={handleSaveProvider} style={primaryButtonStyle}>{saving ? '保存中…' : '保存 Provider'}</button>
@@ -462,7 +464,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
           </> : <>
             {entries.map((entry, index) => <section key={index} style={{ padding: '16px 0', borderBottom: `1px solid ${t.border}` }}>
               <label style={{ display: 'flex', gap: 8, marginBottom: 16, fontWeight: 600 }}><input type="checkbox" checked={entry.selected} onChange={(event) => setEntries(entries.map((value, i) => i === index ? { ...value, selected: event.target.checked } : value))} />{entry.name} · {entry.conflict ? '同名冲突（勾选后替换）' : '新增'}</label>
-              <div hidden={!entry.selected}><ProviderEditorFields credentialConfigured={credentialConfigured(entry.name)} name={entry.name} onName={(name) => setEntries(entries.map((value, i) => i === index ? { ...value, name, conflict: Object.prototype.hasOwnProperty.call(providers, name), selected: Object.prototype.hasOwnProperty.call(providers, name) ? false : value.selected } : value))} draft={entry.draft} onDraft={(value) => setEntries(entries.map((item, i) => i === index ? { ...item, draft: value } : item))} apiKey={entry.apiKey ?? ''} onApiKey={(value) => setEntries(entries.map((item, i) => i === index ? { ...item, apiKey: value } : item))} /></div>
+              <div hidden={!entry.selected}><ProviderEditorFields hostManagedCredentials={bridge.bootstrap?.credentialBrokerAvailable !== undefined} credentialConfigured={credentialConfigured(entry.name)} name={entry.name} onName={(name) => setEntries(entries.map((value, i) => i === index ? { ...value, name, conflict: Object.prototype.hasOwnProperty.call(providers, name), selected: Object.prototype.hasOwnProperty.call(providers, name) ? false : value.selected } : value))} draft={entry.draft} onDraft={(value) => setEntries(entries.map((item, i) => i === index ? { ...item, draft: value } : item))} apiKey={entry.apiKey ?? ''} onApiKey={(value) => setEntries(entries.map((item, i) => i === index ? { ...item, apiKey: value } : item))} /></div>
               {entry.diagnostics.map((diagnostic, i) => <p key={i} style={{ color: diagnostic.severity === 'error' ? t.danger : t.warn }}>{diagnostic.message}</p>)}
               {entry.selected && importEntryError(entry) && <p role="alert" style={{ color: t.danger }}>{importEntryError(entry)}</p>}
             </section>)}

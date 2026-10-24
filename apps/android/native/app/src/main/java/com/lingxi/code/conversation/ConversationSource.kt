@@ -6,6 +6,8 @@ import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.PromptModeDto
+import com.lingxi.code.bindings.runtime.ProviderConnectionTestDto
+import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.client.PermissionRequest
 import com.lingxi.code.bindings.client.PermissionResponseDto
@@ -62,6 +64,15 @@ interface ConversationSource {
 
     /** Submit a non-conversation protocol command through this source. */
     suspend fun submitClientCommand(command: ClientCommand) {}
+
+    /** Probe through this engine so a recent hot credential update is observed. */
+    suspend fun testProviderConnection(
+        providerId: String,
+        providerPreset: String,
+        apiBase: String,
+        model: String,
+        credentialOverride: ProviderCredentialSecretDto?,
+    ): ProviderConnectionTestDto = error("engine unavailable")
 
     /** Refresh task rows and the current session agent roster after a resume. */
     suspend fun refreshExecutionStatus() {}

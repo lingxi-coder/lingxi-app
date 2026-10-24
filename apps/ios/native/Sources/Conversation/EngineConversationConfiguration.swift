@@ -37,8 +37,8 @@ func makeIosHostEnvironment(
 #endif
 
 #if canImport(harness_runtimeFFI)
-/// Runtime config for the in-process engine. The API key comes from the
-/// environment / an app setting — never hardcoded.
+/// Runtime config for the in-process engine. Persisted credentials stay in the
+/// engine's secure store; only an explicit development override is a scalar.
 struct EngineConfig {
     var apiBase: String
     var apiKey: String
@@ -52,12 +52,8 @@ struct EngineConfig {
     var mobileLinux: TerminalRuntimeConfig?
     var additionalWorkspaceDirectories: [String] = []
 
-    /// Resolve the engine credentials. The API key (and optional base URL)
-    /// come from the iOS Keychain FIRST (SHIP-BLOCKER #1 — a shipped app has no
-    /// process env), with an environment override for development/CI so a
-    /// `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` in the env still wins for a
-    /// dev run. An empty key is valid (turns 401 at run time, slash commands
-    /// still work) and keeps the mock fallback in `make()`.
+    /// Persisted API keys are resolved per request from native secure storage.
+    /// An explicit environment override remains available for development/CI.
     static func fromEnvironment(appSandboxRoot: String,
                                 model: String,
                                 projectCwd: String? = nil,
@@ -65,12 +61,9 @@ struct EngineConfig {
                                 providerProfilesJson: String? = nil,
                                 providerRoutingJson: String? = nil,
                                 visionDelegationEnabled: Bool = true,
-                                mobileLinux: TerminalRuntimeConfig? = nil) -> EngineConfig {
-        let env = ProcessInfo.processInfo.environment
-        // Key: env override (dev) > Keychain (shipped) > empty.
-        let key = nonEmpty(env["ANTHROPIC_API_KEY"])
-            ?? Keychain.get(.apiKey)
-            ?? ""
+                                mobileLinux: TerminalRuntimeConfig? = nil,
+                                environment env: [String: String] = ProcessInfo.processInfo.environment) -> EngineConfig {
+        let key = nonEmpty(env["ANTHROPIC_API_KEY"]) ?? ""
         // Base URL: env override (dev) > Keychain (shipped) > Anthropic default.
         let base = nonEmpty(env["ANTHROPIC_BASE_URL"])
             ?? Keychain.get(.apiBase)
@@ -94,10 +87,64 @@ struct EngineConfig {
     }
 
     /// `s` when it is non-nil and non-empty, else `nil` — so an unset OR blank
-    /// env var falls through to the Keychain instead of masking it with "".
+    /// env var does not create an explicit override.
     private static func nonEmpty(_ s: String?) -> String? {
         guard let s, !s.isEmpty else { return nil }
         return s
     }
+}
+
+/// Retire the old app-specific slot before exposing any newly built engine.
+/// Serializing bootstraps prevents a concurrent source/Cron launch from
+/// reinserting a stale copy after the canonical key has been replaced/deleted.
+actor LegacyAnthropicCredentialMigration {
+    static let shared = LegacyAnthropicCredentialMigration()
+    private var inFlight: Task<Void, Error>?
+
+    func migrate(
+        readLegacy: @escaping @Sendable () async throws -> String?,
+        canonicalExists: @escaping @Sendable () async throws -> Bool,
+        storeCanonical: @escaping @Sendable (String) async throws -> Void,
+        retireLegacy: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        if let inFlight { return try await inFlight.value }
+        let operation = Task {
+            guard let secret = try await readLegacy() else { return }
+            if !(try await canonicalExists()) {
+                try await storeCanonical(secret)
+                guard try await canonicalExists() else {
+                    throw NSError(domain: "ProviderCredentialMigration", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: String(localized: "settings_provider_secure_storage_not_confirmed")
+                    ])
+                }
+            }
+            try await retireLegacy()
+        }
+        inFlight = operation
+        defer { inFlight = nil }
+        try await operation.value
+    }
+}
+
+func migrateLegacyAnthropicCredential(on handle: MobileEngineHandle) async throws {
+    try Task.checkCancellation()
+    try await LegacyAnthropicCredentialMigration.shared.migrate(
+        readLegacy: { Keychain.get(.apiKey) },
+        canonicalExists: {
+            try await SecureStorageImpl().retrieve(service: "lingxi", account: "anthropic-api-key") != nil
+        },
+        storeCanonical: { secret in
+            try await handle.submit(command: .setProviderCredential(
+                operationId: 0, providerId: "anthropic", credential: .init(value: secret)))
+        },
+        retireLegacy: {
+            guard Keychain.clear(.apiKey) else {
+                throw NSError(domain: "ProviderCredentialMigration", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: String(localized: "settings_provider_legacy_keychain_delete_failed")
+                ])
+            }
+        }
+    )
+    try Task.checkCancellation()
 }
 #endif

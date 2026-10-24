@@ -73,6 +73,7 @@ export interface RemoteLease {
  */
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
+  private readonly mutatedProviderCredentials = new Set<string>();
   private readonly openingSessions = new Map<string, { projectPath: string; transcriptPath?: string; promise: Promise<SessionRuntime>; activate: boolean }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
@@ -263,6 +264,12 @@ export class SessionRuntimeManager {
     if (resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
     const runtimeOptions = this.runtimeOptions(ref);
     const runtime = new SessionRuntime({ ...runtimeOptions, remountControls });
+    // A newly opened session can adopt an engine that was absent from the
+    // credential-write fanout. Mark only keys changed during this host's
+    // lifetime; the idle runtime resolves their latest values before readiness.
+    for (const providerId of this.mutatedProviderCredentials) {
+      void runtime.refreshCachedProviderCredential(providerId);
+    }
     this.runtimes.set(ref.sessionId, runtime);
     this.touch(ref.sessionId);
     for (const listener of [...this.runtimeCreatedListeners]) this.announceRuntime(listener, runtime);
@@ -589,26 +596,27 @@ export class SessionRuntimeManager {
   }
 
   async refreshCachedProviderCredential(providerId: string, credential: string): Promise<void> {
-    const runtimes = [...this.runtimes.values()]
-      .filter((runtime) => (
-        runtime.connectionState.status === 'connected'
-        && runtime.hasCachedProviderCredential(providerId)
-      ));
-    await Promise.all(runtimes.map((runtime) => runtime.cacheProviderCredential(providerId, credential)));
+    await this.updateCachedProviderCredential(providerId, credential);
   }
 
   async clearCachedProviderCredential(providerId: string): Promise<void> {
-    const runtimes = [...this.runtimes.values()]
-      .filter((runtime) => (
-        runtime.connectionState.status === 'connected'
-        && runtime.hasCachedProviderCredential(providerId)
-      ));
-    await Promise.all(runtimes.map((runtime) => runtime.clearCachedProviderCredential(providerId)));
+    await this.updateCachedProviderCredential(providerId);
+  }
+
+  private async updateCachedProviderCredential(providerId: string, credential?: string): Promise<void> {
+    this.mutatedProviderCredentials.add(providerId);
+    // Invalidate every runtime, including a pending load or a disconnected
+    // sidecar that may later be recovered without restarting its process.
+    const results = await Promise.allSettled([...this.runtimes.values()]
+      .map((runtime) => runtime.refreshCachedProviderCredential(providerId, credential)));
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
 
   async dispose(): Promise<void> {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
+    this.mutatedProviderCredentials.clear();
     this.lastUsed.clear();
     this.sessionModelHints.clear();
     this.activeSessionId = null;

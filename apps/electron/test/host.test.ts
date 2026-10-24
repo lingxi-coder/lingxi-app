@@ -1050,8 +1050,8 @@ test('provider credential IPC uses the broker path, hot-syncs cached sessions, a
   assert.deepEqual(operations, [
     'broker:set:anthropic',
     'runtime:set:anthropic',
-    'runtime:delete:anthropic',
     'broker:delete:anthropic',
+    'runtime:delete:anthropic',
   ]);
 });
 
@@ -1135,11 +1135,13 @@ test('custom provider credentials use the current runtime configuration and rema
   assert.ok(clearCredential);
   const stored = await setCredential!({ sender, senderFrame: frame }, 'my-provider', 'sk-replacement-secret') as Record<string, unknown>;
   assert.equal(JSON.stringify(stored).includes('sk-replacement-secret'), false);
-  assert.deepEqual(operations, ['broker:set:my-provider', 'runtime:set:my-provider', 'runtime:reload:custom-session']);
+  assert.deepEqual(operations, ['broker:set:my-provider', 'runtime:set:my-provider']);
 
   activeWork = true;
-  await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'my-provider', 'secret'), /cancel the active turn/);
-  assert.equal(operations.length, 3, 'active work must prevent persistence and runtime replacement');
+  await setCredential!({ sender, senderFrame: frame }, 'my-provider', 'sk-replacement-secret');
+  await clearCredential!({ sender, senderFrame: frame }, 'my-provider');
+  assert.equal(activeWork, true, 'credential changes retain the active turn');
+  assert.equal(operations.some((operation) => operation.startsWith('runtime:reload:')), false);
   activeWork = false;
 
   await assert.rejects(async () => setCredential!({ sender, senderFrame: frame }, 'unknown', 'secret'), /unsupported provider/);
@@ -1150,9 +1152,12 @@ test('custom provider credentials use the current runtime configuration and rema
   assert.deepEqual(operations, [
     'broker:set:my-provider',
     'runtime:set:my-provider',
-    'runtime:reload:custom-session',
+    'broker:set:my-provider',
+    'runtime:set:my-provider',
+    'broker:delete:my-provider',
     'runtime:delete:my-provider',
     'broker:delete:my-provider',
+    'runtime:delete:my-provider',
   ]);
 });
 

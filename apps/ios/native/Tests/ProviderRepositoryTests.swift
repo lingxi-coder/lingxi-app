@@ -728,6 +728,351 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertTrue(reconnectSnapshots.isEmpty)
     }
 
+    func testLiveCredentialReplacementAndDeletionPreserveEnabledProfileAndEngine() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        let before = repository.makeLaunchSnapshot()
+        var savedKey: String?
+        var reconnectCount = 0
+        var modelRefreshes = 0
+        repository.configure(
+            submitCommand: { [weak repository] command in
+                switch command {
+                case let .setProviderCredential(operationID, providerID, credential):
+                    savedKey = credential.value
+                    repository?.handle(event: .providerCredentialStatus(
+                        operationId: operationID, configuredProviderIds: [providerID],
+                        unavailableProviderIds: [], storageEncrypted: true,
+                        credentialPreviews: [:], error: nil))
+                case let .deleteProviderCredential(operationID, _):
+                    savedKey = nil
+                    repository?.handle(event: .providerCredentialStatus(
+                        operationId: operationID, configuredProviderIds: [],
+                        unavailableProviderIds: [], storageEncrypted: true,
+                        credentialPreviews: [:], error: nil))
+                case .listModels:
+                    modelRefreshes += 1
+                default:
+                    XCTFail("Credential changes must use the credential protocol")
+                }
+            },
+            applyReconnect: { _ in
+                reconnectCount += 1
+                throw CancellationError() // A live turn may prohibit rebuilding.
+            }
+        )
+
+        for key in ["fixture-first", "fixture-replacement"] {
+            var draft = try XCTUnwrap(repository.makeDraft(for: id))
+            draft.pendingSecret = key
+            let applied = await repository.applyDraft(draft)
+            XCTAssertTrue(applied)
+            XCTAssertTrue(savedKey == key)
+            XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        }
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.clearCredentialOnApply = true
+        let deleted = await repository.applyDraft(draft)
+
+        XCTAssertTrue(deleted)
+        XCTAssertNil(savedKey)
+        XCTAssertEqual(repository.state(for: id)?.credentialState, .missing)
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(reconnectCount, 0)
+        XCTAssertEqual(modelRefreshes, 3)
+    }
+
+    func testModelRefreshFailureDoesNotRollBackCommittedCredential() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        let before = repository.makeLaunchSnapshot()
+        repository.configure(submitCommand: { [weak repository] command in
+            switch command {
+            case let .setProviderCredential(operationID, providerID, _):
+                repository?.handle(event: .providerCredentialStatus(
+                    operationId: operationID, configuredProviderIds: [providerID],
+                    unavailableProviderIds: [], storageEncrypted: true,
+                    credentialPreviews: [:], error: nil))
+            case .listModels:
+                throw NSError(domain: "ModelRefreshFixture", code: 1)
+            default:
+                XCTFail("Unexpected credential transaction command")
+            }
+        })
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.pendingSecret = "fixture-replacement"
+
+        let applied = await repository.applyDraft(draft)
+
+        XCTAssertFalse(applied, "Catalog failure must remain visible to the caller")
+        XCTAssertEqual(repository.state(for: id)?.credentialState, .configured)
+        XCTAssertEqual(repository.state(for: id)?.pendingSecret, "")
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertNotNil(repository.lastRepositoryError)
+    }
+
+    func testConfirmedCredentialMutationsUpdateEveryProfileSharingTheRecord() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let first = repository.addProfile(presetID: "openai")
+        let second = repository.addProfile(presetID: "openai")
+        let before = repository.makeLaunchSnapshot()
+        var reconnects = 0
+        repository.configure(
+            submitCommand: { [weak repository] command in
+                switch command {
+                case let .setProviderCredential(operationID, providerID, _):
+                    repository?.handle(event: .providerCredentialStatus(
+                        operationId: operationID, configuredProviderIds: [providerID],
+                        unavailableProviderIds: [], storageEncrypted: true,
+                        credentialPreviews: [:], error: nil))
+                case let .deleteProviderCredential(operationID, _):
+                    repository?.handle(event: .providerCredentialStatus(
+                        operationId: operationID, configuredProviderIds: [],
+                        unavailableProviderIds: [], storageEncrypted: true,
+                        credentialPreviews: [:], error: nil))
+                default: break
+                }
+            },
+            applyReconnect: { _ in reconnects += 1 })
+
+        repository.stageSecret("fixture-key", for: first)
+        await repository.applyChanges(first)
+        XCTAssertEqual(repository.state(for: first)?.credentialState, .configured)
+        XCTAssertEqual(repository.state(for: second)?.credentialState, .configured)
+
+        repository.clearCredentialRequest(for: second)
+        await repository.applyChanges(second)
+        XCTAssertEqual(repository.state(for: first)?.credentialState, .missing)
+        XCTAssertEqual(repository.state(for: second)?.credentialState, .missing)
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(reconnects, 0)
+    }
+
+    func testExternalCredentialCommitRetiresAnOlderPresenceListing() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let first = repository.addProfile(presetID: "openai")
+        let second = repository.addProfile(presetID: "openai")
+        let recorder = CommandRecorder()
+        repository.configure(submitCommand: { try await recorder.submit(command: $0) })
+        await repository.refreshCredentialStatus()
+        guard case let .listProviderCredentials(operationID, _, _) = try XCTUnwrap(recorder.commands.last) else {
+            return XCTFail("Expected a credential listing")
+        }
+
+        repository.recordExternalCredentialCommit(
+            providerIDs: ["openai"], configuredProviderIDs: ["openai"], storageEncrypted: true)
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationID, configuredProviderIds: [], unavailableProviderIds: [],
+            storageEncrypted: true, credentialPreviews: [:], error: nil))
+
+        XCTAssertEqual(repository.state(for: first)?.credentialState, .configured)
+        XCTAssertEqual(repository.state(for: second)?.credentialState, .configured)
+        XCTAssertFalse(repository.state(for: first)?.operationInFlight ?? true)
+        XCTAssertFalse(repository.state(for: second)?.operationInFlight ?? true)
+    }
+
+    func testConnectionResultCannotRestoreConnectedAfterCredentialDeletion() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.recordExternalCredentialCommit(
+            providerIDs: ["openai"], configuredProviderIDs: ["openai"], storageEncrypted: true)
+        let gate = ProviderConnectionTestGate()
+        let started = expectation(description: "stored credential probe started")
+        repository.configure(submitCommand: nil, testConnection: { _, _ in
+            started.fulfill()
+            return await gate.waitForResult()
+        })
+        let test = Task { await repository.testConnection(id) }
+        await fulfillment(of: [started])
+
+        repository.recordExternalCredentialCommit(
+            providerIDs: ["openai"], configuredProviderIDs: [], storageEncrypted: true)
+        await gate.succeed()
+        await test.value
+
+        XCTAssertEqual(repository.state(for: id)?.credentialState, .missing)
+        XCTAssertEqual(repository.state(for: id)?.connectionState, .idle)
+        XCTAssertNil(repository.state(for: id)?.detailMessage)
+    }
+
+    func testDraftConnectionResultCannotRestoreDeletedCredentialPresence() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.recordExternalCredentialCommit(
+            providerIDs: ["openai"], configuredProviderIDs: ["openai"], storageEncrypted: true)
+        let gate = ProviderConnectionTestGate()
+        let started = expectation(description: "draft credential probe started")
+        repository.configure(submitCommand: nil, testConnection: { _, _ in
+            started.fulfill()
+            return await gate.waitForResult()
+        })
+        let draft = try XCTUnwrap(repository.makeDraft(for: id))
+        let test = Task { await repository.testConnection(for: draft) }
+        await fulfillment(of: [started])
+
+        repository.recordExternalCredentialCommit(
+            providerIDs: ["openai"], configuredProviderIDs: [], storageEncrypted: true)
+        await gate.succeed()
+        let result = await test.value
+
+        XCTAssertEqual(result.connectionState, .failed)
+        XCTAssertFalse(result.hasStoredAPIKey)
+        XCTAssertEqual(result.detailMessage, String(localized: "settings_provider_config_changed_retest"))
+    }
+
+    func testConnectionResultFromPreviousSourceCannotPublishIntoCurrentBinding() async throws {
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.stageSecret("fixture-key", for: id)
+        let gate = ProviderConnectionTestGate()
+        let started = expectation(description: "old source probe started")
+        repository.configure(submitCommand: nil, testConnection: { _, _ in
+            started.fulfill()
+            return await gate.waitForResult()
+        })
+        let test = Task { await repository.testConnection(id) }
+        await fulfillment(of: [started])
+        repository.configure(submitCommand: nil)
+        await gate.succeed()
+        await test.value
+
+        XCTAssertEqual(repository.state(for: id)?.connectionState, .idle)
+        XCTAssertNil(repository.state(for: id)?.detailMessage)
+    }
+
+    func testRebindingRejectsPendingCredentialSaveAndItsLateAcknowledgement() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.configure(submitCommand: { try await recorder.submit(command: $0) })
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.pendingSecret = "fixture-replacement"
+        let apply = Task { await repository.applyDraft(draft) }
+        await waitForCommandCount(1, recorder: recorder)
+        guard case let .setProviderCredential(operationID, providerID, _) = try XCTUnwrap(recorder.commands.last)
+        else { return XCTFail("Expected the credential save") }
+
+        repository.configure(submitCommand: nil)
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationID, configuredProviderIds: [providerID],
+            unavailableProviderIds: [], storageEncrypted: true,
+            credentialPreviews: [:], error: nil))
+        let applied = await apply.value
+
+        XCTAssertFalse(applied)
+        XCTAssertNotEqual(repository.state(for: id)?.credentialState, .configured)
+        XCTAssertFalse(repository.state(for: id)?.operationInFlight ?? true)
+        XCTAssertTrue(draft.hasPendingSecret, "The editor retains the replacement for retry")
+    }
+
+    func testRebindingRejectsPendingCredentialDeleteAndPreservesStoredState() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.configure(submitCommand: { try await recorder.submit(command: $0) })
+        await repository.refreshCredentialStatus()
+        guard case let .listProviderCredentials(listID, providerIDs, _) = try XCTUnwrap(recorder.commands.last)
+        else { return XCTFail("Expected credential status") }
+        repository.handle(event: .providerCredentialStatus(
+            operationId: listID, configuredProviderIds: providerIDs,
+            unavailableProviderIds: [], storageEncrypted: true,
+            credentialPreviews: [:], error: nil))
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.clearCredentialOnApply = true
+        let apply = Task { await repository.applyDraft(draft) }
+        await waitForCommandCount(2, recorder: recorder)
+        guard case let .deleteProviderCredential(operationID, _) = try XCTUnwrap(recorder.commands.last)
+        else { return XCTFail("Expected the credential delete") }
+
+        repository.configure(submitCommand: nil)
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationID, configuredProviderIds: [],
+            unavailableProviderIds: [], storageEncrypted: true,
+            credentialPreviews: [:], error: nil))
+        let applied = await apply.value
+
+        XCTAssertFalse(applied)
+        XCTAssertEqual(repository.state(for: id)?.credentialState, .configured)
+        XCTAssertFalse(repository.state(for: id)?.operationInFlight ?? true)
+        XCTAssertTrue(repository.state(for: id)?.profile.enabled ?? false)
+    }
+
+    func testRebindingAfterAcknowledgementStillRejectsOldEngineSuccess() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        repository.configure(submitCommand: { try await recorder.submit(command: $0) })
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.pendingSecret = "fixture-replacement"
+        let apply = Task { await repository.applyDraft(draft) }
+        await waitForCommandCount(1, recorder: recorder)
+        guard case let .setProviderCredential(operationID, providerID, _) = try XCTUnwrap(recorder.commands.last)
+        else { return XCTFail("Expected the credential save") }
+
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationID, configuredProviderIds: [providerID],
+            unavailableProviderIds: [], storageEncrypted: true,
+            credentialPreviews: [:], error: nil))
+        // No suspension between the ACK and rebinding: the waiting transaction
+        // has not resumed to publish a successful save yet.
+        repository.configure(submitCommand: nil)
+        let applied = await apply.value
+
+        XCTAssertFalse(applied)
+        XCTAssertNotEqual(repository.state(for: id)?.credentialState, .configured)
+    }
+
+    func testCancellationStopsCredentialSubmissionAndIgnoresLateAcknowledgement() async throws {
+        let recorder = CommandRecorder()
+        let repository = ProviderRepository(persistenceURL: persistenceURL)
+        let id = repository.addProfile(presetID: "openai")
+        let cancelled = expectation(description: "The credential submission is cancelled")
+        repository.configure(submitCommand: { command in
+            try await recorder.submit(command: command)
+            do { try await Task.sleep(for: .seconds(60)) }
+            catch { cancelled.fulfill(); throw error }
+        })
+        var draft = try XCTUnwrap(repository.makeDraft(for: id))
+        draft.pendingSecret = "fixture-replacement"
+        let apply = Task { await repository.applyDraft(draft) }
+        await waitForCommandCount(1, recorder: recorder)
+        guard case let .setProviderCredential(operationID, providerID, _) = try XCTUnwrap(recorder.commands.last)
+        else { return XCTFail("Expected the credential save") }
+
+        apply.cancel()
+        let applied = await apply.value
+        await fulfillment(of: [cancelled], timeout: 1)
+        repository.handle(event: .providerCredentialStatus(
+            operationId: operationID, configuredProviderIds: [providerID],
+            unavailableProviderIds: [], storageEncrypted: true,
+            credentialPreviews: [:], error: nil))
+
+        XCTAssertFalse(applied)
+        XCTAssertNotEqual(repository.state(for: id)?.credentialState, .configured)
+        XCTAssertFalse(repository.state(for: id)?.operationInFlight ?? true)
+    }
+
+    #if canImport(harness_runtimeFFI)
+    func testCancelledSourceCommandDoesNotDispatchCredentialMutation() async {
+        let source = EngineConversationSource(config: EngineConfig(
+            apiBase: "https://api.anthropic.com", apiKey: "", model: "",
+            appSandboxRoot: tempDirectory.path, projectCwd: nil, sessionMode: .code,
+            visionDelegationEnabled: false), memoryOnly: true)
+        var commands: [ClientCommand] = []
+        source.setCommandSubmitterForTesting { commands.append($0) }
+        let submit = Task {
+            try await source.submitEngineCommand(.deleteProviderCredential(operationId: 1, providerId: "anthropic"))
+        }
+        submit.cancel()
+        do {
+            try await submit.value
+            XCTFail("A cancelled credential command must fail before dispatch")
+        } catch is CancellationError {} catch { XCTFail("Unexpected command failure") }
+
+        XCTAssertTrue(commands.isEmpty)
+    }
+    #endif
+
     func testEditingAndDiscardingDraftDoesNotChangeSavedSnapshot() throws {
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let id = repository.addProfile(presetID: "deepseek")
@@ -1252,16 +1597,17 @@ final class ProviderRepositoryTests: XCTestCase {
         XCTAssertNotNil(repository.state(for: openAI), "a profile must survive a failed secure deletion")
     }
 
-    func testClearingDefaultCredentialKeepsAsyncResultOnOriginalProfileAfterReorder() async throws {
+    func testClearingDefaultCredentialPreservesRoutingAndDoesNotReconnect() async throws {
         let recorder = CommandRecorder()
         let repository = ProviderRepository(persistenceURL: persistenceURL)
         let openAI = repository.addProfile(presetID: "openai")
         let kimi = repository.addProfile(presetID: "kimi")
+        var reconnectCount = 0
         repository.configure(
             submitCommand: { command in
                 try await recorder.submit(command: command)
             },
-            applyReconnect: { _ in }
+            applyReconnect: { _ in reconnectCount += 1 }
         )
 
         repository.stageSecret("sk-openai", for: openAI)
@@ -1279,6 +1625,7 @@ final class ProviderRepositoryTests: XCTestCase {
             error: nil
         ))
         await initialApply.value
+        let before = repository.makeLaunchSnapshot()
 
         repository.clearCredentialRequest(for: openAI)
         let clearApply = Task { await repository.applyChanges(openAI) }
@@ -1299,12 +1646,14 @@ final class ProviderRepositoryTests: XCTestCase {
 
         let openAIState = try XCTUnwrap(repository.state(for: openAI))
         let kimiState = try XCTUnwrap(repository.state(for: kimi))
-        XCTAssertFalse(openAIState.profile.enabled)
-        XCTAssertFalse(openAIState.profile.isDefault)
-        XCTAssertEqual(openAIState.detailMessage, "已应用配置并请求重连。")
+        XCTAssertTrue(openAIState.profile.enabled)
+        XCTAssertTrue(openAIState.profile.isDefault)
+        XCTAssertEqual(openAIState.credentialState, .missing)
+        XCTAssertEqual(repository.makeLaunchSnapshot(), before)
+        XCTAssertEqual(reconnectCount, 0)
         XCTAssertEqual(openAIState.connectionState, .idle)
-        XCTAssertTrue(kimiState.profile.isDefault)
-        XCTAssertNil(kimiState.detailMessage, "async completion must not leak onto the newly sorted default profile")
+        XCTAssertFalse(kimiState.profile.isDefault)
+        XCTAssertNil(kimiState.detailMessage, "credential completion belongs to the original provider")
     }
 
     func testConnectionResultUsesProfileIDAfterProfilesReorder() async throws {
@@ -1682,8 +2031,13 @@ final class ProviderRepositoryTests: XCTestCase {
 @MainActor
 private final class CommandRecorder {
     private(set) var commands: [ClientCommand] = []
+    private(set) var modelRefreshes = 0
 
     func submit(command: ClientCommand) async throws {
+        if case .listModels = command {
+            modelRefreshes += 1
+            return
+        }
         commands.append(command)
     }
 }

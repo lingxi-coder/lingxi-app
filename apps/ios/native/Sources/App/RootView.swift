@@ -1188,8 +1188,9 @@ struct RootView: View {
 
     #if canImport(harness_runtimeFFI)
         private func installExternalEventHandler(on conversation: any ConversationSource) {
-            conversation.setExternalEventHandler { event in
+            conversation.setExternalEventHandler { [weak conversation] event in
                 Task { @MainActor in
+                    guard let conversation, source === conversation else { return }
                     clientEventCenter.publish(event)
                     handleExternalEvent(event)
                 }
@@ -1249,12 +1250,24 @@ struct RootView: View {
 
     private func wireCurrentSource(preserveCatalog: Bool = false) {
         let current = source
+        let generation = sourceGeneration
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: current)
+            DesktopSettingsRepository.shared.credentialCommitHandler = { [weak current] ids, configured, encrypted in
+                guard let current, source === current, generation == sourceGeneration else { return }
+                providerRepository.recordExternalCredentialCommit(
+                    providerIDs: ids, configuredProviderIDs: configured, storageEncrypted: encrypted)
+            }
             providerRepository.configure(
-                submitCommand: { command in try await current.submitEngineCommand(command) },
+                submitCommand: { command in
+                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                    try await current.submitEngineCommand(command)
+                },
                 testConnection: { profile, secret in
-                    try await current.testProviderConnection(profile: profile, credentialOverride: secret)
+                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                    let result = try await current.testProviderConnection(profile: profile, credentialOverride: secret)
+                    guard source === current, generation == sourceGeneration else { throw CancellationError() }
+                    return result
                 },
                 applyReconnect: { snapshot in
                     try await rebuildSource(snapshot: snapshot)

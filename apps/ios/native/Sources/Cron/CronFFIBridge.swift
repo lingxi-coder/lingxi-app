@@ -191,7 +191,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         let config = IosEngineLaunchConfigFfi(
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
-            apiKey: Keychain.get(.apiKey) ?? "",
+            apiKey: "",
             model: task?.configuration.model ?? snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
             sessionMode: .code,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
@@ -219,6 +219,7 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             secureStorage: SecureStorageImpl(),
             deviceControl: DeviceControlImpl()
         )
+        try await migrateLegacyAnthropicCredential(on: handle)
         permissionSink.attach(handle)
         return handle
     }

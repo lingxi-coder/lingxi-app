@@ -23,6 +23,7 @@ import {
 import { rowState, type SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { ProviderEditorFields } from '../src/renderer/components/settings/pages/ProviderEditorFields';
 
 (globalThis as { React?: typeof React }).React = React;
 
@@ -297,6 +298,46 @@ test('disconnected provider settings keeps credential storage independent from e
   assert.match(markup.slice(disconnectedTestStart, disconnectedTestEnd + 1), /\bdisabled\b/);
   assert.doesNotMatch(markup, /macOS 钥匙串不可用/);
   assert.doesNotMatch(markup, /自定义 API 地址/);
+});
+
+test('a running reply leaves API-key rotation and deletion available and explains an explicit environment override', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider, { value: tokens(false) },
+    React.createElement(ProviderCredentials, {
+      bridge: {
+        bootstrap: { settings: {}, providerCredentials: [{
+          providerId: 'deepseek', configured: true, encryptionAvailable: true, environmentOverride: true,
+        }] },
+        desktop: { currentModel: 'deepseek/deepseek-flash' }, connected: true, running: true,
+      } as any,
+      initialProviderId: 'deepseek', snapshot: null, editingLayer: 'user', theme: 'light',
+      onTheme: () => undefined, onNavigate: () => undefined,
+      onClose: () => undefined, onJumpToLayer: () => undefined,
+    }),
+  ));
+  const input = markup.match(/<input[^>]*data-testid="provider-credential-preview"[^>]*>/)?.[0];
+  assert.ok(input);
+  assert.doesNotMatch(input, /\bdisabled\b/);
+  const deleteMarker = markup.indexOf('>删除 API Key</button>');
+  assert.ok(deleteMarker > 0);
+  assert.doesNotMatch(markup.slice(markup.lastIndexOf('<button', deleteMarker), deleteMarker), /\bdisabled\b/);
+  assert.match(markup, /当前使用启动时明确设置的环境变量凭据/);
+});
+
+test('broker-owned custom provider editing exposes saved keys and disables unsupported arbitrary environment sources', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider, { value: tokens(false) },
+    React.createElement(ProviderEditorFields, {
+      name: 'custom', onName() {}, onDraft() {}, onApiKey() {}, apiKey: '', hostManagedCredentials: true,
+      draft: { type: 'openai', models: [{ id: 'm' }], connections: [{ id: 'cn', apiKeyEnv: 'CUSTOM_CN_KEY' }] },
+    }),
+  ));
+  assert.match(markup, /<option value="env" disabled="">环境变量/);
+  assert.match(markup, /此应用不读取自定义环境变量/);
+  const keyInput = markup.match(/<input[^>]*aria-label="API Key"[^>]*>/)?.[0];
+  assert.ok(keyInput);
+  assert.doesNotMatch(keyInput, /\bdisabled\b/);
+  assert.match(markup.match(/<input[^>]*aria-label="连接 1 apiKeyEnv"[^>]*>/)?.[0] ?? '', /\bdisabled\b/);
 });
 
 test('provider settings defaults to a clickable status list without mounting a credential form', () => {

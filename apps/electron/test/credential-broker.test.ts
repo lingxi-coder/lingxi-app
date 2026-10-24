@@ -3,12 +3,15 @@ import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { buildBridgeArguments, buildCredentialEnvelope } from '../src/main/host-utils';
 
 import {
   createMacCredentialBrokerClient,
   resolveProviderCredential,
   resolveProviderIdForModel,
   resolveModelCredentialProviderIds,
+  resolveProfileCredentialIds,
+  configuredCredentialProviderIds,
   fusionCredentialSelection,
   resolveFusionCredentialProviderIds,
   resolveProviderTestCredential,
@@ -169,8 +172,77 @@ test('session launch prefers environment credentials and maps Claude references 
     environment: { ANTHROPIC_API_KEY: 'env-anthropic' },
   });
 
-  assert.deepEqual(builtIn, { apiKey: 'env-anthropic' });
-  assert.deepEqual(unqualified, { apiKey: 'env-anthropic' });
+  assert.deepEqual(builtIn, { providerCredentials: { anthropic: 'env-anthropic' } });
+  assert.deepEqual(unqualified, { providerCredentials: { anthropic: 'env-anthropic' } });
+});
+
+test('launch cache retries a credential read invalidated by a concurrent save or delete', async () => {
+  let finish!: (value: string | undefined) => void;
+  let reads = 0;
+  let current: string | undefined = 'replacement';
+  const broker = { resolve: () => ++reads === 1
+    ? new Promise<string | undefined>((resolve) => { finish = resolve; })
+    : Promise.resolve(current) };
+  const cache = new SessionLaunchCache();
+  const loading = cache.credentials('deepseek/model', broker);
+  cache.invalidate();
+  finish('retired');
+  assert.deepEqual(await loading, { providerCredentials: { deepseek: 'replacement' } });
+  current = undefined;
+  cache.invalidate();
+  assert.deepEqual(await cache.credentials('deepseek/model', broker), {});
+});
+
+test('stored Anthropic keys use the mutable provider-key launch envelope', async () => {
+  const launch = await resolveSessionLaunchCredentials('anthropic/claude-sonnet-5', {
+    environment: {}, credentialBroker: { resolve: async () => 'stored-anthropic' },
+  });
+  const envelope = JSON.parse(buildCredentialEnvelope(launch));
+  assert.equal(envelope.api_key, null);
+  assert.deepEqual(envelope.provider_keys, { anthropic: 'stored-anthropic' });
+  const args = buildBridgeArguments({
+    workspace: '/workspace', bridgeDir: '/bridge', trusted: true,
+    hasApiKey: !!launch.apiKey, hasCredentialStdin: !!launch.providerCredentials,
+  });
+  assert.equal(args.includes('--credential-stdin'), true);
+  assert.equal(args.includes('--api-key-stdin'), false);
+});
+
+test('model aliases and qualified connections hydrate referenced provider keys and same-group failover slots', () => {
+  const settings = {
+    providers: {
+      custom: {
+        models: [{ id: 'm', aliases: ['fast'] }], credentialIds: ['inherited-key'],
+        connections: [
+          { id: 'cn', credentialIds: ['cn-one', 'cn-two'] },
+          { id: 'us' },
+        ],
+      },
+      backup: { models: ['b'], credentialIds: ['backup-key'] },
+      unrelated: { models: ['u'], credentialIds: ['unrelated-key'] },
+    },
+    routing: { aliases: { picked: 'custom:cn#0/m' }, fallback: { m: ['backup/b'] } },
+  };
+  assert.deepEqual(resolveProfileCredentialIds('custom:cn#0', settings), ['cn-one', 'cn-two', 'inherited-key']);
+  for (const reference of ['fast', 'custom/m', 'custom:cn#0/m', 'picked']) {
+    assert.deepEqual(resolveModelCredentialProviderIds(reference, settings), ['cn-one', 'cn-two', 'inherited-key', 'backup-key']);
+  }
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, {
+    config: { enabled: true, panelModels: [{ profile: 'custom:cn#0', model: 'm' }] },
+  }), ['cn-one', 'cn-two', 'inherited-key'], 'Fusion loads exact chosen groups without ordinary routing fallback');
+  assert.deepEqual(resolveProfileCredentialIds('custom:missing', settings), []);
+  assert.deepEqual(configuredCredentialProviderIds(settings), [
+    'custom', 'cn-one', 'cn-two', 'inherited-key', 'backup', 'backup-key', 'unrelated', 'unrelated-key',
+  ]);
+});
+
+test('connection-level model overrides hydrate the selected group even without top-level models', () => {
+  const settings = { providers: { custom: { connections: [
+    { id: 'cn', models: ['cn-model'], credentialIds: ['cn-key'] },
+    { id: 'us', models: ['us-model'] },
+  ] } } };
+  assert.deepEqual(resolveModelCredentialProviderIds('custom:cn#0/cn-model', settings), ['cn-key', 'custom']);
+  assert.deepEqual(resolveModelCredentialProviderIds('us-model', settings), ['cn-key', 'custom']);
 });
 
 test('provider connection tests resolve only the selected broker credential', async () => {

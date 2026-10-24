@@ -2,13 +2,13 @@ import type { LingxiApi } from './lingxi';
 
 type SettingsHost = Pick<LingxiApi, 'command' | 'onEvent'> & Partial<Pick<LingxiApi, 'onConnectionStateChanged'>>;
 
-function equalJson(left: unknown, right: unknown): boolean {
+export function equalProviderSettings(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
   if (Array.isArray(left) !== Array.isArray(right)) return false;
   const a = Object.keys(left), b = Object.keys(right);
   return a.length === b.length && a.every((key) => Object.prototype.hasOwnProperty.call(right, key)
-    && equalJson((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]));
+    && equalProviderSettings((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]));
 }
 
 /** update_settings has no operation ID; confirm the written layer before reporting success. */
@@ -47,7 +47,7 @@ export function saveProviderSettings(
         const layer = JSON.parse(event.layers_json)[destination];
         if (!layer || typeof layer !== 'object' || Array.isArray(layer)) return;
         if (Object.entries(persistedPatch).every(([key, value]) => value === null
-          ? !Object.prototype.hasOwnProperty.call(layer, key) : equalJson(layer[key], value))) finish();
+          ? !Object.prototype.hasOwnProperty.call(layer, key) : equalProviderSettings(layer[key], value))) finish();
       } catch { /* Malformed snapshots cannot confirm a successful write. */ }
     });
     offState = host.onConnectionStateChanged?.(({ sessionId: incoming, event }) => {

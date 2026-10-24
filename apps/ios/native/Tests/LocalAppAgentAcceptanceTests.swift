@@ -77,7 +77,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             let input: [String: Any] = ["requestId": "ios-cancel-" + UUID().uuidString, "prompt": "Count from 1 to 20000 on separate lines.", "tools": [] as [String]]
             let admitted = try await page(client, first, "agent.run", input)
             let runID = try XCTUnwrap(admitted["runId"] as? String)
-            _ = try await page(client, first, "agent.cancel", ["runId": runID])
+            _ = try await client.agentPage(appID: first.run.appId, invocationID: first.run.runId, method: "agent.cancel", arguments: json(["runId": runID]))
             let cancelled = try await page(client, first, "agent.get", ["runId": runID])
             XCTAssertEqual(cancelled["state"] as? String, "cancelled")
             try await owned.action("restart", id: app.0.record.appId)
@@ -162,7 +162,8 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         #if targetEnvironment(simulator)
         throw XCTSkip("Requires physical iPhone with a configured model")
         #else
-        let client = LocalAppServiceClient(), owned = UnifiedLocalApps(client: LocalAppServiceClient())
+        let client = LocalAppServiceClient()
+        let owned = UnifiedLocalApps(client: client)
         var created: [(LocalAppPublishResult, URL)] = []
         func call(_ launch: LocalAppLaunch, _ method: String, _ arguments: [String: Any], origin: String? = nil) async throws -> (Int, [String: Any]) {
             let url = try XCTUnwrap(URL(string: launch.origin + "/__run/" + launch.run.runId + "/__host/agent"))
@@ -187,7 +188,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
                 "prompt":"Identify the visible food in English in food and describe one visible detail in detail. Use the result tool only.",
                 "images":[["media_type":"image/jpeg","base64":image.base64EncodedString()]], "tools":[] as [String],
                 "outputSchema":["type":"object","properties":["food":["type":"string"],"detail":["type":"string"]],"required":["food","detail"],"additionalProperties":false]]
-            let crossOrigin = try await call(launch,"agent.run",input,origin:"https://other.example")
+            let crossOrigin = try await call(launch,"agent.run",[:],origin:"https://other.example")
             XCTAssertEqual(crossOrigin.0,403)
             let approval = try await call(launch,"answer",[:]); XCTAssertEqual(approval.0,403)
             let admitted = try await call(launch,"agent.run",input)

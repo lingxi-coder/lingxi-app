@@ -454,7 +454,7 @@ class LocalAppAgentAcceptanceTest {
                     .put("prompt", "Identify the visible food in English in food and one visible detail in detail. Use the result tool; no business tools.")
                     .put("images", JSONArray().put(JSONObject().put("media_type", "image/jpeg").put("base64", Base64.encodeToString(photo, Base64.NO_WRAP))))
                     .put("tools", JSONArray()).put("outputSchema", JSONObject("""{"type":"object","properties":{"food":{"type":"string"},"detail":{"type":"string"}},"required":["food","detail"],"additionalProperties":false}"""))
-                assertEquals(403, call(launch, "agent.run", input, "https://other.example").getInt("httpStatus"))
+                assertEquals(403, call(launch, "agent.run", JSONObject(), "https://other.example").getInt("httpStatus"))
                 assertEquals(403, call(launch, "answer", JSONObject()).getInt("httpStatus"))
                 val admitted = call(launch, "agent.run", input)
                 assertTrue(admitted.toString(), admitted.getBoolean("ok"))

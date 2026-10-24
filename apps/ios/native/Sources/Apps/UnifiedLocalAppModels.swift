@@ -125,6 +125,15 @@ struct LocalAppServiceEnvelope<T: Decodable>: Decodable {
     let ok: Bool
     let value: T?
     let error: LocalAppServiceFailure?
+    private enum CodingKeys: String, CodingKey { case ok, value, error }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try container.decode(Bool.self, forKey: .ok)
+        error = try container.decodeIfPresent(LocalAppServiceFailure.self, forKey: .error)
+        // JSON null is a valid LocalAppJSON success (configure/cancel/stop).
+        // decodeIfPresent would erase it and reject the successful operation.
+        value = ok && container.contains(.value) ? try container.decode(T.self, forKey: .value) : nil
+    }
     func result() throws -> T {
         guard ok, let value else { throw error ?? LocalAppServiceFailure("INVALID_RESPONSE", "The app service returned an invalid response.") }
         return value

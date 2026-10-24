@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.firebase.auth.FirebaseAuth
 import com.lingxi.code.MainActivity
+import com.lingxi.code.BuildConfig
 import com.lingxi.code.project.MobileUserStorage
 import kotlinx.coroutines.*
 import org.json.JSONObject
@@ -23,7 +24,11 @@ class LocalAppAccountIndependenceTest {
     @Test fun actualFirebaseSignOutKeepsLocalHomeReleaseDataAndStaticRun() = runBlocking<Unit> {
         assumeTrue("Explicit test-account sign-out opt-in required", InstrumentationRegistry.getArguments().getString("allowAccountSignOut") == "true")
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        check(context.packageName == "com.lingxi.code.play.debug") { "Only independent PlayDebug may sign out" }
+        check(BuildConfig.DEBUG && BuildConfig.FLAVOR == "play" && !BuildConfig.MOBILE_LINUX_FULL) { "Only PlayDebug may sign out" }
+        val expectedPackage = InstrumentationRegistry.getArguments().getString("expectedAcceptancePackage")
+        check(expectedPackage == "com.lingxi.code.debug" && context.packageName == expectedPackage && BuildConfig.APPLICATION_ID == expectedPackage) {
+            "Explicit installed acceptance package confirmation required; production must never sign out"
+        }
         val auth = FirebaseAuth.getInstance()
         checkNotNull(auth.currentUser) { "Actual signed-in test account required" }
         val apps = UnifiedLocalApps.get(context)

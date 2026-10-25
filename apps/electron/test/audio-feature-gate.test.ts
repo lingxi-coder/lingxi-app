@@ -3,10 +3,11 @@ import { test } from 'node:test';
 import { audioFeatureGate, audioConversationGate, voiceStateAfterAudioFailure, audioSetupGuidance } from '../src/renderer/audio/audioFeatureGate';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 import { defaultNativeAudioSnapshot } from '../src/shared/nativeAudio';
+import { tr } from '../src/renderer/i18n/locale';
 
 test('unsupported device operations hide usage entries while configuration remains data', () => {
   const configuration = audioConfigurationDefaults();
-  assert.deepEqual(audioFeatureGate(configuration, defaultNativeAudioSnapshot(), 'listen'), { visible: false, ready: false, reason: '当前设备不支持此音频操作。' });
+  assert.deepEqual(audioFeatureGate(configuration, defaultNativeAudioSnapshot(), 'listen'), { visible: false, ready: false, reason: tr('audio_operation_unsupported'), reasonCode: 'unsupported' });
   assert.equal(configuration.recognition.source, 'automatic');
 });
 
@@ -19,7 +20,8 @@ test('recoverable microphone permission keeps input visible and supplies an acti
   const gate = audioFeatureGate(audioConfigurationDefaults(), snapshot, 'listen');
   assert.equal(gate.visible, true);
   assert.equal(gate.ready, false);
-  assert.match(gate.reason!, /授权/);
+  assert.equal(gate.reason, tr('desktop_audio_gate_microphone'));
+  assert.equal(gate.reasonCode, 'permission_denied');
 });
 
 test('provider unsupported hides input even when native recognition is ready', () => {
@@ -38,9 +40,10 @@ test('unreachable provider remains visible with configuration feedback and realt
   snapshot.sessionContext = { sessionId: 's', profileId: 'p' };
   snapshot.providerCapabilities = [{ profileId: 'p', providerId: 'openai', kind: 'speech', supported: true, readiness: 'unreachable', defaultModelId: 'tts', modelIds: ['tts'] }];
   assert.equal(audioFeatureGate(config, snapshot, 'speak').visible, true);
-  assert.match(audioFeatureGate(config, snapshot, 'speak').reason!, /providerUnreachable/);
+  assert.equal(audioFeatureGate(config, snapshot, 'speak').reason, tr('desktop_audio_gate_unavailable'));
+  assert.equal(audioFeatureGate(config, snapshot, 'speak').reasonCode, 'providerUnreachable');
   config.conversation.mode = 'realtime';
-  assert.deepEqual(audioConversationGate(config, snapshot), { visible: false, ready: false, reason: undefined });
+  assert.deepEqual(audioConversationGate(config, snapshot), { visible: false, ready: false, reason: undefined, reasonCode: undefined });
 });
 
 test('temporary foreground and service failures allow a later normal retry', () => {
@@ -61,17 +64,18 @@ test('current language readiness overrides a stale available recognizer snapshot
   snapshot.recognizerAvailable = true;
   const gate = audioFeatureGate(config, snapshot, 'listen');
   assert.equal(gate.ready, false);
-  assert.match(gate.reason!, /当前语言/);
-  assert.match(audioSetupGuidance('unavailable', gate.reason)?.title ?? '', /语言或模型/);
+  assert.equal(gate.reason, tr('desktop_audio_gate_unavailable'));
+  assert.equal(gate.reasonCode, 'systemUnavailable');
+  assert.equal(audioSetupGuidance('unavailable', gate.reasonCode)?.titleKey, 'audio_guide_configuration_title');
 });
 
 test('audio guidance distinguishes configuration, permissions, quota and retryable input failures', () => {
   assert.equal(audioSetupGuidance('cancelled'), null);
-  assert.match(audioSetupGuidance('unsupported')!.description, /系统、离线模型/);
-  assert.match(audioSetupGuidance('permission_denied')!.title, /权限/);
-  assert.match(audioSetupGuidance('unavailable', 'systemUnavailable')!.title, /语言或模型/);
-  assert.match(audioSetupGuidance('unavailable', 'No speech detected')!.description, /说话一致/);
-  assert.match(audioSetupGuidance('unavailable', 'audio provider returned HTTP 429')!.description, /账号额度/);
+  assert.equal(audioSetupGuidance('unsupported')!.description, tr('desktop_audio_guide_unsupported_detail'));
+  assert.equal(audioSetupGuidance('permission_denied')!.titleKey, 'audio_guide_permission_title');
+  assert.equal(audioSetupGuidance('unavailable', 'systemUnavailable')!.titleKey, 'audio_guide_configuration_title');
+  assert.equal(audioSetupGuidance('unavailable', 'No speech detected')!.descriptionKey, 'desktop_audio_guide_no_speech_detail');
+  assert.equal(audioSetupGuidance('unavailable', 'audio provider returned HTTP 429')!.descriptionKey, 'desktop_audio_guide_quota_detail');
   assert.doesNotMatch(JSON.stringify(audioSetupGuidance('unavailable', 'private-canary request identifier')), /private-canary/);
 });
 

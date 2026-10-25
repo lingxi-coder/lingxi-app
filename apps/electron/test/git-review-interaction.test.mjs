@@ -7,11 +7,11 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
 import react from '@vitejs/plugin-react';
+import electronBinary from 'electron';
 import { createServer } from 'vite';
 
 const electronRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
-const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'git-electron.mjs');
 
 test('Git review preserves drafts and session ownership, supports branches, diffs, stash and conflicts', async () => {
@@ -38,7 +38,7 @@ test('Git review preserves drafts and session ownership, supports branches, diff
     const fixtureUrl = `http://127.0.0.1:${address.port}/git-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(electronBinary, [electronDriver, fixtureUrl], {
       cwd: electronRoot,
       env: {
         ...process.env,

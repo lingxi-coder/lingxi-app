@@ -3,13 +3,14 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 const url = process.argv.find(arg => arg.startsWith('http://'));
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const trace = message => { if (process.env.LINGXI_TERMINAL_TEST_TRACE === '1') process.stderr.write(`[terminal fixture] ${message}\n`); };
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1200, height: 820, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
     const run = script => window.webContents.executeJavaScript(script);
-    const wait = async expr => { for (let n = 0; n < 300; n++) { if (await run(expr)) return; await delay(20); } throw new Error(`Timeout: ${expr}\n${await run('document.body.innerText')}\n${JSON.stringify(await run('window.terminalFixture?.state()'))}`); };
+    const wait = async expr => { trace(`waiting: ${expr}`); for (let n = 0; n < 300; n++) { if (await run(expr)) { trace(`ready: ${expr}`); return; } await delay(20); } throw new Error(`Timeout: ${expr}\n${await run('document.body.innerText')}\n${JSON.stringify(await run('window.terminalFixture?.state()'))}`); };
     const click = selector => run(`document.querySelector(${JSON.stringify(selector)}).click()`);
     const state = () => run('window.terminalFixture.state()');
     await wait('Boolean(window.terminalFixture)');
@@ -78,7 +79,8 @@ async function main() {
     await run(`window.terminalFixture.migrate('${remaining}', 'session-migrated'); document.querySelector('#composer').focus(); window.terminalFixture.session('session-migrated')`);
     await delay(80);
     result.migrationPreservesShell = (await state()).selected === remaining && (await state()).open && await run('document.activeElement.id === "composer"');
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-  } finally { window.destroy(); app.quit(); }
+    trace(`result: ${JSON.stringify(result)}`);
+    await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
+  } finally { trace('destroying window'); window.destroy(); }
 }
-main().catch(error => { process.stderr.write(`${error.stack ?? error}\n`); app.exit(1); });
+main().then(() => app.exit(0)).catch(error => { process.stderr.write(`${error.stack ?? error}\n`); app.exit(1); });

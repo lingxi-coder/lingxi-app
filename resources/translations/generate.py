@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Generate iOS/Android localization resources from canonical translation JSON sources."""
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import re
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 LOCALES = ["zh-Hans", "zh-Hant", "en", "ja", "ko"]
@@ -20,11 +23,37 @@ ANDROID_VALUES_DIRS = {
 }
 
 # Android format placeholder: %[<arg>$][flags][width][.precision]<conversion>
-_ANDROID_PLACEHOLDER = re.compile(r"%(\d+\$)?[-+#0,]*\d*(\.\d+)?[a-zA-Z]")
+_ANDROID_PLACEHOLDER = re.compile(r"%%|%(\d+\$)?[-+#0,]*\d*(\.\d+)?[a-zA-Z]")
 
 # Valid Android resource names (iOS-style interpolation keys like
 # "settings_provider_default %@" are iOS-only and skipped for Android).
 _ANDROID_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\Z")
+
+# Compare arguments rather than token order so positional translations can
+# reorder words. Escaped percent signs do not consume a formatting argument.
+_FORMAT_ARGUMENT = re.compile(r"%%|%(?:(\d+)\$)?[-+#0 ,]*\d*(?:\.\d+)?(hh|ll|h|l|L|z|j|t)?([@diuoxXfFeEgGaAcCsSp])")
+
+
+def _format_arguments(text: str) -> Counter:
+    arguments = Counter()
+    next_index = 1
+    for match in _FORMAT_ARGUMENT.finditer(text):
+        if match.group() == "%%":
+            continue
+        position, length, conversion = match.groups()
+        index = int(position) if position else next_index
+        if not position:
+            next_index += 1
+        arguments[(index, (length or "") + conversion)] += 1
+    return arguments
+
+
+def _string_variants(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict) and isinstance(value.get("plural"), dict):
+        return [text for text in value["plural"].values() if isinstance(text, str)]
+    return []
 
 
 def _mkdir(path: Path) -> None:
@@ -36,7 +65,8 @@ def _mkdir(path: Path) -> None:
 
 def _write_text(path: Path, text: str) -> None:
     try:
-        path.write_text(text, encoding="utf-8", newline="\n")
+        with path.open("w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
     except OSError as exc:
         raise ValueError(f"error: cannot write {path}: {exc}")
 
@@ -93,6 +123,13 @@ def validate_consistency(locales: dict[str, dict]) -> str | None:
             if extra:
                 detail.append("extra keys: " + ", ".join(extra))
             problems.append(f"{locale}: " + "; ".join(detail))
+        for key in base_keys & keys:
+            source_variants = _string_variants(base[key])
+            if not source_variants:
+                continue
+            expected = _format_arguments(source_variants[0])
+            if any(_format_arguments(text) != expected for text in _string_variants(strings[key])):
+                problems.append(f"{locale}: {key}: formatting arguments differ from {BASE_LOCALE}")
     return "; ".join(problems) if problems else None
 
 
@@ -119,11 +156,12 @@ def _localizations_for(locales: dict[str, dict], scope: str | None, key: str) ->
 
 
 def write_ios(locales: dict[str, dict], out_dir: Path | str) -> None:
-    """Emit Localizable.xcstrings into out_dir."""
+    """Emit UI and system property-list string catalogs into out_dir."""
     out_dir = Path(out_dir)
     _mkdir(out_dir)
     base = locales.get(BASE_LOCALE, {})
     strings = {}
+    info_strings = {}
     for key in base:
         if key == "__info_plist__":
             info = base["__info_plist__"]
@@ -132,7 +170,7 @@ def write_ios(locales: dict[str, dict], out_dir: Path | str) -> None:
             for plist_key in info:
                 localizations = _localizations_for(locales, "__info_plist__", plist_key)
                 if localizations:
-                    strings[plist_key] = {"localizations": localizations}
+                    info_strings[plist_key] = {"localizations": localizations}
         else:
             localizations = _localizations_for(locales, None, key)
             if localizations:
@@ -143,6 +181,14 @@ def write_ios(locales: dict[str, dict], out_dir: Path | str) -> None:
         "strings": dict(sorted(strings.items())),
     }
     _write_text(out_dir / "Localizable.xcstrings", json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
+    # System permission dialogs and the launcher name read the InfoPlist table,
+    # not Localizable. Compiling this catalog emits <locale>.lproj/InfoPlist.strings.
+    info_catalog = {
+        "sourceLanguage": BASE_LOCALE,
+        "version": "1.0",
+        "strings": dict(sorted(info_strings.items())),
+    }
+    _write_text(out_dir / "InfoPlist.xcstrings", json.dumps(info_catalog, ensure_ascii=False, indent=2) + "\n")
 
 
 def _xml_escape_text(s: str) -> str:
@@ -169,7 +215,8 @@ def _android_escape(value: str) -> str:
     Source values are plain text. A literal '%' is doubled to '%%' so Android
     renders it literally. Exception: '%' followed by an optional argument index,
     flags, width/precision, and a letter is treated as a format placeholder and
-    left intact (e.g. "%1$d", "%s"). A literal percent directly before a letter
+    left intact (e.g. "%1$d", "%s"). Already escaped "%%" stays escaped once.
+    A literal percent directly before a letter
     (e.g. "100%x") therefore stays "100%x" and would be formatted at runtime —
     author such literals as "100%%x" in the source JSON instead.
     """
@@ -224,8 +271,8 @@ ANDROID_KNOWN_COMPANION_BASENAMES = {"strings_conversation_extra.xml"}
 def _generator_produced_files(out_dir: Path, kind: str) -> list[Path]:
     """Relative paths under out_dir that the generator owns (for the orphan scan)."""
     if kind == "ios":
-        path = out_dir / "Localizable.xcstrings"
-        return [Path("Localizable.xcstrings")] if path.exists() else []
+        return [Path(name) for name in ("Localizable.xcstrings", "InfoPlist.xcstrings")
+                if (out_dir / name).exists()]
     produced = []
     # Previously this only ever looked for "strings.xml" directly inside each
     # values* directory, so any OTHER strings*.xml sitting there (stray,
@@ -254,7 +301,7 @@ def stale_problems(locales: dict[str, dict], ios_out: Path, android_out: Path) -
         tmp_dir = Path(tmp)
         write_ios(locales, tmp_dir / "ios")
         write_android(locales, tmp_dir / "android")
-        generated_ios = {Path("Localizable.xcstrings")}
+        generated_ios = {Path("Localizable.xcstrings"), Path("InfoPlist.xcstrings")}
         for rel in generated_ios:
             committed = ios_out / rel
             generated = tmp_dir / "ios" / rel

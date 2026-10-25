@@ -148,20 +148,80 @@ cargo test --locked -p client --features test-support
 
 Verification method: Environment validation
 
-The current working-tree protocol constant is 21.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.
+The inspected client protocol constant is 29.0.0. Always read the baseline and the host pin before connecting a separate client. Device callbacks, ordering under disconnect and replay presentation remain target-host checks.
+
+<a id="event-consumer"></a>
+
+## Build a client event consumer
+
+| Event | Use it for | Correlation |
+| --- | --- | --- |
+| SessionStarted / SessionResumed | Mount or replace the visible conversation. | session_id belongs to the connection’s mounted host. |
+| TurnStarted | Mark an admitted prompt active. | Echoed optional turn_id from SendPrompt. |
+| TextDelta | Append assistant text to the active presentation. | The ordered event feed; this DTO does not add a per-delta turn_id. |
+| ToolUseStarted / ToolUseResult | Show progress, input, result and error state. | Match id, not the tool display name. |
+| MessageComplete | Settle the completed assistant message when supplied. | Use the message’s identity and ordered blocks; message can be absent. |
+| TurnEnded / Error | Settle the host’s terminal execution presentation. | Keep outcome, stop reason, costs or structured error kind separately. |
+
+Do not assume every event has session_id or turn_id. The protocol deliberately makes session selection a connection attribute. Transports that multiplex connections must retain their own authenticated connection-to-session mapping.
+
+<a id="permission-roundtrip"></a>
+
+## Complete the permission request round trip
+
+1. Receive the permission request from the host-owned PermissionRequestSink and store its connection-scoped request_id with the rendered card.
+2. Display the requested operation and the engine-provided actions. Respect suppress_always_allow_rule and auto_mode_prompt; the client must not infer eligibility for broader permission.
+3. Send ApprovePermission or DenyPermission with that request_id through the connection that owns the parked request.
+4. Remove or settle the card when PermissionRequestResolved arrives. Approved, Denied, Cancelled and Expired are terminal states; a stale click can lose a race with cancellation.
+
+### ClientCommand JSON · one-time approval
+
+```json
+{
+  "type": "approve_permission",
+  "request_id": 7,
+  "response": { "type": "allow_once" }
+}
+```
+
+Verification method: API excerpt
+
+### AdapterPermissionGate::resolve
+
+```text
+pub async fn resolve(&self, request_id: u64, response: PermissionResponseDto, tool_name_hint: &str) -> bool
+```
+
+Returns false when the parked request is unknown or no longer has a receiver. Route by the stored request identity; the tool-name hint does not replace it.
+
+<a id="client-error-handling"></a>
+
+## Handle errors without guessing success
+
+| Signal | Client response | Avoid |
+| --- | --- | --- |
+| Transport error | Keep partial content, report the failure and apply the host’s reconnect policy. | Automatically resending a side-effecting prompt as if it had never run. |
+| Protocol / Internal error | Retain diagnostics and validate the exact host/client binding versions. | Converting missing or malformed events into completed messages. |
+| MaxTurns | Explain that the configured execution budget ended and preserve the conversation. | Reporting the user’s task as complete solely because a turn ended. |
+| Unknown future enum variant | Follow the host’s compatibility contract and provide an explicit unsupported state when needed. | Inventing a permission approval or successful operation for an unrecognized payload. |
+
+- [Cancellation, terminal outcomes and partial output](harness-sessions.md#cancellation-recipe)
 
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/lib.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/Cargo.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/version.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/version.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/commands.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/events.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/adapter/output_stream.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/message.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/message.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/lib.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/Cargo.toml) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/protocol/version.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/protocol/version.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/protocol/commands.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/protocol/events.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/adapter/output_stream.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/protocol/message.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/protocol/message.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/adapter/turn.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/adapter/turn.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/adapter/permission_gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/adapter/permission_gate.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/protocol/permission.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/protocol/permission.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD a39da75f0985d61d90fffa255f7b4d90901b0e27; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin a39da75f0985d61d90fffa255f7b4d90901b0e27
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

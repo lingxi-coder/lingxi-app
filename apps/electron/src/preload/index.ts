@@ -1,11 +1,27 @@
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
+import { CH_COMPUTER_SETTINGS, CH_COMPUTER_SETTINGS_CHANGED, type ComputerSettingsApi } from '../shared/computerSettings.js';
+import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_APPLICATION_MENU, type ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectCreationPurpose, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
+import {
+  CH_REMOTE_AT_STARTUP_GET,
+  CH_REMOTE_AT_STARTUP_SET,
+  CH_REMOTE_DEVICE_REVOKE,
+  CH_REMOTE_DEVICES_LIST,
+  CH_REMOTE_ENABLED_SET,
+  CH_REMOTE_PROMPT_ECHO,
+  CH_REMOTE_SESSION_SET,
+  CH_REMOTE_SESSIONS_EVENT,
+  CH_REMOTE_SESSIONS_GET,
+  CH_REMOTE_STATUS_EVENT,
+  CH_REMOTE_STATUS_GET,
+  type RemoteControlApi,
+} from '../shared/remoteControl.js';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
 import type { GitApi } from '../shared/git.js';
@@ -150,7 +166,7 @@ export interface WorkspaceMetadata {
     message: string;
   };
 }
-export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true }
+export interface CredentialMetadata { configured: boolean; encryptionAvailable: boolean; credentialPreview?: string; runtimeOnly?: true; environmentOverride?: true }
 export interface ProviderCredentialMetadata extends CredentialMetadata { providerId: string }
 export interface ProviderCredentialUpdate { credential: ProviderCredentialMetadata; settings: PublicSettings }
 export type ProviderConnectionTestResult = Extract<ClientEvent, { type: 'provider_connection_tested' }>;
@@ -209,10 +225,12 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  computerSettings: ComputerSettingsApi;
   applicationIcon: ApplicationIconApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
   scheduled: ScheduledApi;
+  remoteControl: RemoteControlApi;
   git?: GitApi;
   terminal: TerminalApi;
   getPathForFile(file: File): string;
@@ -255,6 +273,7 @@ export interface LingxiApi {
   diagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
   copyText(text: string): Promise<void>;
+  setInterfaceLocale(locale: string, followSystem: boolean): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   listProjectSessions(projectPath: string, scope?: SessionCatalogScope): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null>;
@@ -323,6 +342,14 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  computerSettings: {
+    execute: command => ipcRenderer.invoke(CH_COMPUTER_SETTINGS, command),
+    onChanged: listener => {
+      const callback = (_event: IpcRendererEvent, snapshot: Parameters<typeof listener>[0]) => listener(snapshot);
+      ipcRenderer.on(CH_COMPUTER_SETTINGS_CHANGED, callback);
+      return () => ipcRenderer.removeListener(CH_COMPUTER_SETTINGS_CHANGED, callback);
+    },
+  },
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
   localApps: {
     list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,
@@ -385,6 +412,19 @@ const api: LingxiApi = {
     manage: (scopeId, request) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request }),
     openSession: (scopeId, sessionId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'open', scopeId, sessionId }),
   } satisfies ScheduledApi,
+  remoteControl: {
+    status: () => ipcRenderer.invoke(CH_REMOTE_STATUS_GET),
+    onStatus: callback => subscribe(CH_REMOTE_STATUS_EVENT, callback),
+    setEnabled: enabled => ipcRenderer.invoke(CH_REMOTE_ENABLED_SET, enabled),
+    atStartup: () => ipcRenderer.invoke(CH_REMOTE_AT_STARTUP_GET),
+    setAtStartup: enabled => ipcRenderer.invoke(CH_REMOTE_AT_STARTUP_SET, enabled),
+    devices: () => ipcRenderer.invoke(CH_REMOTE_DEVICES_LIST),
+    revokeDevice: deviceId => ipcRenderer.invoke(CH_REMOTE_DEVICE_REVOKE, deviceId),
+    sessions: () => ipcRenderer.invoke(CH_REMOTE_SESSIONS_GET),
+    setSession: (sessionId, enabled) => ipcRenderer.invoke(CH_REMOTE_SESSION_SET, sessionId, enabled),
+    onSessions: callback => subscribe(CH_REMOTE_SESSIONS_EVENT, callback),
+    onPromptEcho: callback => subscribe(CH_REMOTE_PROMPT_ECHO, callback),
+  } satisfies RemoteControlApi,
   bootstrap: () => ipcRenderer.invoke(CH_BOOTSTRAP) as Promise<BootstrapState>,
   settings: () => ipcRenderer.invoke(CH_SETTINGS_GET) as Promise<PublicSettings>,
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,
@@ -411,6 +451,7 @@ const api: LingxiApi = {
   diagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_GET) as Promise<DiagnosticEntry[]>,
   copyDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_COPY) as Promise<void>,
   copyText: (text) => ipcRenderer.invoke(CH_CLIPBOARD_WRITE_TEXT, text) as Promise<void>,
+  setInterfaceLocale: (locale, followSystem) => ipcRenderer.invoke(CH_INTERFACE_LOCALE, locale, followSystem) as Promise<void>,
   exportDiagnostics: () => ipcRenderer.invoke(CH_DIAGNOSTICS_EXPORT) as Promise<string | null>,
   listProjectSessions: (projectPath, scope) => ipcRenderer.invoke(CH_PROJECT_SESSIONS_LIST, projectPath, scope) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   updateSessionWorkspace: (sessionId, operation) => ipcRenderer.invoke(CH_SESSION_WORKSPACE, sessionId, operation) as Promise<BootstrapState | null>,

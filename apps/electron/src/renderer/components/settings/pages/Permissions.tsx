@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useEffect, useState } from 'react';
 import type { ClientCommand, PermissionBehaviorDto, WritableScopeDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, ProvenanceBadge, Row, type Provenance } from '../rows';
@@ -106,18 +108,18 @@ export function bypassRowProvenance(): Provenance {
  * pick it from here either.
  */
 const DEFAULT_MODE_OPTIONS: { id: string; label: string; danger?: boolean }[] = [
-  { id: 'default', label: '默认（每次询问）' },
-  { id: 'plan', label: 'Plan（只读探索）' },
-  { id: 'acceptEdits', label: '自动接受编辑' },
-  { id: 'dontAsk', label: "Don't Ask（拒绝未显式允许的操作）" },
-  { id: 'auto', label: 'Auto（分类器驱动的自动批准，遇到风险时询问）' },
-  { id: 'bypassPermissions', label: 'Bypass Permissions（完全放行）', danger: true },
+  { id: 'default', label: "desktop_settings_07f8a52190" },
+  { id: 'plan', label: "desktop_settings_79505cb43f" },
+  { id: 'acceptEdits', label: "settings_permission_mode_accept_edits" },
+  { id: 'dontAsk', label: "desktop_settings_91c1cf103a" },
+  { id: 'auto', label: "desktop_settings_ebd1340f07" },
+  { id: 'bypassPermissions', label: "desktop_settings_ec6040b0a6", danger: true },
 ];
 
 const BEHAVIOR_SECTIONS: { key: 'allow' | 'deny' | 'ask'; title: string; desc: string }[] = [
-  { key: 'allow', title: '允许 (allow)', desc: '匹配的工具调用无需询问，直接放行。' },
-  { key: 'deny', title: '拒绝 (deny)', desc: '匹配的工具调用直接拒绝，不会询问。' },
-  { key: 'ask', title: '询问 (ask)', desc: '匹配的工具调用总是询问，即使默认模式会自动放行。' },
+  { key: 'allow', title: "desktop_settings_c7f00c6c78", desc: "desktop_settings_000ad51c44" },
+  { key: 'deny', title: "desktop_settings_93453f0e6a", desc: "desktop_settings_9cdc6bb497" },
+  { key: 'ask', title: "desktop_settings_1735f05ca0", desc: "desktop_settings_a0333cee43" },
 ];
 
 function RuleSection({
@@ -132,20 +134,20 @@ function RuleSection({
     <Card title={title}>
       <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3 }}>{desc}</div>
       {rules.length === 0 && (
-        <div style={{ padding: '10px 18px 14px', color: t.text4, fontSize: 12.5 }}>还没有规则。</div>
+        <div style={{ padding: '10px 18px 14px', color: t.text4, fontSize: 12.5 }}>{tr('desktop_settings_69b6ed2dbd')}</div>
       )}
       {rules.map((rule) => (
         <Row key={rule} align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{rule}</span>}>
-          <button type="button" disabled={saving} onClick={() => onRemove(rule)} style={ghostButtonStyle(t, saving, true)}>移除</button>
+          <button type="button" disabled={saving} onClick={() => onRemove(rule)} style={ghostButtonStyle(t, saving, true)}>{tr('settings_parity_remove')}</button>
         </Row>
       ))}
-      <Row title="新增规则" align="center">
+      <Row title={tr('desktop_settings_83009fcfe6')} align="center">
         <div style={{ display: 'flex', gap: 7 }}>
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="例如 Bash(ls:*)"
-            aria-label={`新增${title}规则`}
+            placeholder={tr('desktop_settings_9c02f9652c')}
+            aria-label={tr('desktop_settings_8df39a2f56', title)}
             style={{ ...inputStyle(t), width: 220 }}
           />
           <button
@@ -154,7 +156,7 @@ function RuleSection({
             onClick={() => { onAdd(draft.trim()); setDraft(''); }}
             style={ghostButtonStyle(t, saving || !draft.trim())}
           >
-            添加
+            {tr('workspace_confirm_add')}
           </button>
         </div>
       </Row>
@@ -175,6 +177,7 @@ function RuleSection({
  * `CustomProviders`' `settings.providers`).
  */
 export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
+  useI18n();
   const t = useT();
   const draft = permissionsFromLayer(snapshot, editingLayer);
   const permissionsRowState = snapshot ? rowState(snapshot, 'permissions', editingLayer) : null;
@@ -198,7 +201,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
     setRuleSaving(true);
     setRuleError(null);
     void bridge.updatePermissionRules(command.destination, command.behavior, command.add, command.remove)
-      .catch((cause) => setRuleError(cause instanceof Error ? cause.message : '无法保存权限规则。'))
+      .catch((cause) => setRuleError(cause instanceof Error ? cause.message : tr('desktop_settings_4231766e96')))
       .finally(() => setRuleSaving(false));
   };
 
@@ -207,7 +210,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
     setRuleSaving(true);
     setRuleError(null);
     void bridge.updatePermissionRules(command.destination, command.behavior, command.add, command.remove)
-      .catch((cause) => setRuleError(cause instanceof Error ? cause.message : '无法移除权限规则。'))
+      .catch((cause) => setRuleError(cause instanceof Error ? cause.message : tr('desktop_settings_45ebc4f38b')))
       .finally(() => setRuleSaving(false));
   };
 
@@ -216,7 +219,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
     setModeError(null);
     setAttemptedMode(mode);
     void bridge.setDefaultPermissionMode(editingLayer, mode)
-      .catch((cause) => setModeError(cause instanceof Error ? cause.message : '无法保存默认权限模式。'))
+      .catch((cause) => setModeError(cause instanceof Error ? cause.message : tr('desktop_settings_70b6b18a11')))
       .finally(() => setModeSaving(false));
   };
 
@@ -227,7 +230,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
     setDirError(null);
     void bridge.updateWorkspaceDirectories(editingLayer, [dir], [])
       .then(() => setDirDraft(''))
-      .catch((cause) => setDirError(cause instanceof Error ? cause.message : '无法保存工作目录。'))
+      .catch((cause) => setDirError(cause instanceof Error ? cause.message : tr('desktop_settings_037376edba')))
       .finally(() => setDirSaving(false));
   };
 
@@ -235,7 +238,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
     setDirSaving(true);
     setDirError(null);
     void bridge.updateWorkspaceDirectories(editingLayer, [], [dir])
-      .catch((cause) => setDirError(cause instanceof Error ? cause.message : '无法移除工作目录。'))
+      .catch((cause) => setDirError(cause instanceof Error ? cause.message : tr('desktop_settings_93cde86488')))
       .finally(() => setDirSaving(false));
   };
 
@@ -251,7 +254,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
   return (
     <>
       {(permissionsRowState?.kind === 'merged' || permissionsRowState?.kind === 'overridden') && (
-        <Card title="生效层">
+        <Card title={tr('desktop_settings_ad25986d5b')}>
           <FieldProvenanceNotice snapshot={snapshot} fieldKey="permissions" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} label="permissions" />
         </Card>
       )}
@@ -259,8 +262,8 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
       {BEHAVIOR_SECTIONS.map((section) => (
         <RuleSection
           key={section.key}
-          title={section.title}
-          desc={section.desc}
+          title={tr(section.title)}
+          desc={tr(section.desc)}
           rules={draft[section.key]}
           saving={ruleSaving}
           onAdd={(rule) => handleAddRule(section.key, rule)}
@@ -269,61 +272,60 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
       ))}
       {ruleError && <div role="alert" style={{ color: t.danger, fontSize: 12, marginTop: -18, marginBottom: 18 }}>{ruleError}</div>}
 
-      <Card title="默认权限模式">
-        <Row title="defaultMode" desc="没有任何规则匹配时，如何处理工具调用。" align="center">
+      <Card title={tr('settings_parity_default_permission')}>
+        <Row title="defaultMode" desc={tr('desktop_settings_d47c2477c5')} align="center">
           <select
             value={draft.defaultMode ?? 'default'}
             disabled={modeSaving}
             onChange={(e) => handleSetMode(e.target.value)}
-            aria-label="默认权限模式"
+            aria-label={tr('settings_parity_default_permission')}
             style={inputStyle(t)}
           >
-            {DEFAULT_MODE_OPTIONS.map((opt) => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+            {DEFAULT_MODE_OPTIONS.map((opt) => <option key={opt.id} value={opt.id}>{tr(opt.label)}</option>)}
           </select>
         </Row>
         {bypassRefused && (
-          <Row title="未保存" align="center">
+          <Row title={tr('desktop_settings_6a1be012c9')} align="center">
             <span role="alert" style={{ color: t.warn, fontSize: 12 }}>
-              Bypass Permissions 无法从设置页持久化——这是安全设计，不是 bug；每次激活都需要单独在弹窗中确认。
-            </span>
+              {tr('desktop_settings_7892426a18')}</span>
           </Row>
         )}
-        {modeError && <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{modeError}</span></Row>}
+        {modeError && <Row title={tr('cron_error_section')} align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{modeError}</span></Row>}
       </Card>
 
-      <Card title="附加工作目录 (additionalDirectories)">
+      <Card title={tr('desktop_settings_0c5726f11b')}>
         {draft.additionalDirectories.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有附加目录。</div>
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>{tr('desktop_settings_5b087a2d1b')}</div>
         )}
         {draft.additionalDirectories.map((dir) => (
           <Row key={dir} align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{dir}</span>}>
-            <button type="button" disabled={dirSaving} onClick={() => handleRemoveDirectory(dir)} style={ghostButtonStyle(t, dirSaving, true)}>移除</button>
+            <button type="button" disabled={dirSaving} onClick={() => handleRemoveDirectory(dir)} style={ghostButtonStyle(t, dirSaving, true)}>{tr('settings_parity_remove')}</button>
           </Row>
         ))}
-        <Row title="新增目录" align="center">
+        <Row title={tr('desktop_settings_7f55269f30')} align="center">
           <div style={{ display: 'flex', gap: 7 }}>
             <input
               value={dirDraft}
               onChange={(e) => setDirDraft(e.target.value)}
-              placeholder="路径"
-              aria-label="新增附加工作目录"
+              placeholder={tr('desktop_settings_77e1ea5c56')}
+              aria-label={tr('desktop_settings_dbe9f32480')}
               style={{ ...inputStyle(t), width: 260 }}
             />
-            <button type="button" disabled={dirSaving || !dirDraft.trim()} onClick={handleAddDirectory} style={ghostButtonStyle(t, dirSaving || !dirDraft.trim())}>添加</button>
+            <button type="button" disabled={dirSaving || !dirDraft.trim()} onClick={handleAddDirectory} style={ghostButtonStyle(t, dirSaving || !dirDraft.trim())}>{tr('workspace_confirm_add')}</button>
           </div>
         </Row>
-        {dirError && <Row title="错误" align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{dirError}</span></Row>}
+        {dirError && <Row title={tr('cron_error_section')} align="center"><span role="alert" style={{ color: t.danger, fontSize: 12 }}>{dirError}</span></Row>}
       </Card>
 
-      <Card title="设备状态">
+      <Card title={tr('desktop_settings_240cf246ac')}>
         <Row
-          title="Bypass Permissions 已确认"
+          title={tr('desktop_settings_e387c90938')}
           badge={<ProvenanceBadge destination={bypassRowProvenance()} />}
-          desc="这条状态存在 Electron 本地存储中，与设置层无关——切换上方的层不会改变它。"
+          desc={tr('desktop_settings_6e5e2fce96')}
           align="center"
         >
           <span style={{ fontSize: 12.5, color: t.text2 }}>
-            {bridge.bootstrap?.settings.bypassPermissionsModeAccepted ? '是' : '否'}
+            {bridge.bootstrap?.settings.bypassPermissionsModeAccepted ? tr('common_yes') : tr('common_no')}
           </span>
         </Row>
       </Card>

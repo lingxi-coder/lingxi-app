@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { constants as fsConstants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -514,10 +514,11 @@ function copyPackagedApp(appPath, tempRoot) {
   mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
   const destination = join(tempRoot, `${APP_NAME}.app`);
   cpSync(appPath, destination, {
+    // APFS can isolate the test copy without allocating another full app bundle.
+    mode: constants.COPYFILE_FICLONE,
     dereference: false,
     errorOnExist: true,
     force: false,
-    mode: fsConstants.COPYFILE_FICLONE,
     preserveTimestamps: true,
     recursive: true,
     verbatimSymlinks: true,
@@ -884,7 +885,7 @@ async function assertDesktopGit(page, workspace, tempRoot) {
     const warning = document.querySelector('.git-branch-warning');
     return current?.textContent.includes('desktop-review-smoke')
       && current?.textContent.includes('Current')
-      && warning?.textContent.includes('1 file has changes');
+      && warning?.textContent.includes('Changed files: 1.');
   })()`), { label: 'current branch and uncommitted change warning' });
   const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(tmpdir(), 'lingxi-git-environment-packaged.png'), Buffer.from(environmentScreenshot.data, 'base64'));
@@ -1111,6 +1112,46 @@ async function createPackagedLocalAppSourceSession(page, creatorSessionId, confi
   }, { label: 'Native Create host-persisted pending AuthoringRef' });
   assertPackagedLocalAppPendingAuthoring(pendingIndex, sourceSession);
   return sourceSession;
+}
+
+async function assertColdSessionOpen(page, sessionId) {
+  const before = await evaluate(page, 'window.lingxi.bootstrap()');
+  assert.equal(before.runtimes.some(runtime => runtime.sessionId === sessionId), false,
+    'the saved session must have no live runtime before its first open');
+  const result = await evaluate(page, `(async () => {
+    const id = ${JSON.stringify(sessionId)};
+    const events = [], commands = [];
+    let connected = false;
+    const offEvent = window.lingxi.onEvent(envelope => {
+      if (envelope.sessionId === id) events.push(envelope.event);
+    });
+    const offState = window.lingxi.onConnectionStateChanged(envelope => {
+      if (connected || envelope.sessionId !== id || envelope.event.status !== 'connected') return;
+      connected = true;
+      for (const type of ['list_models', 'get_conversation_controls', 'task_list', 'list_session_agents']) {
+        commands.push(window.lingxi.command(id, {type}).then(() => ({type}), error => ({type, error: String(error)})));
+      }
+    });
+    try {
+      const opened = await window.lingxi.openSession(${JSON.stringify(before.workspace.path)}, id);
+      return {connected, events, commands: await Promise.all(commands), active: opened.activeSession?.sessionId,
+        remoteStatus: await window.lingxi.remoteControl.status(), remoteSessions: await window.lingxi.remoteControl.sessions()};
+    } finally { offEvent(); offState(); }
+  })()`);
+  assert.equal(result.connected, true, 'the cold runtime must publish connected');
+  assert.equal(result.active, sessionId);
+  assert.equal(result.commands.length, 4, 'metadata must be requested at the handshake, before owned resume completes');
+  assert.deepEqual(result.commands.filter(command => command.error), [], 'connected-time metadata must wait instead of reporting a resume error');
+  assert(result.events.some(event => event.type === 'session_resumed' && event.session_id === sessionId && event.messages.length > 0),
+    'the exact saved session must restore its persisted transcript');
+  assert(result.events.some(event => event.type === 'model_changed'), 'the saved model must be restored');
+  assert.equal(typeof result.remoteStatus.enabled, 'boolean', 'the packaged Remote Control status IPC must remain available');
+  assert(Array.isArray(result.remoteSessions.sessions), 'the packaged Remote Control sessions IPC must remain available');
+  await page.send('Page.reload', { ignoreCache: true });
+  await waitFor(() => evaluate(page, `document.body.innerText.includes('Custom provider verified.')`), { label: 'cold-open saved transcript rendered' });
+  assert.equal(await evaluate(page, `document.body.innerText.includes('This chat is being resumed')`), false,
+    'the cold-open renderer must not show the original error');
+  log('cold saved session: handshake-time metadata, transcript/model restore, renderer and Remote Control IPC passed');
 }
 
 async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, configHome) {
@@ -1360,6 +1401,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
   let child;
   let output = { stdout: '', stderr: '' };
   let customProbe;
+  let coldSession;
   let scheduledRecords;
   const consoleErrors = [];
   const runtimeExceptions = [];
@@ -1399,7 +1441,16 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
 
     log('checking credential and scheduled-task persistence');
     customProbe = await customProviderProbe();
-    await prepareCustomProvider(page, customProbe);
+    coldSession = await prepareCustomProvider(page, customProbe);
+    // Provider routes are assembled when the sidecar boots. This turn is now
+    // exercised before the full app restart, so first load the saved route.
+    await evaluate(page, `window.lingxi.restartBridge(${JSON.stringify(coldSession)})`);
+    await assertCustomProviderRequest(page, customProbe, coldSession);
+    // Commit another foreground session so that only that session is restored
+    // at relaunch. The earlier saved UUID must then take the true cold-open path.
+    const otherSession = await prepareCustomProvider(page, customProbe, true);
+    assert.notEqual(otherSession, coldSession);
+    await assertCustomProviderRequest(page, customProbe, otherSession);
     scheduledRecords = await assertScheduledPersistenceBeforeRestart(page, `${customProbe.providerId}/smoke-model`);
 
     assertNoRendererErrors();
@@ -1422,6 +1473,7 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await monitorRenderer(page);
     await waitFor(() => evaluate(page, 'window.lingxi?.bootstrap().then(b => b.connection?.status === "connected")'), { label: 'restarted custom provider app' });
     await assertScheduledPersistenceAfterRestart(page, scheduledRecords);
+    await assertColdSessionOpen(page, coldSession);
     const customSession = await prepareCustomProvider(page, customProbe, true);
     await assertCustomProviderRequest(page, customProbe, customSession);
     await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));

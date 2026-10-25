@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 /**
  * PermissionPrompt — the renderer's allow/deny surface for engine-parked
  * permission requests (7.3).
@@ -90,8 +92,8 @@ function describe(request: PermissionRequest): PermissionDescription {
   switch (kind.type) {
     case 'tool_use_confirm':
       return {
-        title: `Allow ${kind.tool_name}?`,
-        summary: 'Review the action before allowing access.',
+        title: tr('permission_allow_tool', kind.tool_name),
+        summary: tr('desktop_interaction_review_action'),
         // The FULL redacted payload — never a preview, and never a single
         // probed key. This dialog is a security decision, so showing MORE is
         // the safe failure mode; see `permissionDetail`.
@@ -99,21 +101,21 @@ function describe(request: PermissionRequest): PermissionDescription {
       };
     case 'exit_plan_mode':
       return {
-        title: 'Exit plan mode and proceed?',
-        summary: 'LingXi wants to leave plan mode and begin working from this plan.',
+        title: tr('desktop_interaction_exit_plan'),
+        summary: tr('desktop_interaction_plan_summary'),
         detail: kind.plan,
       };
     case 'bypass_permissions_mode':
       return {
-        title: 'Enable bypass-permissions mode?',
-        summary: 'LingXi will be able to act without asking for further confirmation.',
-        detail: 'The agent will act without asking for further confirmation.',
+        title: tr('desktop_interaction_bypass_title'),
+        summary: tr('desktop_interaction_bypass_summary'),
+        detail: tr('desktop_interaction_bypass_detail'),
       };
     default:
       // Exhaustiveness guard — a new kind shows a generic prompt rather than nothing.
       return {
-        title: 'Permission requested',
-        summary: 'LingXi needs your approval before it can continue.',
+        title: tr('desktop_interaction_permission_requested'),
+        summary: tr('permission_prompt_general_summary'),
         detail: '',
       };
   }
@@ -141,6 +143,7 @@ export interface PermissionPromptProps {
 }
 
 export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRules = true }: PermissionPromptProps) {
+  const { tr } = useI18n();
   const t = useT();
   if (!request) return null;
 
@@ -151,12 +154,12 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
   const showAutoMode = Boolean(request.auto_mode_prompt && !request.suppress_always_allow_rule);
   const elevatedRisk = request.kind.type === 'bypass_permissions_mode';
   const riskCopy = elevatedRisk
-    ? 'This can expose or modify sensitive data. Continue only if you trust the current session.'
+    ? tr('desktop_interaction_bypass_risk')
     : showAutoMode
-      ? 'Auto mode can approve future actions without asking. Review the requested scope carefully.'
+      ? tr('desktop_interaction_auto_risk')
       : showPersistentRule
-        ? 'Allow matching actions also allows future matching requests in this workspace.'
-        : 'This decision applies only to the current request.';
+        ? tr('desktop_interaction_rule_risk')
+        : tr('permission_prompt_once_risk');
 
   const dialogVariables = {
     '--dialog-window': t.windowBg,
@@ -203,7 +206,7 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
       <div className="inline-interaction-body">
         <p id="lingxi-permission-summary" className="permission-prompt-summary">{summary}</p>
         {detail && (
-          <div id="lingxi-permission-detail" className="permission-prompt-detail mono" role="region" aria-label="Requested action" tabIndex={0}>
+          <div id="lingxi-permission-detail" className="permission-prompt-detail mono" role="region" aria-label={tr('desktop_interaction_requested_action')} tabIndex={0}>
             {detail}
           </div>
         )}
@@ -216,23 +219,20 @@ export function PermissionPrompt({ request, onApprove, onDeny, allowPersistentRu
       <footer className="inline-interaction-footer">
         <DesktopDialogActions>
           <DesktopDialogButton variant="cancel" onClick={() => onDeny(request.request_id)}>
-            Deny
-          </DesktopDialogButton>
+            {tr('permission_deny')}</DesktopDialogButton>
           {allowPersistentRules && showPersistentRule && (
             <DesktopDialogButton variant="secondary" onClick={() => onApprove(request.request_id, { type: 'allow_always' })}>
-              Allow matching actions
-            </DesktopDialogButton>
+              {tr('desktop_interaction_allow_matching')}</DesktopDialogButton>
           )}
           {showAutoMode && (
             <DesktopDialogButton variant="secondary" onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}>
               {request.auto_mode_prompt === 'workflow_bash'
-                ? 'Yes, and switch to auto mode'
-                : 'Yes, and use auto mode'}
+                ? tr('desktop_interaction_switch_auto')
+                : tr('desktop_interaction_use_auto')}
             </DesktopDialogButton>
           )}
           <DesktopDialogButton variant="primary" onClick={() => onApprove(request.request_id, { type: 'allow_once' })}>
-            Allow once
-          </DesktopDialogButton>
+            {tr('permission_allow_once')}</DesktopDialogButton>
         </DesktopDialogActions>
       </footer>
     </section>

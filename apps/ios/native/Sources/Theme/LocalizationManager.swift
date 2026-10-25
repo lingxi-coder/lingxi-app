@@ -4,8 +4,7 @@ import ObjectiveC
 import os
 
 /// Owns the user-selected app language ("" = follow system) and applies it by
-/// swizzling Bundle.main's localizedString(forKey:value:table:) so both
-/// String(localized:) and SwiftUI Text lookups resolve in the chosen language
+/// resolving native string lookups and SwiftUI's locale in the chosen language
 /// without an app restart.
 @Observable
 @MainActor
@@ -17,14 +16,16 @@ final class LocalizationManager {
 
     // MARK: - Supported languages (order matches LanguagePage RadioList)
 
-    static let supported: [(code: String, label: String)] = [
-        ("",      "跟随系统"),
-        ("zh-CN", "简体中文"),
-        ("zh-TW", "繁體中文"),
-        ("en-US", "English"),
-        ("ja-JP", "日本語"),
-        ("ko-KR", "한국어"),
-    ]
+    static var supported: [(code: String, label: String)] {
+        [
+            ("",      String(localized: "onboarding_voice_language_system")),
+            ("zh-CN", "简体中文"),
+            ("zh-TW", "繁體中文"),
+            ("en-US", "English"),
+            ("ja-JP", "日本語"),
+            ("ko-KR", "한국어"),
+        ]
+    }
 
     // MARK: - Observable state
 
@@ -36,12 +37,14 @@ final class LocalizationManager {
     // MARK: - Private storage
 
     private let defaults: UserDefaults
+    private let systemLanguages: () -> [String]
     private static var swizzled = false
 
     // MARK: - Init
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, systemLanguages: @escaping () -> [String] = { Locale.preferredLanguages }) {
         self.defaults = defaults
+        self.systemLanguages = systemLanguages
         let stored = defaults.string(forKey: "appLanguage") ?? ""
         self.language = Self.isSupported(stored) ? stored : ""
         Self.swizzleIfNeeded()
@@ -55,7 +58,7 @@ final class LocalizationManager {
     }
 
     static func label(for code: String) -> String {
-        supported.first { $0.code == code }?.label ?? "跟随系统"
+        supported.first { $0.code == code }?.label ?? String(localized: "onboarding_voice_language_system")
     }
 
     /// Canonical locale for UI formatting (dates, numbers, etc.).
@@ -88,14 +91,21 @@ final class LocalizationManager {
         case "ko-KR": canonical = "ko"
         default:      canonical = ""
         }
-        // Write into the lock-protected cache consumed by the swizzled Bundle method (same file).
-        Bundle._lxCurrentLanguageID.withLock { $0 = canonical }
         // Persist language preference for UIKit/system framework re-launches.
         if canonical.isEmpty {
-            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+            defaults.removeObject(forKey: "AppleLanguages")
         } else {
-            UserDefaults.standard.set([canonical], forKey: "AppleLanguages")
+            defaults.set([canonical], forKey: "AppleLanguages")
         }
+        // Bundle caches its launch-time language. Resolve follow-system explicitly
+        // after removing our override so switching back also updates in this run.
+        let resolved = canonical.isEmpty
+            ? Bundle.preferredLocalizations(
+                from: ["zh-Hans", "zh-Hant", "en", "ja", "ko"],
+                forPreferences: systemLanguages()
+            ).first ?? "zh-Hans"
+            : canonical
+        Bundle._lxCurrentLanguageID.withLock { $0 = resolved }
     }
 
     // MARK: - Swizzle setup (one-time)
@@ -112,11 +122,27 @@ final class LocalizationManager {
     }
 }
 
+extension String {
+    /// Foundation's Swift initializer bypasses Bundle's Objective-C lookup. Route
+    /// the app's single-argument lookups through the selected language bundle; the
+    /// native overload remains available for callers supplying a bundle or locale.
+    init(localized key: String.LocalizationValue) {
+        let language = Bundle._lxCurrentLanguageID.withLock { $0 }
+        let bundle = Bundle.main.path(forResource: language, ofType: "lproj")
+            .flatMap(Bundle.init(path:)) ?? .main
+        self.init(
+            localized: key,
+            bundle: bundle,
+            locale: language.isEmpty ? .current : Locale(identifier: language)
+        )
+    }
+}
+
 // MARK: - Bundle swizzle extension
 
 extension Bundle {
     /// Cache of the canonical lproj directory ID currently in effect
-    /// (e.g. "zh-Hans", "en"). Empty string means follow-system.
+    /// (e.g. "zh-Hans", "en"), including the resolved follow-system language.
     /// Protected by an unfair lock: written on @MainActor from LocalizationManager.apply(),
     /// read on any thread from lx_localizedString (Foundation may call localizedString
     /// from background queues).
@@ -134,8 +160,8 @@ extension Bundle {
     // MARK: swizzled implementation
 
     @objc func lx_localizedString(forKey key: String, value: String?, table tableName: String?) -> String {
-        // Only intercept the default Localizable table; forward all other tables untouched.
-        guard tableName == "Localizable" || tableName == nil else {
+        // Never redirect framework/package translations into the app's catalog.
+        guard self === Bundle.main, tableName == "Localizable" || tableName == nil else {
             return Bundle._lxCallOriginal(on: self, key: key, value: value, table: tableName)
         }
 

@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import hljs from 'highlight.js/lib/common';
 
@@ -111,6 +113,7 @@ export const CodeBlock = memo(function CodeBlock({
   variant = 'message',
 }: CodeBlockProps) {
   const t = useT();
+  useI18n();
   const highlighted = useMemo(
     () => highlightCodeForDisplay(code, language, closed),
     [closed, code, language],
@@ -132,7 +135,7 @@ export const CodeBlock = memo(function CodeBlock({
     try {
       if (window.lingxi?.copyText) await window.lingxi.copyText(copyText);
       else if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(copyText);
-      else throw new Error('Clipboard unavailable');
+      else throw new Error(tr("desktop_ui_clipboard_unavailable"));
       setTemporaryCopyState('copied');
     } catch {
       setTemporaryCopyState('error');
@@ -161,16 +164,19 @@ export const CodeBlock = memo(function CodeBlock({
     '--syntax-constant': t.syntax.constant,
     '--syntax-attribute': t.syntax.attribute,
   } as CSSProperties;
-  const copyLabel = copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy';
+  // Syntax highlighting is cached independently of translated toolbar labels.
+  const displayLanguage = !highlighted.language ? tr('drawer_tab_code')
+    : normalizedLanguage(highlighted.language) === 'plaintext' ? tr('desktop_ui_plain_text') : highlighted.label;
+  const copyLabel = copyState === 'copied' ? tr("chat_message_copied") : copyState === 'error' ? tr("desktop_ui_copy_failed") : tr("terminal_copy_button");
 
   return (
     <div id={id} className={`code-card code-card-${variant}`} style={variables}>
       <div className="code-card-toolbar">
-        <span className="code-card-language mono">{highlighted.label}</span>
+        <span className="code-card-language mono">{displayLanguage}</span>
         <button
           type="button"
           className="code-card-copy"
-          aria-label="Copy code"
+          aria-label={tr("chat_copy_code")}
           data-state={copyState}
           onClick={() => { void copy(); }}
         >

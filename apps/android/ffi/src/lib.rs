@@ -102,6 +102,10 @@ pub use local_apps::{
 mod linux_types;
 mod probes;
 #[cfg(feature = "uniffi")]
+mod remote;
+#[cfg(feature = "uniffi")]
+pub use remote::*;
+#[cfg(feature = "uniffi")]
 pub use callbacks::AndroidAudioFfiError;
 #[cfg(feature = "uniffi")]
 pub use callbacks::AndroidAudioService;

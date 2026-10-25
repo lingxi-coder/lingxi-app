@@ -1,4 +1,6 @@
 import { LocalAppMarket, LegacyLocalApps, LocalAppPublish } from './LocalAppMarket';
+import { useI18n } from '../i18n/useI18n';
+import { tr } from '../i18n/locale';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { DesktopLocalApp, LocalAppLog, LocalAppPhase, LocalAppVersion } from '../../shared/localApps';
 import type { ToolRunItem } from '../model/runItem';
@@ -7,12 +9,13 @@ import { useT } from '../theme/ThemeContext';
 import { LocalAppAgentQuestions, LocalAppAgentSettingsDialog } from './LocalAppAgentSettings';
 
 function appsApi() { const api = window.lingxi?.localApps; if (!api) throw new Error('Desktop application host is unavailable'); return api; }
-const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'Ready to open', installing: 'Installing dependencies', building: 'Building', starting: 'Starting', running: 'Running', stopping: 'Stopping', failed: 'Needs attention' };
+const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'desktop_apps_ready', installing: 'desktop_apps_installing', building: 'desktop_apps_building', starting: 'desktop_apps_starting', running: 'desktop_apps_running', stopping: 'desktop_apps_stopping', failed: 'desktop_apps_attention' };
 export function AppsGlyph({ size = 20 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.8"/></svg>;
 }
 export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: () => void }) {
   const t = useT();
+  const { locale } = useI18n();
   const [tab, setTab] = useState<'mine' | 'market'>('mine');
   const [publication, setPublication] = useState<DesktopLocalApp>();
   const [apps, setApps] = useState<DesktopLocalApp[]>([]);
@@ -41,46 +44,46 @@ export function LocalApps({ visible, onCreate }: { visible: boolean; onCreate: (
     try { await operation(); await refresh(); } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(null); }
   };
-  const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
-  return <section className="local-app-library" aria-label="Apps" style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
-    <header className="local-app-library-header"><div><h1>Apps</h1><p>Made for you. Running on your computer.</p></div><button onClick={onCreate}>Create in chat</button></header>
-    <nav className="local-app-tabs" aria-label="Application library"><button aria-current={tab === 'mine' ? 'page' : undefined} onClick={() => setTab('mine')}>My apps</button><button aria-current={tab === 'market' ? 'page' : undefined} onClick={() => setTab('market')}>Market</button></nav>
+  const filtered = apps.filter(app => `${app.name} ${app.summary}`.toLocaleLowerCase(locale).includes(query.toLocaleLowerCase(locale)));
+  return <section className="local-app-library" aria-label={tr('apps_title')} style={{ '--apps-background': t.stageBg, '--apps-text': t.text, '--apps-muted': t.text3, '--apps-surface': t.surface, '--apps-border': t.border, '--apps-accent': t.accent, '--apps-error': t.danger } as CSSProperties}>
+    <header className="local-app-library-header"><div><h1>{tr('apps_title')}</h1><p>{tr('desktop_apps_tagline')}</p></div><button onClick={onCreate}>{tr('desktop_apps_create_chat')}</button></header>
+    <nav className="local-app-tabs" aria-label={tr('apps_title')}><button aria-current={tab === 'mine' ? 'page' : undefined} onClick={() => setTab('mine')}>My apps</button><button aria-current={tab === 'market' ? 'page' : undefined} onClick={() => setTab('market')}>Market</button></nav>
     <LocalAppMarket visible={visible && tab === 'market'} installed={apps} onInstalled={() => void refresh()}/>
     <div hidden={tab !== 'mine'}>
-    {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>Retry</button></div>}
-    <label className="local-app-search"><span className="sr-only">Search apps</span><input type="search" placeholder="Search your apps" value={query} onChange={event => setQuery(event.target.value)} /></label>
-    {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>A place for your own apps</h2><p>Ask in chat for a tracker, a game, or a tool.<br/>Your finished app will be waiting here.</p><button onClick={onCreate}>Start creating</button></div> : <div className="local-app-grid">
+    {error && <div className="local-app-error" role="alert">{error}<button onClick={() => { setError(''); void refresh(); }}>{tr('common_retry')}</button></div>}
+    <label className="local-app-search"><span className="sr-only">{tr('apps_search_hint')}</span><input type="search" placeholder={tr('desktop_apps_search')} value={query} onChange={event => setQuery(event.target.value)} /></label>
+    {!apps.length && !error ? <div className="local-app-empty"><AppsGlyph size={38}/><h2>{tr('desktop_apps_empty_title')}</h2><p>{tr('desktop_apps_empty_body')}</p><button onClick={onCreate}>{tr('desktop_apps_start_creating')}</button></div> : <div className="local-app-grid">
       {filtered.map(app => <article className="local-app-tile" key={app.id}>
         <button className="local-app-tile-open" onClick={() => void act(app.id, () => appsApi().open(app.id))} disabled={busy === app.id}>
-          <span className="local-app-avatar">{Array.from(app.name)[0]?.toLocaleUpperCase()}</span><h2>{app.name}</h2><p>{app.summary || 'Your local application'}</p>
+          <span className="local-app-avatar">{Array.from(app.name)[0]?.toLocaleUpperCase(locale)}</span><h2>{app.name}</h2><p>{app.summary || tr('desktop_apps_fallback_summary')}</p>
         </button>
-        <div className="local-app-tile-footer"><span className="local-app-phase" data-phase={app.phase}>{phaseLabels[app.phase]}</span><span>v{app.revision}</span></div>
-        {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">Update ready — restart to use v{app.revision}</p>}
+        <div className="local-app-tile-footer"><span className="local-app-phase" data-phase={app.phase}>{tr(phaseLabels[app.phase])}</span><span>v{app.revision}</span></div>
+        {app.runningRevision && app.runningRevision !== app.revision && <p className="local-app-update">{tr('desktop_apps_update', app.revision)}</p>}
         {app.error && <p className="local-app-error">{app.error}</p>}
-        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>Details &amp; logs</button><button disabled={Boolean(app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.authoring?.sourceDirectory ? 'Customize' : 'Continue developing'}</button>
+        <div className="local-app-actions"><button onClick={() => { setSelected(selected === app.id ? null : app.id); }}>{tr('desktop_logs')}</button><button disabled={Boolean(app.marketOrigin && !app.authoring?.sourceDirectory && !app.manifest.remix?.allowed)} onClick={() => void act(app.id, () => app.marketOrigin && !app.authoring?.sourceDirectory ? appsApi().remix(app.id) : appsApi().edit(app.id))}>{app.marketOrigin && !app.authoring?.sourceDirectory ? 'Customize' : tr('desktop_modify')}</button>
           {app.manifest.capabilities?.includes('agent') && <button onClick={() => setAgentSettings(app.id)}>Agent</button>}
           <details><summary aria-label={`Manage ${app.name}`}>•••</summary><div className="local-app-menu">
-            <button onClick={() => void act(app.id, () => appsApi().restart(app.id))}>Restart</button>
-            <button onClick={() => void act(app.id, () => appsApi().stop(app.id))}>Stop</button>
-            <button onClick={() => void act(app.id, () => appsApi().repair(app.id))}>Repair environment</button>
+            <button onClick={() => void act(app.id, () => appsApi().restart(app.id))}>{tr('desktop_restart')}</button>
+            <button onClick={() => void act(app.id, () => appsApi().stop(app.id))}>{tr('desktop_stop')}</button>
+            <button onClick={() => void act(app.id, () => appsApi().repair(app.id))}>{tr('desktop_apps_repair')}</button>
             <button onClick={() => void act(app.id, () => appsApi().openData(app.id))}>Open data folder</button>
-            <label><input type="checkbox" checked={app.background} onChange={event => void act(app.id, () => appsApi().setBackground(app.id, event.target.checked))}/> Keep running when closed</label>
+            <label><input type="checkbox" checked={app.background} onChange={event => void act(app.id, () => appsApi().setBackground(app.id, event.target.checked))}/> {tr('desktop_apps_background')}</label>
             <button onClick={() => setPublication(app)}>Publish to market…</button>
             {app.marketOrigin && !app.marketOrigin.remixedFrom && <button onClick={() => void act(app.id, () => appsApi().marketInstall(app.marketOrigin!.appId, app.id, app.revision))}>Check for update</button>}
             {(!app.marketOrigin || app.authoring?.sourceDirectory) && <button onClick={() => void act(app.id, () => appsApi().restoreSource(app.id))}>Restore source copy</button>}
             {app.manifest.remix?.allowed && <button onClick={() => void act(app.id, () => appsApi().remix(app.id))}>Create a custom copy</button>}
-            <button onClick={() => void act(app.id, () => appsApi().revoke(app.id))}>Revoke permissions</button>
-            <button className="local-app-delete" onClick={() => void act(app.id, () => appsApi().remove(app.id))}>Remove app…</button>
+            <button onClick={() => void act(app.id, () => appsApi().revoke(app.id))}>{tr('desktop_apps_revoke')}</button>
+            <button className="local-app-delete" onClick={() => void act(app.id, () => appsApi().remove(app.id))}>{tr('desktop_apps_delete')}</button>
           </div></details>
         </div>
       </article>)}
     </div>}
-    {apps.length > 0 && !filtered.length && <p className="local-app-no-results">No apps match “{query}”.</p>}
-    {selected && <aside className="local-app-logs" aria-label="Application details"><header><strong>{apps.find(a => a.id === selected)?.name ?? 'Application'}</strong><button onClick={() => setSelected(null)} aria-label="Close details">×</button></header>
+    {apps.length > 0 && !filtered.length && <p className="local-app-no-results">{tr('desktop_apps_no_results', query)}</p>}
+    {selected && <aside className="local-app-logs" aria-label={tr('desktop_apps_logs')}><header><strong>{apps.find(a => a.id === selected)?.name ?? tr('desktop_app')} · {tr('desktop_logs')}</strong><button onClick={() => setSelected(null)} aria-label={tr('desktop_close_logs')}>×</button></header>
       <h3>Versions</h3><p>Switching code keeps application data. Data format changes require a verified migration.</p>
-      {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString()}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}
+      {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}
       <h3>Permissions</h3><p>{apps.find(a => a.id === selected)?.grants.join(', ') || 'No capabilities granted for the latest release.'}</p>
-      <h3>Logs</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString()}] ${l.process}: ${l.text}`).join('\n') : 'No output yet. Open the app to start it.'}</pre></aside>}
+      <h3>{tr('desktop_logs')}</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString(locale)}] ${l.process}: ${l.text}`).join('\n') : tr('desktop_apps_log_empty')}</pre></aside>}
     <LegacyLocalApps visible={visible && tab === 'mine'} onImported={() => void refresh()}/>
     </div>
     {publication && <LocalAppPublish key={publication.id} app={publication} onClose={() => setPublication(undefined)}/>}
@@ -106,14 +109,14 @@ export function LocalAppCard({ item }: { item: ToolRunItem }) {
       <strong>{app.name}</strong>
       {app.summary && <p>{app.summary}</p>}
     </div>
-    <button type="button" disabled={opening} aria-busy={opening} aria-label={`${opening ? 'Opening' : 'Open'} ${app.name}`} onClick={async () => {
+    <button type="button" disabled={opening} aria-busy={opening} aria-label={tr(opening ? 'desktop_opening_app_named' : 'desktop_open_app_named', app.name)} onClick={async () => {
       if (openingRef.current) return;
       openingRef.current = true;
       setOpening(true); setError('');
       try { await appsApi().open(app.id); }
       catch (error) { setError(error instanceof Error ? error.message : String(error)); }
       finally { openingRef.current = false; setOpening(false); }
-    }}>{opening ? 'Opening…' : 'Open app'}</button>
+    }}>{opening ? tr('desktop_opening') : tr('desktop_open_app')}</button>
     {error && <p className="local-app-chat-error" role="alert">{error}</p>}
   </div>;
 }

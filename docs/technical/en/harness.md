@@ -16,6 +16,8 @@ These pages describe the current workspace. The source baseline records HEAD, di
 
 ## Use one source identity
 
+For application integration, retain the dependency revisions declared by Harness. The multi-repository path overlay below is for developing the SDKs together and requires matching contracts. Replacing its pinned LLM Client with an arbitrary newer checkout can fail in llm-runtime before your application is compiled; a Cargo package version alone does not establish source compatibility.
+
 For the current working-tree examples, create sdk-consumer beside harness-runtime, llm-client and mobile-linux-runtime. Use the complete local manifest below. Direct Harness crates and explicit consumer patches select the three SDK working trees; inspect cargo metadata to verify those source identities before compiling the copied examples.
 
 ### Cargo.toml · working-tree consumer
@@ -136,16 +138,56 @@ Choose desktop::build_harness for a Rust host that owns its permission surface, 
 
 Existing sdk_surface tests check the opaque SDK contract; platform composition and real provider execution require their own checks. A build result is not a live model or device acceptance result.
 
+<a id="choose-entrypoint"></a>
+
+## Choose the entry point for your application
+
+Start with the host you are building. A chat window, a batch worker and a mobile application have different input, permission and shutdown requirements, even when they use the same agent loop.
+
+| You want to | Start with | Supply from the host |
+| --- | --- | --- |
+| Embed a Rust chat or desktop UI | desktop::build_harness | DesktopConfig, OutputStream and PermissionGate |
+| Run a noninteractive job | headless::run | HeadlessHostServices, byte readers/writers, and host signals |
+| Integrate Android or iOS | mobile::build_mobile | MobileConfig, Platform, event listener and permission sink |
+| Wrap an already assembled composition | HarnessBuilder::new | SessionService and LifecycleService from the same composition |
+
+- [Platform assembly and shutdown](harness-lifecycle.md#platform-assembly)
+
+<a id="first-agent-workflow"></a>
+
+## Wire your first agent workflow
+
+1. Prepare an application workspace and model/provider configuration. Choose a composition profile and keep all direct Harness dependencies on the same source revision.
+2. Create the output destination before assembling the runtime. If your UI consumes ClientEvent DTOs, wrap one shared ClientEventSink with AdapterOutputStream.
+3. Provide a permission gate that can reach the user or apply an explicit noninteractive policy. Admit a prompt only after the host has a mounted session.
+4. Pass RunInput and a host-owned CancellationToken to session().run. Read text and tool activity from the output stream while awaiting its terminal result.
+5. Keep the returned outcome, session identity and cost snapshot. When closing the application, stop new prompts, drain active turns and then inspect shutdown().complete.
+
+- [Copy the complete service-injection example](harness.md#builder)
+- [Run, cancel and inspect a turn](harness-sessions.md)
+- [Connect a client event sink](harness-client.md#output-adapter)
+
+<a id="startup-troubleshooting"></a>
+
+## Troubleshoot startup
+
+| Symptom | Check first | Next action |
+| --- | --- | --- |
+| The builder succeeds but nothing runs | HarnessBuilder retains services; it does not submit a prompt. | Call the mounted SessionHandle::run and consume its output destination. |
+| Text never reaches the interface | OutputStream or ClientEventSink ownership and delivery. | Verify the same sink is attached before startup; keep transport writes off the execution callback. |
+| An operation waits on approval | The host permission request/response route. | Resolve the exact request_id, or supply the intended noninteractive policy before running. |
+| Shared Rust types do not match | Duplicate Git/path identities in cargo metadata. | Use the complete consumer manifest and one reviewed source identity for companion crates. |
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/lib.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/api.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/Cargo.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/Cargo.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/rust-toolchain.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/runtime/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/src/lib.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/src/api.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/Cargo.toml) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/Cargo.toml) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/rust-toolchain.toml) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD a39da75f0985d61d90fffa255f7b4d90901b0e27; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin a39da75f0985d61d90fffa255f7b4d90901b0e27
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

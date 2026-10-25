@@ -60,9 +60,13 @@ final class DesktopSettingsRepository {
     @ObservationIgnored private var credentialRequests: [UInt64: (ids: [String], expected: Bool?)] = [:]
     @ObservationIgnored private var nextOperation: UInt64 = 8_400_000
     @ObservationIgnored private var confirmationTimeout: Task<Void, Never>?
+    @ObservationIgnored private var credentialModelRefresh: Task<Void, Never>?
+    @ObservationIgnored var credentialCommitHandler: (([String], Set<String>, Bool) -> Void)?
 
     func configure(submitter: ((ClientCommand) async throws -> Void)?) {
         confirmationTimeout?.cancel()
+        credentialModelRefresh?.cancel()
+        credentialModelRefresh = nil
         sourceGeneration += 1
         providerModels = []
         self.submitter = submitter
@@ -259,6 +263,7 @@ final class DesktopSettingsRepository {
 
     func saveCredential(providerID: String, secret: String?) async {
         guard connected, !saving, !providerID.isEmpty else { return }
+        discardCredentialListings(for: [providerID])
         nextOperation += 1
         let operation = nextOperation
         credentialRequests[operation] = ([providerID], secret != nil)
@@ -312,14 +317,20 @@ final class DesktopSettingsRepository {
         case let .providerCredentialStatus(operationId, configured, unavailable, encrypted, _, error):
             guard let request = credentialRequests.removeValue(forKey: operationId) else { return }
             credentialStorageEncrypted = encrypted
-            for id in request.ids { credentialStates[id] = unavailable.contains(id) ? nil : configured.contains(id) }
+            if request.expected == nil || error == nil {
+                for id in request.ids { credentialStates[id] = unavailable.contains(id) ? nil : configured.contains(id) }
+            }
             if let expected = request.expected {
                 confirmationTimeout?.cancel()
                 saving = false
                 if let error { fail(error) }
                 else if request.ids.contains(where: { unavailable.contains($0) || configured.contains($0) != expected }) {
                     fail("Secure storage did not confirm the requested credential change.")
-                } else { restartRequested = true; statusMessage = "Credential change confirmed by secure storage." }
+                } else {
+                    discardCredentialListings(for: request.ids)
+                    credentialCommitHandler?(request.ids, Set(configured), encrypted)
+                    refreshModelsAfterCredentialCommit()
+                }
             } else if let error { errorMessage = error }
         case let .authState(state): auth = state
         case let .doctorReport(report): doctor = report
@@ -363,6 +374,40 @@ final class DesktopSettingsRepository {
         }
     }
 
+    private func refreshModelsAfterCredentialCommit() {
+        let generation = sourceGeneration
+        guard let submitter else { return }
+        saving = true
+        startConfirmationTimeout()
+        credentialModelRefresh = Task { [weak self] in
+            defer {
+                if self?.sourceGeneration == generation {
+                    self?.confirmationTimeout?.cancel()
+                    self?.credentialModelRefresh = nil
+                    self?.saving = false
+                }
+            }
+            do {
+                try Task.checkCancellation()
+                guard self?.sourceGeneration == generation else { return }
+                try await submitter(.listModels)
+                try Task.checkCancellation()
+                guard self?.sourceGeneration == generation else { return }
+                self?.statusMessage = "Credential change confirmed by secure storage."
+            } catch {
+                guard !Task.isCancelled, self?.sourceGeneration == generation else { return }
+                self?.fail("Credential change was saved, but refreshing available models failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func discardCredentialListings(for providerIDs: [String]) {
+        let ids = Set(providerIDs)
+        credentialRequests = credentialRequests.filter { _, request in
+            request.expected != nil || ids.isDisjoint(with: request.ids)
+        }
+    }
+
     private func startConfirmationTimeout(_ timeout: Duration = .seconds(20)) {
         confirmationTimeout?.cancel()
         let generation = sourceGeneration
@@ -375,6 +420,7 @@ final class DesktopSettingsRepository {
 
     private func fail(_ message: String) {
         confirmationTimeout?.cancel()
+        credentialModelRefresh?.cancel()
         errorMessage = message
         statusMessage = nil
         saving = false

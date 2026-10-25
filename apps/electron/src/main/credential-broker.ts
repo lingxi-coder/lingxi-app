@@ -201,27 +201,64 @@ export function resolveProviderIdForModel(model: string | null | undefined): str
   return model.startsWith('claude') ? 'anthropic' : undefined;
 }
 
+/** Credential slots declared by one provider/connection, including its failover keys. */
+export function resolveProfileCredentialIds(profileId: string, settings: unknown): string[] {
+  const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
+  const separator = profileId.search(/[:#]/);
+  const group = separator < 0 ? profileId : profileId.slice(0, separator);
+  const profile = providers[group];
+  if (!isRecord(profile)) return providerById(profileId) ? [profileId] : [];
+  const keys = (value: unknown, fallback: string[]): string[] => {
+    if (value === undefined) return fallback;
+    if (!Array.isArray(value) || value.length === 0
+      || !value.every((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(id))) return [];
+    return value as string[];
+  };
+  const inherited = keys(profile.credentialIds, [group]);
+  if (!Array.isArray(profile.connections)) return inherited;
+  const connectionId = profileId.startsWith(`${group}:`) ? profileId.slice(group.length + 1).split('#')[0] : undefined;
+  const connections = profile.connections.filter(isRecord);
+  if (connectionId !== undefined && !connections.some((connection) => connection.id === connectionId)) return [];
+  // A selected connection may fail over to another connection of the same
+  // provider. Only this group's keys are eligible; other profiles stay private.
+  return [...new Set(connections.flatMap((connection) => keys(connection.credentialIds, inherited)))];
+}
+
+/** Host writes may target a known provider or an explicitly configured key slot. */
+export function configuredCredentialProviderIds(settings: unknown): string[] {
+  const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
+  return [...new Set(Object.keys(providers).flatMap((profile) =>
+    /^[a-z0-9][a-z0-9._-]{0,63}$/.test(profile) && isRecord(providers[profile])
+      ? [profile, ...resolveProfileCredentialIds(profile, settings)] : []))];
+}
+
 /** Mirror registered custom model/alias resolution; decrypt only the selected route's keys. */
 export function resolveModelCredentialProviderIds(model: string, settings: unknown): string[] {
   const config = isRecord(settings) ? settings : {};
   const providers = isRecord(config.providers) ? config.providers : {};
   const routing = isRecord(config.routing) ? config.routing : {};
-  const rows: Array<{ provider: string; model: string; aliases: string[] }> = [];
+  const rows: Array<{ provider: string; model: string; aliases: string[]; credentialProfile?: string }> = [];
   for (const [provider, profile] of Object.entries(providers)) {
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(provider) || !isRecord(profile) || !Array.isArray(profile.models)) continue;
-    for (const entry of profile.models) {
-      const id = typeof entry === 'string' ? entry : isRecord(entry) && typeof entry.id === 'string' ? entry.id : undefined;
-      if (!id) continue;
-      rows.push({ provider, model: id, aliases: isRecord(entry) && Array.isArray(entry.aliases)
-        ? entry.aliases.filter((alias): alias is string => typeof alias === 'string') : [] });
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(provider) || !isRecord(profile)) continue;
+    const connections = Array.isArray(profile.connections) ? profile.connections.filter(isRecord) : [profile];
+    for (const connection of connections) {
+      const models = connection.models ?? profile.models;
+      if (!Array.isArray(models)) continue;
+      for (const entry of models) {
+        const id = typeof entry === 'string' ? entry : isRecord(entry) && typeof entry.id === 'string' ? entry.id : undefined;
+        if (!id) continue;
+        rows.push({ provider, model: id, aliases: isRecord(entry) && Array.isArray(entry.aliases)
+          ? entry.aliases.filter((alias): alias is string => typeof alias === 'string') : [] });
+      }
     }
   }
   const explicit = (reference: string): typeof rows[number] | undefined => {
     const slash = reference.indexOf('/');
     if (slash < 1 || slash === reference.length - 1) return undefined;
-    const provider = reference.slice(0, slash), id = reference.slice(slash + 1);
+    const credentialProfile = reference.slice(0, slash), id = reference.slice(slash + 1);
+    const provider = credentialProfile.split(/[:#]/)[0]!;
     const found = rows.find((row) => row.provider === provider && row.model === id);
-    if (found) return found;
+    if (found) return credentialProfile === provider ? found : { ...found, credentialProfile };
     // Built-in targets are explicitly provider-qualified, never inferred from an unknown alias.
     if (providerById(provider)) return { provider, model: id, aliases: [] };
     return undefined;
@@ -241,17 +278,17 @@ export function resolveModelCredentialProviderIds(model: string, settings: unkno
     if (slash > 0) matches = rows.filter((row) => row.provider === model.slice(0, slash)
       && (row.model === model.slice(slash + 1) || row.aliases.includes(model.slice(slash + 1))));
   }
-  if (matches.length > 1) return []; // The engine rejects ambiguous bare aliases.
+  if (new Set(matches.map((row) => row.provider)).size > 1) return []; // Same-group connections are one model choice.
   const primary = matches[0] ?? explicit(model);
   const legacy = primary ? undefined : resolveProviderIdForModel(model);
   const primaryId = primary?.provider ?? (legacy && providerById(legacy) ? legacy : undefined);
   if (!primaryId) return [];
-  const ids = new Set([primaryId]);
+  const ids = new Set(resolveProfileCredentialIds(primary?.credentialProfile ?? primaryId, settings));
   const chain = isRecord(routing.fallback) ? routing.fallback[primary?.model ?? model] : undefined;
   if (Array.isArray(chain)) {
     for (const target of chain) {
       const row = typeof target === 'string' ? explicit(target) : undefined;
-      if (row) ids.add(row.provider);
+      if (row) for (const id of resolveProfileCredentialIds(row.credentialProfile ?? row.provider, settings)) ids.add(id);
     }
   }
   return [...ids];
@@ -294,14 +331,13 @@ export function resolveFusionCredentialProviderIds(settings: unknown, selection:
     ...(Array.isArray(fusion.panelModels) ? fusion.panelModels : []),
     fusion.analystModel,
   ];
-  const providers = isRecord(settings) && isRecord(settings.providers) ? settings.providers : {};
   return [...new Set(choices.flatMap((choice) => {
     if (!isRecord(choice) || typeof choice.profile !== 'string' || typeof choice.model !== 'string') return [];
     // Configured Fusion routes are exact pairs. Ordinary aliases and fallback
     // chains can refer to unrelated providers that this ensemble never calls.
     const profile = choice.profile.trim();
     if (!choice.model.trim()) return [];
-    return providerById(profile) || isRecord(providers[profile]) ? [profile] : [];
+    return resolveProfileCredentialIds(profile, settings);
   }))];
 }
 
@@ -368,7 +404,10 @@ export class SessionLaunchCache {
     const generation = this.generation;
     const operation = resolveSessionLaunchCredentials(model, { credentialBroker: broker })
       .then((value) => {
-        if (generation === this.generation) this.credentialEntries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+        // Invalidation also fences callers already waiting on a broker read;
+        // avoiding cache insertion alone would still return the retired key.
+        if (generation !== this.generation) return this.credentials(model, broker);
+        this.credentialEntries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
         return value;
       })
       .finally(() => {
@@ -416,9 +455,9 @@ export async function resolveSessionLaunchCredentials(
   if (!providerId) return {};
   const credential = await resolveProviderCredential(providerId, options);
   if (!credential) return {};
-  return providerId === 'anthropic'
-    ? { apiKey: credential }
-    : { providerCredentials: { [providerId]: credential } };
+  // All host-owned keys enter the mutable credential store. The legacy
+  // api_key scalar binds Anthropic's auth source at engine construction.
+  return { providerCredentials: { [providerId]: credential } };
 }
 
 export async function resolveProviderTestCredential(

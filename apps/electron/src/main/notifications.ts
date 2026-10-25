@@ -38,6 +38,7 @@ import {
   type NotificationPreferences,
 } from '../shared/notificationPreferences.js';
 import type { SessionRef } from '../shared/settings.js';
+import type { RemotePushKind } from './remoteControl/pushRequests.js';
 
 /** Copy, kept in step with `resources/translations/*.json` so all three clients
  * say the same thing. Desktop has no i18n framework (see `renderer/settingsLabel.ts`),
@@ -54,16 +55,37 @@ export const NOTIFICATION_COPY = {
   failedBody: '点按返回对话查看并重试',
 } as const;
 
+/** The system counts as idle (the user is away from the computer) after this long without input. */
+export const REMOTE_PUSH_IDLE_SECONDS = 60;
+
 /** Cap on remembered dedupe keys, matching `scheduled.ts`'s own ring. */
 const MAX_DELIVERED_KEYS = 500;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
+
+/** The notification kinds that reach other devices, and what Remote Control calls them. */
+const REMOTE_PUSH_KINDS: Partial<Record<NotificationKind, RemotePushKind>> = {
+  permission_prompt: 'permission',
+  agent_needs_input: 'question',
+  idle_prompt: 'idle',
+  agent_completed: 'task',
+};
 
 export interface HostNotifierDeps {
   /** Raises the actual OS notification. Injected so tests never touch Electron. */
   show(title: string, body: string, ref?: SessionRef): void;
   /** True while the main window has OS focus. */
   isWindowFocused(): boolean;
+  /**
+   * Remote Control's push: called for the kinds that need the user (a
+   * permission prompt, a question, the session going idle, a task finishing)
+   * when the user enabled that kind and is not at the computer. Whether the
+   * session has Remote Control on and whether a viewer is already looking is
+   * for the callee to decide.
+   */
+  remote?(kind: RemotePushKind, sessionId: string): void;
+  /** Seconds since the last keyboard or mouse input (`powerMonitor.getSystemIdleTime`). */
+  systemIdleSeconds?(): number;
   now?(): number;
   schedule?(fn: () => void, ms: number): TimerHandle;
   unschedule?(handle: TimerHandle): void;
@@ -87,6 +109,7 @@ export class HostNotifier {
   private prefs: NotificationPreferences = defaultNotificationPreferences();
   private readonly sessions = new Map<string, SessionNotificationState>();
   private readonly delivered = new Set<string>();
+  private readonly deliveredRemote = new Set<string>();
   private lastInteractionAt = 0;
   private disposed = false;
 
@@ -162,7 +185,7 @@ export class HostNotifier {
     if (!isKindEnabled(this.prefs, 'permission_prompt')) return;
     const timer = this.schedule(() => {
       state.permissionTimers.delete(requestId);
-      this.post('permission_prompt', `${sessionKey}:permission:${requestId}`,
+      this.post('permission_prompt', sessionKey, `${sessionKey}:permission:${requestId}`,
         NOTIFICATION_COPY.permissionTitle, NOTIFICATION_COPY.permissionBody(toolName), state.ref);
     }, PERMISSION_PROMPT_NOTIFY_DELAY_MS);
     state.permissionTimers.set(requestId, timer);
@@ -182,7 +205,7 @@ export class HostNotifier {
    * in the next six seconds" case worth waiting out. */
   askUserQuestion(sessionKey: string, requestId: number, ref?: SessionRef): void {
     const state = this.stateFor(sessionKey, ref);
-    this.post('agent_needs_input', `${sessionKey}:question:${requestId}`,
+    this.post('agent_needs_input', sessionKey, `${sessionKey}:question:${requestId}`,
       NOTIFICATION_COPY.idleTitle, NOTIFICATION_COPY.idleBody, state.ref);
   }
 
@@ -191,7 +214,7 @@ export class HostNotifier {
   taskFinished(sessionKey: string, taskId: string, label: string | undefined, failed: boolean, ref?: SessionRef): void {
     const state = this.stateFor(sessionKey, ref);
     const name = label?.trim() || taskId;
-    this.post('agent_completed', `${sessionKey}:task:${taskId}:${failed ? 'failed' : 'done'}`,
+    this.post('agent_completed', sessionKey, `${sessionKey}:task:${taskId}:${failed ? 'failed' : 'done'}`,
       failed ? NOTIFICATION_COPY.failedTitle : NOTIFICATION_COPY.completedTitle,
       failed ? `${name} 执行失败` : `${name} 已完成`, state.ref);
   }
@@ -248,7 +271,7 @@ export class HostNotifier {
     if (this.lastInteractionAt > state.turnEndedAt) return;           // the user came back
     if (state.dialogsOnScreen > 0) return;                            // !isDialogOnScreen()
     if (this.now() - state.turnEndedAt < threshold) return;           // elapsed >= threshold
-    this.post('idle_prompt', `${sessionKey}:idle:${state.turnEndedAt}`,
+    this.post('idle_prompt', sessionKey, `${sessionKey}:idle:${state.turnEndedAt}`,
       NOTIFICATION_COPY.idleTitle, NOTIFICATION_COPY.idleBody, state.ref);
   }
 
@@ -259,7 +282,28 @@ export class HostNotifier {
     return !this.deps.isWindowFocused();
   }
 
-  private post(kind: NotificationKind, dedupeKey: string, title: string, body: string, ref?: SessionRef): void {
+  /** Whether Remote Control should hear of this kind: it is enabled and the user is away from the computer. */
+  private canDeliverRemote(kind: NotificationKind): boolean {
+    if (this.disposed || !this.deps.remote) return false;
+    if (!isKindEnabled(this.prefs, kind)) return false;
+    return !this.deps.isWindowFocused() || (this.deps.systemIdleSeconds?.() ?? 0) >= REMOTE_PUSH_IDLE_SECONDS;
+  }
+
+  private postRemote(kind: NotificationKind, sessionKey: string, dedupeKey: string): void {
+    const remoteKind = REMOTE_PUSH_KINDS[kind];
+    if (remoteKind === undefined || !this.canDeliverRemote(kind) || this.deliveredRemote.has(dedupeKey)) return;
+    this.deliveredRemote.add(dedupeKey);
+    if (this.deliveredRemote.size > MAX_DELIVERED_KEYS) {
+      for (const key of this.deliveredRemote) {
+        this.deliveredRemote.delete(key);
+        if (this.deliveredRemote.size <= MAX_DELIVERED_KEYS) break;
+      }
+    }
+    try { this.deps.remote?.(remoteKind, sessionKey); } catch { /* A push that cannot be asked for changes nothing here. */ }
+  }
+
+  private post(kind: NotificationKind, sessionKey: string, dedupeKey: string, title: string, body: string, ref?: SessionRef): void {
+    this.postRemote(kind, sessionKey, dedupeKey);
     if (!this.canDeliver(kind)) return;
     if (this.delivered.has(dedupeKey)) return;
     this.delivered.add(dedupeKey);

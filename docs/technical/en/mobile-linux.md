@@ -19,6 +19,51 @@ Mobile Linux Runtime is a standalone SDK. The application supplies paths, verifi
 - Apps that already embed Rust use SDK Rust crates from one Git revision and native-support-only artifacts. Android also needs mobile-linux-installer; iOS selects MobileLinuxNativeSupport.
 - Keep exactly one Rust runtime in the process. Native-support distributions contain platform glue and helpers rather than a second Rust library.
 
+<a id="first-execution"></a>
+
+## Get from installation to a successful command
+
+Use this order when embedding the SDK for the first time. Constructing a wrapper creates a handle; it does not mean a rootfs has been installed or that the selected device can execute Linux. Keep installation, readiness and command success as three separate results in your application.
+
+1. Select either the full Kotlin/Swift distribution or the native-support distribution for an existing Rust host, with bindings and resources from the same source revision.
+2. Verify and stage the platform image. On Android, RootfsInstaller.stage prepares staged data and handle.repairRootfs activates it; iOS takes explicit converted fakefs ZIP and overlay paths.
+3. Create one retained runtime with app-private absolute paths. Probe capability and show its reason when available is false; simulator linking is not guest readiness.
+4. Await boot, then execute a small bounded command with an explicit guest working directory and network policy.
+5. Accept the result only after checking exit_code, timed_out, cancelled and the enforcement receipt. Close owned sessions and await shutdown when the host no longer needs the runtime.
+
+- [Complete portable command example](mobile-rust.md#complete-command)
+- [Android installation and activation](mobile-android.md#install-rootfs)
+- [Swift session lifecycle](mobile-ios.md#ios-end-to-end)
+
+<a id="guest-identity"></a>
+
+## Guest user, home and project paths
+
+Pass Linux guest paths to command cwd and guest-side tools. Pass native host paths to runtime storage and host_path mount fields. The same project has two coordinates: a host backing directory and the guest path exposed by a mount. Do not send an Android filesDir or iOS application-container path as a Linux cwd.
+
+| Value | Default | How to use it |
+| --- | --- | --- |
+| Account / UID / GID | lingxi / 1000 / 1000 | Default unprivileged guest identity; /root is the administrator home. |
+| HOME | /home/lingxi | Use for user configuration and a first command that needs no project mount. |
+| Workspace root | /home/lingxi/lingxi | guest_paths::workspace(id) appends a stable project identifier. |
+| Project path | /home/lingxi/lingxi/<stable-id> | Choose a normalized ID and configure its host directory before executing project commands. |
+| Persistent host home | managed_root/persistent/lingxi | Independent of replaceable rootfs images; do not place it inside an extracted active image. |
+| Scratch | /tmp, /var/tmp | Temporary guest files, rather than stable project identity. |
+
+<a id="execution-selection"></a>
+
+## Choose the execution API for your feature
+
+| Feature | Entry point | Result and cleanup |
+| --- | --- | --- |
+| Run a formatter, build step or finite command | run / run_command / Kotlin execute | Collected stdout/stderr and exit state; set timeout_ms deliberately. |
+| Show command output as it arrives | run_streaming / run_command_streaming | Consume stdout text and stderr bytes with bounded UI queues; still inspect the final result. |
+| Keep a service running under host ownership | spawn_background | Retain the process handle; use kill and observe terminal state. |
+| Build a terminal | open_pty / write_pty / resize_pty | Decode terminal bytes across chunks, handle resize, and call close_pty. |
+| Connect an LSP or byte-framed child protocol | open_raw_stdio / read_raw_stdio / write_raw_stdio | Own the framing buffer and read loop; call close_raw_stdio to reap the process tree. |
+
+The SDK supplies execution primitives. It does not create an Agent, grant application permissions or keep an app alive after the operating system suspends it.
+
 <a id="prerequisites"></a>
 
 ## Build prerequisites
@@ -157,14 +202,18 @@ Acceptance for a new distribution still requires archive corruption and recovery
 
 [Source repository](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/Cargo.toml)
 
-- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/Cargo.toml) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/rust-toolchain.toml) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/runtime.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/types.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/types.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/android/runtime/build.gradle.kts](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/android/runtime/build.gradle.kts) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/ios/Package.swift) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/checks/check-resource-contracts.sh) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/Cargo.toml) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/rust-toolchain.toml) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/runtime.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/types.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/types.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/android/runtime/build.gradle.kts](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/android/runtime/build.gradle.kts) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/ios/Package.swift) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/checks/check-resource-contracts.sh) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/config.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/config.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/user_workspace.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/user_workspace.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

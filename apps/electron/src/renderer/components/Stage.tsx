@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { crossSessionMessage } from './messageOrigin';
 import { ActivityToolGroup } from './ActivityToolGroup';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
@@ -81,19 +83,19 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
       color: goalObjective && !delivery ? (t.dark ? '#18181a' : '#fff') : color, fontWeight: item.strong ? 600 : 400,
     }}>
       {delivery && (
-        <span className="message-delivery-status" role="status" title={delivery === 'pending' ? 'Pending' : 'Not sent'}
+        <span className="message-delivery-status" role="status" title={delivery === 'pending' ? tr('desktop_stage_pending') : tr('desktop_stage_not_sent')}
           style={{ color: delivery === 'failed' ? t.danger : t.text3 }}>
           <Icon name={delivery === 'pending' ? 'clock' : 'shieldAlert'} size={14} />
-          <span className="message-delivery-label">{delivery === 'pending' ? 'Pending' : 'Not sent'}</span>
+          <span className="message-delivery-label">{delivery === 'pending' ? tr('desktop_stage_pending') : tr('desktop_stage_not_sent')}</span>
         </span>
       )}
       {images.length > 0 && (
-        <div role="group" aria-label="Attached images" style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
+        <div role="group" aria-label={tr('desktop_stage_images')} style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
           {images.map((image, index) => (
             <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
               <img
                 src={image.url}
-                alt={`Attached image ${index + 1}`}
+                alt={tr('desktop_stage_image', index + 1)}
                 style={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
               />
             </div>
@@ -139,11 +141,11 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
           className="narration-disclosure-trigger"
           aria-expanded={expanded}
           aria-controls={contentId}
-          aria-label={expanded ? 'Collapse full message' : 'Show full message'}
+          aria-label={expanded ? tr('desktop_stage_collapse') : tr('desktop_stage_expand')}
           onClick={() => onSetOpen(item.id, !expanded)}
           style={{ color: goalObjective ? 'inherit' : user ? t.accent : t.text3 }}
         >
-          <span>{expanded ? 'Show less' : 'Show more'}</span>
+          <span>{expanded ? tr('chat_tool_show_less') : tr('desktop_show_more')}</span>
           <Icon name={expanded ? 'chevron' : 'chevronR'} size={12} stroke={2} />
         </button>
       )}
@@ -268,7 +270,7 @@ const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { 
   // the live region below, and reverting it announced "Copy message" a second
   // time a beat after every copy. Only the outcome is spoken, and only while
   // there is one; the empty region says nothing when the state resets.
-  const status = state === 'copied' ? 'Copied' : state === 'error' ? 'Copy failed' : '';
+  const status = state === 'copied' ? tr('chat_message_copied') : state === 'error' ? tr('desktop_stage_copy_failed') : '';
   return (
     // The resting and hover tones reach the stylesheet as custom properties: an
     // inline `color` would out-rank `:hover` and freeze the icon at one shade.
@@ -281,8 +283,8 @@ const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { 
         type="button"
         className="user-message-copy"
         data-state={state}
-        aria-label="Copy message"
-        title="Copy message"
+        aria-label={tr('desktop_stage_copy_message')}
+        title={tr('desktop_stage_copy_message')}
         onClick={() => { void copy(); }}
         // Only a terminal state paints the icon; otherwise the stylesheet owns it.
         style={state === 'idle' ? undefined : { color: state === 'error' ? t.danger : t.ok }}
@@ -677,7 +679,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >
-        {activityView && <div className="activity-view-heading" style={{ color: t.text3, borderBottom: `1px solid ${t.border}`, paddingBottom: 16, marginBottom: 12, fontSize: 13 }} role="status">{running ? 'Working' : 'Activity'}{agents?.some(agent => agent.agent_id !== 'main' && agent.status === 'running') ? ' · Subagents working' : ''}</div>}
+        {activityView && <div className="activity-view-heading" style={{ color: t.text3, borderBottom: `1px solid ${t.border}`, paddingBottom: 16, marginBottom: 12, fontSize: 13 }} role="status">{running ? tr('chat_working') : tr('desktop_activity')}{agents?.some(agent => agent.agent_id !== 'main' && agent.status === 'running') ? ` · ${tr('desktop_stage_subagents_working')}` : ''}</div>}
         {rows.length === 0 && !running && !agents?.some((agent) => agent.agent_id !== 'main') && (
           <div
             className="desktop-empty-state-wrap"
@@ -702,18 +704,18 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   <path d="M24 22C28 3 48 1 61 13C80 7 95 23 88 41C102 58 89 76 74 76C65 94 46 96 34 84C15 90 3 73 11 57C-1 42 7 25 24 22Z" transform="translate(4 3) scale(.9)" stroke="currentColor" strokeWidth="5.5" strokeLinejoin="round" />
                   <path d="m29 35 8 13-8 13M53 61h18" stroke="currentColor" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                <h1>What should we build{welcomeProject ? <> in <span>{welcomeProject}</span></> : ' today'}?</h1>
+                <h1>{welcomeProject ? tr('desktop_stage_welcome_project', welcomeProject) : tr('desktop_stage_welcome')}</h1>
               </> : <>
               <div className="desktop-empty-mark" aria-hidden="true">
                 <Icon name="spark" size={21} stroke={1.55} />
               </div>
-              <div className="desktop-empty-kicker">LingXi desktop</div>
-              <h1>Turn intent into working code.</h1>
+              <div className="desktop-empty-kicker">{tr('desktop_stage_desktop')}</div>
+              <h1>{tr('desktop_stage_headline')}</h1>
               <p>{emptyMessage}</p>
               <div className="desktop-empty-steps" aria-hidden="true">
-                <span><b>01</b> Add context</span>
-                <span><b>02</b> Set the goal</span>
-                <span><b>03</b> Review the result</span>
+                <span><b>01</b> {tr('desktop_add_context')}</span>
+                <span><b>02</b> {tr('desktop_stage_set_goal')}</span>
+                <span><b>03</b> {tr('desktop_stage_review_result')}</span>
               </div>
               </>}
             </div>
@@ -738,16 +740,18 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
             const user = item.role === 'user';
-            const narrationOpen = collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item);
+            const peer = user ? crossSessionMessage(item.text) : null;
+            const displayItem = peer ? { ...item, text: peer.text } : item;
+            const narrationOpen = collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(displayItem);
             const narration = item.role === 'user' || item.role === 'assistant'
               ? <NativeNarrationRow
                 sessionId={modUiSessionId}
-                item={item as Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' }}
+                item={displayItem as Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' }}
                 open={narrationOpen}
                 isFirstOfReply={item.role === 'assistant' ? firstAssistantById.get(item.id) ?? false : false}
                 onSetOpen={setOpen}
               />
-              : <NarrationLine item={item} open={narrationOpen} onSetOpen={setOpen} />;
+              : <NarrationLine item={displayItem} open={narrationOpen} onSetOpen={setOpen} />;
             // A user row is a COLUMN so the actions sit under the bubble and
             // share its right edge; an assistant row stays a single line.
             return (
@@ -763,6 +767,10 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
                 }}
               >
+                {user && (peer || item.origin?.kind === 'device') && <div className="message-origin-caption" style={{ color: t.text3, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: '0.4em', maxWidth: 'min(700px, 90%)', padding: '0 4px 2px', fontSize: 12, lineHeight: 1.5, textAlign: 'end', overflowWrap: 'anywhere' }}>
+                  <Icon name="chat" size={13} style={{ flex: 'none', marginTop: '0.2em' }} />
+                  <span>{peer?.label ?? `来自 ${item.origin?.kind === 'device' ? item.origin.deviceName || '远程设备' : ''}`}</span>
+                </div>}
                 {user && item.visualizationContext && <VisualizationContextBadge chip={item.visualizationContext} />}
                 {narration}
                 {/*
@@ -772,7 +780,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
                   state — for a message nobody copied. Remounting on the session
                   key drops that state and clears its reset timer.
                 */}
-                {user && goalMessageObjective(item.text) && !item.delivery && <div className="goal-message-caption" style={{ color: t.text3 }}><Icon name="goal" size={14} /><span>Sent as goal</span></div>}
+                {user && goalMessageObjective(item.text) && !item.delivery && <div className="goal-message-caption" style={{ color: t.text3 }}><Icon name="goal" size={14} /><span>{tr('desktop_stage_sent_goal')}</span></div>}
                 {user && <UserMessageActions key={sessionKey} text={item.text} sentAt={item.sentAt} />}
               </div>
             );
@@ -877,7 +885,7 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
           </div>
         )}
 
-        {localPlan && <div role="dialog" aria-label="Plan" style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>Close plan</button><PlanDocument content={localPlan.content}/></div>}
+        {localPlan && <div role="dialog" aria-label={tr('desktop_stage_plan')} style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>{tr('desktop_stage_close_plan')}</button><PlanDocument content={localPlan.content}/></div>}
 
         {/*
           Mounted even while the button is hidden: it is the last child of the
@@ -890,8 +898,8 @@ export function Stage({ messageTarget, onMessageLocated, activityView = false, o
             <button
               type="button"
               className="desktop-stage-jump"
-              aria-label="Scroll to bottom"
-              title="Scroll to bottom"
+              aria-label={tr('desktop_stage_scroll_bottom')}
+              title={tr('desktop_stage_scroll_bottom')}
               onClick={(event) => {
                 armTail();
                 // Activating this unmounts it. A keyboard user would be left

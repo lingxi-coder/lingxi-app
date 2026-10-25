@@ -654,3 +654,12 @@ test('old audio configuration and migration markers are discarded on ordinary v4
   assert.equal('audioConfigRecovery' in saved, false);
   assert.equal('audioConfigMigrationComplete' in saved, false);
 });
+
+
+test('remote-capable runtimes wait for phone approvals while ordinary runtimes keep defaults', () => {
+  const base = { workspace: '/workspace', bridgeDir: '/bridge', hasApiKey: false, trusted: true };
+  const remote = buildBridgeArguments({ ...base, remoteControlEnabled: true });
+  assert.deepEqual(remote.slice(-4), ['--permission-timeout-secs', '1800', '--ask-user-question-timeout', 'never']);
+  assert.ok(!buildBridgeArguments(base).includes('--permission-timeout-secs'));
+  assert.ok(!buildBridgeArguments({ ...base, remoteControlEnabled: true, listSessionsJson: true }).includes('--permission-timeout-secs'));
+});

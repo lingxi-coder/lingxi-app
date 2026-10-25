@@ -77,7 +77,7 @@ fun SettingsHost(
     onClose: () -> Unit = {},
     onOpenScheduledSession: (com.lingxi.code.cron.CronRunRecord) -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
-    onReconnectEngine: () -> Unit = {},
+    onReconnectEngine: () -> Boolean = { false },
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
     onPermissionModeChanged: suspend (String) -> Unit = {},
     onTypescriptLspModeChanged: suspend (String) -> Unit = {},
@@ -89,14 +89,20 @@ fun SettingsHost(
     val engineBridge = remember { SettingsEngineBridge() }
     val draftRegistry = remember(engineSource) { SettingsDraftRegistry() }
     val engineSettingsState by engineBridge.state.collectAsStateWithLifecycle()
-    val reconnectSafely: () -> Unit = {
-        if (draftRegistry.hasUnsavedDrafts || engineSettingsState.savingSettings || engineSettingsState.pending != null) draftRegistry.reconnectBlocked = true
-        else onReconnectEngine()
-    }
     LaunchedEffect(engineSource) { engineBridge.bind(engineSource) }
     val context = LocalContext.current
     val resolvedStore: SettingsStore =
         store ?: viewModel(factory = SettingsStore.factory(context))
+    LaunchedEffect(resolvedStore, engineSettingsState.generation, engineSettingsState.credentialRevision) {
+        if (engineSettingsState.credentialRevision > 0) resolvedStore.refreshAfterProviderCredentialMutation()
+    }
+    val reconnectSafely: () -> Unit = {
+        if (draftRegistry.hasUnsavedDrafts || engineSettingsState.savingSettings || engineSettingsState.credentialSaving || engineSettingsState.pending != null) {
+            draftRegistry.reconnectBlocked = true
+        } else {
+            resolvedStore.applyLlmConfiguration(onReconnectEngine)
+        }
+    }
     val t = LingXiTheme.palette
     val state by resolvedStore.state.collectAsStateWithLifecycle()
     val modelStates by VoiceModelDownloader.states.collectAsStateWithLifecycle()

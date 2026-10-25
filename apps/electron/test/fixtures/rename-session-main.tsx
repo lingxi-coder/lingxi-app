@@ -1,9 +1,13 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RenameSessionDialog } from '../../src/renderer/components/RenameSessionDialog';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+
+// Test labels are deterministic across developer system languages.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 function Fixture() {
   const [busy, setBusy] = useState(false);

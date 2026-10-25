@@ -1,56 +1,28 @@
 import SwiftUI
 
-/// The transcript scroller. `ChatView` is its only caller.
-///
-/// What lives here is the bottom anchor, the "stay pinned while the reader is
-/// at the bottom" rule, the jump-to-latest control, and the scroll-on-focus
-/// nudge. The caller keeps its own content and its own idea of when new content
-/// arrived.
-///
-/// `followsLatest` is a binding rather than internal state because the caller
-/// re-arms it when the visible session changes, or when the reader sends a
-/// prompt. It is otherwise driven entirely by `onScrollGeometryChange`: it is
-/// true exactly while the scroll offset is within
-/// `TranscriptScrollFollowState.bottomSlack` of the bottom. Re-arming is the
-/// only way back to the tail — nothing here reacts to the passage of time,
-/// because a reader who stopped scrolling is reading, not waiting to be moved.
+/// Owns transcript scroll intent and the single native scroll position. Layout
+/// changes keep an attached reader at the tail; only a user scroll can detach
+/// or rejoin it. Composer focus never changes that reading intent.
 struct TranscriptScroll<Follow: Equatable, Content: View>: View {
-    /// Changes to this value mean "new content arrived" and trigger a scroll —
-    /// but only when `followsLatest` is true. Callers compose whatever set of
-    /// signals matters to them into one `Equatable` value.
     let follow: Follow
-
-    /// Whether the reader is currently parked at the bottom. Re-armable by the
-    /// caller; otherwise kept in sync with the measured scroll offset by
-    /// `onScrollGeometryChange`.
-    @Binding var followsLatest: Bool
-
-    /// Composer focus. A keyboard coming up reveals the newest content only
-    /// while the reader is still following the tail: a reader who scrolled up
-    /// to read something keeps their place, exactly as the `follow` signal does.
     var focused: Bool = false
-
-    /// Identifier for UI tests, applied to the scroll view.
+    /// Accepted local sends rejoin even when no transcript row changed yet.
+    var latestRequestRevision: UInt64 = 0
     var accessibilityIdentifier: String?
-
-    /// Maximum readable content width. The compact default applies unless the
-    /// desktop-style conversation opts into its wider column.
     var maxContentWidth: CGFloat = 720
-
-    /// Session plus transcript identity. A new transcript must not inherit an
-    /// anchor from a previous one that happens to reuse the same row id.
     let scrollScope: String
-
-    /// Desktop's short conversations begin at the top of the stage. Keep this
-    /// opt-in so other transcript clients retain their existing anchor.
     var alignShortContentToTop = false
-
     var requestedRowID: String? = nil
     var requestedScrollRevision: UInt64 = 0
-
     @ViewBuilder var content: () -> Content
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @State private var followState = TranscriptScrollFollowState()
+    @State private var scrollTask: Task<Void, Never>?
+    @State private var pendingRowID: String?
+    @State private var pendingLatestAnimation: Bool?
+    @State private var lastRowRequest: TranscriptScrollRowRequest?
 
     var body: some View {
         ScrollView {
@@ -61,72 +33,77 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
         }
-        // New conversations begin at the newest message.
-        .defaultScrollAnchor(.bottom)
-        // Keep the identity of the top visible timeline row while detached so
-        // rotation or sheet resizing does not send the reader to the tail. At
-        // the tail, the bottom-most row remains the anchor instead.
-        .scrollPosition($scrollPosition, anchor: followsLatest ? .bottom : .top)
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        // Native anchoring follows every frame of an animated row resize.
+        // A deferred edge request alone can run before expansion has finished.
+        // History reading and active touches retain their visible position.
+        .defaultScrollAnchor(followState.canFollow ? .bottom : .top, for: .sizeChanges)
+        .scrollPosition($scrollPosition, anchor: followState.followsLatest ? .bottom : .top)
         .modifier(ShortTranscriptAlignmentModifier(enabled: alignShortContentToTop))
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.interactively)
-        // The reader's position is measured, not inferred. The previous
-        // implementation read it from a 1pt marker's onAppear/onDisappear
-        // inside a lazy stack — which fire on cell creation and recycling, out
-        // of order during layout — plus the sign of a drag translation.
-        .onScrollGeometryChange(for: Bool.self) { geometry in
-            TranscriptScrollFollowState.isAtBottom(
-                contentSize: geometry.contentSize.height,
-                visibleMaxY: geometry.visibleRect.maxY,
-                slack: TranscriptScrollFollowState.bottomSlack
-            )
-        } action: { _, isAtBottom in
-            followsLatest = isAtBottom
+        .onScrollGeometryChange(for: TranscriptScrollMetrics.self) { geometry in
+            TranscriptScrollMetrics(geometry)
+        } action: { previous, current in
+            if followState.geometryChanged(from: previous, to: current) {
+                scrollToLatest(animated: false)
+            }
+        }
+        .onScrollPhaseChange { previousPhase, phase, context in
+            if phase == .tracking || (phase == .interacting && previousPhase == .idle) {
+                // A newer gesture cancels a row jump waiting for layout too.
+                pendingRowID = nil
+                pendingLatestAnimation = nil
+            }
+            followState.phaseChanged(to: phase, isAtBottom: TranscriptScrollMetrics(context.geometry).isAtBottom)
+            if followState.isUserInteracting { cancelPendingScroll() }
+            if phase == .idle || phase == .decelerating {
+                if pendingRowID != nil { performPendingRowScroll() }
+                else if let pendingLatestAnimation {
+                    scrollToLatest(animated: pendingLatestAnimation, explicit: true)
+                } else if phase == .idle { scrollToLatest(animated: false) }
+            }
         }
         .modifier(OptionalAccessibilityIdentifier(identifier: accessibilityIdentifier))
         .onAppear {
-            // A modal can temporarily recreate this surface. Restore the
-            // bottom only when the reader was already following the latest
-            // message; otherwise preserve the user's reading position.
-            if let requestedRowID {
-                followsLatest = false
-                scrollPosition.scrollTo(id: requestedRowID, anchor: .center)
-            } else { scrollToLatest(animated: false, requiresFollow: true) }
-        }
-        .onChange(of: follow) { _, _ in
-            // Unanimated on purpose. A streamed turn changes `follow` tens of
-            // times per second; a 200ms animation per change is always
-            // interrupted by the next one, and the pile-up reads as jitter.
-            scrollToLatest(animated: false, requiresFollow: true)
-        }
-        .onChange(of: scrollScope) { _, _ in
-            // Message and tool row ids can be reused between sessions. Drop the
-            // prior anchor and start the new transcript at its tail.
-            scrollPosition = ScrollPosition(idType: String.self)
-            scrollToLatest(animated: false, requiresFollow: false)
-        }
-        .onChange(of: requestedScrollRevision) { _, _ in
-            guard let row = requestedRowID else { return }
-            followsLatest = false
-            Task { @MainActor in
-                await Task.yield()
-                scrollPosition.scrollTo(id: row, anchor: .center)
+            if !consumeRowRequest() {
+                if pendingRowID != nil { performPendingRowScroll() }
+                else { scrollToLatest(animated: false) }
             }
         }
-        .onChange(of: focused) { _, isFocused in
-            // Respects the reader now: the keyboard must not pull someone who
-            // scrolled up away from what they are reading.
-            guard isFocused else { return }
-            scrollToLatest(animated: true, requiresFollow: true)
+        .onDisappear {
+            cancelPendingScroll()
+            followState.suspendInteraction()
         }
-        // The way back for a reader who scrolled up: it re-arms the follow and
-        // scrolls, which a bare re-arm would not do on its own — the `follow`
-        // signal did not change, so `onChange` would not fire.
+        .onChange(of: follow) { _, _ in
+            // Streaming changes do not queue overlapping animations.
+            scrollToLatest(animated: false)
+        }
+        .onChange(of: scrollScope) { _, _ in
+            cancelPendingScroll()
+            pendingRowID = nil
+            pendingLatestAnimation = nil
+            lastRowRequest = nil
+            scrollPosition = ScrollPosition(idType: String.self)
+            followState = TranscriptScrollFollowState()
+            // An explicit message target wins over new-session initialization.
+            if !consumeRowRequest() { scrollToLatest(animated: false) }
+        }
+        .onChange(of: requestedScrollRevision) { _, _ in
+            _ = consumeRowRequest()
+        }
+        .onChange(of: latestRequestRevision) { _, _ in
+            requestLatest(animated: false)
+        }
+        .onChange(of: focused) { _, _ in
+            // Native keyboard geometry drives the final correction. This also
+            // handles focus changes where the keyboard is already presented.
+            scrollToLatest(animated: false)
+        }
         .overlay(alignment: .bottomTrailing) {
-            if !followsLatest {
+            if !followState.followsLatest {
                 Button {
-                    followsLatest = true
-                    scrollToLatest(animated: true, requiresFollow: false)
+                    requestLatest(animated: true)
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.footnote.weight(.semibold))
@@ -143,20 +120,30 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
         }
     }
 
-    private func scrollToLatest(animated: Bool, requiresFollow: Bool) {
-        // Decide BEFORE yielding. The geometry observer writes `followsLatest`
-        // from the very layout this scroll is waiting for: content growing by
-        // more than `bottomSlack` moves the offset out of the bottom band for
-        // one tick, so a guard read after the yield sees `false` and cancels
-        // the scroll that the new content asked for — permanently, since
-        // nothing re-arms it.
-        guard !requiresFollow || followsLatest else { return }
-        // Wait for the streamed row's replacement layout to be committed. A
-        // synchronous scroll can target the old bottom position, especially
-        // when several text deltas arrive in one SwiftUI transaction.
-        Task { @MainActor in
+    private func cancelPendingScroll() {
+        scrollTask?.cancel()
+        scrollTask = nil
+    }
+
+    private func requestLatest(animated: Bool) {
+        pendingRowID = nil
+        pendingLatestAnimation = animated
+        followState.requestLatest()
+        scrollToLatest(animated: animated, explicit: true)
+    }
+
+    private func scrollToLatest(animated: Bool, explicit: Bool = false) {
+        guard followState.followsLatest,
+              explicit ? followState.canApplyExplicitRequest : followState.canFollow else { return }
+        cancelPendingScroll()
+        let scope = scrollScope
+        scrollTask = Task { @MainActor in
+            // Coalesce updates after SwiftUI has laid out the current content.
             await Task.yield()
-            if animated {
+            guard !Task.isCancelled, scope == scrollScope, followState.followsLatest,
+                  explicit ? followState.canApplyExplicitRequest : followState.canFollow else { return }
+            pendingLatestAnimation = nil
+            if animated && !reduceMotion {
                 withAnimation(.easeOut(duration: 0.2)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
@@ -165,6 +152,41 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             }
         }
     }
+
+    @discardableResult
+    private func consumeRowRequest() -> Bool {
+        guard let requestedRowID else { return false }
+        let request = TranscriptScrollRowRequest(
+            scope: scrollScope, rowID: requestedRowID, revision: requestedScrollRevision
+        )
+        guard request != lastRowRequest else { return false }
+        lastRowRequest = request
+        cancelPendingScroll()
+        followState.requestRow()
+        pendingLatestAnimation = nil
+        pendingRowID = requestedRowID
+        performPendingRowScroll()
+        return true
+    }
+
+    private func performPendingRowScroll() {
+        guard let rowID = pendingRowID, followState.canApplyExplicitRequest else { return }
+        cancelPendingScroll()
+        let scope = scrollScope
+        scrollTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled, scope == scrollScope, followState.canApplyExplicitRequest else { return }
+            scrollPosition.scrollTo(id: rowID, anchor: .center)
+            pendingRowID = nil
+        }
+    }
+
+}
+
+private struct TranscriptScrollRowRequest: Equatable {
+    let scope: String
+    let rowID: String
+    let revision: UInt64
 }
 
 private struct ShortTranscriptAlignmentModifier: ViewModifier {
@@ -180,36 +202,104 @@ private struct ShortTranscriptAlignmentModifier: ViewModifier {
     }
 }
 
-enum TranscriptScrollFollowState {
-    /// How far above the true bottom still counts as "at the bottom". Absorbs
-    /// rounding and the one frame between a row growing and the follow scroll
-    /// landing, without swallowing a real upward drag.
+struct TranscriptScrollMetrics: Equatable {
+    let contentHeight: CGFloat
+    let visibleMinY: CGFloat
+    let visibleMaxY: CGFloat
+    let viewportSize: CGSize
+    let topInset: CGFloat
+    let bottomInset: CGFloat
+
+    init(_ geometry: ScrollGeometry) {
+        contentHeight = geometry.contentSize.height
+        visibleMinY = geometry.visibleRect.minY
+        visibleMaxY = geometry.visibleRect.maxY
+        viewportSize = geometry.containerSize
+        topInset = geometry.contentInsets.top
+        bottomInset = geometry.contentInsets.bottom
+    }
+
+    var isAtBottom: Bool {
+        TranscriptScrollFollowState.isAtBottom(
+            contentSize: contentHeight,
+            visibleMaxY: visibleMaxY,
+            slack: TranscriptScrollFollowState.bottomSlack
+        )
+    }
+
+    func hasSameLayout(as other: Self) -> Bool {
+        contentHeight == other.contentHeight && viewportSize == other.viewportSize
+            && topInset == other.topInset && bottomInset == other.bottomInset
+    }
+}
+
+struct TranscriptScrollFollowState {
     static let bottomSlack: CGFloat = 24
 
-    /// Whether the reader is parked at the newest content.
-    ///
-    /// Measured against `visibleRect`, NOT reconstructed from offset, container
-    /// size and insets. Device measurement (iPhone 11, iOS 18) showed
-    /// `containerSize` EXCLUDES the content insets while `visibleRect` includes
-    /// them, and that this surface's only inset is `contentInsets.top`, never
-    /// `.bottom` — so the reconstructed maximum was 92pt too high and this
-    /// predicate answered false even with the reader sitting at the bottom.
-    /// Asking `visibleRect` avoids the whole question.
-    ///
-    /// The gap goes negative while the scroll view rubber-bands past the end,
-    /// and is zero when the content is too short to scroll, so both cases fall
-    /// out of the comparison without a special case.
-    static func isAtBottom(
-        contentSize: CGFloat,
-        visibleMaxY: CGFloat,
-        slack: CGFloat
-    ) -> Bool {
+    private(set) var followsLatest = true
+    private(set) var phase: ScrollPhase = .idle
+    private var userDidScroll = false
+    private var requestDuringInteraction = false
+
+    var isUserInteracting: Bool {
+        phase == .tracking || phase == .interacting || phase == .decelerating
+    }
+
+    var canFollow: Bool { followsLatest && !isUserInteracting }
+
+    /// Explicit controls interrupt momentum but never fight a finger still down.
+    var canApplyExplicitRequest: Bool { phase != .tracking && phase != .interacting }
+
+    mutating func suspendInteraction() {
+        phase = .idle
+        userDidScroll = false
+        requestDuringInteraction = false
+    }
+
+    mutating func requestLatest() {
+        followsLatest = true
+        requestDuringInteraction = isUserInteracting
+    }
+
+    mutating func requestRow() {
+        followsLatest = false
+        requestDuringInteraction = isUserInteracting
+    }
+
+    mutating func phaseChanged(to next: ScrollPhase, isAtBottom: Bool) {
+        if next == .tracking {
+            userDidScroll = false
+            requestDuringInteraction = false
+        }
+        if next == .interacting || next == .decelerating { userDidScroll = true }
+        if next == .idle {
+            // Merely touching the view does not turn concurrent layout growth
+            // into a detached reading position. A completed scroll does.
+            if userDidScroll && !requestDuringInteraction { followsLatest = isAtBottom }
+            userDidScroll = false
+            requestDuringInteraction = false
+        }
+        phase = next
+    }
+
+    /// Returns whether a changed layout needs a tail correction. Geometry alone
+    /// never changes intent, even if content growth exceeds the near-tail band.
+    mutating func geometryChanged(from previous: TranscriptScrollMetrics, to current: TranscriptScrollMetrics) -> Bool {
+        let layoutChanged = !current.hasSameLayout(as: previous)
+        if !requestDuringInteraction, (phase == .interacting || phase == .decelerating), !layoutChanged,
+           abs(current.visibleMinY - previous.visibleMinY) > 0.5 {
+            followsLatest = current.isAtBottom
+        }
+        return canFollow && layoutChanged
+    }
+
+    /// visibleRect includes the native scroll insets. Reconstructing the bottom
+    /// from containerSize instead loses those insets on iPhone.
+    static func isAtBottom(contentSize: CGFloat, visibleMaxY: CGFloat, slack: CGFloat) -> Bool {
         contentSize - visibleMaxY <= slack
     }
 }
 
-/// Applies an accessibility identifier only when one was supplied, so a caller
-/// that has no UI test to satisfy does not stamp an empty identifier.
 private struct OptionalAccessibilityIdentifier: ViewModifier {
     let identifier: String?
 

@@ -90,18 +90,19 @@ object CronNotifications {
         }.isSuccess
     }
 
-    /** Create the result channel on first use (Android 8+/O). */
+    /** Refresh the channel name after language changes while preserving its settings. */
     private fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (manager.getNotificationChannel(RESULT_CHANNEL) == null) {
-            manager.createNotificationChannel(
-                NotificationChannel(
+        val name = com.lingxi.code.theme.LocaleWrapper.getString(context, R.string.cron_notification_channel_name)
+        val existing = manager.getNotificationChannel(RESULT_CHANNEL)
+        if (existing?.name != name) {
+            val channel = existing?.apply { this.name = name } ?: NotificationChannel(
                     RESULT_CHANNEL,
-                    context.getString(R.string.cron_notification_channel_name),
+                    name,
                     NotificationManager.IMPORTANCE_DEFAULT,
-                ),
-            )
+                )
+            manager.createNotificationChannel(channel)
         }
     }
 }

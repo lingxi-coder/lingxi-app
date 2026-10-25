@@ -30,5 +30,7 @@ val DefaultConversationStrings = ConversationStrings { _, fallback, args ->
 }
 
 /** Production resolver: real localized text via the app's (locale-wrapped) [Context]. */
-fun conversationStrings(context: Context): ConversationStrings =
-    ConversationStrings { id, _, args -> context.getString(id, *args) }
+fun conversationStrings(context: Context): ConversationStrings {
+    val appContext = context.applicationContext
+    return ConversationStrings { id, _, args -> com.lingxi.code.theme.LocaleWrapper.getString(appContext, id, *args) }
+}

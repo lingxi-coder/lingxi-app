@@ -28,46 +28,46 @@ struct ModelDetailsSheet: View {
                     .padding(.vertical, 2)
                 }
 
-                detailSection("基本信息", rows: [
-                    ("路由", details.reference),
-                    ("Provider", details.providerId),
-                    ("Family", details.family),
-                    ("状态", details.status),
-                    ("发布日期", details.releaseDate),
-                    ("最近更新", details.lastUpdated),
-                    ("知识截止", details.knowledgeCutoff),
+                detailSection(String(localized: "model_detail_basic"), rows: [
+                    (String(localized: "model_detail_route"), details.reference),
+                    (String(localized: "model_detail_provider"), details.providerId),
+                    (String(localized: "model_detail_family"), details.family),
+                    (String(localized: "session_details_status"), details.status),
+                    (String(localized: "model_detail_release_date"), details.releaseDate),
+                    (String(localized: "model_detail_updated"), details.lastUpdated),
+                    (String(localized: "model_detail_knowledge_cutoff"), details.knowledgeCutoff),
                 ])
 
-                detailSection("模态与能力", rows: [
-                    ("输入模态", list(details.inputModalities)),
-                    ("输出模态", list(details.outputModalities)),
-                    ("Streaming", bool(details.capabilities.streaming)),
-                    ("Tools", bool(details.capabilities.tools)),
-                    ("Vision", bool(details.capabilities.vision)),
-                    ("Documents", bool(details.capabilities.documents)),
-                    ("Reasoning", bool(details.capabilities.reasoning)),
-                    ("Structured Output", bool(details.capabilities.structuredOutput)),
-                    ("Open Weights", ModelDetailFormat.yesNo(details.openWeights)),
-                    ("Attachments", ModelDetailFormat.yesNo(details.attachments)),
-                    ("Temperature Control", ModelDetailFormat.yesNo(details.temperatureControl)),
+                detailSection(String(localized: "model_detail_capabilities"), rows: [
+                    (String(localized: "model_detail_input_modalities"), list(details.inputModalities)),
+                    (String(localized: "model_detail_output_modalities"), list(details.outputModalities)),
+                    (String(localized: "model_detail_streaming"), bool(details.capabilities.streaming)),
+                    (String(localized: "apps_category_tools"), bool(details.capabilities.tools)),
+                    (String(localized: "model_detail_vision"), bool(details.capabilities.vision)),
+                    (String(localized: "model_detail_documents"), bool(details.capabilities.documents)),
+                    (String(localized: "model_detail_reasoning"), bool(details.capabilities.reasoning)),
+                    (String(localized: "model_detail_structured_output"), bool(details.capabilities.structuredOutput)),
+                    (String(localized: "model_detail_open_weights"), ModelDetailFormat.yesNo(details.openWeights)),
+                    (String(localized: "model_detail_attachments"), ModelDetailFormat.yesNo(details.attachments)),
+                    (String(localized: "model_detail_temperature"), ModelDetailFormat.yesNo(details.temperatureControl)),
                 ])
 
-                detailSection("Limits", rows: [
-                    ("模型最大上下文", token(details.contextWindowTokens)),
-                    ("应用输入预算", token(details.contextBudget?.effectiveInputBudget)),
-                    ("上下文策略", details.contextBudget?.policy),
-                    ("标准价格输入上限", details.contextBudget?.standardPriceInputTokens?.formatted()),
-                    ("官方建议输入", token(details.contextBudget?.recommendationInputTokens)),
-                    ("建议来源", details.contextBudget?.recommendationSource),
-                    ("Max Input", token(details.maxInputTokens)),
-                    ("Max Output", token(details.maxOutputTokens)),
+                detailSection(String(localized: "model_detail_limits"), rows: [
+                    (String(localized: "model_detail_max_context"), token(details.contextWindowTokens)),
+                    (String(localized: "model_detail_input_budget"), token(details.contextBudget?.effectiveInputBudget)),
+                    (String(localized: "model_detail_context_policy"), details.contextBudget?.policy),
+                    (String(localized: "model_detail_standard_price_limit"), details.contextBudget?.standardPriceInputTokens?.formatted()),
+                    (String(localized: "model_detail_recommended_input"), token(details.contextBudget?.recommendationInputTokens)),
+                    (String(localized: "model_detail_recommendation_source"), details.contextBudget?.recommendationSource),
+                    (String(localized: "model_detail_max_input"), token(details.maxInputTokens)),
+                    (String(localized: "model_detail_max_output"), token(details.maxOutputTokens)),
                 ])
 
                 reasoningSection
                 pricingSection
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("模型详情")
+            .navigationTitle("composer_model_details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -82,26 +82,26 @@ struct ModelDetailsSheet: View {
 
     @ViewBuilder
     private var reasoningSection: some View {
-        Section("Reasoning") {
-            detailRow("默认", ModelDetailFormat.reasoningSelectionLabel(details.reasoning.providerDefault))
-            detailRow("可编辑", bool(details.reasoning.editable))
-            detailRow("强制开启", bool(details.reasoning.forcedReasoning))
+        Section(String(localized: "model_detail_reasoning")) {
+            detailRow(String(localized: "settings_badge_default"), ModelDetailFormat.reasoningSelectionLabel(details.reasoning.providerDefault))
+            detailRow(String(localized: "model_detail_editable"), bool(details.reasoning.editable))
+            detailRow(String(localized: "model_detail_forced"), bool(details.reasoning.forcedReasoning))
             if let range = details.reasoning.budgetRange {
                 detailRow(
-                    "Budget Range",
+                    String(localized: "model_detail_budget_range"),
                     "\(ModelDetailFormat.tokenCount(range.minTokens)) – \(ModelDetailFormat.tokenCount(range.maxTokens))"
                 )
             }
             if !details.reasoning.options.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("可选项")
+                    Text(String(localized: "model_detail_options"))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(t.text3)
                     ForEach(Array(details.reasoning.options.enumerated()), id: \.offset) { _, option in
                         Text(
                             option.persistable
                                 ? ModelDetailFormat.reasoningSelectionLabel(option.selection)
-                                : "\(ModelDetailFormat.reasoningSelectionLabel(option.selection))（仅当前会话）"
+                                : String(localized: "model_detail_session_only \(ModelDetailFormat.reasoningSelectionLabel(option.selection))")
                         )
                         .font(.system(size: 13))
                         .foregroundStyle(t.text)
@@ -110,39 +110,39 @@ struct ModelDetailsSheet: View {
                 .padding(.vertical, 2)
             }
             if let disabled = details.reasoning.disabledReason {
-                detailRow("不可编辑原因", disabled.message ?? disabled.code)
+                detailRow(String(localized: "model_detail_disabled_reason"), disabled.message ?? disabled.code)
             }
         }
     }
 
     @ViewBuilder
     private var pricingSection: some View {
-        Section("Pricing") {
+        Section(String(localized: "model_detail_pricing")) {
             if let pricing = details.pricing {
-                detailRow("计费方式", ModelDetailFormat.billingModeLabel(pricing.billingMode))
-                detailRow("Input", money(pricing.inputPerMillion))
-                detailRow("Output", money(pricing.outputPerMillion))
-                detailRow("Cache Read", money(pricing.cacheReadPerMillion))
-                detailRow("Cache Write", money(pricing.cacheWritePerMillion))
-                detailRow("Reasoning", money(pricing.reasoningPerMillion))
-                detailRow("来源", pricing.source)
+                detailRow(String(localized: "model_detail_billing"), ModelDetailFormat.billingModeLabel(pricing.billingMode))
+                detailRow(String(localized: "chat_usage_input"), money(pricing.inputPerMillion))
+                detailRow(String(localized: "chat_tool_verb_output"), money(pricing.outputPerMillion))
+                detailRow(String(localized: "model_detail_cache_read"), money(pricing.cacheReadPerMillion))
+                detailRow(String(localized: "chat_usage_cache_write"), money(pricing.cacheWritePerMillion))
+                detailRow(String(localized: "model_detail_reasoning"), money(pricing.reasoningPerMillion))
+                detailRow(String(localized: "audio_source_title"), pricing.source)
                 if !pricing.tiers.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Pricing Tiers")
+                        Text(String(localized: "model_detail_pricing_tiers"))
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(t.text3)
                         ForEach(Array(pricing.tiers.enumerated()), id: \.offset) { _, tier in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("输入 \(tier.contextThresholdTokens.formatted())–\(tier.maxInputTokens.map { $0.formatted() } ?? "∞")，整次请求")
+                                Text(String(localized: "model_detail_price_range \(tier.contextThresholdTokens.formatted()) \(tier.maxInputTokens.map { $0.formatted() } ?? "∞")"))
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(t.text)
                                 Text(
                                     [
-                                        tier.inputPerMillion.map { "in $\(ModelDetailFormat.price($0))" },
-                                        tier.outputPerMillion.map { "out $\(ModelDetailFormat.price($0))" },
-                                        tier.cacheReadPerMillion.map { "cache read $\(ModelDetailFormat.price($0))" },
-                                        tier.cacheWritePerMillion.map { "cache write $\(ModelDetailFormat.price($0))" },
-                                        tier.reasoningPerMillion.map { "reasoning $\(ModelDetailFormat.price($0))" },
+                                        tier.inputPerMillion.map { String(localized: "model_detail_price_input \(ModelDetailFormat.price($0))") },
+                                        tier.outputPerMillion.map { String(localized: "model_detail_price_output \(ModelDetailFormat.price($0))") },
+                                        tier.cacheReadPerMillion.map { String(localized: "model_detail_price_cache_read \(ModelDetailFormat.price($0))") },
+                                        tier.cacheWritePerMillion.map { String(localized: "model_detail_price_cache_write \(ModelDetailFormat.price($0))") },
+                                        tier.reasoningPerMillion.map { String(localized: "model_detail_price_reasoning \(ModelDetailFormat.price($0))") },
                                     ]
                                         .compactMap { $0 }
                                         .joined(separator: " · ")
@@ -155,7 +155,7 @@ struct ModelDetailsSheet: View {
                     }
                 }
             } else {
-                Text("价格未提供")
+                Text(String(localized: "model_detail_no_price"))
                     .font(.system(size: 13))
                     .foregroundStyle(t.text3)
             }
@@ -196,7 +196,7 @@ struct ModelDetailsSheet: View {
     }
 
     private func bool(_ value: Bool) -> String {
-        value ? "是" : "否"
+        value ? String(localized: "common_yes") : String(localized: "common_no")
     }
 
     private func list(_ values: [String]) -> String? {

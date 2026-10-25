@@ -495,19 +495,21 @@ struct ProviderEditorForm: View {
 
     var body: some View {
         Form {
-            statusSection
             identitySection
             apiKeySection
             oauthSection
+            statusSection
             modelSection
-            stateSection
             Section {
                 NavigationLink {
-                    Form { connectionsSection }
-                        .navigationTitle(String(localized: "settings_provider_connections"))
-                        .navigationBarTitleDisplayMode(.inline)
+                    Form {
+                        stateSection
+                        connectionsSection
+                    }
+                    .navigationTitle(String(localized: "settings_section_advanced"))
+                    .navigationBarTitleDisplayMode(.inline)
                 } label: {
-                    Text("settings_provider_connections")
+                    Text("settings_section_advanced")
                 }
                 .accessibilityIdentifier("provider.connections")
             }
@@ -592,6 +594,7 @@ struct ProviderEditorForm: View {
                     text: textBinding(\.baseURL),
                     placeholder: repository.preset(for: draft.profile.presetID).defaultUrl
                 )
+                .keyboardType(.URL)
             }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
@@ -708,9 +711,6 @@ struct ProviderEditorForm: View {
                     } label: {
                         Text(String(localized: "settings_provider_oauth")).foregroundStyle(Color.primary)
                     }
-                    Button(String(localized: "settings_provider_test_connection")) { testConnection() }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(t.accent)
                     Button(String(localized: "settings_provider_logout"), role: .destructive) { logoutOAuth() }
                         .buttonStyle(.plain)
                         .foregroundStyle(t.danger)
@@ -738,8 +738,8 @@ struct ProviderEditorForm: View {
                 ProviderModelsPage(draft: $draft)
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("settings_provider_model_id").foregroundStyle(Color.primary)
-                    Text(draft.profile.modelID.isEmpty ? "—" : draft.profile.modelID)
+                    Text("session_details_model").foregroundStyle(Color.primary)
+                    Text(draft.profile.modelID.isEmpty ? "—" : ModelDisplay.modelName(for: draft.profile.modelID))
                         .font(.subheadline).foregroundStyle(Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -981,6 +981,7 @@ private struct ProviderModelsPage: View {
     @State private var repository = ProviderRepository.shared
     @State private var selectedModelDetails: ModelRuntimeDetails?
     @State private var query = ""
+    @State private var visibilityQuery = ""
     @Binding var draft: ProviderEditorDraft
 
     private struct Catalog {
@@ -1026,6 +1027,27 @@ private struct ProviderModelsPage: View {
         let catalog = catalog
         let visible = repository.visibleModelIDs(for: draft.profile, from: catalog.models)
         List {
+            customModelSection(catalog)
+            Section {
+                NavigationLink {
+                    List { pickerSection(catalog, visible: visible) }
+                        .listStyle(.insetGrouped)
+                        .searchable(text: $visibilityQuery, prompt: Text("composer_search_models_placeholder"))
+                        .navigationTitle("settings_provider_visible_models")
+                        .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    LabeledContent("settings_provider_visible_models") {
+                        if !draft.profile.showInModelPicker {
+                            Text("settings_badge_disabled")
+                                .foregroundStyle(.secondary)
+                        } else if catalog.isReady {
+                            Text(catalog.summary)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("provider.model.visibility")
+            }
             if catalog.isReady {
                 modelListSection(catalog)
             } else {
@@ -1037,22 +1059,20 @@ private struct ProviderModelsPage: View {
                 }
                 .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             }
-            customModelSection(catalog)
-            pickerSection(catalog, visible: visible)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemGroupedBackground))
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("composer_search_models_placeholder"))
         .scrollDismissesKeyboard(.interactively)
-        .navigationTitle(String(localized: "settings_provider_model_id"))
+        .navigationTitle(String(localized: "session_details_model"))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $selectedModelDetails) { details in
             ModelDetailsSheet(details: details, accent: Accents.color(for: draft.profile.presetID))
         }
     }
 
-    private func matchingModels(_ catalog: Catalog) -> [String] {
+    private func matchingModels(_ catalog: Catalog, query: String) -> [String] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return query.isEmpty ? catalog.models : catalog.models.filter {
             $0.localizedStandardContains(query)
@@ -1061,7 +1081,7 @@ private struct ProviderModelsPage: View {
     }
 
     private func modelListSection(_ catalog: Catalog) -> some View {
-        let models = matchingModels(catalog)
+        let models = matchingModels(catalog, query: query)
         return Section {
             if models.isEmpty { ContentUnavailableView.search(text: query) }
             ForEach(models, id: \.self) { model in
@@ -1072,10 +1092,12 @@ private struct ProviderModelsPage: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
                                     .foregroundStyle(Color.primary)
-                                Text(model)
-                                    .font(.footnote.monospaced())
-                                    .foregroundStyle(Color.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                if (details?.preferredDisplayName ?? ModelDisplay.modelName(for: model)) != model {
+                                    Text(model)
+                                        .font(.subheadline)
+                                        .foregroundStyle(Color.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
                             Spacer(minLength: 8)
                             if draft.profile.modelID == model {
@@ -1093,7 +1115,9 @@ private struct ProviderModelsPage: View {
                                 .foregroundStyle(t.accent)
                                 .frame(minWidth: 44, minHeight: 44)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel(String(localized: "composer_model_details"))
+                        .accessibilityValue(details.preferredDisplayName ?? model)
                         .accessibilityIdentifier("provider.model.info.\(model)")
                     }
                 }
@@ -1104,21 +1128,38 @@ private struct ProviderModelsPage: View {
 
     private func customModelSection(_ catalog: Catalog) -> some View {
         Section {
-            TextField(catalog.placeholder, text: Binding(
-                get: { draft.profile.modelID },
-                set: { draft.profile.modelID = $0 }
-            ))
-            .font(.callout.monospaced())
-            .foregroundStyle(Color.primary)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .accessibilityIdentifier("provider.model.custom")
+            if catalog.isReady {
+                LabeledContent("settings_provider_default_model") {
+                    Text(draft.profile.modelID.isEmpty
+                         ? String(localized: "settings_provider_unconfigured")
+                         : ModelDisplay.modelName(for: draft.profile.modelID))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                }
+                DisclosureGroup("settings_provider_custom_model_id") {
+                    customModelField(catalog.placeholder)
+                    Text("settings_provider_custom_model_hint")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                customModelField(catalog.placeholder)
+            }
         } header: {
-            Text(String(localized: "settings_provider_custom_model_id"))
+            if !catalog.isReady { Text("settings_provider_default_model") }
         } footer: {
-            Text(String(localized: "settings_provider_custom_model_hint"))
+            if !catalog.isReady { Text("settings_provider_custom_model_hint") }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
+    }
+
+    private func customModelField(_ placeholder: String) -> some View {
+        TextField(placeholder, text: $draft.profile.modelID)
+            .font(.body)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .accessibilityLabel(String(localized: "settings_provider_custom_model_id"))
+            .accessibilityIdentifier("provider.model.custom")
     }
 
     @ViewBuilder
@@ -1131,8 +1172,9 @@ private struct ProviderModelsPage: View {
                 Text(String(localized: "settings_provider_show_in_picker")).foregroundStyle(Color.primary)
             }
             .tint(t.accent)
+            .accessibilityIdentifier("provider.model.visible")
             if catalog.isReady, draft.profile.showInModelPicker {
-                ForEach(matchingModels(catalog), id: \.self) { model in
+                ForEach(matchingModels(catalog, query: visibilityQuery), id: \.self) { model in
                     Toggle(isOn: Binding(
                         get: { visible.contains(model) },
                         set: { _ in toggleVisibleModel(model, from: catalog.models) }
@@ -1141,9 +1183,9 @@ private struct ProviderModelsPage: View {
                             Text(catalog.details[model]?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
                                 .foregroundStyle(Color.primary)
                             Text(model)
-                                .font(.footnote.monospaced())
+                                .font(.subheadline)
                                 .foregroundStyle(Color.secondary)
-                                .lineLimit(1)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .tint(t.accent)

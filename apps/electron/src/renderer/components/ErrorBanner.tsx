@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { useEffect, useState, type CSSProperties } from 'react';
 import type { UseBridge } from '../bridge/bridgeTypes.js';
 import { classifyDesktopError } from '../bridge/errors';
@@ -10,6 +12,7 @@ export function ErrorBanner({ bridge }: { bridge: Pick<UseBridge, 'error' | 'cle
 
 function ErrorNotification({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   const t = useT();
+  useI18n();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -42,15 +45,15 @@ function ErrorNotification({ message, onDismiss }: { message: string; onDismiss:
         <span className="desktop-notification-icon" aria-hidden="true"><Icon name="circleAlert" size={19} /></span>
         <div className="desktop-notification-content">
           <strong className="desktop-notification-title">{error.title}</strong>
-          <p className="desktop-notification-detail" tabIndex={0} aria-label="Notification details">{error.detail}</p>
+          <p className="desktop-notification-detail" tabIndex={0} aria-label={tr("desktop_ui_notifications")}>{error.detail}</p>
           {error.technicalDetail && (
             <details className="desktop-notification-diagnostics" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
-              <summary>Technical details</summary>
-              <pre tabIndex={0} aria-label="Technical error details">{error.technicalDetail}</pre>
+              <summary>{tr("desktop_ui_technical")}</summary>
+              <pre tabIndex={0} aria-label={tr("desktop_ui_technical_error")}>{error.technicalDetail}</pre>
             </details>
           )}
         </div>
-        <button type="button" className="desktop-notification-close" onClick={onDismiss} aria-label="Dismiss notification" title="Dismiss notification">
+        <button type="button" className="desktop-notification-close" onClick={onDismiss} aria-label={tr("desktop_ui_dismiss_notification")} title={tr("desktop_ui_dismiss_notification")}>
           <Icon name="x" size={12} stroke={2} />
         </button>
       </div>

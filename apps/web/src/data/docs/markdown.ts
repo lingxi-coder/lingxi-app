@@ -59,7 +59,12 @@ export function docMarkdown(page: DocPage, locale: 'en' | 'zh'): string {
   if (sources.length) parts.push(sources.map((source) => {
     const position = `${source.repo}/${source.path}`;
     const label = source.url ? `[${position}](${source.url})` : position;
-    return `- ${label} — ${source.sourceState === 'working-tree' ? (locale === 'zh' ? '未提交源码' : 'Uncommitted source') : (locale === 'zh' ? '已提交源码' : 'Committed source')} (${source.revision})`;
+    const state = source.sourceState === 'unpublished'
+      ? (locale === 'zh' ? '未发布源码' : 'Unpublished source')
+      : source.sourceState === 'working-tree'
+        ? (locale === 'zh' ? '未提交源码' : 'Uncommitted source')
+        : (locale === 'zh' ? '已提交源码' : 'Committed source');
+    return `- ${label} — ${state} (${source.revision})`;
   }).join('\n'));
   const repos = docsBaseline.repositories.filter((repo) => sources.some((source) => source.repo === repo.repo));
   if (repos.length) parts.push(repos.map((repo) => `- ${repo.repo}: HEAD ${repo.revision}; ${locale === 'zh' ? '所据文件指纹' : 'Referenced input fingerprint'} ${repo.treeFingerprint}${repo.productPinnedRevision ? `; ${locale === 'zh' ? '产品固定版本' : 'Product pin'} ${repo.productPinnedRevision}` : ''}`).join('\n'));

@@ -78,7 +78,7 @@ run returns a terminal outcome; streaming output goes to the OutputStream suppli
 ### OutputStream::emit_text
 
 ```text
-async fn emit_text(&self, text: &str, utf16_code_units: Option<&[u16]>)
+async fn emit_text(&self, text: &Utf16JsonProjection)
 ```
 
 Deliver assistant text to the host’s output destination.
@@ -124,15 +124,73 @@ The facade exposes the mounted session. Creating, listing, resuming, or switchin
 
 Streaming protocol checks include truncated streams and tool-result pairing. Separate tests must cover output delivery, permission response routing and durable publication; TurnOutcome alone establishes none of those barriers.
 
+<a id="run-parameters"></a>
+
+## Run input and return values
+
+| Value | Meaning | Integration rule |
+| --- | --- | --- |
+| RunInput.prompt: String | User text passed to the mounted execution path. | Supply the actual user request; system instructions belong to host configuration. |
+| RunInput.images: Vec<PathBuf> | Image paths resolved by the workspace/model implementation. | Keep the files readable on the execution host while the request is in use. |
+| CancellationToken | A shared cancellation signal, not a timeout duration. | Keep a clone for the stop button or host deadline; await run after cancelling. |
+| Result<TurnOutcome, HandleError> | A terminal execution result, rather than streamed assistant text. | Read output from OutputStream and branch separately on outcome versus error. |
+
+Cloning SessionHandle shares the mounted service. It does not create another session, fork history, or grant concurrent turn admission; the composition owns those decisions.
+
+<a id="cancellation-recipe"></a>
+
+## Connect a stop button without losing the result
+
+Give the caller a token clone before starting this function. The caller can cancel that clone from its UI or deadline handler. This function waits for cleanup in the existing run path and returns the original outcome, including a normal completion that won a race with cancellation.
+
+- EndTurn means the execution path ended naturally; MaxTurns means its turn budget ended; Cancelled is an explicit cancellation outcome.
+- An error or cancellation does not undo a tool’s completed file write, command, or external request. Inspect the operation before retrying it.
+- Keep partial text as partial text until the host receives the final message or error boundary. A disconnected UI is not proof that the runtime stopped.
+
+### Rust · complete function, assembled host required
+
+```rust
+use harness_runtime::{CancellationToken, HandleError, Harness, RunInput, TurnOutcome};
+
+async fn submit(
+    harness: &Harness,
+    prompt: String,
+    cancel: CancellationToken,
+) -> Result<TurnOutcome, HandleError> {
+    let session = harness.session();
+    let session_id = session.id().await;
+    let result = session.run(RunInput { prompt, images: vec![] }, cancel).await;
+    let cost = session.cost().await;
+    println!("session={session_id:?}, api_calls={}", cost.api_calls);
+    result
+}
+
+// Before submit: let cancel = CancellationToken::new();
+// Keep cancel.clone() in the host; call cancel.cancel() when the user stops.
+```
+
+Verification method: Environment validation (harness-cancellable-turn)
+
+<a id="stream-rendering"></a>
+
+## Render a stream and reconcile the final message
+
+1. Append text deltas to the active assistant presentation. Preserve source text through the supplied UTF-16 JSON projection instead of round-tripping arbitrary external payloads through lossy strings.
+2. Create tool activity rows from the tool call identity. Update the same row when its matching result arrives; multiple calls can use the same tool name.
+3. Use final message boundaries or MessageComplete DTOs to settle the assistant row. Do not append a second copy of the same completed message after already rendering its deltas.
+4. Read cost() when you need cumulative accounting. A transcript snapshot, a text delta and a cost update serve different purposes.
+
+- [Event fields and permission response routing](harness-client.md#event-consumer)
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/api.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/desktop/sdk.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/core/src/host/orchestrator.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/core/src/host/orchestrator.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/adapter/output_stream.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/src/api.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/runtime/src/desktop/sdk.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/core/src/host/orchestrator.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/core/src/host/orchestrator.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
+- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/a39da75f0985d61d90fffa255f7b4d90901b0e27/crates/client/src/adapter/output_stream.rs) — Committed source (a39da75f0985d61d90fffa255f7b4d90901b0e27)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD a39da75f0985d61d90fffa255f7b4d90901b0e27; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin a39da75f0985d61d90fffa255f7b4d90901b0e27
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -98,6 +98,10 @@ pub use local_apps::{build_ios_local_app_service, MobileLocalAppError, MobileLoc
 
 mod linux_types;
 #[cfg(feature = "uniffi")]
+mod remote;
+#[cfg(feature = "uniffi")]
+pub use remote::*;
+#[cfg(feature = "uniffi")]
 pub use callbacks::CameraFfiError;
 #[cfg(feature = "uniffi")]
 pub use callbacks::CapturedImageFfi;

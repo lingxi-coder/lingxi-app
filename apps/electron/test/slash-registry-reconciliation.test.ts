@@ -7,6 +7,7 @@ import {
   ALL_DESKTOP_COMMANDS,
   DESKTOP_COMMANDS,
   DESKTOP_ENGINE_BUILTIN_COMMANDS,
+  DESKTOP_ONLY_COMMANDS,
   DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS,
 } from '../src/renderer/bridge/desktopCommands';
 
@@ -192,9 +193,49 @@ test('unavailable compatibility handlers are directly resolvable but never adver
   }
 });
 
-test('no desktop command targets a name the engine does not have', () => {
+/** `COMMAND_ALIASES`: every alias the engine resolves, with the builtin it resolves to. */
+function engineAliases(): Map<string, string> {
+  const source = readFileSync(NAMES_RS, 'utf8');
+  const decl = source.indexOf('pub const COMMAND_ALIASES');
+  assert.notEqual(decl, -1, 'COMMAND_ALIASES is gone — this gate is reading the wrong file');
+  const open = source.indexOf('&[(', decl);
+  const close = source.indexOf('];', open);
+  assert.notEqual(close, -1, 'COMMAND_ALIASES is unterminated');
+  const aliases = new Map<string, string>();
+  for (const entry of source.slice(open, close).matchAll(/\("([a-z0-9-]+)",\s*&\[([^\]]*)\]\)/g)) {
+    for (const alias of entry[2]!.matchAll(/"([a-z0-9-]+)"/g)) aliases.set(alias[1]!, entry[1]!);
+  }
+  assert.equal(aliases.get('remote'), 'session', 'the /remote -> /session alias moved — update the Remote Control exception below');
+  return aliases;
+}
+
+test('no desktop command targets a name the engine does not have, except the documented Desktop-only ones', () => {
   const builtins = new Set(builtinCommandNames());
-  const unknown = DESKTOP_COMMANDS.map((c) => c.name).filter((name) => !builtins.has(name));
+  const unknown = DESKTOP_COMMANDS.map((c) => c.name)
+    .filter((name) => !builtins.has(name) && !(name in DESKTOP_ONLY_COMMANDS));
 
   assert.deepEqual(unknown, [], `desktop commands with no engine counterpart (typo?): ${unknown.join(', ')}`);
+});
+
+test('every Desktop-only exception is real, documented, and collides with nothing in the engine', () => {
+  const builtins = new Set(builtinCommandNames());
+  const aliases = engineAliases();
+  const local = new Map(DESKTOP_COMMANDS.map((command) => [command.name, command]));
+  assert.deepEqual(Object.keys(DESKTOP_ONLY_COMMANDS).sort(), ['remote-control']);
+  for (const [name, reason] of Object.entries(DESKTOP_ONLY_COMMANDS)) {
+    const command = local.get(name);
+    assert.ok(command, `/${name} is documented as Desktop-only but is not a Desktop command`);
+    assert.ok(reason.length > 20, `/${name} needs a real reason`);
+    for (const spelling of [name, ...(command.aliases ?? [])]) {
+      assert.equal(builtins.has(spelling), false, `/${spelling} is an engine builtin; it cannot be a Desktop-only spelling`);
+      assert.equal(aliases.has(spelling), false, `/${spelling} is an engine alias; it cannot be a Desktop-only spelling`);
+    }
+  }
+});
+
+test('/remote stays the engine alias of /session and is not shadowed by /remote-control or /rc', () => {
+  const spellings = ALL_DESKTOP_COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])]);
+  assert.equal(spellings.includes('remote'), false);
+  assert.ok(spellings.includes('remote-control'));
+  assert.ok(spellings.includes('rc'));
 });

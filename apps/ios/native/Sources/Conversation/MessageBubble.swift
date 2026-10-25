@@ -12,7 +12,7 @@ private struct MessageImages: View {
                 ForEach(images) { image in
                     Button { selectedImage = image } label: { imageView(image) }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Preview attached image")
+                        .accessibilityLabel(String(localized: "chat_preview_attached_image"))
                 }
             }
         }
@@ -50,7 +50,7 @@ private struct MessageImages: View {
                 .background(t.surfaceActive)
                 .clipShape(RoundedRectangle(cornerRadius: 11))
                 .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
-                .accessibilityLabel("Attached image")
+                .accessibilityLabel(String(localized: "chat_attached_image"))
         } else if let url = URL(string: image.url) {
             AsyncImage(url: url) { phase in
                 switch phase {
@@ -65,14 +65,14 @@ private struct MessageImages: View {
             .background(t.surfaceActive)
             .clipShape(RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
-            .accessibilityLabel("Attached image")
+            .accessibilityLabel(String(localized: "chat_attached_image"))
         } else {
             placeholder
         }
     }
 
     private var placeholder: some View {
-        Text("Image")
+        Text(String(localized: "chat_image_placeholder"))
             .font(.caption)
             .foregroundStyle(t.text3)
             .frame(width: 116, height: 116)
@@ -92,6 +92,8 @@ private struct MessageImages: View {
 struct MessageBubble: View, Equatable {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
+    @ScaledMetric(relativeTo: .body) private var collapsedHeight: CGFloat = 224
     let message: Message
     var detail: ConversationMessageDetail? = nil
     var expandedToolBlocks: Set<String> = []
@@ -120,6 +122,14 @@ struct MessageBubble: View, Equatable {
     var body: some View {
         if message.role == .user {
             VStack(alignment: .trailing, spacing: 4) {
+                if let origin = crossSessionMessage(message.text)?.label ?? message.tag {
+                    Text(verbatim: origin)
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 700, alignment: .trailing)
+                        .accessibilityIdentifier("conversation.message.user.origin")
+                }
                 if let chip = message.visualizationContext {
                     VisualizationContextChipView(chip: chip)
                 }
@@ -130,18 +140,14 @@ struct MessageBubble: View, Equatable {
                     Spacer(minLength: 0)
                     if !message.text.isEmpty {
                         userContent
-                        // Desktop narration uses a 14pt body at 1.65 line
-                        // height. Keep it relative to .body so Dynamic Type
-                        // still scales the transcript as one readable unit.
-                        .font(.scaledSystem(14, relativeTo: .body))
-                        .lineSpacing(14 * 0.65)
-                        // Match Desktop's 13.6em narration reveal at 14pt.
-                        .frame(maxHeight: userIsCollapsed ? 190.4 : nil, alignment: .top)
+                        .font(.body)
+                        .lineSpacing(bodySize * 0.25)
+                        .frame(maxHeight: userIsCollapsed ? collapsedHeight : nil, alignment: .top)
                         .clipped()
                         .foregroundColor(t.text)
                         .padding(.horizontal, 18).padding(.vertical, 12)
                         .background(t.surfaceHover)
-                        .clipShape(.rect(cornerRadius: 16))
+                        .clipShape(.rect(cornerRadius: 20))
                         .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -187,7 +193,7 @@ struct MessageBubble: View, Equatable {
                     assistantContent
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(
-                            maxHeight: assistantIsCollapsed ? 190.4 : nil,
+                            maxHeight: assistantIsCollapsed ? collapsedHeight : nil,
                             alignment: .top
                         )
                         .clipped()
@@ -227,10 +233,10 @@ struct MessageBubble: View, Equatable {
 
     @ViewBuilder
     private var userContent: some View {
-        if message.text.contains("\n") {
-            AIText(markdown: message.text)
+        if userDisplayText.contains("\n") {
+            AIText(markdown: userDisplayText)
         } else {
-            Text(AIText.parseInline(message.text, size: 14))
+            Text(AIText.parseInline(userDisplayText, size: bodySize))
                 .textSelection(.enabled)
         }
     }
@@ -249,8 +255,12 @@ struct MessageBubble: View, Equatable {
         }
     }
 
+    private var userDisplayText: String {
+        crossSessionMessage(message.text)?.text ?? message.text
+    }
+
     private var userIsCollapsible: Bool {
-        AssistantMessageCollapsePolicy.shouldCollapse(message.text, isUser: true)
+        AssistantMessageCollapsePolicy.shouldCollapse(userDisplayText, isUser: true)
     }
 
     private var userIsCollapsed: Bool {
@@ -562,8 +572,6 @@ private struct MDBlockView: View, Equatable {
     @Environment(\.theme) private var t
     let block: MDBlock
 
-    private static let bodySize: CGFloat = 14
-
     static func == (lhs: MDBlockView, rhs: MDBlockView) -> Bool {
         lhs.block == rhs.block
     }
@@ -584,19 +592,19 @@ private struct MDBlockView: View, Equatable {
     private func codeBlock(_ code: String, language: String?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(language.flatMap { $0.isEmpty ? nil : $0 } ?? "Code")
+                Text(language.flatMap { $0.isEmpty ? nil : $0 } ?? String(localized: "drawer_tab_code"))
                     .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(t.text3)
                 Spacer()
                 Button {
                     UIPasteboard.general.string = code
                 } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+                    Label(String(localized: "chat_message_copy"), systemImage: "doc.on.doc")
                         .font(.system(size: 11.5))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(t.text3)
-                .accessibilityLabel("Copy code")
+                .accessibilityLabel(String(localized: "chat_copy_code"))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -783,7 +791,7 @@ private struct MDLineView: View, Equatable {
     @Environment(\.theme) private var t
     let line: MDLine
 
-    private static let bodySize: CGFloat = 14
+    @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
 
     static func == (lhs: MDLineView, rhs: MDLineView) -> Bool {
         lhs.line == rhs.line
@@ -798,8 +806,8 @@ private struct MDLineView: View, Equatable {
         case let .numbered(marker, s):
             listRow(marker: marker, s)
         case let .heading(level, s):
-            Text(AIText.parseInline(s, size: Self.bodySize))
-                .font(.system(size: max(16, 25 - CGFloat(level) * 2), weight: .semibold))
+            Text(AIText.parseInline(s, size: bodySize))
+                .font(.system(size: bodySize + max(0, 8 - CGFloat(level) * 2), weight: .semibold))
                 .foregroundStyle(t.text)
                 .padding(.top, 8)
                 .accessibilityAddTraits(.isHeader)
@@ -826,7 +834,7 @@ private struct MDLineView: View, Equatable {
     private func listRow(marker: String, _ s: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(marker)
-                .font(.scaledSystem(Self.bodySize, relativeTo: .body))
+                .font(.system(size: bodySize))
                 .foregroundColor(t.text2)
                 .frame(minWidth: 14, alignment: .trailing)
             inlineText(s)
@@ -834,12 +842,11 @@ private struct MDLineView: View, Equatable {
     }
 
     private func inlineText(_ s: String) -> some View {
-        // Dynamic Type: the assistant body scales relative to .body. The inline
-        // spans carry their own fixed-point fonts (bold / code) inside the
-        // AttributedString; the outer .font sets the scalable default size.
-        Text(AIText.parseInline(s, size: Self.bodySize))
-            .font(.scaledSystem(Self.bodySize, relativeTo: .body))
-            .lineSpacing(Self.bodySize * 0.65)
+        // Pass the scaled size into inline spans as well, so emphasis and
+        // code grow together with the surrounding Dynamic Type body.
+        Text(AIText.parseInline(s, size: bodySize))
+            .font(.system(size: bodySize))
+            .lineSpacing(bodySize * 0.25)
             .foregroundColor(t.text)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -850,8 +857,6 @@ private struct MDLineView: View, Equatable {
 struct AIText: View, Equatable {
     @Environment(\.theme) private var t
     let markdown: String
-
-    private static let bodySize: CGFloat = 14
 
     static func == (lhs: AIText, rhs: AIText) -> Bool {
         lhs.markdown == rhs.markdown
@@ -1161,4 +1166,36 @@ private struct UserMessageActions: View {
             copied = false
         }
     }
+}
+
+// Only unwrap complete peer envelopes at the presentation boundary.
+private enum CrossSessionEnvelope {
+    static let pattern = try! NSRegularExpression(
+        pattern: #"^\s*<cross-session-message(?=\s|>)([^>]*)>([\s\S]*)</cross-session-message>\s*$"#
+    )
+}
+
+func crossSessionMessage(_ text: String) -> (text: String, label: String)? {
+    let source = text as NSString
+    guard let match = CrossSessionEnvelope.pattern.firstMatch(
+        in: text, range: NSRange(location: 0, length: source.length)
+    ) else { return nil }
+    let attributes = source.substring(with: match.range(at: 1))
+    func attribute(_ name: String) -> String? {
+        let pattern = #"(?:^|\s)"# + name + #"="([^"]*)""#
+        guard let range = attributes.range(of: pattern, options: .regularExpression) else { return nil }
+        let assignment = String(attributes[range])
+        guard let quote = assignment.firstIndex(of: "\"") else { return nil }
+        let value = String(assignment[assignment.index(after: quote)..<assignment.index(before: assignment.endIndex)])
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+    let sender = attribute("from-name") ?? attribute("from") ?? attribute("from-session")
+    return (source.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines),
+            sender.map { "来自其他会话 · \($0)" } ?? "来自其他会话")
 }

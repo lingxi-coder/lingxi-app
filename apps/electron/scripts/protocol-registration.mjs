@@ -68,7 +68,7 @@ else
   command -v xdg-mime >/dev/null 2>&1 || { echo 'xdg-mime is required.' >&2; exit 1; }
   mkdir -p -- "$applications"
   if [ ! -f "$desktop" ]; then xdg-mime query default x-scheme-handler/lingxi > "$backup" || :; fi
-  printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=LingXi Code' "Exec=\"$escaped\" %u" 'Terminal=false' 'NoDisplay=true' 'MimeType=x-scheme-handler/lingxi;' "X-LingXi-Executable=$executable" > "$desktop"
+  printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=LingXi Code' "Icon=$app_dir/resources/icon.png" "Exec=\"$escaped\" %u" 'Terminal=false' 'NoDisplay=true' 'MimeType=x-scheme-handler/lingxi;' "X-LingXi-Executable=$executable" > "$desktop"
   xdg-mime default lingxi-code.desktop x-scheme-handler/lingxi
 fi
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$applications"; fi

@@ -600,6 +600,9 @@ final class ProviderRepository {
     private var pendingOperations: [UInt64: PendingCredentialOperation] = [:]
     private var pendingCompletions: [UInt64: CheckedContinuation<Void, Error>] = [:]
     private var pendingTimeouts: [UInt64: Task<Void, Never>] = [:]
+    private var pendingSubmissions: [UInt64: Task<Void, Never>] = [:]
+    private var credentialBindingGeneration: UInt64 = 0
+    private var credentialRevisions: [String: UInt64] = [:]
     /// Draft transactions use the credential protocol without publishing a
     /// candidate profile to the live list until the command succeeds.
     private var suppressedCredentialStateUpdates: Set<UInt64> = []
@@ -677,8 +680,15 @@ final class ProviderRepository {
         providerCatalog: ProviderCatalogLoader? = nil,
         resetCatalog: Bool = true
     ) {
-        if cancelPendingListOperations() {
-            bumpSyncRevision()
+        // Acknowledgement from a previous engine cannot confirm that the new
+        // engine adopted a credential. Keep the draft available for a retry.
+        credentialBindingGeneration &+= 1
+        for operationID in Array(pendingOperations.keys) {
+            failCredentialOperation(operationID, error: CancellationError())
+        }
+        for index in profiles.indices where profiles[index].connectionState == .testing {
+            profiles[index].connectionState = .idle
+            profiles[index].detailMessage = nil
         }
         if resetCatalog {
             catalogGeneration &+= 1
@@ -833,6 +843,7 @@ final class ProviderRepository {
         updated.operationInFlight = true
         updated.detailMessage = nil
         updated.validationMessage = nil
+        let observation = connectionObservation(for: draft.profile)
         do {
             if updated.clearCredentialOnApply && !updated.hasPendingSecret {
                 throw ProviderRepositoryOperationError.failed(
@@ -864,6 +875,7 @@ final class ProviderRepository {
                     updated.hasPendingSecret ? updated.pendingSecret.trimmingCharacters(in: .whitespacesAndNewlines) : nil
                 )
             }
+            try requireCurrentConnectionObservation(observation)
             updated.operationInFlight = false
             switch result {
             case .success(let message, _):
@@ -881,6 +893,11 @@ final class ProviderRepository {
             updated.operationInFlight = false
             updated.connectionState = .failed
             updated.detailMessage = error.localizedDescription
+            if let current = state(for: draft.id) {
+                updated.credentialState = current.credentialState
+                updated.hasLegacyAnthropicCredential = current.hasLegacyAnthropicCredential
+                updated.oauthState = current.oauthState
+            }
         }
         return updated
     }
@@ -980,13 +997,9 @@ final class ProviderRepository {
         if normalizedDraft.hasPendingSecret {
             normalizedDraft.clearCredentialOnApply = false
         }
-        if normalizedDraft.clearCredentialOnApply {
-            let keepsOAuth = normalizedDraft.oauthState?.signedIn == true
-            normalizedDraft.profile.enabled = keepsOAuth
-            normalizedDraft.profile.isDefault = keepsOAuth
-        }
         let previousState = state(for: normalizedDraft.id)
         let previousLaunchSnapshot = makeLaunchSnapshot()
+        let credentialGeneration = credentialBindingGeneration
         var persistedProfile: ProviderStoredProfile?
         var didPersistProfiles = false
         var didStartCredentialOperation = false
@@ -1059,6 +1072,9 @@ final class ProviderRepository {
                 for: launchProfile,
                 state: state(from: normalizedDraft)
             )
+            if credentialCommitted {
+                try await refreshModelsAfterCredentialCommit(generation: credentialGeneration)
+            }
             let nextLaunchSnapshot = makeLaunchSnapshot()
             let requiresReconnect = applyDraftRequiresReconnect(
                 from: previousLaunchSnapshot,
@@ -1152,6 +1168,7 @@ final class ProviderRepository {
             return
         }
         pendingTimeouts.removeValue(forKey: operationId)?.cancel()
+        pendingSubmissions.removeValue(forKey: operationId)?.cancel()
         let publishCredentialState = suppressedCredentialStateUpdates.remove(operationId) == nil
         self.storageEncrypted = storageEncrypted
         let configured = Set(configuredProviderIds)
@@ -1175,6 +1192,18 @@ final class ProviderRepository {
                 return nil
             }
         }()
+
+        switch operation {
+        case .list:
+            break
+        case .set(let target), .delete(let target):
+            invalidateCredentialObservations([target.credentialID])
+            if operationFailure == nil {
+                updateCredentialPresence(
+                    providerIDs: [target.credentialID], configuredProviderIDs: configured,
+                    storageEncrypted: storageEncrypted)
+            }
+        }
 
         switch operation {
         case .list(let targets):
@@ -1495,6 +1524,7 @@ final class ProviderRepository {
 
     func stageSecret(_ secret: String, for id: String) {
         guard let index = indexOfProfile(id: id) else { return }
+        invalidateCredentialObservations([engineProfileID(for: profiles[index].profile)])
         profiles[index].pendingSecret = secret
         if !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             profiles[index].clearCredentialOnApply = false
@@ -1506,6 +1536,7 @@ final class ProviderRepository {
 
     func clearCredentialRequest(for id: String) {
         guard let index = indexOfProfile(id: id) else { return }
+        invalidateCredentialObservations([engineProfileID(for: profiles[index].profile)])
         profiles[index].pendingSecret = ""
         profiles[index].clearCredentialOnApply = true
         profiles[index].validationMessage = nil
@@ -1522,6 +1553,7 @@ final class ProviderRepository {
 
     func discardCredentialChanges(for id: String) {
         guard let index = indexOfProfile(id: id) else { return }
+        invalidateCredentialObservations([engineProfileID(for: profiles[index].profile)])
         profiles[index].pendingSecret = ""
         profiles[index].clearCredentialOnApply = false
         profiles[index].validationMessage = nil
@@ -1531,7 +1563,9 @@ final class ProviderRepository {
     }
 
     func refreshCredentialStatus() async {
+        let generation = credentialBindingGeneration
         await refreshOAuthStatus()
+        guard !Task.isCancelled, generation == credentialBindingGeneration else { return }
         // Anthropic supports both credential kinds. ChatGPT OAuth is a separate
         // provider and intentionally has no API-key slot to query.
         let targets = profiles.filter { $0.profile.presetID != "openai-chatgpt" }.map { state in
@@ -1577,6 +1611,7 @@ final class ProviderRepository {
 
     private func refreshOAuthStatus() async {
         guard let oauthStateLoader else { return }
+        let generation = credentialBindingGeneration
         let targets = profiles.compactMap { state -> (String, String)? in
             guard let provider = oauthProvider(for: state.profile.presetID) else { return nil }
             return (state.id, provider)
@@ -1584,12 +1619,14 @@ final class ProviderRepository {
         for (settingsID, provider) in targets {
             do {
                 let state = try await oauthStateLoader(provider)
+                guard !Task.isCancelled, generation == credentialBindingGeneration else { return }
                 guard let index = indexOfProfile(id: settingsID) else { continue }
                 profiles[index].oauthState = state
                 if state.signedIn {
                     profiles[index].detailMessage = nil
                 }
             } catch {
+                guard !Task.isCancelled, generation == credentialBindingGeneration else { return }
                 guard let index = indexOfProfile(id: settingsID) else { continue }
                 profiles[index].oauthState = nil
                 profiles[index].detailMessage = error.localizedDescription
@@ -1600,6 +1637,7 @@ final class ProviderRepository {
 
     func testConnection(_ id: String) async {
         guard let index = indexOfProfile(id: id) else { return }
+        let observation = connectionObservation(for: profiles[index].profile)
         if let provider = oauthProvider(for: profiles[index].profile.presetID),
            profiles[index].oauthState?.signedIn == true,
            (profiles[index].profile.presetID == "openai-chatgpt" || !profiles[index].hasStoredAPIKey),
@@ -1625,6 +1663,7 @@ final class ProviderRepository {
                     ? profiles[index].pendingSecret.trimmingCharacters(in: .whitespacesAndNewlines)
                     : nil
             )
+            guard (try? requireCurrentConnectionObservation(observation)) != nil else { return }
             guard let currentIndex = indexOfProfile(id: id) else { return }
             switch result {
             case .success(let message, let usedStoredCredential):
@@ -1639,11 +1678,13 @@ final class ProviderRepository {
                 profiles[currentIndex].detailMessage = message
             }
         } catch let error as ProviderProfileValidationError {
+            guard (try? requireCurrentConnectionObservation(observation)) != nil else { return }
             if let currentIndex = indexOfProfile(id: id) {
                 profiles[currentIndex].connectionState = .failed
                 profiles[currentIndex].validationMessage = error.errorDescription
             }
         } catch {
+            guard (try? requireCurrentConnectionObservation(observation)) != nil else { return }
             if let currentIndex = indexOfProfile(id: id) {
                 profiles[currentIndex].connectionState = .failed
                 profiles[currentIndex].detailMessage = error.localizedDescription
@@ -1727,6 +1768,7 @@ final class ProviderRepository {
 
     private func testOAuthConnection(_ id: String, provider: String) async {
         guard let index = indexOfProfile(id: id) else { return }
+        let observation = connectionObservation(for: profiles[index].profile)
         profiles[index].connectionState = .testing
         profiles[index].detailMessage = nil
         do {
@@ -1737,6 +1779,7 @@ final class ProviderRepository {
             }
             let profile = try validateAndBuildLaunchProfile(for: profiles[index])
             let result = try await oauthConnectionTester(provider, profile)
+            guard (try? requireCurrentConnectionObservation(observation)) != nil else { return }
             guard let currentIndex = indexOfProfile(id: id) else { return }
             switch result {
             case .success(let message, _):
@@ -1747,6 +1790,7 @@ final class ProviderRepository {
                 profiles[currentIndex].detailMessage = message
             }
         } catch {
+            guard (try? requireCurrentConnectionObservation(observation)) != nil else { return }
             if let currentIndex = indexOfProfile(id: id) {
                 profiles[currentIndex].connectionState = .failed
                 profiles[currentIndex].detailMessage = error.localizedDescription
@@ -1758,7 +1802,9 @@ final class ProviderRepository {
     func applyChanges(_ id: String) async {
         guard let index = indexOfProfile(id: id) else { return }
         let previousLaunchSnapshot = makeLaunchSnapshot()
+        let credentialGeneration = credentialBindingGeneration
         do {
+            var credentialCommitted = false
             let isClearingCredential = profiles[index].clearCredentialOnApply
             let launchProfile = try validateAndBuildLaunchProfile(for: profiles[index], allowDisabledWithoutCredential: true)
             profiles[index].validationMessage = nil
@@ -1770,19 +1816,17 @@ final class ProviderRepository {
                     settingsID: launchProfile.settingsID,
                     credentialID: launchProfile.id
                 )
-                if let updatedIndex = indexOfProfile(id: id) {
-                    let keepsOAuth = profiles[updatedIndex].oauthState?.signedIn == true
-                    profiles[updatedIndex].profile.enabled = keepsOAuth
-                    profiles[updatedIndex].profile.isDefault = keepsOAuth
-                    normalizeDefaults()
-                    persistProfiles()
-                }
+                credentialCommitted = true
             } else if let secret = effectiveSecret(for: profiles[index]) {
                 try await storeCredentialIfPossible(
                     secret,
                     settingsID: launchProfile.settingsID,
                     credentialID: launchProfile.id
                 )
+                credentialCommitted = true
+            }
+            if credentialCommitted {
+                try await refreshModelsAfterCredentialCommit(generation: credentialGeneration)
             }
 
             if try await reconnectIfLaunchConfigurationChanged(from: previousLaunchSnapshot) {
@@ -1873,6 +1917,7 @@ final class ProviderRepository {
         }
         let previousProfiles = profiles
         let previousRoutingSettings = routingSettings
+        let credentialGeneration = credentialBindingGeneration
         if state.oauthState?.signedIn == true, let oauthProvider = oauthProvider(for: state.profile.presetID), let oauthLogoutHandler {
             do {
                 try await oauthLogoutHandler(oauthProvider)
@@ -1936,6 +1981,17 @@ final class ProviderRepository {
         if state.id == ProviderRepositoryDefaults.anthropicLegacyProfileID {
             Keychain.clear(.apiBase)
             Keychain.clear(.model)
+        }
+        if shouldDeleteCredential {
+            do {
+                try await refreshModelsAfterCredentialCommit(generation: credentialGeneration)
+            } catch {
+                // Deletion was already confirmed. A catalog refresh failure
+                // cannot restore a credential that no longer exists.
+                lastRepositoryError = error.localizedDescription
+                bumpSyncRevision()
+                return false
+            }
         }
         lastRepositoryError = nil
         bumpSyncRevision()
@@ -2023,6 +2079,89 @@ final class ProviderRepository {
         // are read per request, so only a change to what the engine was
         // launched with needs a rebuild.
         previousLaunchSnapshot != nextLaunchSnapshot
+    }
+
+    private func refreshModelsAfterCredentialCommit(generation: UInt64) async throws {
+        try Task.checkCancellation()
+        guard generation == credentialBindingGeneration else { throw CancellationError() }
+        guard let commandSubmitter else { return }
+        try await commandSubmitter(.listModels)
+        try Task.checkCancellation()
+        guard generation == credentialBindingGeneration else { throw CancellationError() }
+    }
+
+    /// The generic Credentials page shares these records with the profile
+    /// editor. Apply only its confirmed mutation, without changing routing.
+    func recordExternalCredentialCommit(
+        providerIDs: [String], configuredProviderIDs: Set<String>, storageEncrypted: Bool
+    ) {
+        invalidateCredentialObservations(providerIDs)
+        updateCredentialPresence(
+            providerIDs: providerIDs, configuredProviderIDs: configuredProviderIDs,
+            storageEncrypted: storageEncrypted)
+        bumpSyncRevision()
+    }
+
+    private func invalidateCredentialObservations(_ providerIDs: [String]) {
+        let ids = Set(providerIDs)
+        for id in ids { credentialRevisions[id, default: 0] &+= 1 }
+        // An earlier list may still contain the previous presence. A fresh
+        // listing will be requested by the next settings/catalog refresh.
+        cancelPendingListOperations()
+        for index in profiles.indices where ids.contains(engineProfileID(for: profiles[index].profile)) {
+            profiles[index].connectionState = .idle
+            profiles[index].detailMessage = nil
+        }
+    }
+
+    private func updateCredentialPresence(
+        providerIDs: [String], configuredProviderIDs: Set<String>, storageEncrypted: Bool
+    ) {
+        self.storageEncrypted = storageEncrypted
+        let ids = Set(providerIDs)
+        for index in profiles.indices {
+            let credentialID = engineProfileID(for: profiles[index].profile)
+            guard ids.contains(credentialID) else { continue }
+            let configured = configuredProviderIDs.contains(credentialID)
+            profiles[index].credentialState = configured ? .configured : .missing
+            if !configured { profiles[index].hasLegacyAnthropicCredential = false }
+        }
+    }
+
+    private struct ConnectionObservation {
+        let generation: UInt64
+        let credentialID: String
+        let revision: UInt64
+        let settingsID: String
+        let storedProfile: ProviderStoredProfile?
+    }
+
+    private func connectionObservation(for profile: ProviderStoredProfile) -> ConnectionObservation {
+        let credentialID = engineProfileID(for: profile)
+        return ConnectionObservation(
+            generation: credentialBindingGeneration, credentialID: credentialID,
+            revision: credentialRevisions[credentialID, default: 0],
+            settingsID: profile.id, storedProfile: state(for: profile.id)?.profile)
+    }
+
+    private func requireCurrentConnectionObservation(_ observation: ConnectionObservation) throws {
+        try Task.checkCancellation()
+        guard observation.generation == credentialBindingGeneration,
+              observation.revision == credentialRevisions[observation.credentialID, default: 0]
+        else {
+            throw ProviderRepositoryOperationError.failed(String(localized: "settings_provider_config_changed_retest"))
+        }
+        let current = state(for: observation.settingsID)?.profile
+        let sameConnection: Bool
+        if let previous = observation.storedProfile, let current {
+            sameConnection = previous.presetID == current.presetID && previous.baseURL == current.baseURL
+                && previous.modelID == current.modelID && previous.connections == current.connections
+        } else {
+            sameConnection = observation.storedProfile == nil && current == nil
+        }
+        guard sameConnection else {
+            throw ProviderRepositoryOperationError.failed(String(localized: "settings_provider_config_changed_retest"))
+        }
     }
 
     /// Rebuild the engine only when the launch configuration (or an unapplied
@@ -2119,6 +2258,7 @@ final class ProviderRepository {
         credentialID: String,
         publishState: Bool = true
     ) async throws {
+        invalidateCredentialObservations([credentialID])
         if let commandSubmitter {
             let operationID = takeOperationID()
             pendingOperations[operationID] = .set(
@@ -2165,6 +2305,7 @@ final class ProviderRepository {
         credentialID: String,
         publishState: Bool = true
     ) async throws {
+        invalidateCredentialObservations([credentialID])
         if let commandSubmitter {
             let operationID = takeOperationID()
             pendingOperations[operationID] = .delete(
@@ -2460,17 +2601,36 @@ final class ProviderRepository {
         _ operationID: UInt64,
         submit: @escaping @MainActor () async throws -> Void
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            pendingCompletions[operationID] = continuation
-            scheduleCredentialOperationTimeout(operationID)
-            Task { [weak self] in
-                do {
-                    try await submit()
-                } catch {
-                    self?.failCredentialOperation(operationID, error: error)
+        let generation = credentialBindingGeneration
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                pendingCompletions[operationID] = continuation
+                guard !Task.isCancelled else {
+                    failCredentialOperation(operationID, error: CancellationError())
+                    return
+                }
+                scheduleCredentialOperationTimeout(operationID)
+                pendingSubmissions[operationID] = Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try Task.checkCancellation()
+                        guard generation == self.credentialBindingGeneration,
+                              self.pendingOperations[operationID] != nil
+                        else { throw CancellationError() }
+                        try await submit()
+                        try Task.checkCancellation()
+                    } catch {
+                        self.failCredentialOperation(operationID, error: error)
+                    }
                 }
             }
+        } onCancel: { [weak self] in
+            Task { @MainActor in
+                self?.failCredentialOperation(operationID, error: CancellationError())
+            }
         }
+        try Task.checkCancellation()
+        guard generation == credentialBindingGeneration else { throw CancellationError() }
     }
 
     private func expireCredentialOperation(_ operationID: UInt64) {
@@ -2483,7 +2643,14 @@ final class ProviderRepository {
     private func failCredentialOperation(_ operationID: UInt64, error: Error) {
         guard pendingOperations[operationID] != nil else { return }
         pendingTimeouts.removeValue(forKey: operationID)?.cancel()
+        pendingSubmissions.removeValue(forKey: operationID)?.cancel()
         let operation = pendingOperations.removeValue(forKey: operationID)
+        if let operation {
+            switch operation {
+            case .set(let target), .delete(let target): invalidateCredentialObservations([target.credentialID])
+            case .list: break
+            }
+        }
         suppressedCredentialStateUpdates.remove(operationID)
         if let operation {
             clearOperationInFlightIfFinished(for: operation)

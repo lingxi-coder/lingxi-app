@@ -16,6 +16,31 @@ provider 标识服务供应商；profile 标识连接，包括协议、端点、
 
 CapabilitySupport::Unknown 与 Unsupported 不同。目录元数据、已实现适配器、账户权限和成功的真实调用分别代表不同的事实。
 
+<a id="route-diagnosis"></a>
+
+## 排查模型缺失或路由不符
+
+1. 确认 builder 已登记该连接，并用预期 Region 成功构建。连接名、供应商身份和协议族是不同的选择器。
+2. Chat 用 chat().models()，图像用 images().models()，其他服务用各自能力查询。不要把 Chat 模型列表当作所有资源的统一目录。
+3. 发送前解析已配置模型/连接，检查别名、协议模型、区域与可见性。本地解析成功不能证明供应商账户拥有真实模型权限。
+4. 供应商拒绝调用时保留类型化分类、状态与请求 ID。应修复该精确连接的凭据或模型映射，不要把同一密钥静默发送到其他端点。
+
+- [请求级凭据作用域](llm-requests.md#request-option-guide)
+- [错误处理参考](llm-execution-accounting.md#error-action-reference)
+
+<a id="capability-selection"></a>
+
+## 先选择能力，再构造输入
+
+| 需求 | 查询入口 | 需要处理的失败 |
+| --- | --- | --- |
+| 文本与函数工具 | 所选模型/连接与 codec 输入支持 | 不支持的工具、推理或输出控制 |
+| 图像生成或编辑 | images().capabilities_in(profile, model) | 不支持的遮罩、参考图或任务选项 |
+| 语音合成 / 转写 | audio().capabilities(&AudioRoute) | 统一适配器不可用或声音/格式不支持 |
+| 供应商文件或云端资源 | 类型化供应商客户端及资源专属能力/作用域 | 供应商绑定、端点、账户或用途不符 |
+
+兼容 JSON Chat 协议不代表获得所有能力。应将不支持状态明确交给调用者，让其主动选择受支持的流程。
+
 <a id="managed-catalog"></a>
 
 ## 管理持久化配置
@@ -187,20 +212,23 @@ pub fn estimate_local_tokens_in(&self, profile: &str, request: &ChatRequest) -> 
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/store.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/store.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/resolve.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/configuration/model.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/configuration/model.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/configuration/sync.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/configuration/sync.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/provider.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/frozen_pricing.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/token_count/request.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/capability-matrix-protocols.json](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/capability-matrix-protocols.json) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/capability-audit.json](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/capability-audit.json) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/providers/openai.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/providers/openai.toml) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/providers/anthropic.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/providers/anthropic.toml) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/data/providers/qwen.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/data/providers/qwen.toml) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/regions.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/regions.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- llm-client/src/client/store.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/resolve.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/configuration/model.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/configuration/sync.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/provider.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/frozen_pricing.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/token_count/request.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/capability-matrix-protocols.json — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/capability-audit.json — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/providers/openai.toml — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/providers/anthropic.toml — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/data/providers/qwen.toml — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/regions.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/live.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/chat.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/continuation.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; 所据文件指纹 sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; 产品固定版本 ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

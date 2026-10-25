@@ -18,7 +18,9 @@ export function parseBrowserCredential(value: unknown, provider: BrowserCredenti
   if (input.providerId !== provider) throw new Error('Unexpected sign-in provider');
   const result: BrowserCredential = { providerId: provider };
   for (const key of ['idToken', 'accessToken', 'nonce', 'pendingToken'] as const) {
-    if (input[key] !== undefined) {
+    // Firebase serializes absent optional OAuth fields (notably Google's
+    // pendingToken) as null. Only non-null values carry a credential.
+    if (input[key] !== undefined && input[key] !== null) {
       if (typeof input[key] !== 'string' || input[key].length > 32_768) throw new Error('Invalid sign-in response');
       result[key] = input[key];
     }
@@ -69,9 +71,11 @@ export async function browserSignIn(
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'self' 'nonce-${secret}' https://apis.google.com; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://${config.authDomain}; frame-src https://${config.authDomain}; style-src 'nonce-${secret}'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`);
         const label = provider === 'google.com' ? 'Google' : 'Apple';
+        // Dynamic imports keep electron-vite's ESM shim scanner from treating
+        // browser imports inside this HTML string as imports of the Node bundle.
         res.end(`<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LingXi 登录</title><style nonce="${secret}">body{font:16px system-ui;max-width:440px;margin:15vh auto;padding:24px;color:#202124}button{font:inherit;padding:12px 24px;border-radius:10px;border:1px solid #ccc;background:#fff;cursor:pointer}p{line-height:1.6}</style><h1>登录 LingXi</h1><p>使用 ${label} 账号继续。</p><button id="login">通过 ${label} 登录</button><p id="status" role="status"></p><script type="module" nonce="${secret}">
-import { initializeApp } from '/firebase-app.js';
-import { initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, GoogleAuthProvider, OAuthProvider, signInWithPopup, signOut } from '/firebase-auth.js';
+const { initializeApp } = await import('/firebase-app.js');
+const { initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, GoogleAuthProvider, OAuthProvider, signInWithPopup, signOut } = await import('/firebase-auth.js');
 const auth = initializeAuth(initializeApp(${JSON.stringify(config).replaceAll('<', '\\u003c')}), { persistence: inMemoryPersistence, popupRedirectResolver: browserPopupRedirectResolver });
 const provider = ${provider === 'google.com' ? 'new GoogleAuthProvider()' : "new OAuthProvider('apple.com')"};
 provider.addScope('email');

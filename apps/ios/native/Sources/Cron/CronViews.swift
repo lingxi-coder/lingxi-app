@@ -26,12 +26,12 @@ struct CronRootView: View {
             // RootView owns navigation on both phone and tablet. Keep one
             // navigation bar and let the repository retain editor/run history.
             if linkedResourceMissing {
-                ContentUnavailableView("Scheduled item unavailable", systemImage: "link", description: Text("This scheduled item is not stored locally on this device."))
+                ContentUnavailableView(String(localized: "cron_link_unavailable"), systemImage: "link", description: Text(String(localized: "cron_link_missing")))
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_close") { onDismiss?() } } }
             } else if let route = repository.routePath.last {
                 destination(route)
             } else {
-                taskList.navigationTitle("Scheduled")
+                taskList.navigationTitle(String(localized: "settings_title_cron"))
             }
         }
         .navigationBarBackButtonHidden()
@@ -53,9 +53,9 @@ struct CronRootView: View {
             }
         }
         .interactiveDismissDisabled(repository.hasUnsavedChanges)
-        .alert("Discard unsaved changes?", isPresented: $closeAlert) {
-            Button("Discard", role: .destructive) { repository.discardDraft(); onDismiss?() }
-            Button("Keep editing", role: .cancel) {}
+        .alert(String(localized: "cron_discard_title"), isPresented: $closeAlert) {
+            Button(String(localized: "cron_discard"), role: .destructive) { repository.discardDraft(); onDismiss?() }
+            Button(String(localized: "cron_keep_editing"), role: .cancel) {}
         }
         .accessibilityIdentifier("cron.root")
     }
@@ -65,7 +65,7 @@ struct CronRootView: View {
             .toolbar {
                 if let onDismiss {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") {
+                        Button(String(localized: "common_close")) {
                             if repository.hasUnsavedChanges { closeAlert = true } else { onDismiss() }
                         }
                     }
@@ -94,15 +94,15 @@ private struct CronListView: View {
         repository.state.tasks.filter {
             (filter == "all" || $0.task.status.rawValue == filter) &&
             (query.isEmpty || ($0.task.configuration.name ?? "").localizedCaseInsensitiveContains(query) ||
-                $0.task.prompt.localizedCaseInsensitiveContains(query) || $0.scope.projectName.localizedCaseInsensitiveContains(query))
+                $0.task.prompt.localizedCaseInsensitiveContains(query) || $0.scope.displayName.localizedCaseInsensitiveContains(query))
         }
     }
 
     var body: some View {
         List {
             Section {
-                Picker("Status", selection: $filter) {
-                    Text("All").tag("all")
+                Picker(String(localized: "settings_linux_section_status"), selection: $filter) {
+                    Text(String(localized: "drawer_filter_all")).tag("all")
                     ForEach(CronTaskStatus.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
                 }
                 .pickerStyle(.segmented)
@@ -119,11 +119,11 @@ private struct CronListView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(scoped.task.configuration.name ?? scoped.task.prompt.firstCronLine ?? scoped.task.id)
                                     .foregroundStyle(.primary).lineLimit(2)
-                                Text("\(scoped.task.human) · \(scoped.scope.projectName)").font(.subheadline).foregroundStyle(.secondary)
+                                Text("\(scoped.task.human) · \(scoped.scope.displayName)").font(.subheadline).foregroundStyle(.secondary)
                                 if let reason = scoped.task.configuration.statusReason ?? scoped.task.unsupportedReason {
                                     Text(reason).font(.caption).foregroundStyle(.orange)
                                 } else if let next = scoped.task.nextFireMs, scoped.task.status == .active {
-                                    Text("Next run: \(formatCronEpoch(next))").font(.caption).foregroundStyle(.secondary)
+                                    Text(String(localized: "cron_run_summary_next \(formatCronEpoch(next))")).font(.caption).foregroundStyle(.secondary)
                                 }
                                 if let run = scoped.activeRun ?? scoped.lastRun {
                                     Text(run.status.label).font(.caption).foregroundStyle(.secondary)
@@ -134,18 +134,18 @@ private struct CronListView: View {
                     }
                     .swipeActions(allowsFullSwipe: false) {
                         if scoped.task.status != .completed {
-                            Button(scoped.task.status == .active ? "Pause" : "Resume") {
+                            Button(scoped.task.status == .active ? String(localized: "cron_pause") : String(localized: "cron_resume")) {
                                 Task { await repository.setStatus(scopeID: scoped.scope.scopeID, taskID: scoped.task.id, status: scoped.task.status == .active ? .paused : .active) }
                             }.tint(.orange)
                         }
-                        Button("Delete", role: .destructive) {
+                        Button(String(localized: "common_delete"), role: .destructive) {
                             Task { await repository.deleteTask(scopeID: scoped.scope.scopeID, taskID: scoped.task.id) }
                         }
                     }
                 }
                 if visibleTasks.isEmpty {
                     if query.isEmpty {
-                        ContentUnavailableView("No scheduled tasks", systemImage: "clock", description: Text("Create a task to run saved instructions on a schedule."))
+                        ContentUnavailableView(String(localized: "cron_no_tasks_yet"), systemImage: "clock", description: Text(String(localized: "cron_empty_help")))
                     } else { ContentUnavailableView.search(text: query) }
                 }
             }
@@ -154,18 +154,18 @@ private struct CronListView: View {
                 if let error = repository.state.errorMessage { Text(error).foregroundStyle(.red) }
             }
         }
-        .alert("Discard unsaved changes?", isPresented: $discardAlert) {
-            Button("Discard", role: .destructive) { if let route = pendingRoute { open(route) }; pendingRoute = nil }
-            Button("Keep editing", role: .cancel) { pendingRoute = nil }
+        .alert(String(localized: "cron_discard_title"), isPresented: $discardAlert) {
+            Button(String(localized: "cron_discard"), role: .destructive) { if let route = pendingRoute { open(route) }; pendingRoute = nil }
+            Button(String(localized: "cron_keep_editing"), role: .cancel) { pendingRoute = nil }
         }
-        .searchable(text: $query, prompt: "Search scheduled tasks")
+        .searchable(text: $query, prompt: String(localized: "cron_search_tasks"))
         .refreshable { await repository.refresh() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 // The ACTIVE scope, not the global one: with a project open, pinning
                 // every new task to `globalCronScopeID` runs it in
                 // `<root>/scheduled/workspace` instead of the project workspace.
-                Button("Create", systemImage: "plus") { select(.task(scopeID: repository.state.activeScopeID, taskID: nil)) }
+                Button(String(localized: "common_create"), systemImage: "plus") { select(.task(scopeID: repository.state.activeScopeID, taskID: nil)) }
                     .accessibilityIdentifier("cron.add")
             }
         }
@@ -224,27 +224,27 @@ private struct CronTaskEditorView: View {
     var body: some View {
         Form {
             Section {
-                TextField("Task name", text: name)
-                TextField("Instructions", text: $repository.draft.prompt, axis: .vertical).lineLimit(4...12)
+                TextField(String(localized: "cron_task_name"), text: name)
+                TextField(String(localized: "cron_instructions"), text: $repository.draft.prompt, axis: .vertical).lineLimit(4...12)
             }
             detailsSection
-            Section("Frequency") {
-                TextField("Cron expression", text: $repository.draft.cron).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Toggle("Repeat on schedule", isOn: $repository.draft.recurring)
-                LabeledContent("Time zone", value: TimeZone.current.identifier)
-                Picker("Notifications", selection: $repository.draft.automation.notificationPolicy) {
+            Section(String(localized: "cron_frequency")) {
+                TextField(String(localized: "cron_expression_field_label"), text: $repository.draft.cron).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Toggle(String(localized: "cron_recurring_toggle"), isOn: $repository.draft.recurring)
+                LabeledContent(String(localized: "cron_time_zone"), value: TimeZone.current.identifier)
+                Picker(String(localized: "settings_notifications"), selection: $repository.draft.automation.notificationPolicy) {
                     ForEach(CronNotificationPolicy.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 Text("cron_ios_scheduling_note").font(.footnote).foregroundStyle(.secondary)
             }
             if let taskID = repository.draft.taskID, repository.draft.automation.status == .active {
                 Section {
-                    Button("Run now") { Task { await repository.runNow(scopeID: repository.draft.scopeID, taskID: taskID) } }
+                    Button(String(localized: "cron_run_now_button")) { Task { await repository.runNow(scopeID: repository.draft.scopeID, taskID: taskID) } }
                         .disabled(repository.hasUnsavedChanges)
                 }
             }
             if !taskHistory.isEmpty {
-                Section("Run history") {
+                Section(String(localized: "cron_run_history_section")) {
                     ForEach(taskHistory) { run in
                         Button { repository.openRun(run.runID) } label: {
                             LabeledContent(run.status.label, value: formatCronEpoch(run.scheduledAtMs))
@@ -254,25 +254,25 @@ private struct CronTaskEditorView: View {
             }
             if let error = repository.state.errorMessage { Section { Text(error).foregroundStyle(.red) } }
         }
-        .navigationTitle(repository.draft.isEditing ? "Edit task" : "New task")
+        .navigationTitle(repository.draft.isEditing ? String(localized: "cron_edit_task_title") : String(localized: "cron_new_task_title"))
         .navigationBarBackButtonHidden()
         .interactiveDismissDisabled(repository.hasUnsavedChanges)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") {
+                Button(String(localized: "common_cancel")) {
                     if repository.hasUnsavedChanges { discardAlert = true } else { repository.popRoute() }
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
+                Button(String(localized: "settings_save")) {
                     saving = true
                     Task { await repository.saveDraft(); saving = false }
                 }.disabled(saving || repository.draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || repository.draft.automation.model == nil)
             }
         }
-        .alert("Discard unsaved changes?", isPresented: $discardAlert) {
-            Button("Discard", role: .destructive) { repository.discardDraft() }
-            Button("Keep editing", role: .cancel) {}
+        .alert(String(localized: "cron_discard_title"), isPresented: $discardAlert) {
+            Button(String(localized: "cron_discard"), role: .destructive) { repository.discardDraft() }
+            Button(String(localized: "cron_keep_editing"), role: .cancel) {}
         }
         .sheet(isPresented: $modelPicker) {
             ModelPickerSheet(availableModels: repository.modelChoices, detailsByReference: repository.modelDetails,
@@ -289,39 +289,39 @@ private struct CronTaskEditorView: View {
     }
 
     private var detailsSection: some View {
-            Section("Details") {
-                Picker("Status", selection: $repository.draft.automation.status) {
+            Section(String(localized: "session_details_button")) {
+                Picker(String(localized: "settings_linux_section_status"), selection: $repository.draft.automation.status) {
                     ForEach(CronTaskStatus.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                Picker("Runs in", selection: $repository.draft.automation.runMode) {
+                Picker(String(localized: "cron_runs_in"), selection: $repository.draft.automation.runMode) {
                     ForEach(CronRunMode.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 if repository.draft.automation.runMode == .selectedSession {
-                    Picker("Chat", selection: target) {
-                        Text("Select chat").tag("")
+                    Picker(String(localized: "drawer_tab_chat"), selection: target) {
+                        Text(String(localized: "cron_select_chat")).tag("")
                         ForEach(repository.sessionChoices.filter { !repository.draft.isEditing || $0.scopeID == repository.draft.scopeID }) { Text($0.title).tag($0.id) }
                     }
                 }
-                Picker("Project", selection: $repository.draft.scopeID) {
-                    ForEach(repository.state.scopes) { scope in Text(scope.projectID == nil ? "None" : scope.projectName).tag(scope.scopeID) }
+                Picker(String(localized: "cron_run_project_label"), selection: $repository.draft.scopeID) {
+                    ForEach(repository.state.scopes) { scope in Text(scope.displayName).tag(scope.scopeID) }
                 }.disabled(repository.draft.isEditing || repository.draft.automation.runMode == .selectedSession)
                 Button { modelPicker = true } label: {
-                    LabeledContent("Model", value: repository.modelDetails[repository.draft.automation.model ?? ""]?.displayName ?? repository.draft.automation.model ?? "Select model")
+                    LabeledContent(String(localized: "session_details_model"), value: repository.modelDetails[repository.draft.automation.model ?? ""]?.displayName ?? repository.draft.automation.model ?? String(localized: "composer_select_model"))
                 }
-                Picker("Reasoning", selection: reasoning) {
+                Picker(String(localized: "model_detail_reasoning"), selection: reasoning) {
                     ForEach(reasoningOptions, id: \.self) { option in
                         Text(ModelDetailFormat.reasoningSelectionLabel(option)).tag(reasoningID(option))
                     }
                 }
                 if repository.draft.automation.reasoning.type == "token_budget",
                    let range = repository.modelDetails[repository.draft.automation.model ?? ""]?.reasoning.budgetRange {
-                    TextField("Token budget", value: Binding(
+                    TextField(String(localized: "cron_token_budget"), value: Binding(
                         get: { repository.draft.automation.reasoning.tokens ?? range.minTokens },
                         set: { repository.draft.automation.reasoning.tokens = min(range.maxTokens, max(range.minTokens, $0)) }
                     ), format: .number).keyboardType(.numberPad)
                 }
                 if repository.draft.isEditing {
-                    Button("Copy to project…") { repository.beginCopy() }
+                    Button(String(localized: "cron_copy_project")) { repository.beginCopy() }
                 }
                 if let reason = repository.draft.automation.statusReason { Text(reason).foregroundStyle(.orange) }
             }
@@ -346,7 +346,7 @@ private struct CronRunDetailView: View {
         Form {
             if let run = repository.state.history.first(where: { $0.runID == runID }) {
                 Section("cron_run_section_overview") {
-                    LabeledContent("cron_run_project_label", value: run.projectName)
+                    LabeledContent("cron_run_project_label", value: run.projectID == nil ? String(localized: "common_none") : run.projectName)
                     LabeledContent("settings_linux_section_status", value: run.resultCategory.label)
                     LabeledContent("cron_scheduled_at_label", value: formatCronEpoch(run.scheduledAtMs))
                     LabeledContent("cron_triggered_at_label", value: formatCronEpoch(run.triggeredAtMs))
@@ -356,8 +356,8 @@ private struct CronRunDetailView: View {
                     if let finishedAt = run.finishedAtMs {
                         LabeledContent("cron_finished_at_label", value: formatCronEpoch(finishedAt))
                     }
-                    if let model = run.actualModel { LabeledContent("Model", value: model) }
-                    if run.sessionID != nil { Button("Open chat") { repository.openResultSession(run) } }
+                    if let model = run.actualModel { LabeledContent(String(localized: "session_details_model"), value: model) }
+                    if run.sessionID != nil { Button(String(localized: "cron_open_chat")) { repository.openResultSession(run) } }
                     LabeledContent("cron_run_id_label", value: run.runID)
                 }
                 Section("settings_linux_section_tasks") {
@@ -372,7 +372,7 @@ private struct CronRunDetailView: View {
                 }
                 if let error = run.errorMessage, !error.isEmpty {
                     Section("cron_error_section") {
-                        Text(run.errorKind.map { "\($0.label)：\(error)" } ?? error)
+                        Text(run.errorKind.map { String(localized: "cron_error_detail \($0.label) \(error)") } ?? error)
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
                     }
@@ -386,7 +386,7 @@ private struct CronRunDetailView: View {
         .navigationBarBackButtonHidden()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Back") { repository.popRoute() }
+                Button(String(localized: "onboarding_back")) { repository.popRoute() }
             }
         }
     }

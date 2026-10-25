@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import * as React from 'react';
 import { modUiRenderPropsWithinBounds } from '../../shared/modUiPlainData';
 import {
@@ -689,6 +691,7 @@ function ModUiParentSiteRuntime({
 }
 
 function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescriptor }) {
+  useI18n();
   const context = useContext(ParentContext);
   const elementRef = useRef<HTMLDivElement>(null);
   const runtimeIdRef = useRef<string | null>(null);
@@ -1081,7 +1084,7 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
     style.height = `${visibleFault.surfaceHeight}px`;
   }
   return <div ref={elementRef} className="mod-ui-client-instance" data-client={descriptor.key} data-plugin={descriptor.plugin} data-module={descriptor.module} style={style}>
-    {visibleFault || missingRuntimeEpoch ? <div className="mod-ui-client-fallback" role="status">This Mod surface is unavailable.</div>
+    {visibleFault || missingRuntimeEpoch ? <div className="mod-ui-client-fallback" role="status">{tr("desktop_ui_mod_unavailable")}</div>
       : frame && frame.renderRevision === site?.renderRevision ? <ModUiClientTree
         tree={frame.tree}
         site={{ component: site?.component ?? 'AbovePrompt', instanceId: site?.instanceId ?? '' }}
@@ -1094,6 +1097,6 @@ function ClientModuleSurface({ descriptor }: { descriptor: ClientElementDescript
         }}
         onRenderFault={(reason) => reportCurrentFault('render', reason, site?.renderRevision ?? -1)}
       />
-        : <div className="mod-ui-client-loading" role="status" aria-label="Loading Mod surface" />}
+        : <div className="mod-ui-client-loading" role="status" aria-label={tr("desktop_ui_mod_loading")} />}
   </div>;
 }

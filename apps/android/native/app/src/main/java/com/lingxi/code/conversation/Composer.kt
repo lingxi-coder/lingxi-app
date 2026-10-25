@@ -11,14 +11,22 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.semantics.Role
+import com.lingxi.code.components.ModelSelectionSheet
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
@@ -47,7 +55,6 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
@@ -57,6 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -121,6 +130,9 @@ fun Composer(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    /** Several attachments (Remote Control sends up to four); shown after [attachment]. */
+    attachments: List<ComposerAttachment> = emptyList(),
+    onRemoveAttachmentAt: (Int) -> Unit = {},
     /** The widget the next prompt follows up on, with its remove control. */
     visualizationChip: VisualizationContextChip? = null,
     onRemoveVisualizationChip: () -> Unit = {},
@@ -136,6 +148,7 @@ fun Composer(
     onOpenModelSettings: () -> Unit = {},
     /** Current settings/credential state keyed by the engine provider profile. */
     modelProviderStatuses: List<ModelProviderStatus> = emptyList(),
+    remoteModelSelection: Boolean = false,
     /** Opens a specific provider editor, or the provider list when id is null. */
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     /** Fired by the Stop button to cancel the in-flight turn. */
@@ -166,7 +179,7 @@ fun Composer(
     var suggestionRejected by remember(suggestionTurnKey) { mutableStateOf(false) }
     val visibleSuggestion = promptSuggestion?.takeIf {
         !suggestionRejected && text.isEmpty() && !isStreaming && enabled
-            && attachment == null && visualizationChip == null
+            && attachment == null && attachments.isEmpty() && visualizationChip == null
     }
     LaunchedEffect(promptSuggestion, visibleSuggestion, suggestionTurnKey) {
         if (promptSuggestion != null && !suggestionShown && !suggestionRejected) {
@@ -207,6 +220,13 @@ fun Composer(
             // shown only once a camera capture has surfaced an image.
             if (attachment != null) {
                 AttachmentThumb(attachment = attachment, onRemove = onRemoveAttachment)
+            }
+            if (attachments.isNotEmpty()) {
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    attachments.forEachIndexed { index, item ->
+                        AttachmentThumb(attachment = item, onRemove = { onRemoveAttachmentAt(index) })
+                    }
+                }
             }
             if (visualizationChip != null) {
                 VisualizationContextChipView(chip = visualizationChip, onDismiss = onRemoveVisualizationChip)
@@ -434,6 +454,7 @@ fun Composer(
                         ModelChip(
                             model = model, models = availableModels, modelSetupRequired = modelSetupRequired,
                             onOpenModelSettings = onOpenModelSettings, providerStatuses = modelProviderStatuses,
+                            remoteModelSelection = remoteModelSelection,
                             onOpenProviderSettings = onOpenProviderSettings, onModelChange = onModelChange,
                             reasoning = reasoning, onReasoningChange = onReasoningChange,
                             compact = compactModel,
@@ -522,7 +543,7 @@ private fun IconHit(
 }
 
 /**
- * Model-selector chip + anchored dropdown menu. The engine has already curated
+ * Model-selector chip + searchable Material bottom sheet. The engine has already curated
  * the latest common models; this menu groups exactly those rows by provider and
  * keeps the active provider-qualified id highlighted.
  */
@@ -533,6 +554,7 @@ private fun ModelChip(
     modelSetupRequired: Boolean,
     onOpenModelSettings: () -> Unit,
     providerStatuses: List<ModelProviderStatus>,
+    remoteModelSelection: Boolean,
     onOpenProviderSettings: (String?) -> Unit,
     onModelChange: (ModelOption) -> Unit,
     reasoning: ReasoningControl?,
@@ -541,6 +563,7 @@ private fun ModelChip(
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
+    val reasoningLabel = effortLabel(reasoning?.selection.orEmpty())
     var open by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var selectedDetails by remember { mutableStateOf<CatalogModelDetails?>(null) }
@@ -585,7 +608,7 @@ private fun ModelChip(
                     else Modifier.testTag(UiTags.MODEL_PICKER_CHIP),
                 )
                 .heightIn(min = 48.dp)
-                .semantics { contentDescription = "${model.name}, ${reasoning?.selection ?: "automatic"}" }
+                .semantics { contentDescription = "${model.name}, $reasoningLabel" }
                 .padding(horizontal = if (compact) 14.dp else 9.dp, vertical = 5.dp),
         ) {
             if (compact) {
@@ -619,112 +642,87 @@ private fun ModelChip(
             }
         }
 
-        DropdownMenu(
-            expanded = open,
-            onDismissRequest = { open = false },
-            containerColor = t.surface,
-            modifier = Modifier
-                .width(330.dp)
-                .heightIn(max = 600.dp),
-        ) {
-            reasoning?.let { control ->
-                EffortPicker(control = control, onSelect = onReasoningChange)
-            }
-            ModelSearchField(
-                query = query,
-                onQueryChange = { query = it },
-            )
-            if (recents.isNotEmpty()) {
-                Text(
-                    text = stringResource(R.string.composer_recent_models),
-                    color = t.text3,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier
-                        .padding(start = 15.dp, end = 15.dp, top = 8.dp, bottom = 4.dp)
-                        .fillMaxWidth(),
-                )
-                recents.forEach { m ->
-                    ModelPickerRow(
-                        model = m,
-                        active = m.id == model.id,
-                        providerStatuses = providerStatuses,
-                        onShowDetails = { selectedDetails = it },
-                        onSelected = {
-                            open = false
-                            recentsStore.record(m.id)
-                            recentRefs = recentsStore.references()
-                            onModelChange(m)
-                        },
-                        onOpenProviderSettings = { settingsId ->
-                            open = false
-                            onOpenProviderSettings(settingsId)
-                        },
-                    )
+        if (open) {
+            ModelSelectionSheet(
+                title = stringResource(R.string.composer_select_model),
+                onDismiss = { open = false },
+            ) {
+                ModelSearchField(query = query, onQueryChange = { query = it })
+                LazyColumn(Modifier.weight(1f).selectableGroup()) {
+                    if (query.isBlank() && reasoning != null) {
+                        item {
+                            var expanded by remember { mutableStateOf(false) }
+                            ListItem(
+                                headlineContent = { Text(stringResource(R.string.composer_model_options)) },
+                                supportingContent = { Text(effortLabel(reasoning.selection)) },
+                                trailingContent = { LXIcon(if (expanded) LXIconName.Chevron else LXIconName.ChevronR) },
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                modifier = Modifier.clickable { expanded = !expanded }.testTag("composer.model.options"),
+                            )
+                            if (expanded) EffortPicker(control = reasoning, onSelect = onReasoningChange)
+                        }
+                    }
+                    if (recents.isNotEmpty()) {
+                        item {
+                            Text(
+                                stringResource(R.string.composer_recent_models),
+                                color = t.text3,
+                                style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                            )
+                        }
+                        items(recents, key = { "recent:${it.id}" }) { m ->
+                            ModelPickerRow(
+                                model = m, active = m.id == model.id,
+                                providerStatuses = providerStatuses, remoteModelSelection = remoteModelSelection,
+                                onShowDetails = { selectedDetails = it },
+                                onSelected = {
+                                    open = false
+                                    recentsStore.record(m.id)
+                                    recentRefs = recentsStore.references()
+                                    onModelChange(m)
+                                },
+                                onOpenProviderSettings = { settingsId -> open = false; onOpenProviderSettings(settingsId) },
+                            )
+                        }
+                    }
+                    groups.forEach { group ->
+                        item(key = "header:${group.id}") {
+                            val status = EngineModelCatalog.providerStatus(group.id, providerStatuses)
+                            ListItem(
+                                headlineContent = { Text(group.name, style = androidx.compose.material3.MaterialTheme.typography.titleSmall) },
+                                supportingContent = if (remoteModelSelection) null else {{
+                                    Text(status?.displayLabel ?: stringResource(R.string.settings_provider_unconfigured))
+                                }},
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            )
+                        }
+                        items(group.models, key = { "provider:${it.id}" }) { m ->
+                            ModelPickerRow(
+                                model = m, active = m.id == model.id,
+                                providerStatuses = providerStatuses, remoteModelSelection = remoteModelSelection,
+                                onShowDetails = { selectedDetails = it },
+                                onSelected = {
+                                    open = false
+                                    recentsStore.record(m.id)
+                                    recentRefs = recentsStore.references()
+                                    onModelChange(m)
+                                },
+                                onOpenProviderSettings = { settingsId -> open = false; onOpenProviderSettings(settingsId) },
+                            )
+                        }
+                    }
+                    if (groups.isEmpty() && recents.isEmpty()) {
+                        item {
+                            Text(
+                                stringResource(if (query.isBlank() && visibleModels.isEmpty()) R.string.composer_no_visible_models else R.string.composer_no_matching_models),
+                                color = t.text3,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(24.dp),
+                            )
+                        }
+                    }
                 }
-            }
-            groups.forEachIndexed { groupIndex, group ->
-                val providerStatus = EngineModelCatalog.providerStatus(group.id, providerStatuses)
-                val providerLabel = providerStatus?.displayLabel ?: stringResource(R.string.settings_provider_unconfigured)
-                val providerColor = providerStatus?.status?.dot(t) ?: t.text4
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(
-                        start = 15.dp,
-                        end = 15.dp,
-                        // The tighter first-group inset only applies when this
-                        // header really is the first thing under the search
-                        // field — the recents group can now precede it.
-                        top = if (groupIndex == 0 && recents.isEmpty()) 8.dp else 12.dp,
-                        bottom = 4.dp,
-                    ).fillMaxWidth(),
-                ) {
-                    Text(
-                        text = group.name,
-                        color = t.text3,
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Dot(color = providerColor, size = 6.dp)
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        text = providerLabel,
-                        color = providerColor,
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-                group.models.forEach { m ->
-                    ModelPickerRow(
-                        model = m,
-                        active = m.id == model.id,
-                        providerStatuses = providerStatuses,
-                        onShowDetails = { selectedDetails = it },
-                        onSelected = {
-                            open = false
-                            recentsStore.record(m.id)
-                            recentRefs = recentsStore.references()
-                            onModelChange(m)
-                        },
-                        onOpenProviderSettings = { settingsId ->
-                            open = false
-                            onOpenProviderSettings(settingsId)
-                        },
-                    )
-                }
-            }
-            if (groups.isEmpty() && recents.isEmpty()) {
-                Text(
-                    text = if (query.isBlank() && visibleModels.isEmpty()) {
-                        stringResource(R.string.composer_no_visible_models)
-                    } else {
-                        stringResource(R.string.composer_no_matching_models)
-                    },
-                    color = t.text3,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
-                )
             }
         }
         selectedDetails?.let { details ->
@@ -744,81 +742,38 @@ private fun ModelPickerRow(
     model: ModelOption,
     active: Boolean,
     providerStatuses: List<ModelProviderStatus>,
+    remoteModelSelection: Boolean,
     onShowDetails: (CatalogModelDetails) -> Unit,
     onSelected: () -> Unit,
     onOpenProviderSettings: (String?) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val providerStatus = EngineModelCatalog.providerStatus(model.providerId, providerStatuses)
-    val canSelect = providerStatus?.canSelect == true
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 5.dp, vertical = 2.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (active) t.accent.tint(0.15f) else Color.Transparent)
-            .clickable {
+    val canSelect = modelPickerCanSelect(remoteModelSelection, providerStatus)
+    val currentLabel = stringResource(R.string.composer_current_model)
+    ListItem(
+        headlineContent = { Text(model.name) },
+        supportingContent = {
+            Text(model.id.substringAfter('/'), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        },
+        leadingContent = { RadioButton(selected = active, onClick = null, enabled = canSelect) },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                model.details?.let { details -> ModelDetailsInfoButton(onClick = { onShowDetails(details) }) }
+                if (!canSelect) Text(
+                    stringResource(R.string.composer_configure_button),
+                    color = t.accent,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
+                )
+            }
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth()
+            .selectable(selected = active, role = Role.RadioButton) {
                 if (canSelect) onSelected() else onOpenProviderSettings(providerStatus?.settingsId)
             }
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-    ) {
-        Dot(color = model.color, size = 8.dp)
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = model.name,
-                color = if (canSelect) t.text else t.text2,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = model.desc,
-                color = t.text3,
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (model.metadata.summaryItems.isNotEmpty()) {
-                Text(
-                    text = model.metadata.summaryItems.joinToString(" · "),
-                    color = t.text3,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    lineHeight = 13.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        model.details?.let { details ->
-            ModelDetailsInfoButton(onClick = { onShowDetails(details) })
-        }
-        when {
-            !canSelect -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Text(stringResource(R.string.composer_configure_button), color = t.accent, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
-                LXIcon(
-                    name = LXIconName.ChevronR,
-                    size = 10.dp,
-                    color = t.accent,
-                    stroke = 2f,
-                    contentDescription = stringResource(
-                        R.string.composer_configure_provider,
-                        model.providerName,
-                    ),
-                )
-            }
-            active -> LXIcon(
-                name = LXIconName.Check,
-                size = 13.dp,
-                color = t.accent,
-                stroke = 2f,
-                contentDescription = stringResource(R.string.composer_current_model),
-            )
-        }
-    }
+            .semantics { if (active) contentDescription = currentLabel },
+    )
 }
 
 @Composable
@@ -826,42 +781,15 @@ private fun ModelSearchField(
     query: String,
     onQueryChange: (String) -> Unit,
 ) {
-    val t = LingXiTheme.palette
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(9.dp))
-            .background(t.surfaceHover)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-    ) {
-        LXIcon(
-            name = LXIconName.Search,
-            size = 14.dp,
-            color = t.text3,
-            stroke = 1.8f,
-            contentDescription = stringResource(R.string.composer_search_models_description),
-        )
-        Box(Modifier.weight(1f)) {
-            if (query.isEmpty()) {
-                Text(stringResource(R.string.composer_search_models_placeholder), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-            }
-            BasicTextField(
-                value = query,
-                onValueChange = onQueryChange,
-                singleLine = true,
-                textStyle = LocalTextStyle.current.merge(
-                    androidx.compose.material3.MaterialTheme.typography.bodySmall.copy(color = t.text),
-                ),
-                cursorBrush = SolidColor(t.accent),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(UiTags.MODEL_PICKER_SEARCH),
-            )
-        }
-    }
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        singleLine = true,
+        label = { Text(stringResource(R.string.composer_search_models_placeholder)) },
+        leadingIcon = { LXIcon(LXIconName.Search, size = 20.dp) },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)
+            .testTag(UiTags.MODEL_PICKER_SEARCH),
+    )
 }
 
 @Composable
@@ -873,3 +801,7 @@ private fun Dot(color: Color, size: androidx.compose.ui.unit.Dp) {
             .background(color),
     )
 }
+
+/** Remote model commands are validated by the desktop that supplied the catalog. */
+internal fun modelPickerCanSelect(remote: Boolean, provider: ModelProviderStatus?): Boolean =
+    remote || provider?.canSelect == true

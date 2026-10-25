@@ -1,0 +1,33 @@
+<resources>
+    <string name="workspace_browser_title">Workspace</string>
+    <string name="workspace_browser_home">Home folder</string>
+    <string name="workspace_browser_workspace">Workspace folder</string>
+    <string name="workspace_browser_current_folder">Current folder</string>
+    <string name="workspace_browser_locations">Locations</string>
+    <string name="workspace_browser_saved_locations">Saved locations</string>
+    <string name="workspace_browser_projects">Projects</string>
+    <string name="workspace_browser_browse_folders">Browse folders</string>
+    <string name="workspace_browser_add_location">Add location</string>
+    <string name="workspace_browser_use_folder">Use this folder</string>
+    <string name="workspace_browser_new_folder">New folder</string>
+    <string name="workspace_browser_rename_folder">Rename folder</string>
+    <string name="workspace_browser_delete_folder">Delete folder</string>
+    <string name="workspace_browser_remove_location">Remove from list</string>
+    <string name="workspace_browser_edit_location">Edit location</string>
+    <string name="workspace_browser_location_name">Display name</string>
+    <string name="workspace_browser_folder_name">Folder name</string>
+    <string name="workspace_browser_path">Folder path</string>
+    <string name="workspace_browser_go_to_folder">Go to folder</string>
+    <string name="workspace_browser_show_hidden">Show hidden files</string>
+    <string name="workspace_browser_open">Open</string>
+    <string name="workspace_browser_folder_actions">Folder actions</string>
+    <string name="workspace_browser_contents">Contents</string>
+    <string name="workspace_browser_empty_title">This folder is empty</string>
+    <string name="workspace_browser_delete_warning">Permanently delete this folder and everything inside it? This cannot be undone.</string>
+    <string name="workspace_browser_edit_location_hint">This changes the saved name or path. It does not rename or move the folder on disk.</string>
+    <string name="workspace_browser_operation_failed">Unable to complete action</string>
+    <string name="workspace_browser_unavailable">Changing the workspace is unavailable in this conversation.</string>
+    <string name="workspace_browser_busy">Wait for the current response to finish before changing files.</string>
+    <string name="workspace_browser_session_folders">Folders accessible to this session</string>
+    <string name="workspace_browser_parent_folder">Parent folder</string>
+</resources>

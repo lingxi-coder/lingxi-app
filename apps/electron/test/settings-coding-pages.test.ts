@@ -1,3 +1,7 @@
+import { LANGUAGE_STORAGE_KEY } from '../src/renderer/i18n/locale';
+
+// Behavior assertions use an explicit interface language across developer machines.
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: (key: string) => key === LANGUAGE_STORAGE_KEY ? 'en' : null } });
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -188,22 +192,17 @@ test('parseJsonObjectInput accepts a JSON object and refuses everything else', (
 });
 
 test('parseJsonObjectInput names what kind of config failed, when a caller says so', () => {
-  // Task 18 fix round 2, "Also": consolidating this parser (round 1) into
-  // one generic function silently dropped `McpServers.tsx`'s original,
-  // more specific "服务器配置必须是一个 JSON 对象" wording in favour of a
-  // bare "配置必须是一个 JSON 对象" that no longer named what it was
-  // validating. Restored via an optional `label`, defaulting to the
-  // generic noun so a caller that does not care still gets a sentence.
+  // The interface language controls the sentence; supplied labels remain intact.
   const generic = parseJsonObjectInput('[1,2,3]');
   assert.ok('error' in generic);
-  assert.match((generic as { error: string }).error, /^配置必须是一个 JSON 对象/);
+  assert.match((generic as { error: string }).error, /^Configuration must be a JSON object/);
 
   const server = parseJsonObjectInput('[1,2,3]', '服务器配置');
   assert.ok('error' in server);
-  assert.match((server as { error: string }).error, /^服务器配置必须是一个 JSON 对象/);
+  assert.match((server as { error: string }).error, /^服务器配置 must be a JSON object/);
 
   const plugin = parseJsonObjectInput('[1,2,3]', '插件配置');
-  assert.match((plugin as { error: string }).error, /^插件配置必须是一个 JSON 对象/);
+  assert.match((plugin as { error: string }).error, /^插件配置 must be a JSON object/);
 });
 
 // ---------------------------------------------------------------------------
@@ -239,13 +238,13 @@ test('mcp is the one 编码-group page that is NOT layered — it owns its own s
 // ---------------------------------------------------------------------------
 
 test('the plugins page discloses the dependency-aware enable and disable rules', () => {
-  const caveat = pluginDependencyCaveat();
+  const caveat = pluginDependencyCaveat('zh-Hans');
   assert.match(caveat, /递归启用.*依赖/);
   assert.match(caveat, /停用.*会被拒绝/);
 });
 
 test('the plugins lifecycle explains its preflight confirmation boundary', () => {
-  const caveat = pluginDependencyCaveat();
+  const caveat = pluginDependencyCaveat('zh-Hans');
   assert.match(caveat, /预检/);
   assert.match(caveat, /确认执行/);
 });

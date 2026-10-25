@@ -46,3 +46,11 @@
   --warning: #e8bd69;
   --shadow: 0 28px 80px rgba(0, 0, 0, .28);
 }
+
+/* Outlined LingXi wordmark shared by all website layouts. */
+.product-brand { display: inline-flex; align-items: center; flex-shrink: 0; max-width: 100%; }
+.product-brand img { display: block; max-width: 100%; height: auto; }
+.product-brand .product-brand-dark { display: none; }
+[data-theme="dark"] .product-brand .product-brand-light { display: none; }
+[data-theme="dark"] .product-brand .product-brand-dark { display: block; }
+@media (max-width: 700px) { .product-brand-compact img { width: 145px; } }

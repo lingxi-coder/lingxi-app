@@ -8,6 +8,14 @@ struct DeepLinkRuntimeDetail: View {
     @Environment(\.dismiss) private var dismiss
     private var kind: String { target.parts[1] }
     private var identifier: String { target.parts[2] }
+    private var title: String {
+        switch kind {
+        case "task": return String(localized: "chat_summary_agents")
+        case "plan": return String(localized: "chat_summary_plan")
+        case "review": return String(localized: "chat_summary_changes")
+        default: return String(localized: "deep_link_activity_title")
+        }
+    }
     private var tools: [ConversationToolTrace] {
         convo.items.flatMap { item -> [ConversationToolTrace] in
             if case let .run(run) = item { return run.tools }
@@ -23,7 +31,7 @@ struct DeepLinkRuntimeDetail: View {
                     detail
                 }.padding()
             }
-            .navigationTitle(kind.capitalized)
+            .navigationTitle(title)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_close") { dismiss() } } }
         }
     }
@@ -34,7 +42,7 @@ struct DeepLinkRuntimeDetail: View {
                 Text(task.descriptionText).font(.headline)
                 Text(String(describing: task.status))
                 if let error = task.errorText { Text(error).foregroundStyle(.red) }
-                if task.canResumeWorkflow { Button("Resume") { source.resumeWorkflow(task.id) } }
+                if task.canResumeWorkflow { Button("chat_workflow_resume") { source.resumeWorkflow(task.id) } }
             } else if let task = convo.planTasks.first(where: { $0.id == identifier }) {
                 Text(task.subject).font(.headline)
                 Text(task.state.label)
@@ -59,6 +67,6 @@ struct DeepLinkRuntimeDetail: View {
         }
     }
     private var missing: some View {
-        ContentUnavailableView("Local item unavailable", systemImage: "link", description: Text("This identifier is not present in the loaded local conversation."))
+        ContentUnavailableView(String(localized: "deep_link_local_unavailable"), systemImage: "link", description: Text(String(localized: "deep_link_runtime_missing")))
     }
 }

@@ -23,6 +23,28 @@ client.provider::<T>(profile) validates provider identity and profile scope. Liv
 
 Resource families describe code entry points, not universal upstream support. Check the operation’s typed scope, concrete route and authentication restrictions. Use Rustdoc for complete method signatures and provider payload types.
 
+<a id="tool-execution-choice"></a>
+
+## Choose who executes the tool
+
+| Mechanism | Executes on | Application integration |
+| --- | --- | --- |
+| ChatRequest.tools | Your host | Validate completed tool calls, apply permission policy, run registered code and append ToolResult |
+| ChatRequest.hosted_tools | Provider infrastructure | Enable an admitted typed tool and retain provider-native results, citations and usage |
+| Hosted remote MCP | Remote MCP service via the provider | Supply request-local server authorization; handle any provider approval/continuation outcome |
+| Harness local tools / MCP | Harness-managed host execution | Use Harness registration, permissions, lifecycle and durable session integration |
+
+- [Complete a local function round trip](llm-requests.md#function-tool-roundtrip)
+
+<a id="cloud-job-recovery"></a>
+
+## Persist cloud job identity before polling
+
+1. Persist the returned resource reference with the application job record immediately after a successful submit. Keep profile, account, endpoint and resource scope together.
+2. After a restart, query the saved reference with fresh credentials for the same account. Polling is a read operation on the existing job, not another submit.
+3. Distinguish cancel from delete. Cancelling asks the provider to stop work; deleting a stored result is a separate resource-lifecycle action where supported.
+4. If submit/cancel acknowledgement is lost, retain the unknown-outcome state and reconcile against supported provider APIs. Do not turn a network error into a second side effect.
+
 <a id="tools-boundaries"></a>
 
 ## Local functions and provider-side tools
@@ -78,27 +100,29 @@ Verification method: Compile check (llm-background-submit)
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/providers/binding.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/binding.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/openai/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openai/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/google/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/google/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/anthropic/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/anthropic/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/qwen/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/qwen/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/xai/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/xai/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/minimax/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/minimax/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/zhipu/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/zhipu/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/openrouter/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openrouter/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/kimi/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/kimi/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/deepseek/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/deepseek/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/github_copilot/client.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/github_copilot/client.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/file_resources.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/file_resources.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/account_resources.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/account_resources.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/openai/background/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openai/background/mod.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/dispatch.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/dispatch.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/execution_safety.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/execution_safety.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/hosted_search.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/hosted_search.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/code_interpreter.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/code_interpreter.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/provider_clients.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/provider_clients.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- llm-client/src/providers/binding.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/openai/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/google/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/anthropic/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/qwen/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/xai/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/minimax/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/zhipu/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/openrouter/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/kimi/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/deepseek/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/github_copilot/client.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/file_resources.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/account_resources.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/openai/background/mod.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/dispatch.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/execution_safety.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/hosted_search.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/code_interpreter.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/provider_clients.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/llm.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/options.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

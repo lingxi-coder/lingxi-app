@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { memo, type CSSProperties, type ReactNode } from 'react';
 
 import {
@@ -22,7 +24,7 @@ function HelpBody({ item }: { item: CommandRunItem }) {
   const entries = parseCommandHelp(item.output);
   if (entries.length === 0) return <PlainBody item={item} />;
   return (
-    <div className="command-help-grid" role="list" aria-label="Available slash commands">
+    <div className="command-help-grid" role="list" aria-label={tr("desktop_ui_slash_commands")}>
       {entries.map((entry) => (
         <div className="command-help-entry" role="listitem" key={entry.name}>
           <CommandIdentity command={entry.name} iconSize={22} showSlash />
@@ -110,6 +112,7 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
   onSetOpen(id: string, next: boolean): void;
 }) {
   const t = useT();
+  useI18n();
   const presentation = commandPresentation(item);
   const collapsible = commandShouldCollapse(item);
   const expanded = !collapsible || open;
@@ -126,7 +129,7 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
     '--command-text-muted': t.text3,
     '--command-danger': t.danger,
   } as CSSProperties;
-  const label = item.name || (commandName(item) ? `/${commandName(item)}` : 'Slash command');
+  const label = item.name || (commandName(item) ? `/${commandName(item)}` : tr("desktop_ui_slash_command"));
   return (
     <section
       className="command-result-card"
@@ -139,7 +142,7 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
         {isGoal ? <Icon name="goal" size={20} color={accent} /> : <CommandIcon command={item.name} size={30} />}
         <div className="command-result-heading">
           <strong data-error={item.isError || undefined}>
-            {item.isError && <Icon name="shieldAlert" size={14} />}{isGoal ? (item.isError ? 'Goal unavailable' : 'Goal') : presentation.title}
+            {item.isError && <Icon name="shieldAlert" size={14} />}{isGoal ? (item.isError ? tr("desktop_ui_goal_unavailable") : tr("desktop_ui_goal")) : presentation.title}
           </strong>
           <span className="command-result-name mono">{label}</span>
         </div>

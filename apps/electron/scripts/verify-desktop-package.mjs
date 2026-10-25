@@ -52,6 +52,8 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(asar, 'application asar');
   requirePath(sidecar, 'bridge-server sidecar');
   requirePath(executable, 'Electron executable');
+  requirePath(join(resources, 'icon.png'), 'LingXi application icon');
+  if (sha256File(join(resources, 'icon.png')) !== sha256File(join(packageRoot, 'assets', 'icons', 'icon.png'))) throw new Error('Packaged brand icon is stale');
   verifyModBun(resources, platform, arch);
   if (platform !== 'darwin') verifyProtocolRegistration(paths.payloadRoot, platform);
   if (platform === 'darwin') {
@@ -116,7 +118,9 @@ export function verifyDesktopPackage(root, platform, arch) {
       join(extracted, 'package.json'),
       join(extracted, 'out', 'main', 'index.js'),
       join(extracted, 'out', 'preload', 'index.cjs'),
+      join(extracted, 'out', 'preload', 'remoteRtc.cjs'),
       join(extracted, 'out', 'renderer', 'index.html'),
+      join(extracted, 'out', 'renderer', 'remote-rtc.html'),
       join(extracted, 'node_modules', '@lingxi', 'bridge-client', 'dist', 'index.js'),
     ]) requirePath(path, 'runtime file');
     const runtimeMetadata = readJson(join(extracted, 'package.json'));

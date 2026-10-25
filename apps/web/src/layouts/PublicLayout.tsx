@@ -61,6 +61,7 @@ export function PublicLayout({
   if (activeRoute === '/') {
     const t = (en: string, zh: string) => pickLocaleText(locale, { en, zh });
     const navigation = <>
+      <a href="#landing-scenarios">{t('Use cases', '使用场景')}</a>
       <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
       <RouteLink href="/docs">{t('Documentation', '开发者文档')}</RouteLink>
       <a href="https://github.com/lingxi-coder/lingxi-app" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
@@ -80,7 +81,7 @@ export function PublicLayout({
             <LandingMenu locale={locale}>{navigation}</LandingMenu>
           </div>
         </header>
-        <main id="landing-main">{children}</main>
+        <main id="landing-main" tabIndex={-1}>{children}</main>
         <footer className="landing-footer">
           <div><Brand compact /><p>{t('Your personal AI agent.', '你的个人辅助 Agent。')}</p></div>
           <div className="landing-footer-links">

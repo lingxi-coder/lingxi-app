@@ -48,6 +48,8 @@ fun ModelDetailsDialog(
     details: CatalogModelDetails,
     onDismiss: () -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    fun copy(id: Int, vararg args: Any): String = context.getString(id, *args)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -78,70 +80,70 @@ fun ModelDetailsDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    DetailRow("Provider", details.providerLabel)
-                    DetailRow("Reference", details.reference)
-                    DetailRow("Raw model ID", details.modelId)
-                    DetailRow("Family", details.family)
-                    DetailRow("Status", details.status)
-                    DetailRow("Release", details.releaseDate)
-                    DetailRow("Updated", details.lastUpdated)
-                    DetailRow("Knowledge", details.knowledgeCutoff)
-                    DetailRow("Input modalities", details.inputModalities.ifEmpty { null }?.joinToString(", "))
-                    DetailRow("Output modalities", details.outputModalities.ifEmpty { null }?.joinToString(", "))
-                    DetailRow("Capabilities", details.capabilities.ifEmpty { null }?.joinToString(" · "))
-                    DetailRow("模型最大上下文", details.contextWindowTokens?.let(::formatTokenCount))
-                    DetailRow("应用输入预算", details.contextBudget?.effectiveInputBudget?.let(::formatTokenCount))
-                    DetailRow("上下文策略", details.contextBudget?.policy)
-                    DetailRow("标准价格输入上限", details.contextBudget?.standardPriceInputTokens?.toString())
-                    DetailRow("官方建议输入", details.contextBudget?.recommendationInputTokens?.let(::formatTokenCount))
-                    DetailRow("建议来源", details.contextBudget?.recommendationSource)
-                    DetailRow("Max input", details.maxInputTokens?.let(::formatTokenCount))
-                    DetailRow("Max output", details.maxOutputTokens?.let(::formatTokenCount))
+                    DetailRow(stringResource(R.string.model_detail_provider), details.providerLabel)
+                    DetailRow(stringResource(R.string.model_detail_route), details.reference)
+                    DetailRow(stringResource(R.string.settings_provider_model_id), details.modelId)
+                    DetailRow(stringResource(R.string.model_detail_family), details.family)
+                    DetailRow(stringResource(R.string.session_details_status), details.status)
+                    DetailRow(stringResource(R.string.model_detail_release_date), details.releaseDate)
+                    DetailRow(stringResource(R.string.model_detail_updated), details.lastUpdated)
+                    DetailRow(stringResource(R.string.model_detail_knowledge_cutoff), details.knowledgeCutoff)
+                    DetailRow(stringResource(R.string.model_detail_input_modalities), details.inputModalities.ifEmpty { null }?.joinToString(", "))
+                    DetailRow(stringResource(R.string.model_detail_output_modalities), details.outputModalities.ifEmpty { null }?.joinToString(", "))
+                    DetailRow(stringResource(R.string.model_detail_capabilities), details.capabilities.ifEmpty { null }?.joinToString(" · "))
+                    DetailRow(stringResource(R.string.model_detail_max_context), details.contextWindowTokens?.let(::formatTokenCount))
+                    DetailRow(stringResource(R.string.model_detail_input_budget), details.contextBudget?.effectiveInputBudget?.let(::formatTokenCount))
+                    DetailRow(stringResource(R.string.model_detail_context_policy), details.contextBudget?.policy?.let { copy(when (it) { "long" -> R.string.composer_context_policy_long; "custom" -> R.string.composer_context_policy_custom; else -> R.string.composer_context_policy_auto }) })
+                    DetailRow(stringResource(R.string.model_detail_standard_price_limit), details.contextBudget?.standardPriceInputTokens?.toString())
+                    DetailRow(stringResource(R.string.model_detail_recommended_input), details.contextBudget?.recommendationInputTokens?.let(::formatTokenCount))
+                    DetailRow(stringResource(R.string.model_detail_recommendation_source), details.contextBudget?.recommendationSource)
+                    DetailRow(stringResource(R.string.model_detail_max_input), details.maxInputTokens?.let(::formatTokenCount))
+                    DetailRow(stringResource(R.string.model_detail_max_output), details.maxOutputTokens?.let(::formatTokenCount))
                     DetailRow(
-                        "Reasoning",
+                        stringResource(R.string.model_detail_reasoning),
                         buildList {
                             if (details.reasoningOptions.isNotEmpty()) {
                                 add(details.reasoningOptions.joinToString(" / ") { it.label })
                             }
-                            details.reasoningDefault?.let { add("default: $it") }
-                            if (details.reasoningForced) add("forced")
-                            if (!details.reasoningEditable) add("locked")
+                            details.reasoningDefault?.let { add("${copy(R.string.settings_badge_default)}: $it") }
+                            if (details.reasoningForced) add(copy(R.string.model_detail_forced))
+                            if (!details.reasoningEditable) add(copy(R.string.model_detail_locked))
                         }.ifEmpty { null }?.joinToString(" · "),
                     )
                     DetailRow(
-                        "Pricing",
+                        stringResource(R.string.model_detail_pricing),
                         details.pricing?.let { pricing ->
                             when (pricing.billingMode) {
-                                ModelBillingModeDto.SUBSCRIPTION -> "套餐/订阅内"
-                                ModelBillingModeDto.FREE -> "免费"
-                                ModelBillingModeDto.UNKNOWN -> "价格未提供"
+                                ModelBillingModeDto.SUBSCRIPTION -> copy(R.string.model_detail_subscription)
+                                ModelBillingModeDto.FREE -> copy(R.string.model_detail_free)
+                                ModelBillingModeDto.UNKNOWN -> copy(R.string.model_detail_no_price)
                                 ModelBillingModeDto.PER_TOKEN -> buildList {
-                                    pricing.inputPerMillion?.let { add("input \$${formatPrice(it)} / 1M") }
-                                    pricing.outputPerMillion?.let { add("output \$${formatPrice(it)} / 1M") }
-                                    pricing.cacheReadPerMillion?.let { add("cache read \$${formatPrice(it)} / 1M") }
-                                    pricing.cacheWritePerMillion?.let { add("cache write \$${formatPrice(it)} / 1M") }
-                                    pricing.reasoningPerMillion?.let { add("reasoning \$${formatPrice(it)} / 1M") }
-                                }.ifEmpty { listOf("价格未提供") }.joinToString("\n")
+                                    pricing.inputPerMillion?.let { add(copy(R.string.model_detail_price_input_fmt, formatPrice(it)) + " / 1M") }
+                                    pricing.outputPerMillion?.let { add(copy(R.string.model_detail_price_output_fmt, formatPrice(it)) + " / 1M") }
+                                    pricing.cacheReadPerMillion?.let { add(copy(R.string.model_detail_price_cache_read_fmt, formatPrice(it)) + " / 1M") }
+                                    pricing.cacheWritePerMillion?.let { add(copy(R.string.model_detail_price_cache_write_fmt, formatPrice(it)) + " / 1M") }
+                                    pricing.reasoningPerMillion?.let { add(copy(R.string.model_detail_price_reasoning_fmt, formatPrice(it)) + " / 1M") }
+                                }.ifEmpty { listOf(copy(R.string.model_detail_no_price)) }.joinToString("\n")
                             }
                         },
                     )
                     details.pricing?.tiers?.takeIf { it.isNotEmpty() }?.let { tiers ->
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
-                                "Pricing tiers",
+                                stringResource(R.string.model_detail_pricing_tiers),
                                 fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             tiers.forEach { tier ->
                                 Text(
-                                    "输入 ${tier.contextThresholdTokens}–${tier.maxInputTokens?.toString() ?: "∞"}（整次请求）: " +
+                                    copy(R.string.model_detail_price_range_fmt, tier.contextThresholdTokens.toString(), tier.maxInputTokens?.toString() ?: "∞") + ": " +
                                         listOfNotNull(
-                                            tier.inputPerMillion?.let { "input \$${formatPrice(it)}" },
-                                            tier.outputPerMillion?.let { "output \$${formatPrice(it)}" },
-                                            tier.cacheReadPerMillion?.let { "cache read \$${formatPrice(it)}" },
-                                            tier.cacheWritePerMillion?.let { "cache write \$${formatPrice(it)}" },
-                                            tier.reasoningPerMillion?.let { "reasoning \$${formatPrice(it)}" },
+                                            tier.inputPerMillion?.let { copy(R.string.model_detail_price_input_fmt, formatPrice(it)) },
+                                            tier.outputPerMillion?.let { copy(R.string.model_detail_price_output_fmt, formatPrice(it)) },
+                                            tier.cacheReadPerMillion?.let { copy(R.string.model_detail_price_cache_read_fmt, formatPrice(it)) },
+                                            tier.cacheWritePerMillion?.let { copy(R.string.model_detail_price_cache_write_fmt, formatPrice(it)) },
+                                            tier.reasoningPerMillion?.let { copy(R.string.model_detail_price_reasoning_fmt, formatPrice(it)) },
                                         ).joinToString(" · "),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurface,
@@ -149,10 +151,10 @@ fun ModelDetailsDialog(
                             }
                         }
                     }
-                    DetailRow("Attachments", details.attachments?.let(::boolLabel))
-                    DetailRow("Open weights", details.openWeights?.let(::boolLabel))
-                    DetailRow("Temperature control", details.temperatureControl?.let(::boolLabel))
-                    DetailRow("Pricing source", details.pricing?.source)
+                    DetailRow(stringResource(R.string.model_detail_attachments), details.attachments?.let { copy(if (it) R.string.common_yes else R.string.common_no) })
+                    DetailRow(stringResource(R.string.model_detail_open_weights), details.openWeights?.let { copy(if (it) R.string.common_yes else R.string.common_no) })
+                    DetailRow(stringResource(R.string.model_detail_temperature), details.temperatureControl?.let { copy(if (it) R.string.common_yes else R.string.common_no) })
+                    DetailRow(stringResource(R.string.audio_source_title), details.pricing?.source)
                 }
             }
         },
@@ -203,5 +205,3 @@ private fun trimDecimal(value: Double): String {
     val rounded = round(value * 100.0) / 100.0
     return if (rounded % 1.0 == 0.0) rounded.toInt().toString() else rounded.toString()
 }
-
-private fun boolLabel(value: Boolean): String = if (value) "Yes" else "No"

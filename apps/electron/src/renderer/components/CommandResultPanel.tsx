@@ -1,3 +1,5 @@
+import { tr } from '../i18n/locale';
+import { useI18n } from '../i18n/useI18n';
 import { useEffect, useId, useRef, type CSSProperties } from 'react';
 import { commandName, commandPresentation, type CommandRunItem } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
@@ -9,6 +11,7 @@ import { commandPaletteColor } from './commandPaletteIcons';
 /** Ephemeral utility output, intentionally independent of the conversation transcript. */
 export function CommandResultPanel({ item, onClose }: { item: CommandRunItem; onClose(): void }) {
   const t = useT();
+  useI18n();
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const presentation = commandPresentation(item);
@@ -40,9 +43,9 @@ export function CommandResultPanel({ item, onClose }: { item: CommandRunItem; on
           <h2 id={titleId} data-error={item.isError || undefined}>
             {item.isError && <Icon name="shieldAlert" size={17} />}{presentation.title}
           </h2>
-          <p>{item.name || 'Command output'}</p>
+          <p>{item.name || tr("slash_command_output_title")}</p>
         </div>
-        <button type="button" autoFocus aria-label="Close command result" onClick={onClose}><Icon name="x" size={18} /></button>
+        <button type="button" autoFocus aria-label={tr("desktop_ui_close_command")} onClick={onClose}><Icon name="x" size={18} /></button>
       </header>
       <div className="command-utility-content" role={item.isError ? 'alert' : undefined} data-error={item.isError || undefined}>
         <CommandBody item={item} />

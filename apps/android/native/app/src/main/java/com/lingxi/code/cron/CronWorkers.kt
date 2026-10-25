@@ -302,7 +302,7 @@ class CronExecutionWorker internal constructor(
         val scope = repository.scope(existing.scopeId)
             ?: return terminalFailure(
                 existing,
-                applicationContext.getString(R.string.cron_workspace_unavailable),
+                com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_workspace_unavailable),
             )
         try {
             val task = gateway.list(scope).firstOrNull { it.id == existing.taskId }
@@ -364,7 +364,7 @@ class CronExecutionWorker internal constructor(
         } catch (timeout: TimeoutCancellationException) {
             terminalFailure(
                 existing,
-                applicationContext.getString(R.string.cron_execution_timeout_message),
+                com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_execution_timeout_message),
                 status = CronRunStatus.TimedOut,
             )
         } catch (cancel: CancellationException) {
@@ -381,21 +381,21 @@ class CronExecutionWorker internal constructor(
                 terminalFailure(
                     existing,
                     error.message
-                        ?: applicationContext.getString(R.string.cron_execution_failed_default_android),
+                        ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_execution_failed_default_android),
                 )
             } else if (runAttemptCount + 1 < MAX_EXECUTION_ATTEMPTS) {
                 history.markRetry(
                     id,
                     runAttemptCount + 1,
                     error.message
-                        ?: applicationContext.getString(R.string.cron_temporary_network_error),
+                        ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_temporary_network_error),
                 )
                 repository.refresh()
                 Result.retry()
             } else {
                 terminalFailure(
                     existing,
-                    error.message ?: applicationContext.getString(R.string.cron_retries_exhausted),
+                    error.message ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.cron_retries_exhausted),
                 )
             }
         } finally {
@@ -440,7 +440,7 @@ class CronExecutionWorker internal constructor(
                         queued.runId,
                         CronRunStatus.Succeeded,
                         resultText = fired.resultText?.ifBlank { null }
-                            ?: applicationContext.getString(R.string.chat_status_completed),
+                            ?: com.lingxi.code.theme.LocaleWrapper.getString(applicationContext, R.string.chat_status_completed),
                     )
                     postTerminal(history.record(queued.runId))
                     if (queued.runId == requested.runId) requestedResult = Result.success()
@@ -491,7 +491,7 @@ class CronExecutionWorker internal constructor(
             history.markTerminal(
                 requested.runId,
                 CronRunStatus.Skipped,
-                errorMessage = applicationContext.getString(
+                errorMessage = com.lingxi.code.theme.LocaleWrapper.getString(applicationContext,
                     R.string.cron_task_removed_or_claimed_message,
                 ),
             )

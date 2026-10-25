@@ -1,3 +1,4 @@
+import { tr } from '../src/renderer/i18n/locale';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -87,6 +88,7 @@ function initializer(file: ts.SourceFile, name: string): string {
 }
 function evaluate(code: string, context: Record<string, unknown>): void {
   context.Error = Error;
+  context.tr = tr;
   runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
 }
 function deferred<T>() {

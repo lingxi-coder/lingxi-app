@@ -23,6 +23,7 @@ import {
 } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { tr } from '../src/renderer/i18n/locale';
 import { defaultNativeAudioSnapshot } from '../src/shared/nativeAudio.js';
 import {
   formatClockTime,
@@ -363,7 +364,7 @@ test('composer keeps its idle input compact and aligns the primary action contro
   assert.ok(promptIndex >= 0 && promptStart >= 0 && promptEnd > promptIndex);
   assert.match(markup.slice(promptStart, promptEnd + 1), /min-height:56px/);
 
-  for (const marker of ['aria-label="Start ordinary recording"', 'aria-label="开启心流模式"', 'aria-label="Send prompt"']) {
+  for (const marker of ['aria-label="Start ordinary recording"', `aria-label="${tr('composer_flow_mode')}"`, 'aria-label="Send prompt"']) {
     const tag = openingTag(markup, marker);
     assert.match(tag, /width:40px/);
     assert.match(tag, /height:40px/);
@@ -371,7 +372,7 @@ test('composer keeps its idle input compact and aligns the primary action contro
   }
 
   const microphoneTag = openingTag(markup, 'aria-label="Start ordinary recording"');
-  const flowTag = openingTag(markup, 'aria-label="开启心流模式"');
+  const flowTag = openingTag(markup, `aria-label="${tr('composer_flow_mode')}"`);
   assert.match(microphoneTag, /background:transparent/);
   assert.match(flowTag, /background:transparent/, 'the flow icon must use the same transparent treatment as the microphone');
   assert.doesNotMatch(flowTag, /box-shadow/, 'the flow icon must not restore the old circular halo');
@@ -426,7 +427,7 @@ test('each project row exposes a focused edit action routed to that project draf
 
 test('session navigation exposes immediate opening feedback instead of failing silently', () => {
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
-  assert.match(source, /Opening session/);
+  assert.match(source, /tr\('desktop_chat_opening_session'\)/);
   assert.match(source, /aria-busy=\{opening/);
   assert.match(source, /setOpeningSessionKey/);
 });
@@ -442,7 +443,7 @@ test('opening a session preserves its cached renderer runtime until the host res
   assert.doesNotMatch(openSessionSource, /setRuntimeStates/);
   assert.doesNotMatch(openSessionSource, /turnActiveRefs\.current\.set/);
   assert.doesNotMatch(openSessionSource, /removeRuntimeFromMaps\(sessionId, cancellingRefs/);
-  assert.match(appSource, /: bridge\.activeSession\s+\? 'This session has no messages yet/);
+  assert.match(appSource, /: bridge\.activeSession\s+\? tr\('desktop_shell_empty_session'\)/);
 });
 
 test('session menus are hidden and closed while the active session is loading', () => {
@@ -587,7 +588,7 @@ test('setup stays out of the transcript while project and provider controls rema
   assert.doesNotMatch(desktopSource, /setWorkspaceTrusted/);
   assert.doesNotMatch(readFileSync(join(process.cwd(), 'src/preload/index.ts'), 'utf8'), /lingxi:trust:set|setWorkspaceTrusted/);
   assert.doesNotMatch(readFileSync(join(process.cwd(), 'src/main/host.ts'), 'utf8'), /CH_TRUST_SET|lingxi:trust:set/);
-  assert.match(desktopSource, /aria-label="Add project"/);
+  assert.match(desktopSource, /aria-label=\{tr\('desktop_chat_add_project'\)\}/);
   // Provider controls moved out of `BetaDesktop.tsx`'s old settings modal
   // (retired in Task 20, cutting `<SettingsSection title="Providers">` from
   // this file entirely) into `ProviderCredentials.tsx`, reached through
@@ -596,7 +597,7 @@ test('setup stays out of the transcript while project and provider controls rema
   // current address instead of their old one.
   assert.match(
     readFileSync(join(process.cwd(), 'src/renderer/components/settings/pages/ProviderCredentials.tsx'), 'utf8'),
-    /<Card title="Provider">/,
+    /<Card title=\{tr\('model_detail_provider'\)\}>/,
   );
 });
 

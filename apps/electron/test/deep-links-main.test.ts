@@ -8,6 +8,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import * as contract from '../../../packages/deep-links/index';
 import { DeepLinkQueue } from '../src/main/deepLinkQueue';
+import * as nativeLocale from '../src/shared/nativeLocale';
 
 function runtime(ready: () => Promise<void> = async () => {}) {
   const app = Object.assign(new EventEmitter(), { isReady: () => state.ready, isPackaged: false, setAsDefaultProtocolClient: () => false });
@@ -25,6 +26,7 @@ function runtime(ready: () => Promise<void> = async () => {}) {
       if (id === 'node:fs') return { realpathSync };
       if (id.endsWith('packages/deep-links/index')) return contract;
       if (id === './deepLinkQueue') return { DeepLinkQueue };
+      if (id === '../shared/nativeLocale.js') return nativeLocale;
       throw new Error(id);
     },
   });
@@ -39,6 +41,21 @@ function runtime(ready: () => Promise<void> = async () => {}) {
   const open = (url: string) => app.emit('open-url', { preventDefault() {} }, url);
   return { app, state, windows, handlers, api, window, open };
 }
+
+test('cold-launch error copy resolves after language restoration instead of freezing the enqueue language', () => {
+  nativeLocale.setNativeLocale('en');
+  const r = runtime();
+  r.open('lingxi://unsupported-destination');
+  assert.equal(r.state.dialogs.length, 0);
+  nativeLocale.setNativeLocale('ja');
+  try {
+    r.state.ready = true;
+    r.app.emit('ready');
+    assert.equal(r.state.dialogs.length, 1);
+    assert.match(r.state.dialogs[0].message, /この LingXi リンク/);
+    assert.doesNotMatch(r.state.dialogs[0].message, /unsupported-destination/);
+  } finally { nativeLocale.setNativeLocale('en'); }
+});
 
 test('real main handlers buffer cold launch until restoration and replay after renderer/window recreation', async () => {
   let finish!: () => void;

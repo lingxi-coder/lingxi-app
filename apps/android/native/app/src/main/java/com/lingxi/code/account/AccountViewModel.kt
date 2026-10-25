@@ -1,6 +1,7 @@
 package com.lingxi.code.account
 
 import android.app.Activity
+import com.lingxi.code.R
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
@@ -23,7 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 data class AccountProfile(val uid: String, val email: String?, val name: String?, val verified: Boolean)
-data class AccountUiState(val user: AccountProfile? = null, val busy: Boolean = false, val message: String? = null)
+data class AccountUiState(val user: AccountProfile? = null, val busy: Boolean = false, val messageRes: Int? = null)
 
 class AccountViewModel : ViewModel() {
     private val auth = FirebaseAuth.getInstance()
@@ -43,11 +44,11 @@ class AccountViewModel : ViewModel() {
     }
     private fun perform(action: suspend () -> Unit) {
         if (mutableState.value.busy) return
-        mutableState.update { it.copy(busy = true, message = null) }
+        mutableState.update { it.copy(busy = true, messageRes = null) }
         viewModelScope.launch {
             try { action() }
             catch (error: CancellationException) { throw error }
-            catch (error: Exception) { mutableState.update { it.copy(message = errorMessage(error)) } }
+            catch (error: Exception) { mutableState.update { it.copy(messageRes = errorMessage(error)) } }
             finally { updateUser(); mutableState.update { it.copy(busy = false) } }
         }
     }
@@ -70,11 +71,11 @@ class AccountViewModel : ViewModel() {
     }
     fun resetPassword(email: String) = perform {
         auth.sendPasswordResetEmail(email.trim()).await()
-        mutableState.update { it.copy(message = "如果此邮箱已注册，将收到密码重置邮件。") }
+        mutableState.update { it.copy(messageRes = R.string.account_reset_sent) }
     }
     fun verifyEmail() = perform {
         checkNotNull(auth.currentUser).sendEmailVerification().await()
-        mutableState.update { it.copy(message = "验证邮件已发送，请检查收件箱。") }
+        mutableState.update { it.copy(messageRes = R.string.account_verification_sent) }
     }
     fun reload() {
         if (auth.currentUser != null) perform { auth.currentUser?.reload()?.await() }
@@ -85,17 +86,17 @@ class AccountViewModel : ViewModel() {
     }
     override fun onCleared() { auth.removeAuthStateListener(listener) }
 
-    private fun errorMessage(error: Exception): String {
-        if (error is GetCredentialCancellationException) return "登录已取消。"
-        if (error is FirebaseAuthWebException && error.errorCode == "ERROR_WEB_CONTEXT_CANCELED") return "登录已取消。"
+    private fun errorMessage(error: Exception): Int {
+        if (error is GetCredentialCancellationException) return R.string.account_error_cancelled
+        if (error is FirebaseAuthWebException && error.errorCode == "ERROR_WEB_CONTEXT_CANCELED") return R.string.account_error_cancelled
         return when ((error as? FirebaseAuthException)?.errorCode) {
-            "ERROR_INVALID_CREDENTIAL", "ERROR_WRONG_PASSWORD", "ERROR_USER_NOT_FOUND" -> "邮箱或密码不正确。"
-            "ERROR_EMAIL_ALREADY_IN_USE" -> "此邮箱已注册，请登录或重置密码。"
-            "ERROR_WEAK_PASSWORD" -> "密码强度不足，请使用更长的密码。"
-            "ERROR_OPERATION_NOT_ALLOWED" -> "此登录方式尚未启用。"
-            "ERROR_ACCOUNT_EXISTS_WITH_DIFFERENT_CREDENTIAL" -> "请先使用原有登录方式登录此邮箱。"
-            "ERROR_USER_DISABLED" -> "此账号已停用。"
-            else -> "操作未完成，请检查网络或登录服务配置后重试。"
+            "ERROR_INVALID_CREDENTIAL", "ERROR_WRONG_PASSWORD", "ERROR_USER_NOT_FOUND" -> R.string.account_error_credentials
+            "ERROR_EMAIL_ALREADY_IN_USE" -> R.string.account_error_existing
+            "ERROR_WEAK_PASSWORD" -> R.string.account_error_weak_password
+            "ERROR_OPERATION_NOT_ALLOWED" -> R.string.account_error_provider_disabled
+            "ERROR_ACCOUNT_EXISTS_WITH_DIFFERENT_CREDENTIAL" -> R.string.account_error_other_provider
+            "ERROR_USER_DISABLED" -> R.string.account_error_disabled
+            else -> R.string.account_error_configuration
         }
     }
 }

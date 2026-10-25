@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -20,23 +21,23 @@ export function About({ bridge }: PageContentProps) {
 
   return (
     <>
-      <Card title="关于">
-        <Row title="应用" align="center"><span className="mono" style={valueStyle}>{versions?.app ?? '未知'}</span></Row>
-        <Row title="Electron" align="center"><span className="mono" style={valueStyle}>{versions?.electron ?? '未知'}</span></Row>
+      <Card title={tr('settings_group_about')}>
+        <Row title={tr('desktop_app')} align="center"><span className="mono" style={valueStyle}>{versions?.app ?? tr('chat_status_unknown')}</span></Row>
+        <Row title="Electron" align="center"><span className="mono" style={valueStyle}>{versions?.electron ?? tr('chat_status_unknown')}</span></Row>
         <Row
-          title="引擎"
-          desc={versions?.engine ? undefined : '尚未连接过引擎，暂无版本信息。'}
+          title={tr('desktop_shell_engine')}
+          desc={versions?.engine ? undefined : tr('desktop_shell_no_engine_version')}
           align="center"
         >
           <span className="mono" style={valueStyle}>
-            {versions?.engine ? `${versions.engine.serverName} · ${versions.engine.serverProtocol}` : '不可用'}
+            {versions?.engine ? `${versions.engine.serverName} · ${versions.engine.serverProtocol}` : tr('settings_linux_task_unavailable')}
           </span>
         </Row>
       </Card>
-      <Card title="数据与隐私">
-        <Row title="隐私政策" desc="账号、AI 服务、设备权限与数据保留说明。" align="center"><a href="https://lingxios.net/privacy" target="_blank" rel="noreferrer" style={valueStyle}>阅读政策 ↗</a></Row>
-        <Row title="数据与账号删除" desc="账号、本地工作区与第三方数据需分别处理。" align="center"><a href="https://lingxios.net/data-deletion" target="_blank" rel="noreferrer" style={valueStyle}>查看说明 ↗</a></Row>
-        <Row title="隐私联系" align="center"><span style={valueStyle}>support.lingxi@gmail.com</span></Row>
+      <Card title={tr('settings_data_privacy')}>
+        <Row title={tr('privacy_policy_link')} desc={tr('desktop_shell_privacy_desc')} align="center"><a href="https://lingxios.net/privacy" target="_blank" rel="noreferrer" style={valueStyle}>{tr('desktop_shell_read_policy')}</a></Row>
+        <Row title={tr('privacy_deletion_link')} desc={tr('desktop_shell_deletion_desc')} align="center"><a href="https://lingxios.net/data-deletion" target="_blank" rel="noreferrer" style={valueStyle}>{tr('desktop_shell_read_deletion')}</a></Row>
+        <Row title={tr('desktop_shell_privacy_contact')} align="center"><span style={valueStyle}>support.lingxi@gmail.com</span></Row>
       </Card>
     </>
   );

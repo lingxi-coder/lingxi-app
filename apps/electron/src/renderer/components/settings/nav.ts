@@ -1,3 +1,4 @@
+import { tr } from '../../i18n/locale';
 export interface NavPage {
   id: string;
   label: string;
@@ -28,6 +29,7 @@ export const SETTINGS_NAV: NavPage[] = [
   { id: 'voice', label: '语音', group: '个人', icon: 'mic', needsEngine: false, layered: false, searchKeys: ['voice', '语音', 'tts', 'stt', 'rate'], implemented: true },
   { id: 'archived-chats', label: '已归档会话', group: '个人', icon: 'archive', needsEngine: false, layered: false, searchKeys: ['archived', 'chats', '归档', '会话', 'restore', '恢复'], implemented: true },
   { id: 'projects', label: '项目与信任', group: '个人', icon: 'folder', needsEngine: false, layered: false, searchKeys: ['project', '项目', 'trust', '信任', 'pinned'], implemented: true },
+  { id: 'remote-control', label: '远程控制', group: '个人', icon: 'share', needsEngine: false, layered: false, searchKeys: ['remote', 'remote-control', 'rc', '远程', '远程控制', '设备', 'device', '手机', 'phone', '配对', 'pairing'], implemented: true },
 
   // Account credentials are device-local; the request-format card edits settings.routing.
   { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: false, layered: true, searchKeys: ['provider', 'credential', '凭据', 'API Key', 'keychain', 'defaultProtocols', '默认格式', '请求格式'], implemented: true },
@@ -39,6 +41,7 @@ export const SETTINGS_NAV: NavPage[] = [
   // Fusion lists strategies from all three settings scopes and owns its scope filter.
   { id: 'fusion', label: 'Fusion 多模型合议', group: '模型与服务', icon: 'sparkle', needsEngine: true, layered: false, searchKeys: ['fusion', '合议', '策略', 'scope', 'panelModels', 'analystModel', 'panel', 'analyst', '多模型'], implemented: true },
 
+  { id: 'computer-use', label: 'Computer use', group: '编码', icon: 'pointer', needsEngine: false, layered: false, searchKeys: ['computer use', 'computer-use', '电脑控制', '计算机', '应用控制', 'locked use', 'always-allowed apps'], implemented: true },
   { id: 'permissions', label: '权限', group: '编码', icon: 'shield', needsEngine: true, layered: true, searchKeys: ['permissions', '权限', 'allow', 'deny', 'ask', 'additionalDirectories', 'bypassPermissions'], implemented: true },
   { id: 'tools-agent', label: '工具与 Agent 行为', group: '编码', icon: 'sliders', needsEngine: true, layered: true, searchKeys: ['promptSuggestionEnabled', 'enabledTools', 'outputStyle', 'modelOverrides', 'alwaysThinkingEnabled', 'showThinkingSummaries', 'visionDelegationEnabled', 'disableAllHooks', 'skipWebFetchPreflight'], implemented: true },
   { id: 'skills', label: 'Skills', group: '编码', icon: 'sparkle', needsEngine: true, layered: true, searchKeys: ['skills', 'syncClaudeAiSkills', 'reload'], implemented: true },
@@ -59,6 +62,22 @@ export function searchNav(query: string): NavPage[] {
   if (!needle) return [];
   return SETTINGS_NAV.filter((page) =>
     page.label.toLowerCase().includes(needle) ||
+    navPageLabel(page).toLowerCase().includes(needle) ||
     page.id.includes(needle) ||
     page.searchKeys.some((key) => key.toLowerCase().includes(needle)));
+}
+
+const NAV_LABEL_KEYS: Record<string, string> = {
+  general: 'settings_group_general', account: 'settings_title_account', appearance: 'settings_appearance',
+  notifications: 'settings_notifications', voice: 'settings_group_voice',
+  'archived-chats': 'settings_parity_archived', projects: 'desktop_project_trust', 'remote-control': 'remote_title',
+  'provider-credentials': 'desktop_provider_credentials', 'custom-providers': 'desktop_custom_providers', fusion: 'desktop_fusion',
+  'computer-use': 'settings_title_computer_use', permissions: 'settings_parity_permissions', 'tools-agent': 'desktop_tools_agent',
+  skills: 'settings_title_skills', mcp: 'settings_mcp_servers', plugins: 'desktop_plugins', diagnostics: 'desktop_diagnostics', about: 'settings_group_about',
+};
+export function navPageLabel(page: NavPage): string {
+  return NAV_LABEL_KEYS[page.id] ? tr(NAV_LABEL_KEYS[page.id]!) : page.label;
+}
+export function navGroupLabel(group: NavPage['group']): string {
+  return tr(({ '个人': 'desktop_personal', '模型与服务': 'desktop_models_services', '编码': 'desktop_coding', '高级': 'desktop_advanced' })[group]);
 }

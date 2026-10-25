@@ -3,12 +3,20 @@ on:
   pull_request:
     paths:
       - 'apps/web/**'
+      # The web build compiles the Remote Control core and the Electron reducer chain from source.
+      - 'packages/bridge-client/src/**'
+      - 'apps/electron/src/renderer/**'
+      - 'apps/electron/src/shared/**'
       - 'docs/technical/**'
       - '.github/workflows/documentation.yml'
   push:
     branches: [main]
     paths:
       - 'apps/web/**'
+      # The web build compiles the Remote Control core and the Electron reducer chain from source.
+      - 'packages/bridge-client/src/**'
+      - 'apps/electron/src/renderer/**'
+      - 'apps/electron/src/shared/**'
       - 'docs/technical/**'
       - '.github/workflows/documentation.yml'
 jobs:

@@ -1,10 +1,11 @@
+import { useI18n } from '../i18n/useI18n';
 /**
  * ComputerAccessPrompt — the renderer's approval surface for the `computer`
  * tool's `request_access` action, wired through the same
  * `ComputerAccessExchange` round-trip the TUI's `ComputerAccessView` resolves
  * (`tui-core/src/computer_access_bridge.rs`).
  *
- * Two-panel contract, matching the TUI byte-for-byte:
+ * Two-panel contract, preserving the TUI permission choices:
  *  - When `request.tcc_state` is present, a required macOS permission
  *    (Accessibility / Screen Recording) is missing — render the TCC panel:
  *    granted/not-granted per permission, an "Open System Settings" action per
@@ -14,7 +15,7 @@
  *  - Otherwise render the app-allowlist panel: one pre-checked checkbox per
  *    requested app, a checkbox per requested capability flag
  *    (clipboardRead/clipboardWrite/systemKeyCombos), and a submit button
- *    ("Allow for this session (N apps)").
+ *    ("Allow for this session").
  *
  * Escape while this panel is focused denies (matching the TUI and
  * {@link PermissionPrompt}). Local
@@ -28,6 +29,7 @@ import type { ComputerAccessRequestDto, ComputerAccessResponseDto } from '@lingx
 import type { SystemSettingsPane } from '../bridge/lingxi';
 import { useT } from '../theme/ThemeContext';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
+import { Icon } from './Icon';
 
 export interface ComputerAccessPromptProps {
   /** The head request to render, or `null` to render nothing. */
@@ -45,6 +47,7 @@ function initialCheckedApps(request: ComputerAccessRequestDto | null): Set<strin
 }
 
 export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSettings }: ComputerAccessPromptProps) {
+  const { tr } = useI18n();
   const t = useT();
   const primaryRef = useRef<HTMLButtonElement>(null);
   const promptHasFocus = useRef(false);
@@ -76,7 +79,6 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
   if (!request) return null;
 
   const tcc = request.tcc_state;
-  const grantedCount = checkedApps.size;
 
   const toggleApp = (label: string): void => {
     setCheckedApps((previous) => {
@@ -96,18 +98,78 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     });
   };
 
-  const title = tcc ? 'macOS permissions required' : 'Allow computer access?';
-
   const checkboxRowStyle: CSSProperties = {
     display: 'flex', alignItems: 'center', gap: 10,
     padding: '7px 2px', fontSize: 13, color: t.text,
   };
 
+  if (!tcc) {
+    const appName = request.apps.length === 1 ? request.apps[0]!.label : tr('desktop_computer_these_apps');
+    const variables = {
+      '--dialog-window': t.windowBg,
+      '--dialog-surface': t.surface,
+      '--dialog-surface-hover': t.surfaceHover,
+      '--dialog-border': t.border,
+      '--dialog-text': t.text,
+      '--dialog-text-2': t.text2,
+      '--computer-risk': t.dark ? '#ff9f66' : '#c74300',
+    } as CSSProperties;
+    return (
+      <section
+        className="inline-interaction-card computer-access-prompt"
+        style={variables}
+        role="region"
+        aria-labelledby="lingxi-computer-access-title"
+        aria-describedby="lingxi-computer-access-risk lingxi-computer-access-detail"
+        onFocusCapture={() => { promptHasFocus.current = true; }}
+        onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape' || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onDeny(request.request_id);
+        }}
+      >
+        <div className="computer-access-content">
+          <p className="computer-access-risk-label"><Icon name="shieldAlert" size={19} stroke={1.7} />{tr('desktop_computer_risk')}</p>
+          <h2 id="lingxi-computer-access-title">{tr('desktop_computer_allow_prompt', appName)}</h2>
+          <p id="lingxi-computer-access-risk" className="computer-access-copy">
+            {tr(request.apps.length === 1 ? 'desktop_computer_prompt_risk_one' : 'desktop_computer_prompt_risk_many')}
+          </p>
+          <p id="lingxi-computer-access-detail" className="computer-access-reason">{request.reason}</p>
+          <AppAllowlistPanel
+            request={request}
+            checkedApps={checkedApps}
+            onToggleApp={toggleApp}
+            clipboardRead={clipboardRead}
+            onClipboardRead={setClipboardRead}
+            clipboardWrite={clipboardWrite}
+            onClipboardWrite={setClipboardWrite}
+            systemKeyCombos={systemKeyCombos}
+            onSystemKeyCombos={setSystemKeyCombos}
+            checkboxRowStyle={checkboxRowStyle}
+          />
+        </div>
+        <footer className="computer-access-footer">
+          <span className="computer-access-scope">{tr('desktop_computer_session_scope')}</span>
+          <DesktopDialogActions>
+            <DesktopDialogButton variant="cancel" onClick={() => onDeny(request.request_id)}>
+              {tr('permission_deny')} <kbd aria-hidden="true">Esc</kbd>
+            </DesktopDialogButton>
+            <DesktopDialogButton ref={primaryRef} variant="primary" onClick={submit}>
+              {tr('desktop_computer_allow_session')} <kbd aria-hidden="true">↵</kbd>
+            </DesktopDialogButton>
+          </DesktopDialogActions>
+        </footer>
+      </section>
+    );
+  }
+
   return (
     <DesktopDialog
-      title={title}
+      title={tr('desktop_computer_macos_permissions')}
       summary={request.reason}
-      icon={tcc ? 'shieldAlert' : 'hand'}
+      icon="shieldAlert"
       size="regular"
       titleId="lingxi-computer-access-title"
       summaryId="lingxi-computer-access-detail"
@@ -123,44 +185,13 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
             variant="cancel"
             onClick={() => onDeny(request.request_id)}
           >
-            Deny
-          </DesktopDialogButton>
-          {tcc ? (
-            <DesktopDialogButton
-              ref={primaryRef}
-              variant="primary"
-              onClick={() => onDeny(request.request_id)}
-            >
-              Try again
-            </DesktopDialogButton>
-          ) : (
-            <DesktopDialogButton
-              ref={primaryRef}
-              variant="primary"
-              onClick={submit}
-            >
-              {`Allow for this session (${grantedCount} apps)`}
-            </DesktopDialogButton>
-          )}
+            {tr('permission_deny')}</DesktopDialogButton>
+          <DesktopDialogButton ref={primaryRef} variant="primary" onClick={() => onDeny(request.request_id)}>
+            {tr('desktop_computer_try_again')}</DesktopDialogButton>
         </DesktopDialogActions>
       )}
     >
-      {tcc ? (
-        <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
-      ) : (
-        <AppAllowlistPanel
-          request={request}
-          checkedApps={checkedApps}
-          onToggleApp={toggleApp}
-          clipboardRead={clipboardRead}
-          onClipboardRead={setClipboardRead}
-          clipboardWrite={clipboardWrite}
-          onClipboardWrite={setClipboardWrite}
-          systemKeyCombos={systemKeyCombos}
-          onSystemKeyCombos={setSystemKeyCombos}
-          checkboxRowStyle={checkboxRowStyle}
-        />
-      )}
+      <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
     </DesktopDialog>
   );
 }
@@ -172,10 +203,11 @@ function TccPanel({
   tcc: NonNullable<ComputerAccessRequestDto['tcc_state']>;
   onOpenSystemSettings(pane: SystemSettingsPane): void;
 }) {
+  const { tr } = useI18n();
   const t = useT();
   const rows: Array<{ pane: SystemSettingsPane; label: string; granted: boolean }> = [
-    { pane: 'accessibility', label: 'Accessibility', granted: tcc.accessibility },
-    { pane: 'screen_recording', label: 'Screen Recording', granted: tcc.screen_recording },
+    { pane: 'accessibility', label: tr('desktop_computer_accessibility'), granted: tcc.accessibility },
+    { pane: 'screen_recording', label: tr('desktop_computer_screen_recording'), granted: tcc.screen_recording },
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -197,7 +229,7 @@ function TccPanel({
               }}
             />
             <span style={{ fontSize: 13, color: t.text }}>{row.label}</span>
-            <span style={{ fontSize: 11, color: t.text3 }}>{row.granted ? 'granted' : 'not granted'}</span>
+            <span style={{ fontSize: 11, color: t.text3 }}>{row.granted ? tr('desktop_computer_granted') : tr('desktop_computer_not_granted')}</span>
           </div>
           {!row.granted && (
             <button
@@ -210,7 +242,7 @@ function TccPanel({
                 border: `0.5px solid ${t.accentBorder}`,
               }}
             >
-              {`Open System Settings → ${row.label}`}
+              {tr('desktop_computer_open_system_settings', row.label)}
             </button>
           )}
         </div>
@@ -242,12 +274,13 @@ function AppAllowlistPanel({
   onSystemKeyCombos(value: boolean): void;
   checkboxRowStyle: CSSProperties;
 }) {
+  const { tr } = useI18n();
   const t = useT();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
         <div style={{ fontSize: 10.5, fontWeight: 600, color: t.text3, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
-          {`Apps (${request.tier})`}
+          {tr('desktop_computer_app_scope')}
         </div>
         {request.apps.map((app) => (
           <label key={app.label} style={checkboxRowStyle}>
@@ -263,25 +296,21 @@ function AppAllowlistPanel({
       {(request.clipboard_read || request.clipboard_write || request.system_key_combos) && (
         <div>
           <div style={{ fontSize: 10.5, fontWeight: 600, color: t.text3, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
-            Capabilities
-          </div>
+            {tr('desktop_computer_capabilities')}</div>
           {request.clipboard_read && (
             <label style={checkboxRowStyle}>
               <input type="checkbox" checked={clipboardRead} onChange={(event) => onClipboardRead(event.target.checked)} />
-              Read the clipboard
-            </label>
+              {tr('desktop_computer_clipboard_read')}</label>
           )}
           {request.clipboard_write && (
             <label style={checkboxRowStyle}>
               <input type="checkbox" checked={clipboardWrite} onChange={(event) => onClipboardWrite(event.target.checked)} />
-              Write the clipboard
-            </label>
+              {tr('desktop_computer_clipboard_write')}</label>
           )}
           {request.system_key_combos && (
             <label style={checkboxRowStyle}>
               <input type="checkbox" checked={systemKeyCombos} onChange={(event) => onSystemKeyCombos(event.target.checked)} />
-              Send system key combos
-            </label>
+              {tr('desktop_computer_system_shortcuts')}</label>
           )}
         </div>
       )}

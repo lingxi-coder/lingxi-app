@@ -46,6 +46,101 @@ pub async fn complete_in(self, profile: &str, request: &ChatRequest, options: &R
 
 Select the starting profile explicitly. complete() instead resolves a route by model.
 
+<a id="input-field-guide"></a>
+
+## Common input fields and defaults
+
+| Field | Meaning / default | When to set it |
+| --- | --- | --- |
+| model | Configured model selector; ChatRequest::new requires it | Choose from the selected connection rather than passing a display label by guess |
+| messages | Empty ordered conversation input | First user turn plus full assistant/tool turns for stateless replay |
+| max_tokens | Optional output ceiling, not an input context limit | Bound response size; allow enough room for reasoning where supported |
+| tools / tool_choice | No functions; ToolChoice::Auto | Advertise host functions and choose Auto, Any, None or one named Tool |
+| output_format | OutputFormat::Text | Ask for a JSON object or schema-constrained final answer |
+| continuation | No provider state reference | Use a completed, same-account ContinuationRef and send only new input |
+
+Optional controls are validated by the selected model and protocol. An explicitly unsupported option is an error; the client does not silently translate every provider feature into another wire format.
+
+<a id="request-option-guide"></a>
+
+## Options that should be request-scoped
+
+Changing a model request must not mutate a global key, timeout or reasoning setting shared by other sessions. Pass a fresh RequestOptions for each application request and reuse the long-lived client handle.
+
+| Option | Application contract |
+| --- | --- |
+| credential | A valid secret for the primary connection; the host refreshes and stores it |
+| fallback_credentials | Keys indexed by exact fallback profile; never an implicit copy of the primary key |
+| total_timeout | Whole-operation budget including reads. Streams need an explicit value for a total deadline |
+| account_scope | Stable non-secret identity for provider continuation; use the same account on the next turn |
+| file_account_scope | Independent account identity for eligible provider upload reuse |
+| mcp_authorizations | Fresh remote-server credentials indexed by declared label/name; keep them out of history |
+
+<a id="function-tool-roundtrip"></a>
+
+## Complete a function-tool round trip
+
+A function definition describes what the model may request; it does not execute code. The host validates a completed ToolUse result, runs its registered implementation, adds a ToolResult with the original call ID, and makes the next request. Keep a round limit, cancellation path and permission decision in the host.
+
+This source-checked example exposes one harmless in-memory article lookup. The request must already contain a user message, and the selected route must support strict tool input. It rejects unregistered/namespaced calls and malformed input rather than executing model-supplied names. It does not implement a general Agent runtime.
+
+### Bounded tool loop · host-owned implementation
+
+```rust
+use lingxi_llm_client::{LlmClient, RequestOptions};
+use lingxi_llm_client::protocol::{
+    ChatRequest, ChatResponse, ContentBlock, ConversationMessage,
+    MessageRole, StopReason, ToolChoice, ToolSpec,
+};
+
+pub async fn answer_with_lookup(
+    client: &LlmClient,
+    profile: &str,
+    mut request: ChatRequest,
+    options: &RequestOptions,
+) -> Result<ChatResponse, Box<dyn std::error::Error>> {
+    request.tools = vec![serde_json::from_str::<ToolSpec>(r#"{
+        "name":"lookup_article", "description":"Read one local help article by ID.",
+        "input_schema":{"type":"object","properties":{"article":{"type":"string"}},
+            "required":["article"],"additionalProperties":false}, "strict":true
+    }"#)?];
+    request.tool_choice = ToolChoice::Auto;
+    for _ in 0..3 {
+        let response = client.chat().complete_in(profile, &request, options).await?;
+        if !response.tool_input_issues.is_empty() {
+            return Err("tool input was not valid JSON".into());
+        }
+        if response.stop_reason != StopReason::ToolUse { return Ok(response); }
+        let mut results = Vec::new();
+        for (id, namespace, name, input) in response.message.tool_uses() {
+            if namespace.is_some() || name != "lookup_article" {
+                return Err("tool is not registered by this host".into());
+            }
+            let article = input.string_at("/article").ok_or("article must be a string")?;
+            let found = article == "quickstart";
+            results.push(ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: if found { "Use the LLM Client quickstart." } else { "Article not found." }.into(),
+                is_error: Some(!found), blocks: None, cache_reference: None, toolset_name: None,
+            });
+        }
+        if results.is_empty() { return Err("tool-use response has no callable tool".into()); }
+        request.messages.push(response.message);
+        request.messages.push(ConversationMessage {
+            role: MessageRole::User, content: results, native_options: Vec::new(),
+        });
+    }
+    Err("tool round limit reached".into())
+}
+```
+
+Verification method: Compile check (llm-function-tool-roundtrip)
+
+- [Harness tools and permissions](harness-tools.md)
+- [Structured tool and output contracts](llm-controls.md)
+
+Preserve the complete assistant message before appending tool results: tool IDs, native provider content and reasoning signatures may be required by the next request. For permissions, tool scheduling and persistent sessions, integrate Harness instead.
+
 <a id="request-options"></a>
 
 ## RequestOptions
@@ -189,15 +284,19 @@ A completed response produces a reusable ContinuationRef only with stable accoun
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/options.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/prepared.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/executor.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/requests.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/requests.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/llm.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/codecs/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/mod.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/transport.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/transport.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/execution_contracts.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- llm-client/src/client/options.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/prepared.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/executor.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/requests.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/llm.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/codecs/mod.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/transport.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/execution_contracts.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/chat.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/message.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/json_payload.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/continuation.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -1,7 +1,6 @@
 import { OpenLinkPage } from '../pages/OpenLinkPage';
 import { lazy, Suspense, useEffect } from 'react';
 import { ConsoleLayout } from '../layouts/ConsoleLayout';
-import { DocsPage } from '../pages/DocsPage';
 import { PrivacyPage, DataDeletionPage } from '../pages/PrivacyPage';
 import { LoginPage } from '../pages/LoginPage';
 import {
@@ -14,10 +13,16 @@ import { DownloadPage, HomePage, PricingPage } from '../pages/PublicPages';
 import { PublicLayout } from '../layouts/PublicLayout';
 import { detectInitialRegion, Locale, Region } from '../utils/locale';
 import { usePersistentState } from './usePersistentState';
-import { useRouter } from './router';
+import { isRemoteRoute, useRouter } from './router';
 import { useTheme } from './useTheme';
 
 const AdminModelsPage = lazy(() => import('../pages/AdminModelsPage'));
+const DocsPage = lazy(async () => {
+  const [page] = await Promise.all([import('../pages/DocsPage'), import('../docs.css')]);
+  return { default: page.DocsPage };
+});
+const RemotePage = lazy(() => import('../pages/RemotePage'));
+const RemoteSignInPage = lazy(() => import('../pages/RemoteSignInPage'));
 
 export function App() {
   const route = useRouter();
@@ -28,7 +33,9 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
-    if (!route.startsWith('/docs')) {
+    if (isRemoteRoute(route) || route === '/login/remote') {
+      document.title = locale === 'zh' ? '灵犀远控 — LingXi Remote' : 'LingXi Remote';
+    } else if (!route.startsWith('/docs')) {
       document.title = route === '/privacy' ? (locale === 'zh' ? '隐私政策 — 灵犀 LingXi' : 'Privacy policy — LingXi')
         : route === '/data-deletion' ? (locale === 'zh' ? '数据与账号删除 — 灵犀 LingXi' : 'Data and account deletion — LingXi')
         : locale === 'zh' ? '灵犀 LingXi — 你的个人辅助 Agent' : 'LingXi — Your personal AI agent';
@@ -58,16 +65,29 @@ export function App() {
 
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
 
+  if (isRemoteRoute(route) || route === '/login/remote') {
+    const fallback = <main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>;
+    return (
+      <Suspense fallback={fallback}>
+        {route === '/login/remote'
+          ? <RemoteSignInPage locale={locale} />
+          : <RemotePage locale={locale} theme={theme} route={route} onLocaleChange={setLocale} onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))} />}
+      </Suspense>
+    );
+  }
+
   if (route === '/admin/models') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载管理后台…' : 'Loading administration…'}</main>}><AdminModelsPage locale={locale} /></Suspense>;
 
   if (route === '/docs' || route.startsWith('/docs/')) {
     return (
-      <DocsPage
-        pageId={route === '/docs' ? 'overview' : route.slice('/docs/'.length)}
-        {...common}
-        theme={theme}
-        onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
-      />
+      <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载文档…' : 'Loading documentation…'}</main>}>
+        <DocsPage
+          pageId={route === '/docs' ? 'overview' : route.slice('/docs/'.length)}
+          {...common}
+          theme={theme}
+          onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+        />
+      </Suspense>
     );
   }
 

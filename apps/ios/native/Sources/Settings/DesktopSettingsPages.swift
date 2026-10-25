@@ -8,7 +8,7 @@ struct SettingsConnectionStatus: View {
                 Label("settings_parity_disconnected", systemImage: "network.slash").accessibilityIdentifier("settings.engine-disconnected")
             } else if !repository.loaded {
                 ProgressView("settings_parity_wait_snapshot")
-                Button("Retry") { Task { await repository.refresh() } }
+                Button(String(localized: "common_retry")) { Task { await repository.refresh() } }
             }
             if let error = repository.errorMessage { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             if let status = repository.statusMessage { Text(status).foregroundStyle(.secondary) }
@@ -61,7 +61,7 @@ struct SettingsValueEditor: View {
                     Text(DesktopSettingsRepository.json(repository.effective[key] ?? NSNull()))
                         .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 }
-                Text("Enter a JSON value. null removes this layer's override.").font(.caption2).foregroundStyle(.secondary)
+                Text(String(localized: "settings_json_value_hint")).font(.caption2).foregroundStyle(.secondary)
             }
         } label: { Text(key) }
         .onAppear { reload() }
@@ -78,7 +78,7 @@ struct DesktopGeneralPage: View {
     let host: SettingsHost
     var body: some View {
         VStack(spacing: 12) {
-            SettingsSection(label: "偏好设置") {
+            SettingsSection(label: String(localized: "settings_preferences")) {
                 SettingsRow(label: String(localized: "settings_language_title"), onTap: { host.push(.language) })
                 SettingsRow(label: String(localized: "settings_notifications"), onTap: { host.push(.notifications) })
                 SettingsRow(label: String(localized: "settings_keyboard_input"), onTap: { host.push(.input) })
@@ -88,7 +88,7 @@ struct DesktopGeneralPage: View {
             SettingsSection(label: String(localized: "settings_parity_mobile_capabilities")) {
                 SettingsRow(label: String(localized: "settings_linux_runtime"), onTap: { host.push(.linuxRuntime) })
                 SettingsRow(label: String(localized: "settings_dream_mode"), onTap: { host.push(.dream) })
-                SettingsRow(label: "TypeScript LSP", onTap: { host.push(.typescriptLsp) })
+                SettingsRow(label: String(localized: "settings_typescript_lsp_title"), onTap: { host.push(.typescriptLsp) })
                 SettingsRow(label: String(localized: "settings_data_privacy"), isLast: true, onTap: { host.push(.privacy) })
             }
         }
@@ -114,7 +114,7 @@ struct DesktopDiagnosticsPage: View {
             DisclosureGroup("settings_parity_configuration_files") {
                 Text(repository.filesJSON).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
             }
-            ShareLink(item: repository.filesJSON) { Label("Export configuration file diagnostics", systemImage: "square.and.arrow.up") }
+            ShareLink(item: repository.filesJSON) { Label(String(localized: "settings_diagnostics_export"), systemImage: "square.and.arrow.up") }
                 .disabled(!repository.loaded)
         }
     }
@@ -124,9 +124,9 @@ struct DesktopAboutPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "LingXi").font(.title2.bold())
-            LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
-            LabeledContent("Build", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—")
-            Text("iOS updates are delivered through the App Store or your installed distribution channel.")
+            LabeledContent(String(localized: "plugins_detail_version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+            LabeledContent(String(localized: "settings_build_number"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—")
+            Text(String(localized: "settings_ios_updates"))
                 .foregroundStyle(.secondary)
         }
     }
@@ -194,7 +194,7 @@ struct DesktopProjectsPage: View {
         VStack(alignment: .leading, spacing: 16) {
             if let projectStore {
                 ForEach(projectStore.projects) { project in
-                    LabeledContent(project.record.name, value: project.record.id == projectStore.activeProjectId ? "Active" : "")
+                    LabeledContent(project.record.name, value: project.record.id == projectStore.activeProjectId ? String(localized: "settings_cu_state_active") : "")
                 }
             }
             LayeredSettingsPage(keys: ["trustedDirectories"])
@@ -243,7 +243,7 @@ struct SettingsLayerPicker: View {
     @Environment(\.settingsProjectSwitching) private var switching
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Picker("Settings layer", selection: $selection) {
+            Picker(String(localized: "settings_layer_label"), selection: $selection) {
                 ForEach(DesktopSettingsLayer.allCases) { Text($0.title).tag($0) }
             }.pickerStyle(.segmented)
             // 每一层都要有一句「值落到哪、影响谁」。四个裸标签本身不解释任何东西，
@@ -313,17 +313,17 @@ struct DesktopToolsAgentPage: View {
             SettingsLayerPicker(selection: $layer)
             ForEach(flags, id: \.self) { key in
                 VStack(alignment: .leading) {
-                    Toggle(key, isOn: Binding(get: { repository.ownValue(key: key, layer: layer) as? Bool ?? (key == "promptSuggestionEnabled") },
+                    Toggle(toolFlagLabel(key), isOn: Binding(get: { repository.ownValue(key: key, layer: layer) as? Bool ?? (key == "promptSuggestionEnabled") },
                                               set: { value in save(key, value) }))
                         .disabled(!repository.canEdit(key: key, layer: layer))
                     Text(repository.provenanceLabel(for: key)).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            GroupBox("Enabled tools") {
+            GroupBox(String(localized: "settings_tools_enabled")) {
                 VStack(alignment: .leading) {
                     TextField("Bash, Read, Edit", text: $tools).textFieldStyle(.roundedBorder)
-                    Text("Empty means unrestricted. Tool lists merge across layers.").font(.caption)
-                    Button("Save tools") { save("enabledTools", tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }) }
+                    Text(String(localized: "settings_tools_merge_hint")).font(.caption)
+                    Button(String(localized: "settings_tools_save")) { save("enabledTools", tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }) }
                 }.disabled(!repository.canEdit(key: "enabledTools", layer: layer))
             }
             GroupBox("settings_parity_output_style") {
@@ -332,7 +332,7 @@ struct DesktopToolsAgentPage: View {
                     Button("settings_save") { save("outputStyle", outputStyle.isEmpty ? NSNull() : outputStyle as Any) }
                 }.disabled(!repository.canEdit(key: "outputStyle", layer: layer))
             }
-            GroupBox("Model overrides") {
+            GroupBox(String(localized: "settings_model_overrides")) {
                 VStack(alignment: .leading) {
                     ForEach(overrides.keys.sorted(), id: \.self) { key in
                         HStack {
@@ -341,15 +341,28 @@ struct DesktopToolsAgentPage: View {
                             Button("settings_parity_remove", role: .destructive) { var next = overrides; next.removeValue(forKey: key); save("modelOverrides", next) }
                         }
                     }
-                    TextField("Original model ID", text: $overrideFrom).textFieldStyle(.roundedBorder)
-                    TextField("Replacement model ID", text: $overrideTo).textFieldStyle(.roundedBorder)
-                    Button("Add override") { var next = overrides; next[overrideFrom] = overrideTo; save("modelOverrides", next) }
+                    TextField(String(localized: "settings_model_original_id"), text: $overrideFrom).textFieldStyle(.roundedBorder)
+                    TextField(String(localized: "settings_model_replacement_id"), text: $overrideTo).textFieldStyle(.roundedBorder)
+                    Button(String(localized: "settings_model_add_override")) { var next = overrides; next[overrideFrom] = overrideTo; save("modelOverrides", next) }
                         .disabled(overrideFrom.isEmpty || overrideTo.isEmpty)
                 }.disabled(!repository.canEdit(key: "modelOverrides", layer: layer))
             }
         }.onAppear { reload() }
         .onChange(of: layer) { _, _ in reload() }
         .onChange(of: repository.sourceGeneration) { _, _ in reload() }
+    }
+    private func toolFlagLabel(_ key: String) -> String {
+        switch key {
+        case "promptSuggestionEnabled": String(localized: "settings_tools_prompt_suggestions")
+        case "disableArtifact": String(localized: "settings_tools_disable_artifacts")
+        case "disableAgentView": String(localized: "settings_tools_disable_agent_view")
+        case "disableAllHooks": String(localized: "settings_tools_disable_hooks")
+        case "skipWebFetchPreflight": String(localized: "settings_tools_skip_fetch_preflight")
+        case "alwaysThinkingEnabled": String(localized: "settings_tools_always_thinking")
+        case "showThinkingSummaries": String(localized: "settings_tools_thinking_summaries")
+        case "visionDelegationEnabled": String(localized: "settings_provider_vision_delegation")
+        default: key
+        }
     }
     private func save(_ key: String, _ value: Any) { Task { await repository.save(key: key, json: DesktopSettingsRepository.json(value), layer: layer) } }
     private func reload() {
@@ -374,10 +387,10 @@ struct DesktopPermissionsPage: View {
             SettingsLayerPicker(selection: $layer)
             Text(repository.provenanceLabel(for: "permissions")).font(.caption).foregroundStyle(.secondary)
             ForEach(["allow", "deny", "ask"], id: \.self) { kind in
-                GroupBox(kind.capitalized) {
+                GroupBox(ruleBehaviorLabel(kind)) {
                     VStack(alignment: .leading) {
                         let rules = own[kind] as? [String] ?? []
-                        if rules.isEmpty { Text("No rules in this layer.").foregroundStyle(.secondary) }
+                        if rules.isEmpty { Text(String(localized: "settings_permission_rules_empty")).foregroundStyle(.secondary) }
                         ForEach(rules, id: \.self) { value in
                             HStack {
                                 Text(value).font(.system(.body, design: .monospaced)); Spacer()
@@ -387,25 +400,41 @@ struct DesktopPermissionsPage: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            Picker("Rule behavior", selection: $behavior) { Text("Allow").tag("allow"); Text("Deny").tag("deny"); Text("Ask").tag("ask") }.pickerStyle(.segmented)
-            TextField("Rule, e.g. Bash(git status)", text: $rule).textFieldStyle(.roundedBorder)
-            Button("Add rule") { let rules = own[behavior] as? [String] ?? []; if !rules.contains(rule) { update(behavior, rules + [rule]) } }
+            Picker(String(localized: "settings_permission_rule_behavior"), selection: $behavior) { Text(String(localized: "permission_allow")).tag("allow"); Text(String(localized: "permission_deny")).tag("deny"); Text(String(localized: "settings_permission_ask")).tag("ask") }.pickerStyle(.segmented)
+            TextField(String(localized: "settings_permission_rule_placeholder"), text: $rule).textFieldStyle(.roundedBorder)
+            Button(String(localized: "settings_permission_add_rule")) { let rules = own[behavior] as? [String] ?? []; if !rules.contains(rule) { update(behavior, rules + [rule]) } }
                 .disabled(!writable || rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Picker("settings_parity_default_permission", selection: Binding(get: { own["defaultMode"] as? String ?? "default" }, set: { update("defaultMode", $0) })) {
-                ForEach(["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"], id: \.self) { Text($0).tag($0) }
+                ForEach(["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"], id: \.self) { Text(permissionModeLabel($0)).tag($0) }
             }.disabled(!writable)
-            GroupBox("Additional workspace directories") {
+            GroupBox(String(localized: "settings_workspace_additional_directories")) {
                 VStack(alignment: .leading) {
                     let directories = own["additionalDirectories"] as? [String] ?? []
                     ForEach(directories, id: \.self) { value in
                         HStack { Text(value); Spacer(); Button("settings_parity_remove", role: .destructive) { update("additionalDirectories", directories.filter { $0 != value }) } }
                     }
-                    TextField("Absolute path", text: $directory).textFieldStyle(.roundedBorder)
-                    Button("Add directory") { if !directories.contains(directory) { update("additionalDirectories", directories + [directory]) } }.disabled(!directory.hasPrefix("/"))
+                    TextField(String(localized: "settings_absolute_path"), text: $directory).textFieldStyle(.roundedBorder)
+                    Button(String(localized: "workspace_add_directory")) { if !directories.contains(directory) { update("additionalDirectories", directories + [directory]) } }.disabled(!directory.hasPrefix("/"))
                 }.disabled(!writable)
             }
-            Button("Current session permission mode") { host.push(.permissionMode) }
+            Button(String(localized: "settings_permission_current_session")) { host.push(.permissionMode) }
         }.onChange(of: repository.sourceGeneration) { _, _ in rule = ""; directory = "" }
+    }
+    private func ruleBehaviorLabel(_ behavior: String) -> String {
+        switch behavior {
+        case "deny": String(localized: "permission_deny")
+        case "ask": String(localized: "settings_permission_ask")
+        default: String(localized: "permission_allow")
+        }
+    }
+    private func permissionModeLabel(_ mode: String) -> String {
+        switch mode {
+        case "acceptEdits": String(localized: "settings_permission_mode_accept_edits")
+        case "plan": String(localized: "settings_permission_mode_plan")
+        case "dontAsk": String(localized: "settings_permission_mode_dont_ask")
+        case "bypassPermissions": String(localized: "settings_permission_mode_bypass")
+        default: String(localized: "settings_permission_mode_default")
+        }
     }
     private func update(_ field: String, _ value: Any) {
         guard let destination = layer.destination else { return }
@@ -514,7 +543,7 @@ struct DesktopCustomProvidersPage: View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsConnectionStatus()
             if let initialSelectionError {
-                ContentUnavailableView("Provider unavailable", systemImage: "link", description: Text(initialSelectionError))
+                ContentUnavailableView(String(localized: "settings_provider_unavailable"), systemImage: "link", description: Text(initialSelectionError))
             }
             SettingsLayerPicker(selection: $layer)
             GroupBox("settings_provider_region") {
@@ -548,81 +577,81 @@ struct DesktopCustomProvidersPage: View {
                 Button("settings_parity_import_providers") { showingImport = true }
                     .disabled(!repository.canEdit(key: "providers", layer: layer))
             }
-            GroupBox("Provider profile") {
+            GroupBox(String(localized: "settings_provider_profile")) {
                 VStack(alignment: .leading, spacing: 10) {
                     TextField("settings_parity_new_profile", text: $profileID).disabled(selected != nil)
-                    Picker("Protocol", selection: $providerType) { ForEach(types, id: \.self) { Text($0).tag($0) } }
+                    Picker(String(localized: "settings_provider_protocol"), selection: $providerType) { ForEach(types, id: \.self) { Text($0).tag($0) } }
                     TextField("settings_parity_base_url", text: $baseURL).keyboardType(.URL)
                     TextField("settings_parity_api_key_env", text: $apiKeyEnv)
-                    Text("Manage stored API keys in Provider credentials. Secrets are never written into this settings form.").font(.caption).foregroundStyle(.secondary)
-                    if providerType == "azure-openai" { TextField("API version", text: $apiVersion) }
-                    TextField("Model IDs, comma separated", text: $modelIDs)
+                    Text(String(localized: "settings_provider_credentials_separate")).font(.caption).foregroundStyle(.secondary)
+                    if providerType == "azure-openai" { TextField(String(localized: "settings_provider_api_version"), text: $apiVersion) }
+                    TextField(String(localized: "settings_provider_model_ids"), text: $modelIDs)
                     Button("settings_save") { saveProvider() }.accessibilityIdentifier("settings.providers.save")
                 }.textFieldStyle(.roundedBorder).autocorrectionDisabled().textInputAutocapitalization(.never)
                     .disabled(!repository.canEdit(key: "providers", layer: layer))
             }
-            GroupBox("Connections") {
+            GroupBox(String(localized: "settings_provider_connections")) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("One provider can be reached several ways — a domestic and an international address, or several keys. Blank fields inherit the values above. Requests try them in order and move to the next one when a connection fails.")
+                    Text(String(localized: "settings_provider_connections_layered_hint"))
                         .font(.caption).foregroundStyle(.secondary)
                     if connections.isEmpty {
-                        Text("Single connection: the address and authentication above are used.")
+                        Text(String(localized: "settings_provider_connections_single"))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach($connections) { $connection in
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                TextField("Connection id, e.g. cn", text: $connection.connectionID)
+                                TextField(String(localized: "settings_provider_connection_id"), text: $connection.connectionID)
                                     .accessibilityIdentifier("settings.providers.connection.id")
                                 Button("settings_parity_remove", role: .destructive) {
                                     connections.removeAll { $0.id == connection.id }
                                 }
                             }
                             TextField("settings_parity_base_url", text: $connection.baseURL).keyboardType(.URL)
-                            Picker("Protocol", selection: $connection.type) {
-                                Text("Inherit \(providerType)").tag("")
+                            Picker(String(localized: "settings_provider_protocol"), selection: $connection.type) {
+                                Text(String(localized: "settings_provider_inherit_protocol \(providerType)")).tag("")
                                 ForEach(types, id: \.self) { Text($0).tag($0) }
                             }
                             TextField("settings_parity_api_key_env", text: $connection.apiKeyEnv)
-                            Text("Uses \(profileID.isEmpty ? "the provider" : profileID)'s saved key unless this connection lists its own credentialIds.")
+                            Text(String(localized: "settings_provider_connection_credential_hint \(profileID.isEmpty ? String(localized: "model_detail_provider") : profileID)"))
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
                     }
-                    Button("Add connection") { connections.append(ProviderConnectionRow()) }
+                    Button(String(localized: "settings_provider_connection_add")) { connections.append(ProviderConnectionRow()) }
                         .accessibilityIdentifier("settings.providers.connection.add")
                 }.textFieldStyle(.roundedBorder).autocorrectionDisabled().textInputAutocapitalization(.never)
                     .disabled(!repository.canEdit(key: "providers", layer: layer))
             }
             EngineProfileCredentialsEditor(initialProviderID: profileID)
-            GroupBox("Routing aliases") {
+            GroupBox(String(localized: "settings_provider_routing_aliases")) {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(aliases.keys.sorted(), id: \.self) { name in
                         HStack { Text("\(name) → \(aliases[name] ?? "")"); Spacer(); Button("settings_parity_remove", role: .destructive) { var next = aliases; next.removeValue(forKey: name); saveRouting("aliases", next) } }
                     }
                     TextField("settings_parity_alias", text: $alias)
-                    TextField("Provider/model target", text: $aliasTarget)
+                    TextField(String(localized: "settings_provider_route_target"), text: $aliasTarget)
                     Button("settings_parity_add_alias") { var next = aliases; next[alias] = aliasTarget; saveRouting("aliases", next) }.disabled(alias.isEmpty || aliasTarget.isEmpty)
                 }.textFieldStyle(.roundedBorder).disabled(!repository.canEdit(key: "routing", layer: layer))
             }
-            GroupBox("Fallback routes") {
+            GroupBox(String(localized: "settings_provider_fallback_routes")) {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(fallbacks.keys.sorted(), id: \.self) { name in
                         HStack { Text("\(name) → \((fallbacks[name] ?? []).joined(separator: ", "))"); Spacer(); Button("settings_parity_remove", role: .destructive) { var next = fallbacks; next.removeValue(forKey: name); saveRouting("fallback", next) } }
                     }
-                    TextField("Primary route", text: $fallbackFrom)
-                    TextField("Fallback routes, comma separated", text: $fallbackTo)
-                    Button("Add fallback") { var next = fallbacks; next[fallbackFrom] = split(fallbackTo); saveRouting("fallback", next) }.disabled(fallbackFrom.isEmpty || fallbackTo.isEmpty)
-                    Stepper("Maximum attempts: \(maxAttempts)", value: $maxAttempts, in: 1...20)
-                    Stepper("Backoff: \(backoffMS) ms", value: $backoffMS, in: 0...60000, step: 100)
-                    Button("Save retry policy") {
+                    TextField(String(localized: "settings_provider_primary_route"), text: $fallbackFrom)
+                    TextField(String(localized: "settings_provider_fallback_routes_placeholder"), text: $fallbackTo)
+                    Button(String(localized: "settings_provider_add_fallback")) { var next = fallbacks; next[fallbackFrom] = split(fallbackTo); saveRouting("fallback", next) }.disabled(fallbackFrom.isEmpty || fallbackTo.isEmpty)
+                    Stepper(String(localized: "settings_provider_max_attempts \(maxAttempts)"), value: $maxAttempts, in: 1...20)
+                    Stepper(String(localized: "settings_provider_backoff \(backoffMS)"), value: $backoffMS, in: 0...60000, step: 100)
+                    Button(String(localized: "settings_provider_save_retry")) {
                         var retry = routing["retry"] as? [String: Any] ?? [:]
                         retry["maxAttempts"] = maxAttempts; retry["backoffMs"] = backoffMS
                         saveRouting("retry", retry)
                     }
                 }.textFieldStyle(.roundedBorder).disabled(!repository.canEdit(key: "routing", layer: layer))
             }
-            DisclosureGroup("Advanced provider and routing JSON") { SettingsValueEditor(key: "providers", layer: layer); SettingsValueEditor(key: "routing", layer: layer) }
+            DisclosureGroup(String(localized: "settings_provider_routing_json")) { SettingsValueEditor(key: "providers", layer: layer); SettingsValueEditor(key: "routing", layer: layer) }
         }.disabled(initialSelectionError != nil)
         .onAppear { if initialProfileID == nil { select(nil) } else { resolveLinkedProfile() } }
         .sheet(isPresented: $showingImport) { ProviderBulkImportPage(layer: layer) }
@@ -642,7 +671,7 @@ struct DesktopCustomProvidersPage: View {
             (initialScope == nil || initialScope == candidate.rawValue) && (repository.ownValue(key: "providers", layer: candidate) as? [String: Any])?[initialProfileID] != nil
         }
         guard matches.count == 1, let match = matches.first else {
-            initialSelectionError = matches.count > 1 ? "This provider exists in several settings layers. Open a link with its scope." : "This provider is not stored in the requested local settings layer."
+            initialSelectionError = matches.count > 1 ? String(localized: "provider_link_ambiguous") : String(localized: "provider_link_missing")
             return
         }
         layer = match; select(initialProfileID)
@@ -735,24 +764,24 @@ struct EngineProfileCredentialsEditor: View {
     var body: some View {
         GroupBox("settings_parity_credentials") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("API keys are stored by the engine's secure credential service, separately from settings files.")
+                Text(String(localized: "settings_credential_storage_separate"))
                     .font(.caption).foregroundStyle(.secondary)
                 if let encrypted = repository.credentialStorageEncrypted {
-                    Label(encrypted ? "Encrypted storage" : "Storage reports no encryption", systemImage: encrypted ? "lock.fill" : "lock.open")
+                    Label(encrypted ? String(localized: "settings_credential_storage_encrypted") : String(localized: "settings_credential_storage_unencrypted"), systemImage: encrypted ? "lock.fill" : "lock.open")
                         .font(.caption)
                 }
                 if !ids.isEmpty {
-                    Picker("Provider", selection: $providerID) {
-                        Text("Choose provider").tag("")
+                    Picker(String(localized: "model_detail_provider"), selection: $providerID) {
+                        Text(String(localized: "settings_provider_choose")).tag("")
                         ForEach(ids, id: \.self) { id in Text(id).tag(id) }
                     }
                 }
-                TextField("Engine profile ID", text: $providerID).textFieldStyle(.roundedBorder)
+                TextField(String(localized: "settings_credential_profile_id"), text: $providerID).textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled().textInputAutocapitalization(.never)
                 if let configured = repository.credentialStates[providerID] {
-                    Text(configured ? "Credential configured" : "No stored credential").font(.caption)
+                    Text(configured ? String(localized: "settings_parity_secret_configured") : String(localized: "settings_parity_secret_missing")).font(.caption)
                 }
-                SecureField("API key", text: $secret).textFieldStyle(.roundedBorder)
+                SecureField(String(localized: "settings_provider_api_key"), text: $secret).textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled().textInputAutocapitalization(.never)
                 HStack {
                     Button("settings_save") {
@@ -761,7 +790,7 @@ struct EngineProfileCredentialsEditor: View {
                         secret = ""
                         Task { await repository.saveCredential(providerID: id, secret: value) }
                     }.disabled(!repository.connected || repository.saving || providerID.isEmpty || secret.isEmpty)
-                    Button("Delete credential", role: .destructive) {
+                    Button(String(localized: "settings_provider_clear_credential"), role: .destructive) {
                         let id = providerID
                         secret = ""
                         Task { await repository.saveCredential(providerID: id, secret: nil) }

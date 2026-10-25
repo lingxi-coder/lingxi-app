@@ -26,8 +26,8 @@ private val languageStoreScope = CoroutineScope(SupervisorJob() + Dispatchers.IO
 
 /**
  * Supported in-app languages. The empty code means "follow the system locale"
- * (the persisted default). These are the iOS client's language options; the
- * labels stay hardcoded here — Task 12 extracts them to resources.
+ * (the persisted default). Language names use their own scripts; the language
+ * page resolves the follow-system option through the active locale's resources.
  */
 object AppLanguage {
     val SUPPORTED = listOf(
@@ -99,6 +99,10 @@ class AppLanguageStore(context: Context) {
  * no AppCompat dependency). Called from [android.app.Activity.attachBaseContext].
  */
 object LocaleWrapper {
+    /** Resolve background/ViewModel copy from the current selection, without retaining an Activity. */
+    fun getString(base: Context, id: Int, vararg args: Any): String =
+        wrap(base.applicationContext).getString(id, *args)
+
     fun wrap(base: Context): Context {
         val canonical = AppLanguage.canonical(AppLanguageStore.currentLanguage(base))
         if (canonical.isEmpty()) return base

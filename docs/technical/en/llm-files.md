@@ -14,6 +14,31 @@ AttachmentRef is an immutable host-store reference: attachment_id, revision, fil
 | ProviderFileRef / ProviderFileSource | SDK-scoped provider resource and codec input | Wrong account, endpoint, purpose or expired file fails validation |
 | ProviderFileContent | Original bytes where a download operation is supported | Download support is independent of upload or text extraction |
 
+<a id="file-workflow-choice"></a>
+
+## Choose attachment input or explicit file management
+
+Do not replace a conversation’s host AttachmentRef with an expiring provider ID. A remote file can expire or become inaccessible while the original authorized host attachment remains the user’s durable content.
+
+| Goal | Workflow |
+| --- | --- |
+| Ask about a user attachment | Store an immutable host revision, configure AttachmentResolver, and put its AttachmentRef in ChatRequest |
+| Reuse a provider file across requests | Upload through the typed provider files resource; retain ProviderFileRef and its exact account/endpoint scope |
+| Download or delete a remote resource | Check that specific file operation is supported, then use the original scoped reference |
+
+<a id="file-error-actions"></a>
+
+## Handle upload and readiness outcomes
+
+| Outcome | Next step |
+| --- | --- |
+| Unsupported operation / scope mismatch | Stop before reading or uploading again; correct route, purpose, media type and account |
+| FileUploadError::OutcomeUnknown | Record the uncertain attempt; use supported listing/metadata to reconcile before another upload |
+| ProviderFileProcessing | Retain the returned file reference and resume readiness polling |
+| Expired or missing file | Revalidate the host attachment and replay policy; a replacement upload is not universally safe |
+
+- [Keep attachment data out of retries](llm-execution-accounting.md)
+
 <a id="resolve"></a>
 
 ## Resolve host attachments
@@ -100,19 +125,19 @@ Implementation evidence: provider_files, provider_file_clients, file_stream_uplo
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/mod.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/builder.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/attachments/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/attachments/resolve.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/attachments/prepare.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/attachments/prepare.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/attachments/cache.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/attachments/cache.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/files/service.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/files/service.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/files/policy.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/files/policy.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/files/types.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/files/types.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/file_resources.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/file_resources.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/provider_files.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/provider_files.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/file_stream_upload.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/file_stream_upload.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/file_deadlines.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/file_deadlines.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- llm-client/src/client/mod.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/builder.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/attachments/resolve.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/attachments/prepare.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/attachments/cache.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/files/service.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/files/policy.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/files/types.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/file_resources.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/provider_files.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/file_stream_upload.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/file_deadlines.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -6,6 +6,7 @@ export interface DocRepositoryBaseline {
   revision: string;
   sourceUrl: string;
   dirty: boolean;
+  published?: boolean;
   treeFingerprint: string;
   productPinnedRevision?: string;
 }
@@ -14,7 +15,7 @@ export interface ResolvedDocSource {
   repo: DocRepository;
   path: string;
   revision: string;
-  sourceState: 'committed' | 'working-tree';
+  sourceState: 'committed' | 'unpublished' | 'working-tree';
   url?: string;
 }
 
@@ -28,7 +29,7 @@ export const docsBaseline = baseline as {
 export function resolveDocSources(page: DocPage): ResolvedDocSource[] {
   const saved = docsBaseline.pages[page.id] ?? [];
   if (JSON.stringify(saved.map(({ repo, path }) => ({ repo, path }))) !== JSON.stringify(page.sources ?? [])) return [];
-  return saved.map((source) => source.sourceState === 'working-tree' ? { ...source, url: undefined } : source);
+  return saved.map((source) => source.sourceState !== 'committed' ? { ...source, url: undefined } : source);
 }
 
 export function validateDocBaseline(pages: DocPage[], baseline = docsBaseline): void {

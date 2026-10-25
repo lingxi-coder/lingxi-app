@@ -30,6 +30,24 @@ def test_consistency_info_plist_inner_parity():
     err = validate_consistency(locales)
     assert err and "en" in err and "NSCameraUsageDescription" in err
 
+def test_consistency_rejects_missing_duplicate_or_wrong_format_arguments():
+    for translated in ("Used %1$d", "Used %1$d %1$d %2$s", "Used %1$s %2$s"):
+        error = validate_consistency({"zh-Hans": {"summary": "%1$d · %2$s"}, "en": {"summary": translated}})
+        assert error and "summary: formatting arguments differ" in error
+
+def test_consistency_allows_reordered_arguments_and_escaped_percent():
+    assert validate_consistency({
+        "zh-Hans": {"summary": "%1$d%% · %2$s"},
+        "en": {"summary": "%2$s · %1$d%%"},
+    }) is None
+
+def test_consistency_checks_each_plural_variation():
+    error = validate_consistency({
+        "zh-Hans": {"count %lld": "%lld 项"},
+        "en": {"count %lld": {"plural": {"one": "%lld item", "other": "items"}}},
+    })
+    assert error and "count %lld: formatting arguments differ" in error
+
 def test_generate_check_exit_0(tmp_path):
     out = tmp_path / "out"
     result = subprocess.run([sys.executable, "generate.py", "--ios-out", str(out), "--android-out", str(out), "--check"], cwd=os.path.dirname(__file__), capture_output=True, text=True)
@@ -54,8 +72,9 @@ def test_ios_catalog_shape(tmp_path):
     assert cat["sourceLanguage"] == "zh-Hans"
     assert cat["version"] == "1.0"
     assert "app_name" in cat["strings"]
-    # InfoPlist keys present under their plist names
-    assert "NSCameraUsageDescription" in cat["strings"]
+    # System permission dialogs look in InfoPlist.strings, not Localizable.
+    info = json.load(open(tmp_path / "InfoPlist.xcstrings"))
+    assert "NSCameraUsageDescription" in info["strings"]
     en = cat["strings"]["app_name"]["localizations"]["en"]["stringUnit"]["value"]
     assert en == "Lingxi"
 
@@ -74,6 +93,8 @@ def test_android_escaping(tmp_path):
             "a": "a <b> & c",
             "p": "100%x",
             "nl": "line one\nline two",
+            "percent": "Used %1$d%% (remaining %2$d%%)",
+            "percent_letter": "100%%x",
         },
         "en": {"k": "x", "n": "y", "q": "z", "a": "w", "p": "v", "nl": "u"},
     }
@@ -89,6 +110,8 @@ def test_android_escaping(tmp_path):
     # resource format requires the escape to render it as a line break.
     assert '<string name="nl">line one\\nline two</string>' in xml
     assert "line one\nline two" not in xml
+    assert '<string name="percent">Used %1$d%% (remaining %2$d%%)</string>' in xml
+    assert '<string name="percent_letter">100%%x</string>' in xml
 
 def _gate_sandbox(tmp_path):
     """Write canonical locales into a tmp dir and return (locales, ios_out, android_out)."""
@@ -117,6 +140,21 @@ def test_stale_gate_out_of_date(tmp_path):
     cat.write_text(cat.read_text().replace("Lingxi", "LingxiX"), encoding="utf-8")
     problems = stale_problems(locales, ios_out, android_out)
     assert any("Localizable.xcstrings" in p and "out of date" in p for p in problems)
+
+def test_info_plist_catalog_is_separate_and_freshness_checked(tmp_path):
+    locales, ios_out, android_out = _gate_sandbox(tmp_path)
+    write_ios(locales, ios_out)
+    write_android(locales, android_out)
+    ui = json.loads((ios_out / "Localizable.xcstrings").read_text())
+    info_path = ios_out / "InfoPlist.xcstrings"
+    info = json.loads(info_path.read_text())
+    assert "CFBundleDisplayName" not in ui["strings"]
+    assert info["strings"]["CFBundleDisplayName"]["localizations"]["en"]["stringUnit"]["value"] == "灵犀"
+    info_path.unlink()
+    assert any("InfoPlist.xcstrings" in p and "missing" in p for p in stale_problems(locales, ios_out, android_out))
+    write_ios(locales, ios_out)
+    info_path.write_text("{}", encoding="utf-8")
+    assert any("InfoPlist.xcstrings" in p and "out of date" in p for p in stale_problems(locales, ios_out, android_out))
 
 def test_stale_gate_orphan(tmp_path):
     locales, ios_out, android_out = _gate_sandbox(tmp_path)

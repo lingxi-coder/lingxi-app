@@ -8,6 +8,8 @@ import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.displayText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
@@ -30,7 +32,15 @@ class SettingsEngineBridge {
         val pending: ULong? = null,
         val models: List<ModelDetailsDto> = emptyList(),
         val operation: ClientEvent.ConfigurationOperation? = null,
+        /** Raw operation acknowledgement, retained for import correlation. */
         val credentials: ClientEvent.ProviderCredentialStatus? = null,
+        /** Confirmed presence by ID; each native status covers only its requested IDs. */
+        val credentialStates: Map<String, Boolean> = emptyMap(),
+        val credentialStorageEncrypted: Boolean? = null,
+        val credentialStatusError: String? = null,
+        /** Confirmed mutations only; listing credentials must not cause another refresh. */
+        val credentialRevision: Long = 0,
+        val credentialSaving: Boolean = false,
         val requiresReconnect: Boolean = false,
         val savingSettings: Boolean = false,
     )
@@ -39,6 +49,7 @@ class SettingsEngineBridge {
     private var source: ConversationSource? = null
     private var serial = System.currentTimeMillis().toULong() * 1000uL
     private var generation = 0L
+    private var credentialListingSerial = 0L
     private var pendingPatch: Pair<String, JSONObject>? = null
     private var confirmationArmed = false
 
@@ -84,8 +95,7 @@ class SettingsEngineBridge {
                     requiresReconnect = mutable.value.requiresReconnect || (message?.startsWith("Saved to ") == true && event.activeJson == null))
             }
             is ClientEvent.ProviderCredentialStatus -> {
-                mutable.value = mutable.value.copy(credentials = event,
-                    notice = event.error ?: "Credential storage status refreshed")
+                mutable.value = mutable.value.copy(credentials = event)
             }
             is ClientEvent.ModelList -> mutable.value = mutable.value.copy(models = event.details)
             is ClientEvent.Error -> {
@@ -191,15 +201,96 @@ class SettingsEngineBridge {
         val stored = JSONObject(confirmed.snapshot?.layersJson ?: "{}").optJSONObject(layer)?.optJSONObject("providers") ?: JSONObject()
         check(jsonEquivalent(stored,providers)) { "The engine did not confirm the provider import. Review is retained; refresh settings before retrying." }
     }
-    suspend fun refreshCredentials(providerIds: List<String>) = dispatch(ClientCommand.ListProviderCredentials(++serial,providerIds,emptyList()))
+    suspend fun refreshCredentials(providerIds: List<String>) {
+        val requestSource = source ?: error("Connect an engine to manage credentials")
+        val requestGeneration = generation
+        val listingSerial = ++credentialListingSerial
+        val ids = providerIds.distinct()
+        fun isCurrentBinding() = requestGeneration == generation && requestSource === source
+        fun isCurrentListing() = isCurrentBinding() && listingSerial == credentialListingSerial
+        while (isCurrentListing()) {
+            val requestRevision = mutable.value.credentialRevision
+            val id = ++serial
+            try {
+                val result = runLiveProviderCredentialOperation(
+                    requestSource, id, ClientCommand.ListProviderCredentials(id,ids,emptyList()), ::isCurrentBinding)
+                currentCoroutineContext().ensureActive()
+                if (!isCurrentListing()) return
+                // A mutation can invalidate the initial full listing. Retry
+                // it so unrelated IDs still get an authoritative presence.
+                if (requestRevision != mutable.value.credentialRevision) continue
+                val states = mutable.value.credentialStates.toMutableMap()
+                val globallyUnavailable = result.error != null && result.unavailableProviderIds.isEmpty()
+                for (providerId in ids) {
+                    if (!globallyUnavailable && providerId !in result.unavailableProviderIds) {
+                        states[providerId] = providerId in result.configuredProviderIds
+                    }
+                }
+                mutable.value = mutable.value.copy(
+                    credentialStates = states,
+                    credentialStorageEncrypted = result.storageEncrypted,
+                    credentialStatusError = result.error,
+                    notice = result.error ?: "Credential storage status refreshed",
+                )
+                return
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                if (isCurrentListing()) {
+                    if (requestRevision != mutable.value.credentialRevision) continue
+                    mutable.value = mutable.value.copy(
+                        credentialStatusError = error.message ?: "Credential status request failed",
+                        notice = error.message ?: "Credential status request failed",
+                    )
+                }
+                throw error
+            }
+        }
+    }
     suspend fun setCredential(providerId: String, secret: String) {
         require(providerId.isNotBlank() && secret.isNotBlank()) { "Provider and credential are required" }
-        mutable.value = mutable.value.copy(notice = "Waiting for secure credential storage…")
-        dispatch(ClientCommand.SetProviderCredential(++serial,providerId,ProviderCredentialSecretDto(secret)))
+        val id = ++serial
+        mutateCredential(id, ClientCommand.SetProviderCredential(id,providerId,ProviderCredentialSecretDto(secret)))
     }
     suspend fun deleteCredential(providerId: String) {
-        mutable.value = mutable.value.copy(notice = "Waiting for secure credential storage…")
-        dispatch(ClientCommand.DeleteProviderCredential(++serial,providerId))
+        require(providerId.isNotBlank()) { "Provider is required" }
+        val id = ++serial
+        mutateCredential(id, ClientCommand.DeleteProviderCredential(id,providerId))
+    }
+    private suspend fun mutateCredential(operationId: ULong, command: ClientCommand) {
+        val requestSource = source ?: error("Connect an engine to manage credentials")
+        val requestGeneration = generation
+        fun isCurrentBinding() = requestGeneration == generation && requestSource === source
+        check(!mutable.value.credentialSaving) { "Wait for the current credential change to finish" }
+        mutable.value = mutable.value.copy(credentialSaving = true, notice = "Waiting for secure credential storage…")
+        try {
+            val result = runLiveProviderCredentialOperation(requestSource, operationId, command, ::isCurrentBinding)
+            check(result.error == null) { result.error ?: "Credential storage request failed" }
+            currentCoroutineContext().ensureActive()
+            check(isCurrentBinding()) { "Engine source changed; retry the credential operation" }
+            val providerId = when (command) {
+                is ClientCommand.SetProviderCredential -> command.providerId
+                is ClientCommand.DeleteProviderCredential -> command.providerId
+                else -> error("Expected a credential mutation")
+            }
+            mutable.value = mutable.value.copy(
+                credentialStates = mutable.value.credentialStates + (providerId to (command is ClientCommand.SetProviderCredential)),
+                credentialStorageEncrypted = result.storageEncrypted,
+                credentialStatusError = null,
+                credentialRevision = mutable.value.credentialRevision + 1,
+                notice = "Credential change confirmed by secure storage.",
+            )
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            if (isCurrentBinding()) {
+                mutable.value = mutable.value.copy(
+                    credentialStatusError = error.message ?: "Credential storage request failed",
+                    notice = error.message ?: "Credential storage request failed",
+                )
+            }
+            throw error
+        } finally {
+            if (isCurrentBinding()) mutable.value = mutable.value.copy(credentialSaving = false)
+        }
     }
     /** Sends one admin command; returns the operation id of a mutating one (null for `get_*`). */
     suspend fun admin(domain: String, action: String, target: String? = null, scope: String? = null,

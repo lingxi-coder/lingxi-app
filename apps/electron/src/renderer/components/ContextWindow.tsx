@@ -4,6 +4,7 @@ import type { ModelContextBudgetDto } from '@lingxi/bridge-client';
 import type { UsageSnapshot } from '../bridge/conversation';
 import { formatTokens } from '../formatTokens';
 import { useT } from '../theme/ThemeContext';
+import { useI18n } from '../i18n/useI18n';
 
 export function contextWindowUsage(usage: UsageSnapshot | null, capacity?: number) {
   if (!usage || !capacity || !Number.isFinite(capacity) || capacity <= 0) return null;
@@ -17,6 +18,7 @@ export function contextWindowUsage(usage: UsageSnapshot | null, capacity?: numbe
 
 /** Latest API context footprint; session-wide billing totals are deliberately separate. */
 export function ContextWindow({ usage, capacity, maximum, priceBoundary, policy }: { usage: UsageSnapshot | null; capacity?: number; maximum?: number; priceBoundary?: number | null; policy?: ModelContextBudgetDto['policy'] }) {
+  const { tr, locale } = useI18n();
   const t = useT();
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -27,9 +29,9 @@ export function ContextWindow({ usage, capacity, maximum, priceBoundary, policy 
   const open = (hovered || focused) && !dismissed;
   const [position, setPosition] = useState({ left: 0, bottom: 0 });
   const snapshot = contextWindowUsage(usage, capacity);
-  const summary = snapshot ? `${snapshot.percent}% used (${100 - snapshot.percent}% left)` : 'Usage unavailable';
-  const tokens = snapshot ? `${formatTokens(snapshot.used)} / ${formatTokens(snapshot.capacity)} tokens used`
-    : capacity && Number.isFinite(capacity) && capacity > 0 ? `${formatTokens(capacity)} token capacity` : 'Context size unavailable';
+  const summary = snapshot ? tr('composer_context_summary_fmt', snapshot.percent, 100 - snapshot.percent) : tr('desktop_misc_context_unavailable');
+  const tokens = snapshot ? tr('composer_context_tokens_fmt', formatTokens(snapshot.used), formatTokens(snapshot.capacity))
+    : capacity && Number.isFinite(capacity) && capacity > 0 ? tr('desktop_misc_context_capacity', formatTokens(capacity)) : tr('desktop_misc_context_size_unavailable');
 
   useEffect(() => {
     if (!open) return;
@@ -57,7 +59,7 @@ export function ContextWindow({ usage, capacity, maximum, priceBoundary, policy 
   return <>
     <button ref={trigger} type="button" className="context-window-trigger"
       style={{ '--context-color': t.text3, '--context-track': t.border, '--context-focus': t.accent } as CSSProperties}
-      aria-label={`Context window (estimated): ${summary}. ${tokens}`} aria-describedby={open ? id : undefined}
+      aria-label={tr('composer_context_accessibility_fmt', tr('composer_context_title'), summary, tokens)} aria-describedby={open ? id : undefined}
       onMouseEnter={() => { setHovered(true); setDismissed(false); }} onMouseLeave={() => setHovered(false)}
       onFocus={() => { setFocused(true); setDismissed(false); }} onBlur={() => setFocused(false)}
       onClick={() => { setDismissed(false); trigger.current?.focus(); }}>
@@ -69,14 +71,14 @@ export function ContextWindow({ usage, capacity, maximum, priceBoundary, policy 
       </svg>
     </button>
     {open && createPortal(<div ref={tooltip} id={id} role="tooltip" className="context-window-tooltip" style={position}>
-      <div className="context-window-heading">Context window:</div>
+      <div className="context-window-heading">{tr('composer_context_title')}</div>
       <div>{summary}</div>
       <div>{tokens}</div>
       <div className="context-window-details">
-        <div>最近一次请求输入 / 应用预算</div>
-        {policy && <div>应用策略：{policy === 'long' ? '长上下文' : policy === 'custom' ? '自定义' : '自动'}</div>}
-        {maximum != null && <div>模型最大上下文：{formatTokens(maximum)}</div>}
-        {priceBoundary != null && <div>输入超过 {priceBoundary.toLocaleString()} tokens 后，整次请求适用长上下文价格。</div>}
+        <div>{tr('composer_context_budget_note')}</div>
+        {policy && <div>{tr('composer_context_policy_fmt', tr(policy === 'long' ? 'composer_context_policy_long' : policy === 'custom' ? 'composer_context_policy_custom' : 'composer_context_policy_auto'))}</div>}
+        {maximum != null && <div>{tr('composer_context_model_max_fmt', formatTokens(maximum))}</div>}
+        {priceBoundary != null && <div>{tr('composer_context_long_price_fmt', priceBoundary.toLocaleString(locale))}</div>}
       </div>
     </div>, document.body)}
   </>;

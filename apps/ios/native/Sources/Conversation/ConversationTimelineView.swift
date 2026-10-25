@@ -97,8 +97,12 @@ struct ConversationTimelineView: View {
                 },
                 isUserExpanded: expandedToolCalls.contains("user:\(rowID)"),
                 onToggleUserExpanded: { onToggleToolCall("user:\(rowID)") },
-                isAssistantExpanded: expandedToolCalls.contains("assistant:\(rowID)"),
-                onToggleAssistantExpanded: { onToggleToolCall("assistant:\(rowID)") }
+                isAssistantExpanded: message.streamed
+                    ? !expandedToolCalls.contains("collapsed-assistant:\(rowID)")
+                    : expandedToolCalls.contains("assistant:\(rowID)"),
+                onToggleAssistantExpanded: {
+                    onToggleToolCall(message.streamed ? "collapsed-assistant:\(rowID)" : "assistant:\(rowID)")
+                }
             )
             .id(rowID)
         case let .commandOutput(rowID, output):

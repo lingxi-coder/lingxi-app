@@ -102,6 +102,10 @@ pub struct BridgeArgs {
     pub session_prompt_directory: Vec<PathBuf>,
     /// `--model <id>`: the default model id (overrides the desktop default).
     pub model: Option<String>,
+    /// Host policy for permission prompts (1..=86400 seconds).
+    pub permission_timeout_secs: Option<u64>,
+    /// Host policy for questions: never, 60s, 5m, or 10m.
+    pub ask_user_question_timeout: Option<tool_ui::ask_user_question::AskUserQuestionTimeout>,
     /// Read one bounded credential line from stdin before assembling the engine.
     pub api_key_stdin: bool,
     /// Read a bounded JSON envelope containing the API key and provider keys.
@@ -248,6 +252,29 @@ impl BridgeArgs {
                         .ok_or_else(|| "--model requires a model id argument".to_string())?;
                     out.model = Some(v.as_ref().to_string());
                 }
+                "--permission-timeout-secs" => {
+                    let value = it
+                        .next()
+                        .ok_or("--permission-timeout-secs requires seconds")?;
+                    let seconds: u64 = value.as_ref().parse().map_err(|_| {
+                        "--permission-timeout-secs requires an integer from 1 to 86400"
+                    })?;
+                    if !(1..=86400).contains(&seconds) {
+                        return Err("--permission-timeout-secs must be from 1 to 86400".into());
+                    }
+                    out.permission_timeout_secs = Some(seconds);
+                }
+                "--ask-user-question-timeout" => {
+                    let value = it
+                        .next()
+                        .ok_or("--ask-user-question-timeout requires never, 60s, 5m, or 10m")?;
+                    out.ask_user_question_timeout = Some(
+                        tool_ui::ask_user_question::AskUserQuestionTimeout::from_settings_str(
+                            value.as_ref(),
+                        )
+                        .ok_or("--ask-user-question-timeout requires never, 60s, 5m, or 10m")?,
+                    );
+                }
                 "--api-key-stdin" => out.api_key_stdin = true,
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
@@ -342,6 +369,8 @@ pub fn usage() -> String {
              --cwd <DIR>      Working directory to root the engine at (default: current dir)\n    \
              --session-id <UUID>\n                              Stable session UUID (generated when omitted)\n    \
              --list-sessions-json\n                              List persisted sessions for --cwd and exit\n    \
+             --permission-timeout-secs <SECONDS>  Permission wait (1..86400)\n    \
+             --ask-user-question-timeout <never|60s|5m|10m>\n    \
              --model <ID>     Default model id (default: the desktop build default)\n    \
              --api-key-stdin  Read the API key from one line on stdin\n    \
              --credential-stdin\n    \
@@ -819,6 +848,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         let mut __desktop_config = DesktopConfig::default();
         __desktop_config.build_info = build_info;
         __desktop_config.diagnostics = None;
+        __desktop_config.permission_timeout = args
+            .permission_timeout_secs
+            .map(std::time::Duration::from_secs);
+        __desktop_config.ask_user_question_timeout_override = args.ask_user_question_timeout;
         __desktop_config.composition = None;
         __desktop_config.defer_session_start = false;
         // The desktop opens a session while its startup MCP servers connect;
@@ -2092,6 +2125,11 @@ pub async fn assemble_with_credentials(
     )
     .await
     .map_err(|error| error.to_string())?;
+    if provider_credentials_ephemeral {
+        // The parent is the only provider-key authority. Keep the shared native
+        // store for MCP/OAuth, but never revive a legacy provider key from it.
+        shared.credentials.use_host_managed_provider_keys();
+    }
     // A desktop that owns credential persistence refreshes its one Codex
     // session itself and serves every engine only access tokens, so any
     // number of them use the account at once. This engine never refreshes
@@ -2581,6 +2619,37 @@ pub fn publish_lockfile_recoverable(
 mod tests {
     use super::*;
     use lingxi_core::host::live_sessions::LiveSessionDir;
+
+    #[test]
+    fn remote_timeout_flags_are_validated_and_reach_the_runtime() {
+        let args = BridgeArgs::parse([
+            "--permission-timeout-secs",
+            "1800",
+            "--ask-user-question-timeout",
+            "never",
+        ])
+        .unwrap();
+        let config = resolve_desktop_config(&args);
+        assert_eq!(
+            config.resolved_permission_timeout().unwrap(),
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(
+            config.ask_user_question_timeout_override,
+            Some(tool_ui::ask_user_question::AskUserQuestionTimeout::Never)
+        );
+        assert!(resolve_desktop_config(&BridgeArgs::default())
+            .permission_timeout
+            .is_none());
+        for value in ["0", "86401", "-1", "1.5", "18446744073709551616"] {
+            assert!(BridgeArgs::parse(["--permission-timeout-secs", value]).is_err());
+        }
+        for value in ["", "forever", "1800"] {
+            assert!(BridgeArgs::parse(["--ask-user-question-timeout", value]).is_err());
+        }
+        assert!(BridgeArgs::parse(["--permission-timeout-secs"]).is_err());
+        assert!(BridgeArgs::parse(["--ask-user-question-timeout"]).is_err());
+    }
 
     #[test]
     fn parse_defaults_when_no_args() {
@@ -3531,7 +3600,12 @@ mod tests {
         let u = usage();
         assert!(u.contains("--api-key-stdin"));
         assert!(!u.contains("ANTHROPIC_API_KEY"));
-        assert!(!u.contains("sk-"), "usage must not embed a key literal");
+        // Match a key-shaped token, not the substring in --ask-user-question-timeout.
+        assert!(
+            !u.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+                .any(|token| token.starts_with("sk-")),
+            "usage must not embed a key literal"
+        );
     }
 
     #[test]
@@ -4061,6 +4135,77 @@ mod fusion_catalog_refresh_budget_tests {
     use super::{seed_parent_supplied_provider_keys, FUSION_CATALOG_REFRESH_BUDGET};
     use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn fresh_host_managed_boot_uses_only_parent_provider_keys() {
+        #[cfg(unix)]
+        use platform_posix::{
+            PlainTextSecureStorage, PosixClock as NativeClock, PosixHttp as NativeHttp,
+        };
+        #[cfg(windows)]
+        use platform_windows::{
+            PlainTextSecureStorage, WindowsClock as NativeClock, WindowsHttp as NativeHttp,
+        };
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            PlainTextSecureStorage::new(temp.path().join("credentials"))
+                .await
+                .unwrap(),
+        );
+        let credentials = Arc::new(secret::CredentialManager::new(
+            storage.clone(),
+            Arc::new(NativeClock::new()),
+            Arc::new(NativeHttp::new()),
+        ));
+        credentials
+            .set_provider_key("anthropic", "old-native-key")
+            .await
+            .unwrap();
+        credentials
+            .set_provider_key("deepseek", "old-native-key")
+            .await
+            .unwrap();
+        credentials.use_host_managed_provider_keys();
+        assert!(credentials
+            .get_provider_key("anthropic")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(credentials
+            .get_provider_key("deepseek")
+            .await
+            .unwrap()
+            .is_none());
+
+        let keys = BTreeMap::from([("anthropic".to_string(), "host-current-key".to_string())]);
+        seed_parent_supplied_provider_keys(
+            &harness_runtime::desktop::FusionCatalogRegistry::default(),
+            &credentials,
+            &keys,
+        )
+        .await;
+        assert_eq!(
+            credentials
+                .get_provider_key("anthropic")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "host-current-key"
+        );
+        assert!(!credentials.has_provider_key("deepseek").await.unwrap());
+        let independent = secret::CredentialManager::new(
+            storage,
+            Arc::new(NativeClock::new()),
+            Arc::new(NativeHttp::new()),
+        );
+        assert!(
+            independent.has_provider_key("deepseek").await.unwrap(),
+            "other hosts retain their native credentials"
+        );
+    }
 
     /// The packaged Electron host hands N provider keys over the credential
     /// stdin boundary; each one triggers a re-probe of EVERY credential source

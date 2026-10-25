@@ -47,8 +47,10 @@ internal object PushNotifications {
     fun show(context: Context, message: RemoteMessage) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "LingXi", NotificationManager.IMPORTANCE_DEFAULT))
-        val intent = PendingIntent.getActivity(context, 0,
-            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        val open = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // A Remote Control notification opens its session; MainActivity vets the link like any other.
+        PushRoute.link(message.data["route"])?.let { open.data = android.net.Uri.parse(it) }
+        val intent = PendingIntent.getActivity(context, 0, open,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_info)

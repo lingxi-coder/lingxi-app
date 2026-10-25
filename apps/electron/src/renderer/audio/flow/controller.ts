@@ -3,6 +3,7 @@ import type { ImageRefDto, AudioOperationDto, AudioOperationResultDto } from '@l
 import type { AudioConfigurationV4 } from '../../../shared/generatedAudioConfiguration.js';
 import { resolveAudioLanguage } from '../../../shared/generatedAudioConfiguration.js';
 import { StreamingSpeechSegmenter } from './segmenter.js';
+import { tr } from '../../i18n/locale.js';
 
 export type VoiceFlowPhase =
   | 'requestingPermission'
@@ -18,13 +19,40 @@ export type VoiceFlowPhase =
 export interface VoiceFlowState {
   phase: VoiceFlowPhase;
   detail: string;
+  detailTranslation?: { message: VoiceFlowMessage; value: string };
   generation: number;
   activeTurnId?: number;
 }
 
+interface VoiceFlowMessage {
+  key: string;
+  args: readonly (string | number | VoiceFlowMessage)[];
+}
+
+function flowMessage(key: string, ...args: VoiceFlowMessage['args']): VoiceFlowMessage {
+  return { key, args };
+}
+
+function resolveFlowMessage(message: VoiceFlowMessage): string {
+  return tr(message.key, ...message.args.map(argument => typeof argument === 'object' ? resolveFlowMessage(argument) : argument));
+}
+
+function flowDetail(message: string | VoiceFlowMessage): Pick<VoiceFlowState, 'detail' | 'detailTranslation'> {
+  if (typeof message === 'string') return { detail: message, detailTranslation: undefined };
+  const value = resolveFlowMessage(message);
+  return { detail: value, detailTranslation: { message, value } };
+}
+
+/** Re-resolve app copy when the UI language changes; backend and user text stay intact. */
+export function voiceFlowDetail(state: VoiceFlowState): string {
+  const translation = state.detailTranslation;
+  // External state adapters may spread the default state and replace its detail.
+  return translation && state.detail === translation.value ? resolveFlowMessage(translation.message) : state.detail;
+}
+
 export const DEFAULT_VOICE_FLOW_STATE: VoiceFlowState = {
   phase: 'paused',
-  detail: '轻点 Orb 开始聆听',
+  ...flowDetail(flowMessage('desktop_flow_idle')),
   generation: 0,
 };
 
@@ -139,7 +167,7 @@ export class VoiceFlowController {
     const generation = this.bumpGeneration();
     this.clearTimers();
     this.resetTurnState();
-    this.update({ phase: 'requestingPermission', detail: '正在准备本机音频服务…' });
+    this.update({ phase: 'requestingPermission', ...flowDetail(flowMessage('desktop_flow_preparing_audio')) });
     await this.startListening(generation, false);
   }
 
@@ -156,7 +184,7 @@ export class VoiceFlowController {
     if (!this.isCurrent(generation) || !released) return;
     this.cleanupTrackedSpeech();
     this.resetTurnState();
-    this.update({ phase: 'paused', detail: '轻点 Orb 开始聆听' });
+    this.update({ phase: 'paused', ...flowDetail(flowMessage('desktop_flow_idle')) });
   }
 
   async retry(): Promise<void> {
@@ -211,7 +239,7 @@ export class VoiceFlowController {
     this.listeningFinalizeRequested = false;
     this.update({
       phase: interrupting ? 'interrupting' : 'listening',
-      detail: interrupting ? '请说出新的问题…' : '正在聆听…',
+      ...flowDetail(flowMessage(interrupting ? 'desktop_flow_replacement_question' : 'voice_listening')),
     });
     let result: AudioOperationResultDto;
     try {
@@ -223,7 +251,7 @@ export class VoiceFlowController {
       if (!this.isCurrent(generation)) return;
       this.listeningActive = false;
       this.listeningFinalizeRequested = false;
-      this.fail(cause instanceof Error ? cause.message : '本机语音识别失败。');
+      this.fail(cause instanceof Error ? cause.message : flowMessage('desktop_flow_recognition_failed'));
       return;
     }
     if (!this.isCurrent(generation)) return;
@@ -235,7 +263,7 @@ export class VoiceFlowController {
       return;
     }
     if (result.type !== 'transcript') {
-      this.fail('本机语音服务返回了无效的识别结果。');
+      this.fail(flowMessage('desktop_flow_recognition_invalid'));
       return;
     }
     const transcript = result.text.trim();
@@ -255,17 +283,17 @@ export class VoiceFlowController {
     if (!this.listeningActive || this.listeningFinalizeRequested || !this.isCurrent(generation)) return;
     this.listeningFinalizeRequested = true;
     this.update(this.interruptContext
-      ? { phase: 'interrupting', detail: '正在等待插话识别完成…' }
-      : { phase: 'recognizing', detail: '正在等待当前语音识别完成…' });
+      ? { phase: 'interrupting', ...flowDetail(flowMessage('desktop_flow_wait_interruption')) }
+      : { phase: 'recognizing', ...flowDetail(flowMessage('voice_flow_finalizing_hint')) });
     try {
       await this.options.audio.finishListen();
     } catch (cause) {
       if (!this.isCurrent(generation) || !this.listeningActive || !this.listeningFinalizeRequested) return;
       this.listeningFinalizeRequested = false;
-      const error = cause instanceof Error ? cause.message : '无法结束当前本机语音识别。';
+      const error = cause instanceof Error ? cause.message : flowMessage('desktop_flow_finish_failed');
       this.update(this.interruptContext
-        ? { phase: 'interrupting', detail: `结束插话识别失败：${error}；仍在等待识别结果…` }
-        : { phase: 'recognizing', detail: `结束识别失败：${error}；仍在等待识别结果…` });
+        ? { phase: 'interrupting', ...flowDetail(flowMessage('desktop_flow_wait_interruption_failed', error)) }
+        : { phase: 'recognizing', ...flowDetail(flowMessage('desktop_flow_wait_recognition_failed', error)) });
     }
   }
 
@@ -282,7 +310,7 @@ export class VoiceFlowController {
     this.currentTurnId = undefined;
     const tracked = this.options.bridge.sendTrackedPrompt(text, [], [], [], { purpose: 'flow' });
     if (!tracked) {
-      this.fail('无法发送当前心流问题。');
+      this.fail(flowMessage('desktop_flow_send_unavailable'));
       return;
     }
     this.currentToken = tracked.token;
@@ -293,7 +321,7 @@ export class VoiceFlowController {
     });
     void tracked.queued.catch((cause: unknown) => {
       if (!this.isCurrent(generation)) return;
-      this.fail(cause instanceof Error ? cause.message : '心流问题发送失败。');
+      this.fail(cause instanceof Error ? cause.message : flowMessage('desktop_flow_send_failed'));
     });
   }
 
@@ -358,7 +386,7 @@ export class VoiceFlowController {
       if (result.type !== 'playback_completed') {
         this.speechInFlight = false;
         this.currentSpeechSegment = null;
-        this.fail('本机语音服务未确认播放完成。');
+        this.fail(flowMessage('desktop_flow_playback_unconfirmed'));
         return;
       }
       this.speechInFlight = false;
@@ -366,12 +394,12 @@ export class VoiceFlowController {
       if (this.interruptContext) return;
       if (this.speechQueue.length > 0) void this.maybeStartSpeaking(generation);
       else if (this.streamComplete) this.scheduleRelisten();
-      else this.update({ phase: 'thinking', detail: '正在继续生成回复…' });
+      else this.update({ phase: 'thinking', ...flowDetail(flowMessage('desktop_flow_continuing_reply')) });
     } catch (cause) {
       if (!this.isCurrent(generation)) return;
       this.speechInFlight = false;
       this.currentSpeechSegment = null;
-      this.fail(cause instanceof Error ? cause.message : '语音播放失败。');
+      this.fail(cause instanceof Error ? cause.message : flowMessage('desktop_flow_playback_failed'));
     }
   }
 
@@ -391,7 +419,7 @@ export class VoiceFlowController {
     this.speechQueue = [];
     this.currentSpeechSegment = null;
     this.speechInFlight = false;
-    this.update({ phase: 'interrupting', detail: '请说出新的问题…' });
+    this.update({ phase: 'interrupting', ...flowDetail(flowMessage('desktop_flow_replacement_question')) });
     try { await this.options.audio.cancel(); } catch { /* pending playback may already be done */ }
     if (!this.isCurrent(generation)) return;
     await this.startListening(generation, true);
@@ -417,14 +445,14 @@ export class VoiceFlowController {
     if (paused) this.turnPreferences = paused.previousPreferences;
     if (paused && paused.pausedSegments.length > 0) {
       this.speechQueue = [...paused.pausedSegments, ...this.speechQueue];
-      this.update({ phase: 'paused', detail: '继续当前回复…' });
+      this.update({ phase: 'paused', ...flowDetail(flowMessage('desktop_flow_resume_reply')) });
       const generation = this.generation;
       this.relistenTimer = this.options.timers.setTimeout(() => {
         void this.maybeStartSpeaking(generation);
       }, 0);
       return;
     }
-    this.update({ phase: 'paused', detail: '没有检测到新的插话，重新开始聆听…' });
+    this.update({ phase: 'paused', ...flowDetail(flowMessage('desktop_flow_no_interruption')) });
     this.scheduleRelisten();
   }
 
@@ -442,7 +470,7 @@ export class VoiceFlowController {
     this.fail(detail, requiresConfiguration(result) ? 'configurationRequired' : 'failed');
   }
 
-  private fail(detail: string, phase: 'failed' | 'configurationRequired' = 'failed'): void {
+  private fail(detail: string | VoiceFlowMessage, phase: 'failed' | 'configurationRequired' = 'failed'): void {
     const token = this.currentToken;
     this.bumpGeneration();
     this.clearTimers();
@@ -455,7 +483,7 @@ export class VoiceFlowController {
     this.listeningActive = false;
     this.listeningFinalizeRequested = false;
     this.turnPreferences = null;
-    this.update({ phase, detail });
+    this.update({ phase, ...flowDetail(detail) });
     if (token) void this.cancelOwnedTurn(token, detail);
     else this.cleanupTrackedSpeech();
   }
@@ -489,7 +517,7 @@ export class VoiceFlowController {
     this.cleanupTrackedSpeech();
   }
 
-  private cancelOwnedTurn(token: VoiceFlowTurnToken, failureDetail?: string): Promise<boolean> {
+  private cancelOwnedTurn(token: VoiceFlowTurnToken, failureDetail?: string | VoiceFlowMessage): Promise<boolean> {
     if (!this.ownsToken(token)) return Promise.resolve(true);
     if (this.cancellationTask?.token.sessionId === token.sessionId
       && this.cancellationTask.token.clientTurnId === token.clientTurnId) return this.cancellationTask.promise;
@@ -500,8 +528,10 @@ export class VoiceFlowController {
     }).catch((cause: unknown) => {
       if (!this.ownsToken(token)) return true;
       if (!this.disposed) {
-        const message = cause instanceof Error ? cause.message : '无法停止上一条心流问题。';
-        this.update({ phase: 'failed', detail: `${failureDetail ? `${failureDetail}；` : ''}停止上一条心流问题失败：${message}` });
+        const message = cause instanceof Error ? cause.message : flowMessage('desktop_flow_stop_failed');
+        this.update({ phase: 'failed', ...flowDetail(failureDetail
+          ? flowMessage('desktop_flow_stop_previous_with_detail', failureDetail, message)
+          : flowMessage('desktop_flow_stop_previous', message)) });
       }
       return false;
     }).finally(() => {
@@ -526,7 +556,12 @@ export class VoiceFlowController {
   }
 
   private update(patch: Partial<VoiceFlowState>): void {
-    this.state = { ...this.state, ...patch, generation: this.generation };
+    this.state = {
+      ...this.state,
+      ...(Object.prototype.hasOwnProperty.call(patch, 'detail') ? { detailTranslation: undefined } : {}),
+      ...patch,
+      generation: this.generation,
+    };
     this.publish();
   }
 

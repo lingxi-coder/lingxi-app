@@ -61,6 +61,282 @@ export const mobilePages: DocPage[] = [
         ]
       },
       {
+        "id": "first-execution",
+        "title": {
+          "en": "Get from installation to a successful command",
+          "zh": "从安装到第一个成功命令"
+        },
+        "paragraphs": [
+          {
+            "en": "Use this order when embedding the SDK for the first time. Constructing a wrapper creates a handle; it does not mean a rootfs has been installed or that the selected device can execute Linux. Keep installation, readiness and command success as three separate results in your application.",
+            "zh": "首次嵌入 SDK 时按以下顺序接入。创建包装对象只会得到句柄，不表示 rootfs 已安装，也不表示当前设备可以执行 Linux。应用应分别记录安装、就绪与命令执行的结果。"
+          }
+        ],
+        "steps": [
+          {
+            "en": "Select either the full Kotlin/Swift distribution or the native-support distribution for an existing Rust host, with bindings and resources from the same source revision.",
+            "zh": "选择完整 Kotlin／Swift 分发，或供已有 Rust 宿主使用的 native-support 分发；绑定与资源必须来自同一源码版本。"
+          },
+          {
+            "en": "Verify and stage the platform image. On Android, RootfsInstaller.stage prepares staged data and handle.repairRootfs activates it; iOS takes explicit converted fakefs ZIP and overlay paths.",
+            "zh": "校验并暂存平台镜像。Android 由 RootfsInstaller.stage 准备 staged 数据，再由 handle.repairRootfs 激活；iOS 提供转换后的 fakefs ZIP 与 overlay 的显式路径。"
+          },
+          {
+            "en": "Create one retained runtime with app-private absolute paths. Probe capability and show its reason when available is false; simulator linking is not guest readiness.",
+            "zh": "使用应用私有绝对路径创建并持有运行时。检查 capability；available 为 false 时展示 reason，不能把模拟器链接成功当作 guest 已就绪。"
+          },
+          {
+            "en": "Await boot, then execute a small bounded command with an explicit guest working directory and network policy.",
+            "zh": "等待 boot 完成，再以明确的 guest 工作目录和网络策略执行一个有时间上限的小命令。"
+          },
+          {
+            "en": "Accept the result only after checking exit_code, timed_out, cancelled and the enforcement receipt. Close owned sessions and await shutdown when the host no longer needs the runtime.",
+            "zh": "检查 exit_code、timed_out、cancelled 与执行回执后再接受结果。宿主不再需要运行时时，关闭其拥有的会话并等待 shutdown。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Complete portable command example",
+              "zh": "完整可移植命令示例"
+            },
+            "href": "/docs/mobile-rust#complete-command"
+          },
+          {
+            "label": {
+              "en": "Android installation and activation",
+              "zh": "Android 安装与激活"
+            },
+            "href": "/docs/mobile-android#install-rootfs"
+          },
+          {
+            "label": {
+              "en": "Swift session lifecycle",
+              "zh": "Swift 会话生命周期"
+            },
+            "href": "/docs/mobile-ios#ios-end-to-end"
+          }
+        ]
+      },
+      {
+        "id": "guest-identity",
+        "title": {
+          "en": "Guest user, home and project paths",
+          "zh": "Guest 用户、主目录与项目路径"
+        },
+        "paragraphs": [
+          {
+            "en": "Pass Linux guest paths to command cwd and guest-side tools. Pass native host paths to runtime storage and host_path mount fields. The same project has two coordinates: a host backing directory and the guest path exposed by a mount. Do not send an Android filesDir or iOS application-container path as a Linux cwd.",
+            "zh": "命令 cwd 与 guest 工具使用 Linux guest 路径；运行时存储和挂载 host_path 使用原生宿主路径。同一项目具有两个坐标：宿主 backing 目录与挂载后可见的 guest 路径。不要把 Android filesDir 或 iOS 应用容器路径当作 Linux cwd。"
+          }
+        ],
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Value",
+                "zh": "项目"
+              },
+              {
+                "en": "Default",
+                "zh": "默认值"
+              },
+              {
+                "en": "How to use it",
+                "zh": "使用方式"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Account / UID / GID",
+                  "zh": "账号／UID／GID"
+                },
+                {
+                  "en": "lingxi / 1000 / 1000",
+                  "zh": "lingxi / 1000 / 1000"
+                },
+                {
+                  "en": "Default unprivileged guest identity; /root is the administrator home.",
+                  "zh": "默认非特权 guest 身份；/root 是管理员主目录。"
+                }
+              ],
+              [
+                {
+                  "en": "HOME",
+                  "zh": "HOME"
+                },
+                {
+                  "en": "/home/lingxi",
+                  "zh": "/home/lingxi"
+                },
+                {
+                  "en": "Use for user configuration and a first command that needs no project mount.",
+                  "zh": "存放用户配置；不需要项目挂载的首个命令可使用此 cwd。"
+                }
+              ],
+              [
+                {
+                  "en": "Workspace root",
+                  "zh": "工作区根"
+                },
+                {
+                  "en": "/home/lingxi/lingxi",
+                  "zh": "/home/lingxi/lingxi"
+                },
+                {
+                  "en": "guest_paths::workspace(id) appends a stable project identifier.",
+                  "zh": "guest_paths::workspace(id) 在此追加稳定的项目标识。"
+                }
+              ],
+              [
+                {
+                  "en": "Project path",
+                  "zh": "项目路径"
+                },
+                {
+                  "en": "/home/lingxi/lingxi/<stable-id>",
+                  "zh": "/home/lingxi/lingxi/<stable-id>"
+                },
+                {
+                  "en": "Choose a normalized ID and configure its host directory before executing project commands.",
+                  "zh": "选择规范化 ID；执行项目命令前配置对应宿主目录。"
+                }
+              ],
+              [
+                {
+                  "en": "Persistent host home",
+                  "zh": "持久化宿主 HOME"
+                },
+                {
+                  "en": "managed_root/persistent/lingxi",
+                  "zh": "managed_root/persistent/lingxi"
+                },
+                {
+                  "en": "Independent of replaceable rootfs images; do not place it inside an extracted active image.",
+                  "zh": "独立于可替换 rootfs 镜像；不要放入解压后的 active 镜像内部。"
+                }
+              ],
+              [
+                {
+                  "en": "Scratch",
+                  "zh": "临时目录"
+                },
+                {
+                  "en": "/tmp, /var/tmp",
+                  "zh": "/tmp、/var/tmp"
+                },
+                {
+                  "en": "Temporary guest files, rather than stable project identity.",
+                  "zh": "用于 guest 临时文件，不作为稳定项目身份。"
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "id": "execution-selection",
+        "title": {
+          "en": "Choose the execution API for your feature",
+          "zh": "按功能选择执行接口"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Feature",
+                "zh": "功能"
+              },
+              {
+                "en": "Entry point",
+                "zh": "入口"
+              },
+              {
+                "en": "Result and cleanup",
+                "zh": "结果与清理"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Run a formatter, build step or finite command",
+                  "zh": "运行格式化、构建步骤或有限命令"
+                },
+                {
+                  "en": "run / run_command / Kotlin execute",
+                  "zh": "run／run_command／Kotlin execute"
+                },
+                {
+                  "en": "Collected stdout/stderr and exit state; set timeout_ms deliberately.",
+                  "zh": "收集 stdout／stderr 与退出状态；主动设置 timeout_ms。"
+                }
+              ],
+              [
+                {
+                  "en": "Show command output as it arrives",
+                  "zh": "执行中展示命令输出"
+                },
+                {
+                  "en": "run_streaming / run_command_streaming",
+                  "zh": "run_streaming／run_command_streaming"
+                },
+                {
+                  "en": "Consume stdout text and stderr bytes with bounded UI queues; still inspect the final result.",
+                  "zh": "通过有界 UI 队列消费 stdout 文本与 stderr 字节；仍需检查最终结果。"
+                }
+              ],
+              [
+                {
+                  "en": "Keep a service running under host ownership",
+                  "zh": "在宿主管理下保持服务运行"
+                },
+                {
+                  "en": "spawn_background",
+                  "zh": "spawn_background"
+                },
+                {
+                  "en": "Retain the process handle; use kill and observe terminal state.",
+                  "zh": "保留进程句柄；使用 kill 并确认终态。"
+                }
+              ],
+              [
+                {
+                  "en": "Build a terminal",
+                  "zh": "构建终端"
+                },
+                {
+                  "en": "open_pty / write_pty / resize_pty",
+                  "zh": "open_pty／write_pty／resize_pty"
+                },
+                {
+                  "en": "Decode terminal bytes across chunks, handle resize, and call close_pty.",
+                  "zh": "跨 chunk 解码终端字节、处理尺寸变化，并调用 close_pty。"
+                }
+              ],
+              [
+                {
+                  "en": "Connect an LSP or byte-framed child protocol",
+                  "zh": "连接 LSP 或按字节分帧的子进程协议"
+                },
+                {
+                  "en": "open_raw_stdio / read_raw_stdio / write_raw_stdio",
+                  "zh": "open_raw_stdio／read_raw_stdio／write_raw_stdio"
+                },
+                {
+                  "en": "Own the framing buffer and read loop; call close_raw_stdio to reap the process tree.",
+                  "zh": "宿主维护分帧缓冲与读取循环；调用 close_raw_stdio 回收进程树。"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "The SDK supplies execution primitives. It does not create an Agent, grant application permissions or keep an app alive after the operating system suspends it.",
+          "zh": "SDK 提供执行原语，不会自动创建 Agent、授予应用权限，或在操作系统挂起应用后保持宿主存活。"
+        }
+      },
+      {
         "id": "prerequisites",
         "title": {
           "en": "Build prerequisites",
@@ -297,6 +573,22 @@ export const mobilePages: DocPage[] = [
       {
         "repo": "mobile-linux-runtime",
         "path": "scripts/checks/check-resource-contracts.sh"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-api/src/mobile_linux.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/config.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/config.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/user_workspace.rs"
       }
     ]
   },
@@ -415,6 +707,160 @@ export const mobilePages: DocPage[] = [
             }
           }
         ]
+      },
+      {
+        "id": "command-fields",
+        "title": {
+          "en": "Command parameters and result checks",
+          "zh": "命令参数与结果检查"
+        },
+        "paragraphs": [
+          {
+            "en": "The request is an executable plus an argument vector. Shell operators, variable expansion and redirection are interpreted only when you explicitly invoke a shell, for example command=/bin/sh with args=[-c, script]. Keep user-selected arguments separate from shell source when the feature does not need a shell.",
+            "zh": "请求由可执行文件与参数数组组成。只有显式启动 shell，例如 command=/bin/sh、args=[-c, script]，才会解释管道、变量展开和重定向。不需要 shell 的功能应将用户选择的参数与 shell 源码分开。"
+          }
+        ],
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Parameter / result",
+                "zh": "参数／结果"
+              },
+              {
+                "en": "Contract",
+                "zh": "契约"
+              },
+              {
+                "en": "Caller decision",
+                "zh": "调用方决策"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "command, args",
+                  "zh": "command、args"
+                },
+                {
+                  "en": "Non-empty command; arguments are individual values, not a joined command string.",
+                  "zh": "command 非空；args 是独立参数，不是拼接后的命令字符串。"
+                },
+                {
+                  "en": "Prefer an installed guest executable and a concrete argument list.",
+                  "zh": "优先使用已安装的 guest 可执行文件与明确参数数组。"
+                }
+              ],
+              [
+                {
+                  "en": "cwd",
+                  "zh": "cwd"
+                },
+                {
+                  "en": "Optional absolute guest path; it is not a native host path.",
+                  "zh": "可选的 guest 绝对路径，不是原生宿主路径。"
+                },
+                {
+                  "en": "Use /home/lingxi for a first command or the configured guest project path.",
+                  "zh": "首个命令可使用 /home/lingxi；项目命令使用已配置的 guest 项目路径。"
+                }
+              ],
+              [
+                {
+                  "en": "env",
+                  "zh": "env"
+                },
+                {
+                  "en": "Rust BTreeMap; FFI uses key/value records. Environment keys must be non-empty and cannot contain = or NUL.",
+                  "zh": "Rust 使用 BTreeMap；FFI 使用 key／value 记录。环境变量名不能为空，不能含 = 或 NUL。"
+                },
+                {
+                  "en": "Supply values explicitly; do not assume shell expansion occurs inside a value.",
+                  "zh": "显式传入值；不要假定值内部会执行 shell 展开。"
+                }
+              ],
+              [
+                {
+                  "en": "stdin, timeout_ms",
+                  "zh": "stdin、timeout_ms"
+                },
+                {
+                  "en": "Finite command input is optional text; a provided timeout must be positive.",
+                  "zh": "有限命令可携带文本输入；指定的 timeout 必须大于零。"
+                },
+                {
+                  "en": "Use raw stdio for binary or ongoing input, and set a budget appropriate to the operation.",
+                  "zh": "二进制或持续输入使用 raw stdio；按操作设置合理时间预算。"
+                }
+              ],
+              [
+                {
+                  "en": "network, resource_limits, mounts",
+                  "zh": "network、resource_limits、mounts"
+                },
+                {
+                  "en": "Requested policy and filesystem exposure; success still needs the matching enforcement receipt.",
+                  "zh": "请求的策略与文件系统暴露范围；成功后仍需核对对应执行回执。"
+                },
+                {
+                  "en": "Choose the necessary policy before admission; a policy error is not permission to retry with weaker isolation.",
+                  "zh": "准入前选择所需策略；策略错误不表示可以自动改为更弱隔离后重试。"
+                }
+              ],
+              [
+                {
+                  "en": "exit_code, timed_out, cancelled",
+                  "zh": "exit_code、timed_out、cancelled"
+                },
+                {
+                  "en": "A returned result can describe a failed or interrupted command. SDK errors are a separate result path.",
+                  "zh": "返回结果仍可能描述命令失败或中断；SDK 错误是另一条返回路径。"
+                },
+                {
+                  "en": "Check all three before marking the operation successful; retain stderr for diagnosis.",
+                  "zh": "标记成功前检查这三个字段，并保留 stderr 用于诊断。"
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "id": "stream-consumption",
+        "title": {
+          "en": "Consume live output without blocking execution",
+          "zh": "消费实时输出而不阻塞执行"
+        },
+        "paragraphs": [
+          {
+            "en": "ProcessStreamSink has separate stdout_line(String) and stderr_chunk(Vec<u8>) callbacks. Ordinary stdout line endings are removed; stderr chunks do not promise line boundaries or complete UTF-8 characters. The Android reader also emits bounded stdout fragments for an unusually long line, so a callback is not a general-purpose binary framing boundary.",
+            "zh": "ProcessStreamSink 分别提供 stdout_line(String) 与 stderr_chunk(Vec<u8>) 回调。普通 stdout 行末会被移除；stderr chunk 不保证按行或完整 UTF-8 字符划分。Android 读取器还会为异常长行发送有界 stdout 片段，因此回调不能充当通用二进制协议分帧边界。"
+          },
+          {
+            "en": "Drain stdout and stderr together. Forward output into a bounded host queue, then render on the UI executor. Returning a ProcessError from a sink stops delivery and causes the platform runner to tear down the owned command; a slow sink applies backpressure rather than producing unlimited host memory.",
+            "zh": "同时消费 stdout 与 stderr。先将输出送入有界宿主队列，再由 UI 执行器渲染。sink 返回 ProcessError 会停止交付，并使平台运行器清理其拥有的命令；缓慢 sink 会施加背压，而不是无限占用宿主内存。"
+          },
+          {
+            "en": "The portable trait provides a run-then-replay fallback. Probe streaming_output and use the selected backend implementation when real-time output is part of your feature. Receiving some output does not establish successful completion; await the command result and check its terminal fields.",
+            "zh": "可移植 trait 提供先 run、再回放输出的默认实现。功能要求实时输出时，应检查 streaming_output 并使用所选后端的实现。收到部分输出不表示执行成功；仍须等待命令结果并检查终态字段。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Reusable streaming helper · host supplies runtime and sink",
+              "zh": "可复用流式辅助函数 · 宿主提供运行时与 sink"
+            },
+            "language": "rust",
+            "verification": "compile",
+            "code": "use mobile_linux_api::{\n    LinuxCommandRequest, LinuxCommandResult, MobileLinuxError,\n    MobileLinuxRuntime, ProcessStreamSink,\n};\nuse std::sync::Arc;\n\npub async fn stream_command(\n    runtime: &dyn MobileLinuxRuntime,\n    request: LinuxCommandRequest,\n    sink: Arc<dyn ProcessStreamSink>,\n) -> Result<LinuxCommandResult, MobileLinuxError> {\n    let network = request.network;\n    let limits = request.resource_limits;\n    let result = runtime.run_streaming(request, sink).await?;\n    result.enforcement.ensure_for(network, limits)?;\n    Ok(result)\n}",
+            "exampleId": "mobile-stream-command"
+          }
+        ],
+        "note": {
+          "en": "This helper assumes the host already owns and booted the runtime. Its caller still checks the command exit state and owns shutdown.",
+          "zh": "此辅助函数假定宿主已拥有并启动运行时。调用方仍检查命令退出状态并负责 shutdown。"
+        }
       },
       {
         "id": "task-lifecycle",
@@ -575,6 +1021,39 @@ export const mobilePages: DocPage[] = [
         }
       },
       {
+        "id": "raw-read-loop",
+        "title": {
+          "en": "Implement the raw stdio read loop",
+          "zh": "实现 raw stdio 读取循环"
+        },
+        "steps": [
+          {
+            "en": "Open a RawStdioOpenRequest with explicit command, arguments and policy. Retain the returned session handle with the runtime owner.",
+            "zh": "使用明确的命令、参数和策略创建 RawStdioOpenRequest；由运行时所有者保留返回的会话句柄。"
+          },
+          {
+            "en": "Write complete protocol frames with write_raw_stdio. Keep framing independent of how the SDK splits later reads.",
+            "zh": "通过 write_raw_stdio 写入协议帧；协议分帧不应依赖 SDK 随后的读取分块方式。"
+          },
+          {
+            "en": "Read a bounded amount, for example 65,536 bytes. Append stdout to the protocol parser and drain stderr to diagnostics; neither buffer is guaranteed to contain a complete message.",
+            "zh": "每次读取有界数据，例如 65,536 字节。把 stdout 追加到协议解析器，同时将 stderr 送往诊断通道；两个缓冲区都不保证包含完整消息。"
+          },
+          {
+            "en": "A read with empty buffers and closed=false is not EOF. Yield or wait according to the host scheduling policy before polling again. Finish only when closed is true, handling the optional exit_code.",
+            "zh": "缓冲区为空且 closed=false 不表示 EOF。再次轮询前按宿主调度策略让出执行权或等待。仅在 closed 为 true 时结束，并处理可选 exit_code。"
+          },
+          {
+            "en": "On normal completion, protocol failure or user cancellation, await close_raw_stdio. Closing owns process-tree cleanup; dropping a screen or stopping a read loop does not replace it.",
+            "zh": "正常完成、协议失败或用户取消时，都要等待 close_raw_stdio。关闭操作负责进程树清理；离开页面或停止读取循环不能替代关闭。"
+          }
+        ],
+        "note": {
+          "en": "FFI raw sessions reject command-request stdin and timeout_ms. Their input and lifetime are controlled through write/close calls. FFI max_bytes is 1..1048576; do not issue a zero-byte readiness probe.",
+          "zh": "FFI raw 会话拒绝命令请求中的 stdin 与 timeout_ms，输入和生命周期由 write／close 调用管理。FFI max_bytes 范围是 1..1048576，不要用零字节读取探测就绪状态。"
+        }
+      },
+      {
         "id": "events",
         "title": {
           "en": "Events and task snapshots",
@@ -606,6 +1085,93 @@ export const mobilePages: DocPage[] = [
             }
           }
         ]
+      },
+      {
+        "id": "event-cursor",
+        "title": {
+          "en": "Resume monitoring with event cursors and task snapshots",
+          "zh": "使用事件游标与任务快照恢复监控"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Operation",
+                "zh": "操作"
+              },
+              {
+                "en": "Meaning",
+                "zh": "语义"
+              },
+              {
+                "en": "Host handling",
+                "zh": "宿主处理"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "read_events(None, limit)",
+                  "zh": "read_events(None, limit)"
+                },
+                {
+                  "en": "Read currently retained events after sequence zero. The maximum batch is 512.",
+                  "zh": "读取当前保留且序号大于零的事件；单批最多 512 条。"
+                },
+                {
+                  "en": "Use a nonzero bounded limit and store the largest sequence you processed.",
+                  "zh": "使用非零有界 limit，保存已处理事件中的最大 sequence。"
+                }
+              ],
+              [
+                {
+                  "en": "read_events(Some(last), limit)",
+                  "zh": "read_events(Some(last), limit)"
+                },
+                {
+                  "en": "Returns events with sequence strictly greater than last.",
+                  "zh": "返回 sequence 严格大于 last 的事件。"
+                },
+                {
+                  "en": "Advance after processing the batch; do not add one to last before sending the cursor.",
+                  "zh": "处理完一批再推进；传递游标前不要给 last 加一。"
+                }
+              ],
+              [
+                {
+                  "en": "TaskStatusChanged / PtyClosed",
+                  "zh": "TaskStatusChanged／PtyClosed"
+                },
+                {
+                  "en": "Terminal state and exit detail are distinct from output frames.",
+                  "zh": "终态和退出细节独立于输出帧。"
+                },
+                {
+                  "en": "Stop the activity indicator from terminal state, not from an idle stdout channel.",
+                  "zh": "根据终态停止运行指示，不要根据 stdout 暂时安静推断结束。"
+                }
+              ],
+              [
+                {
+                  "en": "list_tasks / task_status",
+                  "zh": "list_tasks／task_status"
+                },
+                {
+                  "en": "Current task snapshots; task_status can return None for an unknown ID.",
+                  "zh": "当前任务快照；未知 ID 的 task_status 可以返回 None。"
+                },
+                {
+                  "en": "Reconcile a recreated UI with these snapshots. Do not treat None as a successful command.",
+                  "zh": "用快照重建 UI；不要把 None 当作命令成功。"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "Streaming callbacks from RuntimeHandle.run_command_streaming use a separate per-call run-N identifier and sequence 0. Do not overwrite a backend read_events cursor with callback metadata. The runtime event buffer is not a durable transcript store.",
+          "zh": "RuntimeHandle.run_command_streaming 回调使用单次调用的 run-N 标识与 sequence 0。不要用回调元数据覆盖后端 read_events 游标；运行时事件缓冲区不是持久化会话存储。"
+        }
       },
       {
         "id": "mounts",
@@ -706,7 +1272,7 @@ export const mobilePages: DocPage[] = [
               "zh": "Rust 消费者函数"
             },
             "language": "rust",
-            "code": "use mobile_linux_api::{\n    LinuxCommandRequest, LinuxCommandResult, MobileLinuxError,\n    MobileLinuxRuntime, NetworkPolicy, ResourceLimits,\n};\nuse std::collections::BTreeMap;\n\npub async fn execute_once(\n    runtime: &dyn MobileLinuxRuntime,\n) -> Result<LinuxCommandResult, MobileLinuxError> {\n    runtime.boot().await?;\n    let network = NetworkPolicy::Disabled;\n    let limits = ResourceLimits::default();\n    let execution = runtime.run(LinuxCommandRequest {\n        command: \"/bin/sh\".into(),\n        args: vec![\"-c\".into(), \"printf 'ready\\n'\".into()],\n        cwd: Some(\"/root\".into()),\n        env: BTreeMap::new(),\n        stdin: None,\n        timeout_ms: Some(10_000),\n        network,\n        resource_limits: limits,\n        mounts: Vec::new(),\n    }).await;\n    let cleanup = runtime.shutdown().await;\n    let result = execution?;\n    cleanup?;\n    result.enforcement.ensure_for(network, limits)?;\n    Ok(result)\n}",
+            "code": "use mobile_linux_api::{\n    LinuxCommandRequest, LinuxCommandResult, MobileLinuxError,\n    MobileLinuxRuntime, NetworkPolicy, ResourceLimits,\n};\nuse std::collections::BTreeMap;\n\npub async fn execute_once(\n    runtime: &dyn MobileLinuxRuntime,\n) -> Result<LinuxCommandResult, MobileLinuxError> {\n    runtime.boot().await?;\n    let network = NetworkPolicy::Disabled;\n    let limits = ResourceLimits::default();\n    let execution = runtime.run(LinuxCommandRequest {\n        command: \"/bin/sh\".into(),\n        args: vec![\"-c\".into(), \"printf 'ready\\n'\".into()],\n        cwd: Some(\"/home/lingxi\".into()),\n        env: BTreeMap::new(),\n        stdin: None,\n        timeout_ms: Some(10_000),\n        network,\n        resource_limits: limits,\n        mounts: Vec::new(),\n    }).await;\n    let cleanup = runtime.shutdown().await;\n    let result = execution?;\n    cleanup?;\n    result.enforcement.ensure_for(network, limits)?;\n    Ok(result)\n}",
             "verification": "compile",
             "exampleId": "mobile-command-lifecycle"
           }
@@ -842,6 +1408,18 @@ export const mobilePages: DocPage[] = [
       {
         "repo": "mobile-linux-runtime",
         "path": "crates/mobile-linux-ios/src/runtime/tests.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/process.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/streaming.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/validation.rs"
       }
     ]
   },
@@ -1020,6 +1598,140 @@ export const mobilePages: DocPage[] = [
         ]
       },
       {
+        "id": "android-config-fields",
+        "title": {
+          "en": "Fill RuntimeConfig from the Android host",
+          "zh": "从 Android 宿主填写 RuntimeConfig"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Field",
+                "zh": "字段"
+              },
+              {
+                "en": "Host value",
+                "zh": "宿主值"
+              },
+              {
+                "en": "Common mistake",
+                "zh": "常见问题"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "managedRoot",
+                  "zh": "managedRoot"
+                },
+                {
+                  "en": "A stable app-private runtime directory below filesDir.",
+                  "zh": "filesDir 下稳定的应用私有运行时目录。"
+                },
+                {
+                  "en": "Using a cache directory that the OS may evict as the only copy of persistent runtime data.",
+                  "zh": "把可能被系统清理的 cache 目录作为持久化运行时数据的唯一副本。"
+                }
+              ],
+              [
+                {
+                  "en": "appSandboxRoot",
+                  "zh": "appSandboxRoot"
+                },
+                {
+                  "en": "The app-owned files root used to validate managed paths.",
+                  "zh": "用于校验托管路径的应用文件根目录。"
+                },
+                {
+                  "en": "Passing a guest path such as /home/lingxi.",
+                  "zh": "传入 /home/lingxi 等 guest 路径。"
+                }
+              ],
+              [
+                {
+                  "en": "abi",
+                  "zh": "abi"
+                },
+                {
+                  "en": "arm64-v8a or x86_64, matching the packaged native helpers.",
+                  "zh": "arm64-v8a 或 x86_64，与打包的原生辅助程序一致。"
+                },
+                {
+                  "en": "Copying the installer manifest ABI arm64 into this field without mapping it.",
+                  "zh": "未经映射便把 installer manifest 的 arm64 填入此字段。"
+                }
+              ],
+              [
+                {
+                  "en": "rootfsVersion / archiveSha256",
+                  "zh": "rootfsVersion／archiveSha256"
+                },
+                {
+                  "en": "The exact image version and expected archive digest used for staging.",
+                  "zh": "暂存时使用的精确镜像版本与预期压缩包摘要。"
+                },
+                {
+                  "en": "Treating a version label as proof that archive contents match.",
+                  "zh": "把版本标签当作压缩包内容一致的证明。"
+                }
+              ],
+              [
+                {
+                  "en": "nativeLibraryDir",
+                  "zh": "nativeLibraryDir"
+                },
+                {
+                  "en": "Context.applicationInfo.nativeLibraryDir.",
+                  "zh": "Context.applicationInfo.nativeLibraryDir。"
+                },
+                {
+                  "en": "Omitting extracted native helper libraries or packaging a different ABI.",
+                  "zh": "遗漏提取后的原生辅助库，或打包了不同 ABI。"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "The cross-platform FFI record also contains iOS resource and mount-policy fields. Android create_runtime does not consume the iOS authorization_file or iOS allowlist fields. Configure Android mounts and request policy through the Android runtime path rather than relying on those fields.",
+            "zh": "跨平台 FFI 记录也包含 iOS 资源和挂载策略字段。Android create_runtime 不消费 iOS authorization_file 或 iOS 白名单字段。应通过 Android 运行时路径配置挂载和请求策略，不要依赖这些字段。"
+          }
+        ]
+      },
+      {
+        "id": "android-handle-lifetime",
+        "title": {
+          "en": "Keep execution alive across Activity recreation",
+          "zh": "跨 Activity 重建管理执行归属"
+        },
+        "paragraphs": [
+          {
+            "en": "Keep MobileLinuxRuntime in an application-owned component with a lifetime appropriate to the task. An Activity can be recreated while its process remains alive; creating another screen must not discard the only process/PTY/raw handle needed for cleanup. A host coroutine scope and any foreground-service policy remain application choices.",
+            "zh": "将 MobileLinuxRuntime 保存在生命周期与任务匹配的应用级组件中。进程存活期间 Activity 也可能重建；新建页面时，不能丢失用于清理的唯一进程／PTY／raw 句柄。宿主 coroutine scope 和 foreground-service 策略仍由应用决定。"
+          }
+        ],
+        "steps": [
+          {
+            "en": "Retain runtime plus the returned session or process handle, and route output to a bounded state holder.",
+            "zh": "保留 runtime 与返回的会话或进程句柄，并将输出路由到有界状态容器。"
+          },
+          {
+            "en": "After screen recreation, use listTasks or taskStatus to reconcile state; continue readEvents with the backend cursor if you are monitoring runtime events.",
+            "zh": "页面重建后使用 listTasks 或 taskStatus 对齐状态；监控运行时事件时，沿用后端游标调用 readEvents。"
+          },
+          {
+            "en": "On a deliberate stop, await killProcess, closePty or closeRawStdio for the selected handle, then release the UI subscription.",
+            "zh": "主动停止时，等待对应句柄的 killProcess、closePty 或 closeRawStdio，再释放 UI 订阅。"
+          },
+          {
+            "en": "When the application no longer needs any runtime work, await shutdown. Android process death is a separate OS event and does not preserve in-memory SDK handles.",
+            "zh": "应用不再需要任何运行时任务时，等待 shutdown。Android 进程死亡是独立的操作系统事件，不会保留内存中的 SDK 句柄。"
+          }
+        ]
+      },
+      {
         "id": "command-example",
         "title": {
           "en": "Command request",
@@ -1027,7 +1739,7 @@ export const mobilePages: DocPage[] = [
         },
         "paragraphs": [
           {
-            "en": "This helper is copied from the Android device smoke test. It creates a disabled-network shell request by default and clears the timeout for raw stdio. Install and boot the runtime before calling execute or handle.openRawStdio.",
+            "en": "This helper adapts the Android device smoke request shape to the unprivileged guest home. It creates a disabled-network shell request by default and clears the timeout for raw stdio. Install and boot the runtime before calling execute or handle.openRawStdio.",
             "zh": "下面的辅助函数摘自 Android 真机 smoke test。默认创建禁用网络的 shell 请求，raw stdio 模式清除超时。调用 execute 或 handle.openRawStdio 前，先安装并启动运行时。"
           }
         ],
@@ -1038,7 +1750,7 @@ export const mobilePages: DocPage[] = [
               "zh": "辅助函数摘录"
             },
             "language": "kotlin",
-            "code": "private fun command(script: String, network: NetworkPolicyFfi = NetworkPolicyFfi.DISABLED,\n                        python: Boolean = false, raw: Boolean = false) = MobileLinuxCommandRequestFfi(\n        command = if (python) \"/usr/bin/python3\" else \"/bin/sh\",\n        args = if (python) listOf(\"-u\", \"-c\", script) else listOf(\"-c\", script),\n        cwd = \"/root\", env = emptyList(), stdin = null,\n        timeoutMs = if (raw) null else 15_000uL, network = network,\n        resourceLimits = ResourceLimitsFfi(null, null, null, null), mounts = emptyList(),\n    )",
+            "code": "private fun command(script: String, network: NetworkPolicyFfi = NetworkPolicyFfi.DISABLED,\n                        python: Boolean = false, raw: Boolean = false) = MobileLinuxCommandRequestFfi(\n        command = if (python) \"/usr/bin/python3\" else \"/bin/sh\",\n        args = if (python) listOf(\"-u\", \"-c\", script) else listOf(\"-c\", script),\n        cwd = \"/home/lingxi\", env = emptyList(), stdin = null,\n        timeoutMs = if (raw) null else 15_000uL, network = network,\n        resourceLimits = ResourceLimitsFfi(null, null, null, null), mounts = emptyList(),\n    )",
             "verification": "excerpt"
           }
         ]
@@ -1083,7 +1795,7 @@ export const mobilePages: DocPage[] = [
               "zh": "Kotlin 生命周期函数"
             },
             "language": "kotlin",
-            "code": "import io.lingxi.mobilelinux.MobileLinuxRuntime\nimport io.lingxi.mobilelinux.bindings.*\n\nsuspend fun executeOnce(config: RuntimeConfig): MobileLinuxCommandResultFfi {\n    val runtime = MobileLinuxRuntime.create(config)\n    runtime.boot()\n    try {\n        val result = runtime.execute(MobileLinuxCommandRequestFfi(\n            command = \"/bin/sh\", args = listOf(\"-c\", \"printf 'ready\\n'\"),\n            cwd = \"/root\", env = emptyList(), stdin = null,\n            timeoutMs = 10_000uL, network = NetworkPolicyFfi.DISABLED,\n            resourceLimits = ResourceLimitsFfi(null, null, null, null),\n            mounts = emptyList(),\n        ))\n        check(result.enforcement.networkPolicyEnforced) { \"Network isolation not proven\" }\n        check(result.exitCode == 0 && !result.timedOut && !result.cancelled)\n        return result\n    } finally {\n        runtime.shutdown()\n    }\n}",
+            "code": "import io.lingxi.mobilelinux.MobileLinuxRuntime\nimport io.lingxi.mobilelinux.bindings.*\n\nsuspend fun executeOnce(config: RuntimeConfig): MobileLinuxCommandResultFfi {\n    val runtime = MobileLinuxRuntime.create(config)\n    runtime.boot()\n    try {\n        val result = runtime.execute(MobileLinuxCommandRequestFfi(\n            command = \"/bin/sh\", args = listOf(\"-c\", \"printf 'ready\\n'\"),\n            cwd = \"/home/lingxi\", env = emptyList(), stdin = null,\n            timeoutMs = 10_000uL, network = NetworkPolicyFfi.DISABLED,\n            resourceLimits = ResourceLimitsFfi(null, null, null, null),\n            mounts = emptyList(),\n        ))\n        check(result.enforcement.networkPolicyEnforced) { \"Network isolation not proven\" }\n        check(result.exitCode == 0 && !result.timedOut && !result.cancelled)\n        return result\n    } finally {\n        runtime.shutdown()\n    }\n}",
             "verification": "manual",
             "exampleId": "android-runtime-lifecycle"
           }
@@ -1107,6 +1819,103 @@ export const mobilePages: DocPage[] = [
           {
             "en": "RealRuntimeSmokeTest exercises actual device requests and policy cases. It is the acceptance entry point, not evidence that this documentation edit ran instrumentation. Validate both arm64-v8a and x86_64 where supported, timeout descendants, binary stdio, terminal resize and denied network/memory policies on the artifact to be distributed.",
             "zh": "RealRuntimeSmokeTest 覆盖真实设备请求和策略用例，是验收入口，不表示此文档修改已经执行 instrumentation。对待分发产物验证支持的 arm64-v8a 与 x86_64、超时后代进程、二进制 stdio、终端尺寸调整及拒绝网络／内存策略。"
+          }
+        ]
+      },
+      {
+        "id": "android-troubleshooting",
+        "title": {
+          "en": "Diagnose an Android integration failure",
+          "zh": "排查 Android 接入失败"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Symptom",
+                "zh": "现象"
+              },
+              {
+                "en": "Inspect first",
+                "zh": "先检查"
+              },
+              {
+                "en": "Next action",
+                "zh": "处理方式"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Runtime unavailable or PRoot cannot start",
+                  "zh": "运行时不可用或 PRoot 无法启动"
+                },
+                {
+                  "en": "capability.reason, runtime ABI, nativeLibraryDir and packaged helper files.",
+                  "zh": "capability.reason、运行时 ABI、nativeLibraryDir 与已打包的辅助文件。"
+                },
+                {
+                  "en": "Correct the package/ABI before changing command or model configuration.",
+                  "zh": "先修正打包／ABI，再排查命令或模型配置。"
+                }
+              ],
+              [
+                {
+                  "en": "Missing or corrupt rootfs",
+                  "zh": "rootfs 缺失或损坏"
+                },
+                {
+                  "en": "status.state, status.last_error and the staged image version/digest.",
+                  "zh": "status.state、status.last_error 以及暂存镜像版本／摘要。"
+                },
+                {
+                  "en": "Stage the expected verified image, then repairRootfs and boot; preserve the external workspace.",
+                  "zh": "暂存预期的已校验镜像，再 repairRootfs 与 boot；保留外部工作区。"
+                }
+              ],
+              [
+                {
+                  "en": "Command returns but the feature fails",
+                  "zh": "命令已返回但功能失败"
+                },
+                {
+                  "en": "exitCode, stderr, timedOut and cancelled.",
+                  "zh": "exitCode、stderr、timedOut 与 cancelled。"
+                },
+                {
+                  "en": "Show the command result separately from an FFI exception; do not equate a returned record with exit success.",
+                  "zh": "分别展示命令结果与 FFI 异常；返回记录不等于退出成功。"
+                }
+              ],
+              [
+                {
+                  "en": "Terminal text or protocol frames are damaged",
+                  "zh": "终端文字或协议帧损坏"
+                },
+                {
+                  "en": "PTY versus raw stdio selection and decoder buffering across chunks.",
+                  "zh": "PTY／raw stdio 的选择，以及跨 chunk 的解码缓冲。"
+                },
+                {
+                  "en": "Use a terminal decoder for PTY and a byte-framed parser for raw stdout.",
+                  "zh": "PTY 使用终端解码器；raw stdout 使用按字节分帧的解析器。"
+                }
+              ],
+              [
+                {
+                  "en": "Cancellation leaves work running",
+                  "zh": "取消后仍有任务运行"
+                },
+                {
+                  "en": "Whether the owner awaited the handle-specific close/kill and checked its error.",
+                  "zh": "所有者是否等待了对应句柄的 close／kill，并检查其错误。"
+                },
+                {
+                  "en": "Exercise whole-process-tree cancellation on the exact packaged device build.",
+                  "zh": "在实际打包的设备版本上验证整个进程树的取消。"
+                }
+              ]
+            ]
           }
         ]
       }
@@ -1135,6 +1944,14 @@ export const mobilePages: DocPage[] = [
       {
         "repo": "mobile-linux-runtime",
         "path": "examples/android/app/src/androidTest/java/io/lingxi/mobilelinux/sample/RealRuntimeSmokeTest.kt"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-android/src/runtime/process.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "android/installer/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxGuestPaths.kt"
       }
     ]
   },
@@ -1164,8 +1981,8 @@ export const mobilePages: DocPage[] = [
             "zh": "该 package 为 Swift 应用暴露 MobileLinuxRuntime，为已嵌入 Rust 的应用暴露 MobileLinuxNativeSupport。完整产品链接 MobileLinuxRuntimeFFI 与 MobileLinuxNativeSupport；支持产品加入 sqlite3、resolv、z 和 c++ 链接库。"
           },
           {
-            "en": "The checked-in repository-root Package.swift points to v0.1.0-rc.2 binary assets built from source 9e8e19a473728722183fcbfa0814398c1dd8a8ff and contains their actual checksums. Asset availability and release device acceptance must be checked against that release. Do not replace checksums with placeholder values.",
-            "zh": "仓库根目录中已提交的 Package.swift 指向 v0.1.0-rc.2 二进制资源，声明源码版本为 9e8e19a473728722183fcbfa0814398c1dd8a8ff，并包含实际 checksums。资源是否可用及发布版本的真机验收需核对该次发布。不要用占位值替换 checksums。"
+            "en": "The checked-in repository-root Package.swift points to v0.1.0-rc.3 binary assets built from source 6b033d41a2b6b736fda1e8f996f55a4b20bd885d and contains their actual checksums. Asset availability and release device acceptance must be checked against that release. Do not replace checksums with placeholder values.",
+            "zh": "仓库根目录中已提交的 Package.swift 指向 v0.1.0-rc.3 二进制资源，声明源码版本为 6b033d41a2b6b736fda1e8f996f55a4b20bd885d，并包含实际 checksums。资源是否可用及发布版本的真机验收需核对该次发布。不要用占位值替换 checksums。"
           },
           {
             "en": "For local SwiftPM, stage the two built frameworks in ios/Artifacts and matching generated bindings in ios/Bindings, then add the local ios package. The local manifest cannot resolve from a clean checkout without those binary artifacts.",
@@ -1233,6 +2050,120 @@ export const mobilePages: DocPage[] = [
             "language": "bash",
             "code": ": \"${ROOTFS_ARCHIVE:?Set the aarch64 archive path}\"\n: \"${ROOTFS_ARCHIVE_SHA256:?Set its pinned SHA-256}\"\nbash scripts/build/prepare-ios-rootfs.sh \\\n  --archive \"$ROOTFS_ARCHIVE\" --expected-archive-sha256 \"$ROOTFS_ARCHIVE_SHA256\" \\\n  --profile toolchain --native-output \"$SDK_BUILD_DIR/ios-native/native\" \\\n  --output \"$SDK_BUILD_DIR/ios-rootfs\" --cache \"$SDK_BUILD_DIR/ios-cache\"",
             "verification": "excerpt"
+          }
+        ]
+      },
+      {
+        "id": "ios-config-fields",
+        "title": {
+          "en": "Choose stable Swift configuration values",
+          "zh": "选择稳定的 Swift 配置值"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Input",
+                "zh": "输入"
+              },
+              {
+                "en": "Rule",
+                "zh": "规则"
+              },
+              {
+                "en": "Why it matters",
+                "zh": "作用"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "managedRoot / appSandboxRoot",
+                  "zh": "managedRoot／appSandboxRoot"
+                },
+                {
+                  "en": "App-private absolute host paths, normalized before the session is created.",
+                  "zh": "应用私有的宿主绝对路径，创建会话前进行规范化。"
+                },
+                {
+                  "en": "Separate replaceable image state from persistent guest user storage.",
+                  "zh": "分离可替换镜像状态与持久 guest 用户存储。"
+                }
+              ],
+              [
+                {
+                  "en": "workspaceHostPath / stableWorkspaceId",
+                  "zh": "workspaceHostPath／stableWorkspaceId"
+                },
+                {
+                  "en": "A configured host directory and a non-empty ID with no /. The values . and .. are rejected.",
+                  "zh": "已配置的宿主目录与非空稳定 ID；ID 不能含 /，也不能为 . 或 ..。"
+                },
+                {
+                  "en": "The guest project path is /home/lingxi/lingxi/<stable-id>; changing a screen title should not change project identity.",
+                  "zh": "guest 项目路径为 /home/lingxi/lingxi/<stable-id>；修改页面标题不应改变项目身份。"
+                }
+              ],
+              [
+                {
+                  "en": "rootfsArchivePath / archiveSha256",
+                  "zh": "rootfsArchivePath／archiveSha256"
+                },
+                {
+                  "en": "The explicit converted fakefs ZIP path and its digest.",
+                  "zh": "转换后的 fakefs ZIP 的显式路径及其摘要。"
+                },
+                {
+                  "en": "The original tarball digest does not authenticate a converted ZIP.",
+                  "zh": "源 tarball 的摘要不能校验转换后的 ZIP。"
+                }
+              ],
+              [
+                {
+                  "en": "rootfsPatchPath / defaultMountPath",
+                  "zh": "rootfsPatchPath／defaultMountPath"
+                },
+                {
+                  "en": "Explicit resource locations matching the framework build.",
+                  "zh": "与 framework 构建匹配的显式资源位置。"
+                },
+                {
+                  "en": "The native bridge does not infer the application bundle or search environment variables for them.",
+                  "zh": "原生桥接不会推断应用 bundle 或通过环境变量查找它们。"
+                }
+              ],
+              [
+                {
+                  "en": "protectedHostRoots / allowedMountRoots / allowedGuestRoots",
+                  "zh": "protectedHostRoots／allowedMountRoots／allowedGuestRoots"
+                },
+                {
+                  "en": "Protected host trees plus explicit host and guest prefixes for additional mounts.",
+                  "zh": "受保护宿主目录，以及额外挂载允许使用的 host／guest 前缀。"
+                },
+                {
+                  "en": "An empty extra allowlist admits no extra non-workspace mounts.",
+                  "zh": "额外白名单为空时，不允许额外的非工作区挂载。"
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ios-session-identity",
+        "title": {
+          "en": "Understand kernel identity and workspace sessions",
+          "zh": "区分内核身份与工作区会话"
+        },
+        "paragraphs": [
+          {
+            "en": "The process-wide iSH registry compares immutable configuration separately from workspaceHostPath and stableWorkspaceId. A second session can therefore target another configured workspace while keeping the same kernel/rootfs identity. A different immutable configuration is rejected at construction with InvalidRequest; it is not a request to silently replace an existing kernel.",
+            "zh": "进程级 iSH registry 将不可变配置与 workspaceHostPath、stableWorkspaceId 分开比较。因此，第二个会话可以使用另一个已配置工作区，同时保持相同内核／rootfs 身份。构建时发现不同不可变配置会返回 InvalidRequest，不会静默替换已存在内核。"
+          },
+          {
+            "en": "After the kernel starts, repair/reset cannot unload it and return RestartRequired. shutdown closes the logical session and its transient work; it does not create a fresh process. Persist the user’s requested recovery action and let the host restart deliberately rather than repeatedly constructing a new wrapper.",
+            "zh": "内核启动后，repair／reset 无法卸载它，会返回 RestartRequired。shutdown 关闭逻辑会话及其临时任务，并不会创建新进程。保存用户请求的恢复动作，由宿主主动重启，不要反复创建新的包装对象。"
           }
         ]
       },
@@ -1360,6 +2291,93 @@ export const mobilePages: DocPage[] = [
         ]
       },
       {
+        "id": "ios-terminal-and-protocols",
+        "title": {
+          "en": "Handle terminals and child protocols in Swift",
+          "zh": "在 Swift 中处理终端与子进程协议"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Surface",
+                "zh": "接口"
+              },
+              {
+                "en": "Input / output",
+                "zh": "输入／输出"
+              },
+              {
+                "en": "Lifecycle detail",
+                "zh": "生命周期细节"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "PTY",
+                  "zh": "PTY"
+                },
+                {
+                  "en": "Generated bindings use Data; output contains terminal control sequences as well as text.",
+                  "zh": "生成绑定使用 Data；输出既包含文字，也包含终端控制序列。"
+                },
+                {
+                  "en": "The iSH runtime supports one PTY at a time. Close the existing session before opening another.",
+                  "zh": "iSH 运行时同时支持一个 PTY；新建前关闭现有会话。"
+                }
+              ],
+              [
+                {
+                  "en": "resizePty",
+                  "zh": "resizePty"
+                },
+                {
+                  "en": "Terminal dimensions are rows and columns in cells, not pixel sizes.",
+                  "zh": "终端尺寸是字符单元的行列数，不是像素尺寸。"
+                },
+                {
+                  "en": "Use nonzero dimensions and discard the old handle after close.",
+                  "zh": "使用非零尺寸；关闭后丢弃旧句柄。"
+                }
+              ],
+              [
+                {
+                  "en": "Raw stdio",
+                  "zh": "Raw stdio"
+                },
+                {
+                  "en": "Separate stdout and stderr Data buffers; bounded read maxBytes is 1...1048576.",
+                  "zh": "stdout 与 stderr 使用分开的 Data 缓冲；有界读取 maxBytes 为 1...1048576。"
+                },
+                {
+                  "en": "No PTY byte translation; accumulate protocol frames across reads and await closeRawStdio.",
+                  "zh": "不会执行 PTY 字节转换；跨读取累积协议帧，并等待 closeRawStdio。"
+                }
+              ],
+              [
+                {
+                  "en": "Background process",
+                  "zh": "后台进程"
+                },
+                {
+                  "en": "spawnBackground returns a process handle, not an OS background-execution entitlement.",
+                  "zh": "spawnBackground 返回进程句柄，不代表获得操作系统后台执行权限。"
+                },
+                {
+                  "en": "The app owns scene/OS lifetime and explicitly awaits killProcess when stopping the task.",
+                  "zh": "应用负责 scene／操作系统生命周期，停止任务时显式等待 killProcess。"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "Keep terminal rendering and UI state on the UI executor, and keep execution ownership outside a transient view. A Swift Task cancellation is not a substitute for checking the SDK close/kill result.",
+          "zh": "终端渲染和 UI 状态在 UI 执行器上处理，执行所有权应位于临时视图之外。取消 Swift Task 不能替代检查 SDK close／kill 的返回结果。"
+        }
+      },
+      {
         "id": "swift-example",
         "title": {
           "en": "Command helper",
@@ -1391,8 +2409,8 @@ export const mobilePages: DocPage[] = [
         },
         "paragraphs": [
           {
-            "en": "An app process has one immutable iSH kernel/rootfs configuration, while sessions may use different workspace paths and stable IDs. Changing an initialized kernel configuration or repairing/resetting after boot can return RestartRequired. The host owns the app restart experience.",
-            "zh": "一个应用进程具有一份不可变的 iSH 内核与 rootfs 配置，会话可以使用不同工作区路径和稳定 ID。修改已初始化的内核配置，或在启动后 repair/reset，可能返回 RestartRequired。宿主负责应用重启体验。"
+            "en": "An app process has one immutable iSH kernel/rootfs configuration, while sessions may use different workspace paths and stable IDs. Constructing a conflicting immutable configuration returns InvalidRequest. Repairing or resetting after the kernel has started returns RestartRequired; the host owns the application restart experience.",
+            "zh": "应用进程只能使用一个不可变 iSH 内核／rootfs 配置，会话可以使用不同工作区路径与稳定 ID。构建冲突的不可变配置会返回 InvalidRequest；内核启动后修复或重置会返回 RestartRequired。应用重启体验由宿主负责。"
           }
         ]
       },
@@ -1415,7 +2433,7 @@ export const mobilePages: DocPage[] = [
               "zh": "Swift 生命周期函数"
             },
             "language": "swift",
-            "code": "import MobileLinuxRuntime\nimport MobileLinuxRuntimeBindings\n\nfunc executeOnce(config: RuntimeConfig) async throws -> MobileLinuxCommandResultFfi {\n    let runtime = try MobileLinuxRuntime(configuration: config)\n    _ = try await runtime.boot()\n    do {\n        let request = MobileLinuxCommandRequestFfi(\n            command: \"/bin/sh\", args: [\"-c\", \"printf 'ready\\n'\"], cwd: \"/root\",\n            env: [], stdin: nil, timeoutMs: 10_000, network: .disabled,\n            resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: nil,\n                maxProcesses: nil, maxOpenFiles: nil), mounts: [])\n        let result = try await runtime.handle.runCommand(request: request)\n        try await runtime.shutdown()\n        return result\n    } catch {\n        try? await runtime.shutdown()\n        throw error\n    }\n}",
+            "code": "import MobileLinuxRuntime\nimport MobileLinuxRuntimeBindings\n\nfunc executeOnce(config: RuntimeConfig) async throws -> MobileLinuxCommandResultFfi {\n    let runtime = try MobileLinuxRuntime(configuration: config)\n    _ = try await runtime.boot()\n    do {\n        let request = MobileLinuxCommandRequestFfi(\n            command: \"/bin/sh\", args: [\"-c\", \"printf 'ready\\n'\"], cwd: \"/home/lingxi\",\n            env: [], stdin: nil, timeoutMs: 10_000, network: .disabled,\n            resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: nil,\n                maxProcesses: nil, maxOpenFiles: nil), mounts: [])\n        let result = try await runtime.handle.runCommand(request: request)\n        try await runtime.shutdown()\n        return result\n    } catch {\n        try? await runtime.shutdown()\n        throw error\n    }\n}",
             "verification": "manual",
             "exampleId": "ios-runtime-lifecycle"
           }
@@ -1429,8 +2447,8 @@ export const mobilePages: DocPage[] = [
         },
         "paragraphs": [
           {
-            "en": "Stable workspace identity is independent of the immutable process kernel identity. Switching workspaces must preserve the kernel/rootfs configuration. When repair, reset or configuration change returns RestartRequired, persist the requested state and surface a deliberate host restart action; do not loop boot attempts in the same process.",
-            "zh": "稳定工作区身份与进程不可变内核身份相互独立。切换工作区须保留内核／rootfs 配置。当 repair、reset 或配置变更返回 RestartRequired，保存所请求状态并提供明确的宿主重启动作，不要在同一进程内循环 boot。"
+            "en": "Stable workspace identity is independent of the immutable process kernel identity. Switching workspaces must preserve the kernel/rootfs configuration. A conflicting constructor configuration is InvalidRequest; repair/reset after kernel initialization is RestartRequired. Persist the requested recovery state and surface a deliberate host restart action instead of looping boot attempts in the same process.",
+            "zh": "稳定工作区身份与进程不可变内核身份相互独立。切换工作区须保留内核／rootfs 配置。构建冲突配置返回 InvalidRequest；内核初始化后的 repair／reset 返回 RestartRequired。保存所请求的恢复状态，提供明确的宿主重启动作，不要在同一进程内循环 boot。"
           },
           {
             "en": "Swift concurrency does not itself grant background execution time. The application owns OS suspension, scene transitions and resource cleanup. An iOS simulator native-support slice deliberately reports unavailable guest execution; API generation and simulator linking cannot replace a signed physical-device run.",
@@ -1471,6 +2489,18 @@ export const mobilePages: DocPage[] = [
       {
         "repo": "mobile-linux-runtime",
         "path": "scripts/build/prepare-ios-rootfs.sh"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/validation.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-api/src/mobile_linux.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "Package.swift"
       }
     ]
   },
@@ -1517,8 +2547,8 @@ export const mobilePages: DocPage[] = [
             "zh": "请求挂载不能与托管运行时存储或 protectedHostRoots 重叠，包括它们的祖先目录。直接挂载应用沙箱根目录会被拒绝。"
           },
           {
-            "en": "Workspace mounts must match workspaceHostPath and /workspace/<stableWorkspaceId>. Request mounts cannot replace persistent guest /root.",
-            "zh": "工作区挂载必须匹配 workspaceHostPath 和 /workspace/<stableWorkspaceId>。请求挂载不能替换持久 guest /root。"
+            "en": "Workspace mounts must match workspaceHostPath and /home/lingxi/lingxi/<stableWorkspaceId>. Request mounts cannot replace persistent guest /home/lingxi or administrator /root.",
+            "zh": "工作区挂载必须匹配 workspaceHostPath 和 /home/lingxi/lingxi/<stableWorkspaceId>。请求挂载不能替换持久 guest /home/lingxi 或管理员 /root。"
           },
           {
             "en": "Non-workspace mounts require both an allowedMountRoots host prefix and an allowedGuestRoots guest prefix. Empty allowlists therefore admit no extra request mounts.",
@@ -1539,6 +2569,35 @@ export const mobilePages: DocPage[] = [
         "note": {
           "en": "These explicit host/guest allowlist fields are consumed by the iOS backend. Android has a different runtime configuration and validation path; do not assume iOS policy fields configure Android.",
           "zh": "这些显式 host/guest 白名单字段由 iOS 后端消费。Android 使用不同的运行时配置与验证路径；不要假定 iOS 策略字段会配置 Android。"
+        }
+      },
+      {
+        "id": "mount-recipes",
+        "title": {
+          "en": "Mount a project without exposing runtime storage",
+          "zh": "挂载项目而不暴露运行时存储"
+        },
+        "steps": [
+          {
+            "en": "Choose a stable guest coordinate with guest_paths::workspace(id), and supply the matching host workspace in runtime configuration.",
+            "zh": "使用 guest_paths::workspace(id) 选择稳定 guest 坐标，并在运行时配置中提供对应宿主工作区。"
+          },
+          {
+            "en": "Use MountPurpose::Workspace for the exact configured workspace pair. Additional external data needs its own mount purpose and both host and guest allowlist coverage on iOS.",
+            "zh": "精确匹配已配置的工作区 host／guest 对时使用 MountPurpose::Workspace。额外外部数据需要独立挂载用途；iOS 还要求 host 与 guest 白名单同时覆盖。"
+          },
+          {
+            "en": "Reject requests that replace /home/lingxi, /root or protected managed storage. The managed-home workspace exception applies only to the exact canonical host twin of that workspace.",
+            "zh": "拒绝替换 /home/lingxi、/root 或受保护托管存储的请求。托管 HOME 中工作区的例外，仅适用于该工作区精确、规范化的宿主 backing 目录。"
+          },
+          {
+            "en": "Use the current mount snapshot for presentation translation. map_guest_path_to_host and map_host_path_to_guest are lexical longest-prefix mappings; they do not themselves authorize file writes.",
+            "zh": "展示时使用当前挂载快照进行路径转换。map_guest_path_to_host 与 map_host_path_to_guest 是词法最长前缀映射，本身不会授权文件写入。"
+          }
+        ],
+        "note": {
+          "en": "For host file access, resolve_guest_path additionally honors a matching mount’s read_only bit and rejects guest-owned paths without a safe host mapping. Do not fall back from an unmapped guest /home or /root path to an unrestricted native filesystem path.",
+          "zh": "访问宿主文件时，resolve_guest_path 还会遵守匹配挂载的 read_only 位，并拒绝没有安全宿主映射的 guest 路径。不要把未映射的 guest /home 或 /root 路径降级为不受约束的原生文件系统路径。"
         }
       },
       {
@@ -1587,8 +2646,8 @@ export const mobilePages: DocPage[] = [
             "zh": "在应用边界固定预期压缩包 SHA-256。manifest 不能替代这一信任决策。激活前验证压缩包身份、不可变清单、符号链接路径与 SBOM。RootfsStore.authorize_manifest_file 校验不可变可执行文件白名单，并拒绝可写 guest 位置。"
           },
           {
-            "en": "Default guest writable roots are /root, /tmp, /var/tmp and /workspace. Keep managed runtime storage app-private and separate from externally mounted user workspaces.",
-            "zh": "默认 guest 可写根目录为 /root、/tmp、/var/tmp 与 /workspace。托管运行时存储应保持应用私有，并与外部挂载的用户工作区分开。"
+            "en": "Default guest writable roots are /home/lingxi, /root, /tmp, /var/tmp and /home/lingxi/lingxi. Keep managed runtime storage app-private and separate from externally mounted user workspaces.",
+            "zh": "默认 guest 可写根目录为 /home/lingxi、/root、/tmp、/var/tmp 与 /home/lingxi/lingxi。托管运行时存储应保持应用私有，并与外部挂载的用户工作区分开。"
           }
         ]
       },
@@ -1660,6 +2719,133 @@ export const mobilePages: DocPage[] = [
           "en": "An iOS simulator uses an unavailable backend. App-level operating-system permissions and physical-device acceptance remain host responsibilities.",
           "zh": "iOS 模拟器使用不可用后端。应用级操作系统权限与真机验收仍由宿主负责。"
         }
+      },
+      {
+        "id": "recovery-decisions",
+        "title": {
+          "en": "Choose recovery from the typed error",
+          "zh": "根据类型化错误选择恢复方式"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Error / state",
+                "zh": "错误／状态"
+              },
+              {
+                "en": "Interpretation",
+                "zh": "含义"
+              },
+              {
+                "en": "Recovery",
+                "zh": "恢复方式"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "InvalidRequest",
+                  "zh": "InvalidRequest"
+                },
+                {
+                  "en": "The concrete request or runtime identity is invalid.",
+                  "zh": "具体请求或运行时身份无效。"
+                },
+                {
+                  "en": "Fix the indicated argument, path, mount pair, raw read size or immutable iOS configuration; retrying unchanged inputs will not help.",
+                  "zh": "修正提示的参数、路径、挂载对、raw 读取大小或 iOS 不可变配置；原样重试没有帮助。"
+                }
+              ],
+              [
+                {
+                  "en": "Integrity / Corrupt",
+                  "zh": "Integrity／Corrupt"
+                },
+                {
+                  "en": "The selected image or immutable inventory failed verification.",
+                  "zh": "选定镜像或不可变文件清单未通过校验。"
+                },
+                {
+                  "en": "Restore the pinned verified resource, then repair the managed rootfs. Keep project data outside image replacement.",
+                  "zh": "恢复固定的已校验资源，再修复托管 rootfs；替换镜像时保持项目数据独立。"
+                }
+              ],
+              [
+                {
+                  "en": "Unavailable / Unsupported",
+                  "zh": "Unavailable／Unsupported"
+                },
+                {
+                  "en": "The current backend/device cannot provide execution or the selected surface.",
+                  "zh": "当前后端／设备不能执行或不支持所选接口。"
+                },
+                {
+                  "en": "Inspect capability.reason and choose a supported device/surface explicitly. A simulator does not become supported by retrying boot.",
+                  "zh": "检查 capability.reason，并显式选择受支持设备／接口。反复 boot 不会让模拟器获得 guest 执行能力。"
+                }
+              ],
+              [
+                {
+                  "en": "NetworkPolicyUnavailable / ResourceLimitExceeded",
+                  "zh": "NetworkPolicyUnavailable／ResourceLimitExceeded"
+                },
+                {
+                  "en": "A required policy cannot be guaranteed, or its resource budget was exceeded.",
+                  "zh": "无法保证所需策略，或已超出资源预算。"
+                },
+                {
+                  "en": "Report the named guarantee and keep the chosen admission policy. Ask the host to change the operation or budget deliberately.",
+                  "zh": "报告具体保证，并保持既定准入策略；由宿主主动调整操作或预算。"
+                }
+              ],
+              [
+                {
+                  "en": "RestartRequired",
+                  "zh": "RestartRequired"
+                },
+                {
+                  "en": "The initialized iSH kernel cannot perform the requested repair/reset in this process.",
+                  "zh": "本进程中已初始化的 iSH 内核不能执行所请求的修复／重置。"
+                },
+                {
+                  "en": "Persist the recovery intent and restart the host process before modifying rootfs.",
+                  "zh": "保存恢复意图，在修改 rootfs 前重启宿主进程。"
+                }
+              ],
+              [
+                {
+                  "en": "Timeout or timed_out result",
+                  "zh": "Timeout 或 timed_out 结果"
+                },
+                {
+                  "en": "A configured operation budget expired; the exact return form belongs to the selected API.",
+                  "zh": "操作时间预算耗尽；具体返回形式取决于所选 API。"
+                },
+                {
+                  "en": "Show timeout separately from a nonzero exit, await cleanup, and inspect the command budget before retrying.",
+                  "zh": "分别展示超时与非零退出，等待清理，并在重试前检查命令预算。"
+                }
+              ]
+            ]
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Android diagnosis",
+              "zh": "Android 排查"
+            },
+            "href": "/docs/mobile-android#android-troubleshooting"
+          },
+          {
+            "label": {
+              "en": "iOS kernel and session identity",
+              "zh": "iOS 内核与会话身份"
+            },
+            "href": "/docs/mobile-ios#ios-session-identity"
+          }
+        ]
       },
       {
         "id": "attribution",
@@ -1755,6 +2941,22 @@ export const mobilePages: DocPage[] = [
       {
         "repo": "mobile-linux-runtime",
         "path": "scripts/tests/test_resource_contracts.py"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/guest_path.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-core/src/user_workspace.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/lifecycle.rs"
+      },
+      {
+        "repo": "mobile-linux-runtime",
+        "path": "crates/mobile-linux-ios/src/runtime/config.rs"
       }
     ]
   }

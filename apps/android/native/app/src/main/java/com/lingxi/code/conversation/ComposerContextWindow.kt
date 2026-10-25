@@ -51,13 +51,15 @@ internal data class ComposerContextUsage(val used: Long, val capacity: ULong) {
 internal fun ComposerContextWindow(usage: AgentRunUsage?, capacity: ULong?, details: CatalogModelDetails? = null) {
     val t = LingXiTheme.palette
     val snapshot = ComposerContextUsage.from(usage, capacity) ?: return
-    val summary = "${snapshot.percent}% used (${100 - snapshot.percent}% left)"
-    val tokens = "${snapshot.used} / ${snapshot.capacity} tokens used"
+    val title = stringResource(R.string.composer_context_title)
+    val summary = stringResource(R.string.composer_context_summary_fmt, snapshot.percent, 100 - snapshot.percent)
+    val tokens = stringResource(R.string.composer_context_tokens_fmt, snapshot.used.toString(), snapshot.capacity.toString())
+    val accessibility = stringResource(R.string.composer_context_accessibility_fmt, title, summary, tokens)
     var showsDetails by remember { mutableStateOf(false) }
     IconButton(
         onClick = { showsDetails = true },
         modifier = Modifier.testTag("composer.context-window")
-            .semantics { contentDescription = "Context window (estimated): $summary. $tokens" },
+            .semantics { contentDescription = accessibility },
     ) {
         Canvas(Modifier.size(16.dp)) {
             val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
@@ -70,18 +72,23 @@ internal fun ComposerContextWindow(usage: AgentRunUsage?, capacity: ULong?, deta
     if (showsDetails) {
         AlertDialog(
             onDismissRequest = { showsDetails = false },
-            title = { Text("Context window (estimated)") },
+            title = { Text(title) },
             text = {
                 Column {
                     Text(summary)
                     Text(tokens)
-                    Text("最近一次请求的输入用量 / 应用输入预算")
+                    Text(stringResource(R.string.composer_context_budget_note))
                     details?.contextBudget?.policy?.let { policy ->
-                        Text("应用策略：${when (policy) { "long" -> "长上下文"; "custom" -> "自定义"; else -> "自动" }}")
+                        val policyLabel = stringResource(when (policy) {
+                            "long" -> R.string.composer_context_policy_long
+                            "custom" -> R.string.composer_context_policy_custom
+                            else -> R.string.composer_context_policy_auto
+                        })
+                        Text(stringResource(R.string.composer_context_policy_fmt, policyLabel))
                     }
-                    details?.contextWindowTokens?.let { Text("模型最大上下文：$it tokens") }
+                    details?.contextWindowTokens?.let { Text(stringResource(R.string.composer_context_model_max_fmt, it.toString())) }
                     details?.contextBudget?.standardPriceInputTokens?.let {
-                        Text("输入超过 $it tokens 后，整次请求适用长上下文价格。")
+                        Text(stringResource(R.string.composer_context_long_price_fmt, it.toString()))
                     }
                 }
             },
@@ -93,7 +100,15 @@ internal fun ComposerContextWindow(usage: AgentRunUsage?, capacity: ULong?, deta
 @Composable
 internal fun ComposerPermissionButton(mode: String, onClick: () -> Unit) {
     val t = LingXiTheme.palette
-    val label = stringResource(R.string.settings_permission_mode_effective_fmt, mode)
+    val modeLabel = stringResource(when (mode) {
+        "acceptEdits" -> R.string.settings_permission_mode_accept_edits
+        "plan" -> R.string.settings_permission_mode_plan
+        "auto" -> R.string.settings_permission_mode_auto
+        "dontAsk" -> R.string.settings_permission_mode_dont_ask
+        "bypassPermissions" -> R.string.settings_permission_mode_bypass
+        else -> R.string.settings_permission_mode_default
+    })
+    val label = stringResource(R.string.settings_permission_mode_effective_fmt, modeLabel)
     IconButton(onClick = onClick, modifier = Modifier.testTag("composer.permission")) {
         Icon(
             imageVector = if (mode == "bypassPermissions") Icons.Outlined.GppMaybe else Icons.Outlined.GppGood,

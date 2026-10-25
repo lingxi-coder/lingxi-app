@@ -5,6 +5,102 @@ import XCTest
 @testable import LingxiCode
 
 final class SecureStorageReplacementTests: XCTestCase {
+    #if canImport(harness_runtimeFFI)
+    func testEngineLaunchKeepsPersistedCredentialsOutOfScalarConfiguration() {
+        let normal = EngineConfig.fromEnvironment(appSandboxRoot: "/fixture", model: "", environment: [:])
+        XCTAssertTrue(normal.apiKey.isEmpty)
+
+        let development = EngineConfig.fromEnvironment(
+            appSandboxRoot: "/fixture", model: "", environment: ["ANTHROPIC_API_KEY": "fixture-development"])
+        XCTAssertTrue(development.apiKey == "fixture-development")
+    }
+
+    func testLegacyMigrationKeepsCanonicalCredentialAndRetiresOldSlot() async throws {
+        let fixture = LegacyCredentialMigrationFixture(canonical: "fixture-current")
+        try await migrate(fixture, using: LegacyAnthropicCredentialMigration())
+        let state = await fixture.snapshot()
+
+        XCTAssertTrue(state.canonical == "fixture-current")
+        XCTAssertFalse(state.hasLegacy)
+        XCTAssertEqual(state.writes, 0)
+        XCTAssertEqual(state.retirements, 1)
+    }
+
+    func testLegacyMigrationDoesNotResurrectAnExplicitlyDeletedCredential() async throws {
+        let fixture = LegacyCredentialMigrationFixture()
+        let migration = LegacyAnthropicCredentialMigration()
+        try await migrate(fixture, using: migration)
+        await fixture.deleteCanonical()
+        try await migrate(fixture, using: migration)
+        let state = await fixture.snapshot()
+
+        XCTAssertNil(state.canonical)
+        XCTAssertFalse(state.hasLegacy)
+        XCTAssertEqual(state.writes, 1)
+    }
+
+    func testFailedLegacyMigrationPreservesOldSlotAndCanRetry() async throws {
+        let fixture = LegacyCredentialMigrationFixture(failWrite: true)
+        let migration = LegacyAnthropicCredentialMigration()
+        do {
+            try await migrate(fixture, using: migration)
+            XCTFail("A failed canonical write must fail the bootstrap")
+        } catch {}
+        let failed = await fixture.snapshot()
+        XCTAssertTrue(failed.hasLegacy)
+        XCTAssertNil(failed.canonical)
+        XCTAssertEqual(failed.retirements, 0)
+
+        await fixture.allowWrites()
+        try await migrate(fixture, using: migration)
+        let recovered = await fixture.snapshot()
+        XCTAssertFalse(recovered.hasLegacy)
+        XCTAssertNotNil(recovered.canonical)
+        XCTAssertEqual(recovered.writes, 2)
+    }
+
+    func testLegacyMigrationRequiresConfirmedStorageBeforeRetiringOldSlot() async throws {
+        let fixture = LegacyCredentialMigrationFixture(confirmWrite: false)
+        do {
+            try await migrate(fixture, using: LegacyAnthropicCredentialMigration())
+            XCTFail("Dispatch without a stored record cannot retire the old key")
+        } catch {}
+        let state = await fixture.snapshot()
+
+        XCTAssertTrue(state.hasLegacy)
+        XCTAssertNil(state.canonical)
+        XCTAssertEqual(state.retirements, 0)
+    }
+
+    func testConcurrentBootstrapsShareOneLegacyMigration() async throws {
+        let started = expectation(description: "Canonical credential migration started")
+        let fixture = LegacyCredentialMigrationFixture(blockWrite: true, onWrite: { started.fulfill() })
+        let migration = LegacyAnthropicCredentialMigration()
+        async let first: Void = migrate(fixture, using: migration)
+        async let second: Void = migrate(fixture, using: migration)
+        await fulfillment(of: [started], timeout: 1)
+        await fixture.releaseWrite()
+        _ = try await (first, second)
+        let state = await fixture.snapshot()
+
+        XCTAssertFalse(state.hasLegacy)
+        XCTAssertNotNil(state.canonical)
+        XCTAssertEqual(state.writes, 1)
+        XCTAssertEqual(state.retirements, 1)
+    }
+
+    private func migrate(
+        _ fixture: LegacyCredentialMigrationFixture,
+        using migration: LegacyAnthropicCredentialMigration
+    ) async throws {
+        try await migration.migrate(
+            readLegacy: { await fixture.readLegacy() },
+            canonicalExists: { await fixture.canonicalExists() },
+            storeCanonical: { try await fixture.store($0) },
+            retireLegacy: { await fixture.retireLegacy() })
+    }
+    #endif
+
     func testRepeatedAnthropicReadsNeverRewriteExistingKeychainRecord() async throws {
         let original = Data("existing-anthropic-credential-record".utf8)
         let backend = FakeSecureStorageKeychainBackend(payload: original)
@@ -105,6 +201,64 @@ final class SecureStorageReplacementTests: XCTestCase {
         XCTAssertEqual(backend.calls, ["update", "add", "update", "retrieve"])
     }
 }
+
+#if canImport(harness_runtimeFFI)
+private actor LegacyCredentialMigrationFixture {
+    struct Snapshot: Sendable {
+        let hasLegacy: Bool
+        let canonical: String?
+        let writes: Int
+        let retirements: Int
+    }
+
+    private var legacy: String? = "fixture-legacy"
+    private var canonical: String?
+    private var failWrite: Bool
+    private let confirmWrite: Bool
+    private let blockWrite: Bool
+    private let onWrite: @Sendable () -> Void
+    private var writeGate: CheckedContinuation<Void, Never>?
+    private var writes = 0
+    private var retirements = 0
+
+    init(
+        canonical: String? = nil,
+        failWrite: Bool = false,
+        confirmWrite: Bool = true,
+        blockWrite: Bool = false,
+        onWrite: @escaping @Sendable () -> Void = {}
+    ) {
+        self.canonical = canonical
+        self.failWrite = failWrite
+        self.confirmWrite = confirmWrite
+        self.blockWrite = blockWrite
+        self.onWrite = onWrite
+    }
+
+    func readLegacy() -> String? { legacy }
+    func canonicalExists() -> Bool { canonical != nil }
+    func allowWrites() { failWrite = false }
+    func deleteCanonical() { canonical = nil }
+    func retireLegacy() { legacy = nil; retirements += 1 }
+    func releaseWrite() { writeGate?.resume(); writeGate = nil }
+
+    func store(_ secret: String) async throws {
+        writes += 1
+        if blockWrite {
+            await withCheckedContinuation { continuation in
+                writeGate = continuation
+                onWrite()
+            }
+        } else { onWrite() }
+        if failWrite { throw CancellationError() }
+        if confirmWrite { canonical = secret }
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(hasLegacy: legacy != nil, canonical: canonical, writes: writes, retirements: retirements)
+    }
+}
+#endif
 
 /// Inject the exact update-not-found / competing-insert / duplicate-add
 /// interleaving deterministically, without touching any system credentials.

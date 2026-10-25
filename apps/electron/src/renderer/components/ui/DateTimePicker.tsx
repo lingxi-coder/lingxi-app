@@ -1,3 +1,4 @@
+import { useI18n } from '../../i18n/useI18n';
 import { useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { useT } from '../../theme/ThemeContext';
 import './DateTimePicker.css';
@@ -14,6 +15,7 @@ const dateValue = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() +
 
 /** Shared desktop picker. Values stay in local wall-clock time, without UTC conversion. */
 export function DateTimePicker({ mode, value, onChange, label, disabled }: Props) {
+  const { tr, locale } = useI18n();
   const t = useT();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -72,12 +74,12 @@ export function DateTimePicker({ mode, value, onChange, label, disabled }: Props
     dialog.current!.close();
   }
   const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
-  const weekdayNames = Array.from({ length: 7 }, (_, index) => new Date(2024, 0, 7 + index).toLocaleDateString(undefined, { weekday: 'narrow' }));
+  const weekdayNames = Array.from({ length: 7 }, (_, index) => new Date(2024, 0, 7 + index).toLocaleDateString(locale, { weekday: 'narrow' }));
   return <span className="lx-date-picker" style={theme}>
     <button ref={trigger} type="button" className="lx-date-trigger" aria-label={label} aria-describedby={`${id}-value`} aria-haspopup="dialog" aria-expanded={open} aria-controls={id} disabled={disabled} onClick={show}>
       <span id={`${id}-value`} className="lx-date-value">
-      {hasDate && <span>{value ? safeDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Choose date'}</span>}
-      {hasTime && <span>{selectedTime || 'Choose time'}</span>}
+      {hasDate && <span>{value ? safeDate.toLocaleDateString(locale, { month: 'short', day: 'numeric', year: 'numeric' }) : tr('desktop_navigation_choose_date')}</span>}
+      {hasTime && <span>{selectedTime || tr('desktop_navigation_choose_time')}</span>}
       </span>
     </button>
     <dialog ref={dialog} id={id} className="lx-date-dialog" aria-label={label} style={{ ...theme, ...position }} onKeyDown={(event) => {
@@ -87,12 +89,12 @@ export function DateTimePicker({ mode, value, onChange, label, disabled }: Props
     }} onClose={() => { setOpen(false); trigger.current?.focus(); }} onClick={(event) => {
       if (event.target === event.currentTarget) { const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.current?.close(); }
     }}>
-      <header className="lx-date-heading"><span>{label}</span><button type="button" onClick={close}>Done</button></header>
+      <header className="lx-date-heading"><span>{label}</span><button type="button" onClick={close}>{tr('common_done')}</button></header>
       {hasDate && <>
-        <nav className="lx-date-month" aria-label="Calendar navigation">
-          <span aria-live="polite">{month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
-          <button type="button" aria-label="Previous month" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>‹</button>
-          <button type="button" aria-label="Next month" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>›</button>
+        <nav className="lx-date-month" aria-label={tr('desktop_navigation_calendar_navigation')}>
+          <span aria-live="polite">{month.toLocaleDateString(locale, { month: 'long', year: 'numeric' })}</span>
+          <button type="button" aria-label={tr('desktop_navigation_previous_month')} onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>‹</button>
+          <button type="button" aria-label={tr('desktop_navigation_next_month')} onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>›</button>
         </nav>
         <div className="lx-date-calendar">
           {weekdayNames.map((name, index) => <span className="lx-date-weekday" key={index}>{name}</span>)}
@@ -112,10 +114,10 @@ export function DateTimePicker({ mode, value, onChange, label, disabled }: Props
           })}
         </div>
       </>}
-      {hasTime && <div className="lx-date-time"><span>Time <small>24h</small></span><div className="lx-date-segments">
-        <input aria-label="Hour" type="number" min="0" max="23" required value={hours} onChange={(event) => changeTime('hour', event.target.value)} onFocus={(event) => event.target.select()} onBlur={() => setHours(selectedTime.slice(0, 2) || '00')} />
+      {hasTime && <div className="lx-date-time"><span>{tr('desktop_navigation_time')} <small>{tr('desktop_navigation_hours_24')}</small></span><div className="lx-date-segments">
+        <input aria-label={tr('desktop_navigation_hour')} type="number" min="0" max="23" required value={hours} onChange={(event) => changeTime('hour', event.target.value)} onFocus={(event) => event.target.select()} onBlur={() => setHours(selectedTime.slice(0, 2) || '00')} />
         <span aria-hidden="true">:</span>
-        <input aria-label="Minute" type="number" min="0" max="59" required value={minutes} onChange={(event) => changeTime('minute', event.target.value)} onFocus={(event) => event.target.select()} onBlur={() => setMinutes(selectedTime.slice(3, 5) || '00')} />
+        <input aria-label={tr('desktop_navigation_minute')} type="number" min="0" max="59" required value={minutes} onChange={(event) => changeTime('minute', event.target.value)} onFocus={(event) => event.target.select()} onBlur={() => setMinutes(selectedTime.slice(3, 5) || '00')} />
       </div></div>}
     </dialog>
   </span>;

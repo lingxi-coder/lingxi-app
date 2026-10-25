@@ -1,3 +1,5 @@
+import { useI18n } from '../../../i18n/useI18n';
+import { tr } from '../../../i18n/locale';
 import { useEffect, useRef, useState } from 'react';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
@@ -53,6 +55,7 @@ function BoolRow({
  * `CustomProviders`' own `useEffect([editingLayer])` exactly.
  */
 export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
+  useI18n();
   const t = useT();
   const enabledTools = stringArrayFromLayer(snapshot, editingLayer, 'enabledTools');
   const outputStyle = stringFromLayer(snapshot, editingLayer, 'outputStyle');
@@ -88,15 +91,15 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
     setSaving(key);
     setSaveError(null);
     void bridge.updateEngineSettings(editingLayer, patch)
-      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存设置。'))
+      .catch((cause) => setSaveError(cause instanceof Error ? cause.message : tr('desktop_settings_50fe1f20b6')))
       .finally(() => setSaving(null));
   };
 
   return (
     <>
-      <Card title="启用的工具 (enabledTools)">
+      <Card title={tr('desktop_settings_6fac5943aa')}>
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledTools" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <Row title="enabledTools" desc="留空表示不限制；按名称列出工具会把可用工具限制在这个列表内。此键跨层做并集去重，不是覆盖。" align="start">
+        <Row title="enabledTools" desc={tr('desktop_settings_34d18f886d')} align="start">
           <div style={{ display: 'grid', gap: 7 }}>
             <input
               value={toolsText}
@@ -111,40 +114,40 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
               onClick={() => write({ enabledTools: parseToolList(toolsText) }, 'enabledTools')}
               style={ghostButtonStyle(t, saving === 'enabledTools')}
             >
-              保存
+              {tr('settings_save')}
             </button>
           </div>
         </Row>
       </Card>
 
-      <Card title="内建工具开关">
-        <BoolRow title="disableArtifact" desc="禁用 Artifact 工具。" value={disableArtifact} saving={saving === 'disableArtifact'} onChange={(v) => write({ disableArtifact: v }, 'disableArtifact')} />
-        <BoolRow title="disableAgentView" desc="禁用 Agent 视图工具。" value={disableAgentView} saving={saving === 'disableAgentView'} onChange={(v) => write({ disableAgentView: v }, 'disableAgentView')} />
-        <BoolRow title="disableAllHooks" desc="禁用所有 hooks，无论它们在哪一层定义。" value={disableAllHooks} saving={saving === 'disableAllHooks'} onChange={(v) => write({ disableAllHooks: v }, 'disableAllHooks')} />
-        <BoolRow title="skipWebFetchPreflight" desc="跳过 WebFetch 的预检请求。" value={skipWebFetchPreflight} saving={saving === 'skipWebFetchPreflight'} onChange={(v) => write({ skipWebFetchPreflight: v }, 'skipWebFetchPreflight')} />
+      <Card title={tr('desktop_settings_d08bf2421b')}>
+        <BoolRow title="disableArtifact" desc={tr('desktop_settings_7ef868c639')} value={disableArtifact} saving={saving === 'disableArtifact'} onChange={(v) => write({ disableArtifact: v }, 'disableArtifact')} />
+        <BoolRow title="disableAgentView" desc={tr('desktop_settings_c4142ed999')} value={disableAgentView} saving={saving === 'disableAgentView'} onChange={(v) => write({ disableAgentView: v }, 'disableAgentView')} />
+        <BoolRow title="disableAllHooks" desc={tr('desktop_settings_cc32c17384')} value={disableAllHooks} saving={saving === 'disableAllHooks'} onChange={(v) => write({ disableAllHooks: v }, 'disableAllHooks')} />
+        <BoolRow title="skipWebFetchPreflight" desc={tr('desktop_settings_4272f3edbc')} value={skipWebFetchPreflight} saving={saving === 'skipWebFetchPreflight'} onChange={(v) => write({ skipWebFetchPreflight: v }, 'skipWebFetchPreflight')} />
       </Card>
 
-      <Card title="Agent 行为">
+      <Card title={tr('desktop_settings_064a31e9f1')}>
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="promptSuggestionEnabled" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <BoolRow title="Prompt suggestions" desc="回合结束后在输入框显示建议。" value={snapshot?.layers[editingLayer]?.promptSuggestionEnabled !== false} saving={saving === 'promptSuggestionEnabled'} onChange={(v) => write({ promptSuggestionEnabled: v }, 'promptSuggestionEnabled')} />
-        <BoolRow title="alwaysThinkingEnabled" desc="总是启用扩展思考。" value={alwaysThinkingEnabled} saving={saving === 'alwaysThinkingEnabled'} onChange={(v) => write({ alwaysThinkingEnabled: v }, 'alwaysThinkingEnabled')} />
-        <BoolRow title="showThinkingSummaries" desc="展示模型思考过程的摘要。" value={showThinkingSummaries} saving={saving === 'showThinkingSummaries'} onChange={(v) => write({ showThinkingSummaries: v }, 'showThinkingSummaries')} />
-        <BoolRow title="visionDelegationEnabled" desc="允许把图像理解委派给视觉模型。" value={visionDelegationEnabled} saving={saving === 'visionDelegationEnabled'} onChange={(v) => write({ visionDelegationEnabled: v }, 'visionDelegationEnabled')} />
+        <BoolRow title={tr('desktop_settings_prompt_suggestions')} desc={tr('desktop_settings_9eab68f6d4')} value={snapshot?.layers[editingLayer]?.promptSuggestionEnabled !== false} saving={saving === 'promptSuggestionEnabled'} onChange={(v) => write({ promptSuggestionEnabled: v }, 'promptSuggestionEnabled')} />
+        <BoolRow title="alwaysThinkingEnabled" desc={tr('desktop_settings_6e694a1522')} value={alwaysThinkingEnabled} saving={saving === 'alwaysThinkingEnabled'} onChange={(v) => write({ alwaysThinkingEnabled: v }, 'alwaysThinkingEnabled')} />
+        <BoolRow title="showThinkingSummaries" desc={tr('desktop_settings_d8c4cb8eb1')} value={showThinkingSummaries} saving={saving === 'showThinkingSummaries'} onChange={(v) => write({ showThinkingSummaries: v }, 'showThinkingSummaries')} />
+        <BoolRow title="visionDelegationEnabled" desc={tr('desktop_settings_da3c948583')} value={visionDelegationEnabled} saving={saving === 'visionDelegationEnabled'} onChange={(v) => write({ visionDelegationEnabled: v }, 'visionDelegationEnabled')} />
       </Card>
 
-      <Card title="输出风格 (outputStyle)">
-        <Row title="outputStyle" desc="标量字段，后写入的层直接覆盖，不参与合并。" align="center">
+      <Card title={tr('desktop_settings_8704130f07')}>
+        <Row title="outputStyle" desc={tr('desktop_settings_5bf55e39c3')} align="center">
           <div className="settings-inline-fields" style={{ display: 'flex', gap: 7 }}>
             <input value={outputStyleText} onChange={(e) => setOutputStyleText(e.target.value)} placeholder="Explanatory" aria-label="outputStyle" style={inputStyle(t)} />
-            <button type="button" disabled={!snapshot || saving === 'outputStyle'} onClick={() => write({ outputStyle: outputStyleText.trim() || null }, 'outputStyle')} style={ghostButtonStyle(t, saving === 'outputStyle')}>保存</button>
+            <button type="button" disabled={!snapshot || saving === 'outputStyle'} onClick={() => write({ outputStyle: outputStyleText.trim() || null }, 'outputStyle')} style={ghostButtonStyle(t, saving === 'outputStyle')}>{tr('settings_save')}</button>
           </div>
         </Row>
       </Card>
 
-      <Card title="模型覆盖 (modelOverrides)">
+      <Card title={tr('desktop_settings_f496376d26')}>
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="modelOverrides" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         {Object.keys(modelOverrides).length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有模型覆盖。</div>
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>{tr('desktop_settings_9863316cf9')}</div>
         )}
         {Object.entries(modelOverrides).map(([from, to]) => (
           <Row key={from} align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{from} → {to}</span>}>
@@ -158,14 +161,14 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
               }}
               style={ghostButtonStyle(t, saving === 'modelOverrides', true)}
             >
-              移除
+              {tr('settings_parity_remove')}
             </button>
           </Row>
         ))}
-        <Row title="新增覆盖" align="center">
+        <Row title={tr('desktop_settings_90b3bfb6be')} align="center">
           <div className="settings-inline-fields" style={{ display: 'flex', gap: 7 }}>
-            <input value={overrideFrom} onChange={(e) => setOverrideFrom(e.target.value)} placeholder="原模型 id" aria-label="原模型 id" style={inputStyle(t)} />
-            <input value={overrideTo} onChange={(e) => setOverrideTo(e.target.value)} placeholder="替换为" aria-label="替换为" style={inputStyle(t)} />
+            <input value={overrideFrom} onChange={(e) => setOverrideFrom(e.target.value)} placeholder={tr('desktop_settings_7106752325')} aria-label={tr('desktop_settings_7106752325')} style={inputStyle(t)} />
+            <input value={overrideTo} onChange={(e) => setOverrideTo(e.target.value)} placeholder={tr('desktop_settings_7d37f05964')} aria-label={tr('desktop_settings_7d37f05964')} style={inputStyle(t)} />
             <button
               type="button"
               disabled={saving === 'modelOverrides' || !overrideFrom.trim() || !overrideTo.trim()}
@@ -176,24 +179,24 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
               }}
               style={ghostButtonStyle(t, saving === 'modelOverrides' || !overrideFrom.trim() || !overrideTo.trim())}
             >
-              添加
+              {tr('workspace_confirm_add')}
             </button>
           </div>
         </Row>
       </Card>
 
-      <Card title="运行时 Agent Catalog">
-        <Row title="刷新 Catalog" desc="展示当前引擎已加载的 agent 定义。" align="center">
-          <button type="button" onClick={() => void bridge.refreshAgents()} style={ghostButtonStyle(t)}>刷新</button>
+      <Card title={tr('desktop_settings_459132b9d0')}>
+        <Row title={tr('desktop_settings_945680cc85')} desc={tr('desktop_settings_3e7e38b36d')} align="center">
+          <button type="button" onClick={() => void bridge.refreshAgents()} style={ghostButtonStyle(t)}>{tr('settings_linux_refresh_button')}</button>
         </Row>
         {bridge.agentCatalog.length === 0 && (
-          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>当前 runtime 没有加载任何 agent。</div>
+          <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>{tr('desktop_settings_7ec40412c0')}</div>
         )}
         {bridge.agentCatalog.map((agent) => (
           <Row
             key={agent.name}
             title={agent.name}
-            desc={`${agent.description || '无描述'}${agent.tools_allowed.length ? ` · tools: ${agent.tools_allowed.join(', ')}` : ''}`}
+            desc={`${agent.description || tr('desktop_settings_8ae96d747e')}${agent.tools_allowed.length ? ` · tools: ${agent.tools_allowed.join(', ')}` : ''}`}
             align="center"
           >
             {null}

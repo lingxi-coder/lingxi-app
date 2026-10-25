@@ -1,3 +1,4 @@
+import { tr } from '../../../i18n/locale';
 import { trimProviderDraft } from './customProviderDraft';
 /** Provider import stays pure: secrets never enter the settings payload or diagnostics. */
 export const SUPPORTED_PROVIDER_TYPES = [
@@ -24,9 +25,9 @@ const hasOwn = (value: object, key: string): boolean => Object.prototype.hasOwnP
 const forbidden = new Set(['__proto__', 'prototype', 'constructor']);
 const reservedProfileIds = new Set(['builtin', 'claude']);
 export function validateProfileName(name: string): string | null {
-  if (reservedProfileIds.has(name)) return 'builtin 和 claude 为内置路由保留名称，请使用其他 Profile ID。';
+  if (reservedProfileIds.has(name)) return tr('desktop_settings_30835417d3');
   return typeof name === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name) && !forbidden.has(name)
-    ? null : 'Profile ID 需为 1–64 位小写字母、数字、点、下划线或连字符，并以字母或数字开头。';
+    ? null : tr('desktop_settings_144eb627dd');
 }
 /**
  * Merge one connection over the provider-level defaults.
@@ -58,9 +59,9 @@ const FALLBACK_TRIGGERS = ['rate_limit', 'overloaded', 'server_error', 'network'
  */
 function validateCredentialIds(value: unknown, label: string): string | null {
   if (value === undefined) return null;
-  if (!Array.isArray(value) || !value.length) return `${label}credentialIds 必须是非空数组。`;
-  if (value.some((key) => !nonempty(key))) return `${label}credentialIds 的每一项必须是非空字符串。`;
-  if (new Set(value.map((key) => (key as string).trim())).size !== value.length) return `${label}credentialIds 不能重复。`;
+  if (!Array.isArray(value) || !value.length) return tr('desktop_settings_186903c5f4', label);
+  if (value.some((key) => !nonempty(key))) return tr('desktop_settings_ba3db89e32', label);
+  if (new Set(value.map((key) => (key as string).trim())).size !== value.length) return tr('desktop_settings_d453a799e5', label);
   return null;
 }
 
@@ -70,31 +71,31 @@ function validateCredentialIds(value: unknown, label: string): string | null {
  */
 function validateConnections(draft: CustomProviderDraft): string | null {
   const connections = draft.connections;
-  if (!Array.isArray(connections) || !connections.length) return 'connections 必须是非空数组；单一连接请直接省略该字段。';
+  if (!Array.isArray(connections) || !connections.length) return tr('desktop_settings_1d1042756a');
   const seen = new Set<string>();
   for (const [index, connection] of connections.entries()) {
-    if (!record(connection)) return `connections[${index}] 必须是对象。`;
+    if (!record(connection)) return tr('desktop_settings_2696d785f7', index);
     const id = connection.id;
-    if (!nonempty(id)) return `connections[${index}] 需要非空的 id。`;
+    if (!nonempty(id)) return tr('desktop_settings_071521f356', index);
     const trimmed = (id as string).trim();
     // The id becomes part of a qualified model reference (`provider:conn/model`),
     // so a separator in it would produce a reference that cannot be routed.
-    if (/[/:#]/.test(trimmed)) return `连接 id ${JSON.stringify(trimmed)} 不能包含 '/'、':' 或 '#'。`;
-    if (seen.has(trimmed)) return `连接 id ${JSON.stringify(trimmed)} 重复。`;
+    if (/[/:#]/.test(trimmed)) return tr('desktop_settings_2e7458cb01', JSON.stringify(trimmed));
+    if (seen.has(trimmed)) return tr('desktop_settings_078850f795', JSON.stringify(trimmed));
     seen.add(trimmed);
-    const keysError = validateCredentialIds(connection.credentialIds, `连接 ${JSON.stringify(trimmed)} 的 `);
+    const keysError = validateCredentialIds(connection.credentialIds, tr('desktop_settings_40a568cf54', JSON.stringify(trimmed)));
     if (keysError) return keysError;
     const merged = mergeConnection(draft, connection as CustomProviderConnectionDraft);
     const error = validateCustomProvider(merged);
-    if (error) return `连接 ${JSON.stringify(trimmed)}：${error}`;
+    if (error) return tr('desktop_settings_38ef74e728', JSON.stringify(trimmed), error);
   }
   if (draft.fallback !== undefined) {
-    if (!record(draft.fallback)) return 'fallback 必须为对象。';
+    if (!record(draft.fallback)) return tr('desktop_settings_7ba28be21b');
     const on = (draft.fallback as Record<string, unknown>).on;
     if (on !== undefined) {
-      if (!Array.isArray(on)) return 'fallback.on 必须是数组。';
+      if (!Array.isArray(on)) return tr('desktop_settings_080c4ed554');
       for (const trigger of on) {
-        if (!nonempty(trigger) || !FALLBACK_TRIGGERS.includes((trigger as string).trim())) return `fallback.on 取值无效，支持：${FALLBACK_TRIGGERS.join(', ')}。`;
+        if (!nonempty(trigger) || !FALLBACK_TRIGGERS.includes((trigger as string).trim())) return tr('desktop_settings_7e716339b6', FALLBACK_TRIGGERS.join(', '));
       }
     }
   }
@@ -127,37 +128,37 @@ export function validateCustomProvider(draft: CustomProviderDraft): string | nul
   const keysError = validateCredentialIds(draft.credentialIds, '');
   if (keysError) return keysError;
   if (record(draft) && draft.connections !== undefined) return validateConnections(draft);
-  if (!record(draft) || !SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) return `请选择支持的协议：${SUPPORTED_PROVIDER_TYPES.join(', ')}`;
-  if (!Array.isArray(draft.models) || !draft.models.length) return 'models 至少需要一个模型。';
-  if (draft.models.some(m => !record(m) || !nonempty(m.id))) return '每个 models 条目必须有非空 id。';
-  if (new Set(draft.models.map(m => m.id.trim())).size !== draft.models.length) return '模型 id 不能重复。';
-  if (draft.models.some(m => m.aliases !== undefined && (!Array.isArray(m.aliases) || m.aliases.some(a => !nonempty(a))))) return '模型 aliases 必须为非空字符串数组。';
+  if (!record(draft) || !SUPPORTED_PROVIDER_TYPES.includes(draft.type as SupportedProviderType)) return tr('desktop_settings_9221cf14be', SUPPORTED_PROVIDER_TYPES.join(', '));
+  if (!Array.isArray(draft.models) || !draft.models.length) return tr('desktop_settings_a58fc33a23');
+  if (draft.models.some(m => !record(m) || !nonempty(m.id))) return tr('desktop_settings_b75df669db');
+  if (new Set(draft.models.map(m => m.id.trim())).size !== draft.models.length) return tr('desktop_settings_740f825ba2');
+  if (draft.models.some(m => m.aliases !== undefined && (!Array.isArray(m.aliases) || m.aliases.some(a => !nonempty(a))))) return tr('desktop_settings_e912598ff7');
   for (const model of draft.models) {
-    if (model.capabilities !== undefined && (!record(model.capabilities) || Object.values(model.capabilities).some(v => typeof v !== 'boolean'))) return '模型 capabilities 必须为布尔值对象。';
-    if (model.metadata !== undefined && !validMetadata(model.metadata)) return '模型 metadata 格式无效。';
+    if (model.capabilities !== undefined && (!record(model.capabilities) || Object.values(model.capabilities).some(v => typeof v !== 'boolean'))) return tr('desktop_settings_47a44a3b47');
+    if (model.metadata !== undefined && !validMetadata(model.metadata)) return tr('desktop_settings_11cc3f633b');
   }
-  if (draft.visionDelegate !== undefined && (typeof draft.visionDelegate !== 'string' || draft.visionDelegate.length === 0)) return 'visionDelegate 必须为非空字符串。';
-  if (draft.billingMode !== undefined && (typeof draft.billingMode !== 'string' || !['perToken', 'subscription', 'free', 'unknown'].includes(draft.billingMode))) return 'billingMode 无效。';
+  if (draft.visionDelegate !== undefined && (typeof draft.visionDelegate !== 'string' || draft.visionDelegate.length === 0)) return tr('desktop_settings_00b87f3a56');
+  if (draft.billingMode !== undefined && (typeof draft.billingMode !== 'string' || !['perToken', 'subscription', 'free', 'unknown'].includes(draft.billingMode))) return tr('desktop_settings_469964577d');
   if (draft.pricing !== undefined) {
-    if (!record(draft.pricing)) return 'pricing 必须为对象。';
+    if (!record(draft.pricing)) return tr('desktop_settings_e99fa65871');
     for (const [model, prices] of Object.entries(draft.pricing)) {
-      if (record(prices) && (!hasOwn(prices, 'inputPerMtok') || !hasOwn(prices, 'outputPerMtok'))) return 'pricing 每个模型必须同时填写 inputPerMtok 和 outputPerMtok。';
-      if (!draft.models.some(m => m.id === model) || !record(prices) || Object.entries(prices).some(([key, value]) => !['inputPerMtok', 'outputPerMtok', 'cacheWritePerMtok', 'cacheReadPerMtok', 'reasoningPerMtok'].includes(key) || !finitePrice(value))) return 'pricing 需要已配置的模型及有效的非负价格。';
+      if (record(prices) && (!hasOwn(prices, 'inputPerMtok') || !hasOwn(prices, 'outputPerMtok'))) return tr('desktop_settings_cbf188f726');
+      if (!draft.models.some(m => m.id === model) || !record(prices) || Object.entries(prices).some(([key, value]) => !['inputPerMtok', 'outputPerMtok', 'cacheWritePerMtok', 'cacheReadPerMtok', 'reasoningPerMtok'].includes(key) || !finitePrice(value))) return tr('desktop_settings_12cb209e26');
     }
   }
-  if (draft.type === 'bedrock-claude' && !nonempty(draft.region)) return 'Bedrock 需要 region。';
-  if (draft.type !== 'bedrock-claude' && !nonempty(draft.baseUrl)) return '请填写 baseUrl。';
+  if (draft.type === 'bedrock-claude' && !nonempty(draft.region)) return tr('desktop_settings_d05aa4b859');
+  if (draft.type !== 'bedrock-claude' && !nonempty(draft.baseUrl)) return tr('desktop_settings_f51404fdc8');
   if (draft.baseUrl !== undefined) {
-    if (!nonempty(draft.baseUrl)) return 'baseUrl 必须是 HTTP(S) 地址。';
-    try { const url = new URL(draft.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash || /\{(?:env|file):/.test(draft.baseUrl)) return 'baseUrl 必须是无内嵌凭据的 HTTP(S) 地址。'; }
-    catch { return 'baseUrl 必须是有效的 HTTP(S) 地址。'; }
+    if (!nonempty(draft.baseUrl)) return tr('desktop_settings_8aa7abc7da');
+    try { const url = new URL(draft.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash || /\{(?:env|file):/.test(draft.baseUrl)) return tr('desktop_settings_47430852db'); }
+    catch { return tr('desktop_settings_d88f4b0b09'); }
   }
-  if (draft.apiKeyEnv !== undefined && (typeof draft.apiKeyEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(draft.apiKeyEnv))) return 'apiKeyEnv 必须是有效的环境变量名称。';
-  if (draft.type === 'azure-openai' && !nonempty(draft.apiVersion)) return 'Azure OpenAI 需要 apiVersion。';
-  if (draft.supportsWebsockets !== undefined && typeof draft.supportsWebsockets !== 'boolean') return 'supportsWebsockets 必须为布尔值。';
-  if (draft.supportsWebsockets && draft.type !== 'openai-responses') return 'WebSocket 仅适用于 openai-responses。';
-  if (draft.supportsWebsocketCompression !== undefined && draft.supportsWebsocketCompression !== false) return '当前不支持 WebSocket 压缩。';
-  if (draft.websocketConnectTimeoutMs !== undefined && (!Number.isSafeInteger(draft.websocketConnectTimeoutMs) || Number(draft.websocketConnectTimeoutMs) < 0)) return 'websocketConnectTimeoutMs 必须为非负整数。';
+  if (draft.apiKeyEnv !== undefined && (typeof draft.apiKeyEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(draft.apiKeyEnv))) return tr('desktop_settings_d69e84ee92');
+  if (draft.type === 'azure-openai' && !nonempty(draft.apiVersion)) return tr('desktop_settings_0a1fcb84d0');
+  if (draft.supportsWebsockets !== undefined && typeof draft.supportsWebsockets !== 'boolean') return tr('desktop_settings_2e39a79b9c');
+  if (draft.supportsWebsockets && draft.type !== 'openai-responses') return tr('desktop_settings_207d871d1f');
+  if (draft.supportsWebsocketCompression !== undefined && draft.supportsWebsocketCompression !== false) return tr('desktop_settings_79da4e1a4e');
+  if (draft.websocketConnectTimeoutMs !== undefined && (!Number.isSafeInteger(draft.websocketConnectTimeoutMs) || Number(draft.websocketConnectTimeoutMs) < 0)) return tr('desktop_settings_5d383d8765');
   return null;
 }
 const finitePrice = (value: unknown): boolean => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -191,10 +192,10 @@ const sdkTypes: Record<string, string> = { '@ai-sdk/openai-compatible': 'openai'
 const referenceFields = new Set(['apiKeyEnv', 'credentialIds']);
 const secretField = /(?:api.?key|secret|password|authorization|credential|headers)|^(?:access|refresh|auth|bearer)?[_-]?token$/i;
 const diagnosticFields = new Set([...providerFields, ...modelFields, 'apiKey', 'accessToken', 'refreshToken', 'authorization', 'headers', 'timeout', 'fetch', 'includeUsage', 'compatibility', 'name', 'cost', 'limit', 'modalities', 'release_date', 'attachment', 'reasoning', 'temperature', 'tool_call', 'knowledge', 'open_weights', 'status', 'variants', 'options', 'provider', 'npm', 'whitelist', 'blacklist', 'plugin', 'plugins', 'routing', 'model', 'small_model', 'instructions', 'tools', 'mcp', 'agent']);
-const fieldLabel = (key: string): string => diagnosticFields.has(key) ? key : '（未知字段名已隐藏）';
+const fieldLabel = (key: string): string => diagnosticFields.has(key) ? key : tr('desktop_settings_e90a969e23');
 /** Advanced native JSON is retained except unsafe keys and credential-shaped properties. */
 function safeValue(value: unknown, diagnostics: ImportDiagnostic[], depth = 0): unknown {
-  if (depth > 32) { diagnostics.push({ severity: 'error', message: 'JSON 嵌套过深，请简化高级配置。' }); return null; }
+  if (depth > 32) { diagnostics.push({ severity: 'error', message: tr('desktop_settings_1f9121d617') }); return null; }
   if (Array.isArray(value)) return value.map(v => safeValue(v, diagnostics, depth + 1));
   if (!record(value)) return value;
   return Object.fromEntries(Object.entries(value).filter(([key]) => {
@@ -203,32 +204,32 @@ function safeValue(value: unknown, diagnostics: ImportDiagnostic[], depth = 0): 
     // `providerFields`, but this walker recurses, so a connection's own
     // `apiKeyEnv` was being stripped as if it were a pasted key. The pattern
     // itself is unchanged: every other credential-shaped key is still removed.
-    if (forbidden.has(key) || (!referenceFields.has(key) && secretField.test(key))) { diagnostics.push({ severity: 'error', message: `高级字段 ${fieldLabel(key)} 包含凭据或不安全属性，已移除；请修改原始 JSON。` }); return false; }
+    if (forbidden.has(key) || (!referenceFields.has(key) && secretField.test(key))) { diagnostics.push({ severity: 'error', message: tr('desktop_settings_d720114573', fieldLabel(key)) }); return false; }
     return true;
   }).map(([key,v]) => [key, safeValue(v, diagnostics, depth + 1)]));
 }
 function readKey(value: unknown, entry: ProviderImportEntry): void {
   if (value === undefined || value === null || value === '') return;
-  if (typeof value !== 'string') { entry.diagnostics.push({ severity: 'error', message: 'apiKey 必须为字符串。' }); return; }
+  if (typeof value !== 'string') { entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_018380f837') }); return; }
   const env = /^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(value);
   if (env) { entry.draft.apiKeyEnv = env[1]; return; }
-  if (/\{(?:env|file):/.test(value)) { entry.diagnostics.push({ severity: 'error', message: '无法导入此凭据引用；请在原始 JSON 中移除引用，再填写 API Key 或环境变量。' }); return; }
+  if (/\{(?:env|file):/.test(value)) { entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_00aab73b47') }); return; }
   entry.apiKey = value;
 }
 function nativeDraft(raw: Record<string, unknown>, entry: ProviderImportEntry): void {
   const { diagnostics } = entry;
   for (const [key, value] of Object.entries(raw)) {
     if (key === 'apiKey') continue;
-    if (!providerFields.has(key)) { diagnostics.push({ severity: secretField.test(key) || forbidden.has(key) ? 'error' : 'warning', message: `未导入 Provider 字段 ${fieldLabel(key)}（值已隐藏）；请核对原始 JSON。` }); continue; }
+    if (!providerFields.has(key)) { diagnostics.push({ severity: secretField.test(key) || forbidden.has(key) ? 'error' : 'warning', message: tr('desktop_settings_b36487f7a4', fieldLabel(key)) }); continue; }
     if (key === 'models') {
-      if (!Array.isArray(value)) { diagnostics.push({ severity: 'error', message: 'LingXi models 必须为数组。' }); continue; }
+      if (!Array.isArray(value)) { diagnostics.push({ severity: 'error', message: tr('desktop_settings_0cd669354a') }); continue; }
       entry.draft.models = value.map(model => {
         if (typeof model === 'string') return { id: model };
-        if (!record(model)) { diagnostics.push({ severity: 'error', message: 'models 条目必须为字符串或对象。' }); return { id: '' }; }
+        if (!record(model)) { diagnostics.push({ severity: 'error', message: tr('desktop_settings_cab3bef8fa') }); return { id: '' }; }
         const result: Record<string, unknown> = {};
         for (const [field, data] of Object.entries(model)) {
           if (modelFields.has(field)) result[field] = safeValue(data, diagnostics);
-          else diagnostics.push({ severity: 'warning', message: `未导入模型字段 ${fieldLabel(field)}（值已隐藏）。` });
+          else diagnostics.push({ severity: 'warning', message: tr('desktop_settings_eb75ed21f8', fieldLabel(field)) });
         }
         return { ...result, id: typeof result.id === 'string' ? result.id : '' } as CustomProviderModelDraft;
       });
@@ -238,49 +239,49 @@ function nativeDraft(raw: Record<string, unknown>, entry: ProviderImportEntry): 
   if (hasOwn(raw, 'apiKey')) {
     const fallback = entry.draft.apiKeyEnv;
     readKey(raw.apiKey, entry);
-    if (fallback && entry.draft.apiKeyEnv !== fallback) diagnostics.push({ severity: 'warning', message: 'apiKey 的环境变量引用优先于 apiKeyEnv。' });
+    if (fallback && entry.draft.apiKeyEnv !== fallback) diagnostics.push({ severity: 'warning', message: tr('desktop_settings_376783887e') });
   }
 }
 function openCodeDraft(raw: Record<string, unknown>, entry: ProviderImportEntry): void {
   entry.draft.type = typeof raw.npm === 'string' && hasOwn(sdkTypes, raw.npm) ? sdkTypes[raw.npm] : '';
-  if (!entry.draft.type) entry.diagnostics.push({ severity: 'warning', message: '无法识别 SDK，请手动选择协议。' });
+  if (!entry.draft.type) entry.diagnostics.push({ severity: 'warning', message: tr('desktop_settings_6b335cb413') });
   const options = raw.options === undefined ? {} : raw.options;
-  if (!record(options)) entry.diagnostics.push({ severity: 'error', message: 'OpenCode options 必须为对象。' });
+  if (!record(options)) entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_6e28f89e0b') });
   else for (const [key, value] of Object.entries(options)) {
     if (key === 'baseURL') entry.draft.baseUrl = typeof value === 'string' ? value : '';
     else if (key === 'apiKey') readKey(value, entry);
-    else entry.diagnostics.push({ severity: 'error', message: `无法转换请求选项 ${fieldLabel(key)}；请修改原始 JSON 或取消选择此项。` });
+    else entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_60b03bbd82', fieldLabel(key)) });
   }
   if (raw.models === undefined) entry.draft.models = [];
-  else if (!record(raw.models)) entry.diagnostics.push({ severity: 'error', message: 'OpenCode models 必须为对象。' });
+  else if (!record(raw.models)) entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_5b54290056') });
   else entry.draft.models = Object.entries(raw.models).map(([key, model]) => {
-    if (!record(model)) { entry.diagnostics.push({ severity: 'error', message: 'OpenCode 模型条目必须为对象。' }); return { id: '' }; }
+    if (!record(model)) { entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_c60a133a6f') }); return { id: '' }; }
     const id = model.id === undefined ? key : typeof model.id === 'string' ? model.id : '';
     for (const field of Object.keys(model)) if (field !== 'id') {
       const metadata = ['name','cost','limit','modalities','release_date','attachment','reasoning','temperature','tool_call','knowledge','open_weights','status'].includes(field);
-      entry.diagnostics.push({ severity: metadata ? 'warning' : 'error', message: metadata ? `OpenCode 模型字段 ${fieldLabel(field)} 未转换，请核对模型能力。` : `无法转换模型请求字段 ${fieldLabel(field)}；请修改原始 JSON 或取消选择此项。` });
+      entry.diagnostics.push({ severity: metadata ? 'warning' : 'error', message: metadata ? tr('desktop_settings_a1070ce69f', fieldLabel(field)) : tr('desktop_settings_4ac15a7702', fieldLabel(field)) });
     }
     return id !== key ? { id, aliases: [key] } : { id };
   });
-  for (const key of Object.keys(raw)) if (!['npm','options','models'].includes(key)) entry.diagnostics.push({ severity: ['name','whitelist','blacklist'].includes(key) ? 'warning' : 'error', message: `未导入 OpenCode Provider 字段 ${fieldLabel(key)}；请核对原始 JSON。` });
+  for (const key of Object.keys(raw)) if (!['npm','options','models'].includes(key)) entry.diagnostics.push({ severity: ['name','whitelist','blacklist'].includes(key) ? 'warning' : 'error', message: tr('desktop_settings_bb65ecdc0c', fieldLabel(key)) });
 }
 export function parseProviderImport(text: string, existing: Record<string, CustomProviderDraft> = {}): ProviderImportResult {
   const result: ProviderImportResult = { entries: [], diagnostics: [] };
   let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { result.diagnostics.push({ severity: 'error', message: 'JSON 无效，请检查引号、逗号与括号；仅支持标准 JSON。' }); return result; }
-  if (!record(parsed)) { result.diagnostics.push({ severity: 'error', message: 'JSON 顶层必须为对象。' }); return result; }
-  if (hasOwn(parsed, 'provider') && hasOwn(parsed, 'providers')) { result.diagnostics.push({ severity: 'error', message: '请仅提供 provider 或 providers 中的一种格式。' }); return result; }
+  try { parsed = JSON.parse(text); } catch { result.diagnostics.push({ severity: 'error', message: tr('desktop_settings_1f501a2d52') }); return result; }
+  if (!record(parsed)) { result.diagnostics.push({ severity: 'error', message: tr('desktop_settings_45f67fcc43') }); return result; }
+  if (hasOwn(parsed, 'provider') && hasOwn(parsed, 'providers')) { result.diagnostics.push({ severity: 'error', message: tr('desktop_settings_c403b52fbb') }); return result; }
   const opencode = hasOwn(parsed, 'provider');
   const wrapped = opencode || hasOwn(parsed, 'providers');
   const map = opencode ? parsed.provider : wrapped ? parsed.providers : parsed;
-  if (!record(map) || !Object.keys(map).length) { result.diagnostics.push({ severity: 'error', message: '未找到 Provider 对象。' }); return result; }
+  if (!record(map) || !Object.keys(map).length) { result.diagnostics.push({ severity: 'error', message: tr('desktop_settings_69367391b0') }); return result; }
   if (wrapped) for (const key of Object.keys(parsed)) {
-    if (!['provider','providers','$schema'].includes(key)) result.diagnostics.push({ severity: 'warning', message: `顶层字段 ${fieldLabel(key)} 不会执行或导入；仅导入 Provider。` });
+    if (!['provider','providers','$schema'].includes(key)) result.diagnostics.push({ severity: 'warning', message: tr('desktop_settings_2f17473a57', fieldLabel(key)) });
   }
   for (const [name, raw] of Object.entries(map)) {
     const conflict = hasOwn(existing, name);
     const entry: ProviderImportEntry = { name, draft: { type: '', models: [] }, selected: !conflict, conflict, diagnostics: [] };
-    if (!record(raw)) entry.diagnostics.push({ severity: 'error', message: 'Provider 必须为对象。' });
+    if (!record(raw)) entry.diagnostics.push({ severity: 'error', message: tr('desktop_settings_534e0531e5') });
     else if (opencode) openCodeDraft(raw, entry);
     else nativeDraft(raw, entry);
     result.entries.push(entry);
@@ -290,17 +291,17 @@ export function parseProviderImport(text: string, existing: Record<string, Custo
 export function validateImportEntry(entry: ProviderImportEntry, options: { credentialConfigured?: boolean } = {}): string | null {
   const issue = validateProfileName(entry.name) ?? entry.diagnostics.find(d => d.severity === 'error')?.message ?? validateCustomProvider(trimProviderDraft(entry.draft));
   if (issue) return issue;
-  if (entry.draft.type !== 'bedrock-claude' && !nonempty(entry.apiKey) && !nonempty(entry.draft.apiKeyEnv) && !connectionsCarryAuth(entry.draft) && !options.credentialConfigured) return '请填写 API Key 或环境变量名称。';
+  if (entry.draft.type !== 'bedrock-claude' && !nonempty(entry.apiKey) && !nonempty(entry.draft.apiKeyEnv) && !connectionsCarryAuth(entry.draft) && !options.credentialConfigured) return tr('desktop_settings_fc019e5232');
   return null;
 }
 export function mergeProviderImport(current: Record<string, CustomProviderDraft>, entries: ProviderImportEntry[], options: { credentialConfigured?: (name: string) => boolean } = {}): { providers: Record<string, CustomProviderDraft>; credentials: Record<string, string> } {
   const selected = entries.filter(entry => entry.selected);
-  if (!selected.length) throw new Error('请至少选择一个 Provider。');
+  if (!selected.length) throw new Error(tr('desktop_settings_9d9db82aa8'));
   const names = new Set<string>();
   for (const entry of selected) {
     const error = validateImportEntry(entry, { credentialConfigured: options.credentialConfigured?.(entry.name) });
     if (error) throw new Error(error);
-    if (names.has(entry.name)) throw new Error('导入 Profile ID 重复。');
+    if (names.has(entry.name)) throw new Error(tr('desktop_settings_6d23eca32d'));
     names.add(entry.name);
   }
   const providers = { ...current };
@@ -309,7 +310,7 @@ export function mergeProviderImport(current: Record<string, CustomProviderDraft>
     // Re-sanitize edited drafts at the persistence boundary as well.
     const sanitized: ProviderImportEntry = { ...entry, draft: { type: '', models: [] }, diagnostics: [] };
     nativeDraft(trimProviderDraft(entry.draft), sanitized);
-    if (sanitized.diagnostics.some(d => d.severity === 'error')) throw new Error('配置含不安全或无效字段。');
+    if (sanitized.diagnostics.some(d => d.severity === 'error')) throw new Error(tr('desktop_settings_d725aafe25'));
     providers[entry.name] = sanitized.draft;
     if (nonempty(entry.apiKey)) credentials[entry.name] = entry.apiKey.trim();
   }

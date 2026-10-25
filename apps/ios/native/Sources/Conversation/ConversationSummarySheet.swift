@@ -278,7 +278,7 @@ struct ConversationSummarySheet: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Label {
-                            Text("Resume")
+                            Text("chat_workflow_resume")
                         } icon: {
                             Image(systemName: "play.fill")
                         }

@@ -1,5 +1,10 @@
 package com.lingxi.code.conversation
 
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.isRoot
+import androidx.compose.ui.test.onLast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,7 +70,7 @@ class ModelPickerUiTest {
     )
 
     @Test
-    fun pickerShowsConnectionMetadata_andSearchFiltersRows() {
+    fun pickerShowsConnectionStatus_andSearchFiltersRows() {
         rule.setContent {
             LingXiTheme(darkTheme = true) {
                 var selected by remember { mutableStateOf(models.last()) }
@@ -85,7 +90,7 @@ class ModelPickerUiTest {
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).assertIsDisplayed()
         rule.onNodeWithText("连接失败").assertIsDisplayed()
         rule.onNodeWithText("已连接").assertIsDisplayed()
-        rule.onNodeWithText("Thinking · Tools · 1M context").assertIsDisplayed()
+        rule.onNodeWithText("Thinking · Tools · 1M context").assertDoesNotExist()
 
         rule.onNodeWithTag(UiTags.MODEL_PICKER_SEARCH).performTextInput("sonnet")
         rule.onAllNodes(
@@ -93,6 +98,32 @@ class ModelPickerUiTest {
                 hasContentDescription(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.composer_current_model)),
         ).onFirst().assertIsDisplayed()
         rule.onNodeWithText("DeepSeek Flash").assertDoesNotExist()
+        capture("picker-dark")
+    }
+
+    @Test
+    fun reasoningChoicesAreDisclosedOnDemand() {
+        val selected = AtomicReference<String?>(null)
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                var reasoning by remember { mutableStateOf(com.lingxi.code.model.ReasoningControl(
+                    selection = "automatic", levels = listOf("low", "high"), editable = true, disabledReason = null,
+                )) }
+                Composer(
+                    text = "", onTextChange = {}, model = models.last(), onModelChange = {}, onSend = {},
+                    availableModels = models, modelProviderStatuses = statuses,
+                    reasoning = reasoning,
+                    onReasoningChange = { selected.set(it); reasoning = reasoning.copy(selection = it) },
+                )
+            }
+        }
+        rule.onNodeWithTag(UiTags.MODEL_PICKER_CHIP).performClick()
+        rule.onNodeWithTag(UiTags.COMPOSER_EFFORT).assertDoesNotExist()
+        rule.onNodeWithTag("composer.model.options").performClick()
+        rule.onNodeWithTag(UiTags.COMPOSER_EFFORT).assertIsDisplayed()
+        rule.onNodeWithText(InstrumentationRegistry.getInstrumentation().targetContext.getString(R.string.composer_effort_high)).performClick()
+        rule.runOnIdle { assertEquals("high", selected.get()) }
+        capture("reasoning-light")
     }
 
     @Test
@@ -126,4 +157,18 @@ class ModelPickerUiTest {
         ).onFirst().performClick()
         assertEquals("anthropic/claude-sonnet-5", selectedModel.get())
     }
+    private fun capture(name: String) {
+        rule.mainClock.advanceTimeBy(500)
+        rule.waitForIdle()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val file = java.io.File(instrumentation.targetContext.getExternalFilesDir("model-ui"), "$name.png")
+        val screenshotNode = if (rule.onAllNodes(isDialog()).fetchSemanticsNodes().isNotEmpty()) {
+            rule.onNode(isDialog())
+        } else rule.onAllNodes(isRoot()).onLast()
+        screenshotNode.captureToImage().asAndroidBitmap().let { bitmap ->
+            file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            bitmap.recycle()
+        }
+    }
+
 }

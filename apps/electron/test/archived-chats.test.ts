@@ -26,5 +26,5 @@ test('search matches title, project or session id', () => {
 test('renders full archived list and an honest empty state', () => {
   const render = (archivedSessions: typeof records) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, React.createElement(ArchivedChats, { bridge: { bootstrap: { settings: { archivedSessions } } }, onClose() {} } as never)));
   assert.equal((render(records).match(/<li /g) ?? []).length, 35);
-  assert.match(render([]), /暂无已归档会话/);
+  assert.match(render([]), /No archived conversations/);
 });

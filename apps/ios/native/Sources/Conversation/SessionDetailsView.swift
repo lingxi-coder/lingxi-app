@@ -206,7 +206,7 @@ struct SessionDetailsView: View {
                 .frame(width: 52, height: 52)
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(session.title)
+                    Text(convo.sessionReference(for: session.id, cachedTitle: session.title).title)
                         .font(.system(.title3, design: .rounded).weight(.bold))
                         .foregroundStyle(t.text)
                         .lineLimit(2)

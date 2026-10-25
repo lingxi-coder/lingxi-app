@@ -310,3 +310,17 @@ final class AssistantMessageCollapsePolicyTests: XCTestCase {
         )
     }
 }
+
+final class MessageOriginTests: XCTestCase {
+    func testPeerEnvelopeProjectsSenderAndBody() {
+        let result = crossSessionMessage("<cross-session-message from=\"alpha\" from-name=\"设计 &amp; 开发\">\n第一行🙂\n**正文**\n</cross-session-message>")
+        XCTAssertEqual(result?.label, "来自其他会话 · 设计 & 开发")
+        XCTAssertEqual(result?.text, "第一行🙂\n**正文**")
+    }
+
+    func testOrdinaryAndIncompleteEnvelopesRemainUnchanged() {
+        XCTAssertNil(crossSessionMessage("Example: <cross-session-message>hi</cross-session-message>"))
+        XCTAssertNil(crossSessionMessage("<cross-session-message>hi"))
+        XCTAssertNil(crossSessionMessage("<cross-session-messages>hi</cross-session-message>"))
+    }
+}

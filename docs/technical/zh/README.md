@@ -7,7 +7,7 @@
 ## 开始使用
 
 - [SDK 与开发者工具](overview.md) — 用灵犀构建你的应用。从模型调用、Agent 编排，到移动端 Linux 运行时，选择适合你的 SDK，开始创造。
-- [API 参考](api-reference.md) — 浏览灵犀各 SDK 的公开源码声明。搜索接口名称，按 SDK 筛选，直接查看对应实现。
+- [API 参考](api-reference.md) — 按任务找到推荐 API，跟随完整集成指南，再检索对应的公开接口声明。
 
 ## 系统机制
 
@@ -29,6 +29,13 @@
 - [工具与权限](harness-tools.md) — 通过共享契约实现工具，并注册其能力。
 - [插件](harness-plugins.md) — 加载插件组件、检查生命周期并处理卸载失败。
 - [客户端协议与适配器](harness-client.md) — 在客户端之间共享命令、事件、展示与运行时适配器。
+- [选择 Agent 集成方式](agent-sdk-guide.md) — 将熟悉的 Agent SDK 概念对应到灵犀实际的 Rust 运行时、模型客户端与产品协议，选择适合任务的集成层。
+- [运行第一个 Agent 轮次](agent-first-turn.md) — 从已组装 Harness 出发，完成提示词、终态结果、后续上下文与有序关闭。
+- [把流式输出接到界面](agent-ui-streaming.md) — 接通一个事件目标，呈现文本、工具活动和交互请求，并区分消息完成与轮次完成。
+- [继续、恢复、分支与取消](agent-session-workflows.md) — 选择正确的会话操作，并区分取消、已保存历史与活动执行归属。
+- [添加工具并处理审批](agent-tool-workflows.md) — 让工具从 schema 与宿主注册进入真实权限往返、结果呈现和清理流程。
+- [组合 Skills、Hooks 与 MCP](agent-extension-recipes.md) — 选择合适扩展，配置范围清晰的生命周期检查，并核对外部能力已连接且可调用。
+- [观察并行 Agent 与任务](agent-parallel-tasks.md) — 为独立工作定义清晰归属，并根据权威 Agent／任务状态构建进度与取消操作。
 
 ## LLM Client
 

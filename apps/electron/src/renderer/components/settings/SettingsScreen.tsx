@@ -1,3 +1,5 @@
+import { useI18n } from '../../i18n/useI18n';
+import { tr } from '../../i18n/locale';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type ReactNode } from 'react';
 
 import type { SettingsLinkRequest } from '../../deepLinkRoutes';
@@ -6,7 +8,7 @@ import type { SettingsSnapshotEvent, UseBridge } from '../../bridge/bridgeTypes.
 import { useT } from '../../theme/ThemeContext';
 import type { ThemeMode } from '../../theme/tokens';
 import { Icon } from '../Icon';
-import { SETTINGS_NAV, searchNav, type NavPage } from './nav';
+import { SETTINGS_NAV, searchNav, navPageLabel, navGroupLabel, type NavPage } from './nav';
 import { About } from './pages/About';
 import { Account } from './pages/Account';
 import { Appearance } from './pages/Appearance';
@@ -18,9 +20,11 @@ import { General } from './pages/General';
 import { Hooks } from './pages/Hooks';
 import { McpServers } from './pages/McpServers';
 import { Permissions } from './pages/Permissions';
+import { ComputerUse } from './pages/ComputerUse';
 import { Plugins } from './pages/Plugins';
 import { ArchivedChats } from './pages/ArchivedChats';
 import { Projects } from './pages/Projects';
+import { RemoteControl } from './pages/RemoteControl';
 import { ProviderCredentials } from './pages/ProviderCredentials';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
@@ -179,12 +183,14 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   notifications: Notifications,
   voice: Voice,
   projects: Projects,
+  'remote-control': RemoteControl,
   'archived-chats': ArchivedChats,
   diagnostics: Diagnostics,
   about: About,
   'provider-credentials': ProviderCredentials,
   'custom-providers': CustomProviders,
   permissions: Permissions,
+  'computer-use': ComputerUse,
   'tools-agent': ToolsAgent,
   fusion: Fusion,
   skills: Skills,
@@ -237,10 +243,10 @@ export const SETTINGS_SIDEBAR_TOP_INSET = 44;
 
 function PagePlaceholder({ page, kind }: { page: NavPage; kind: 'not-implemented' | 'not-wired' }) {
   const t = useT();
-  const heading = kind === 'not-implemented' ? `${page.label}：尚未实现` : `${page.label}：内容即将到来`;
+  const heading = tr(kind === 'not-implemented' ? 'desktop_shell_page_unimplemented' : 'desktop_shell_page_coming', navPageLabel(page));
   const body = kind === 'not-implemented'
-    ? '这不是空白页或加载中——这个设置页确实还没有被构建，它属于另一项独立的计划，会在那项计划完成后加入。'
-    : '这个设置页的信息架构已经确定，但具体内容组件还没有接入这层外壳，会由后续任务补上。';
+    ? tr('desktop_shell_page_unbuilt')
+    : tr('desktop_shell_page_unwired');
   return (
     <div data-testid="page-placeholder" data-placeholder-kind={kind} style={{
       marginTop: 8, padding: '40px 24px',
@@ -265,9 +271,9 @@ function EngineRequiredEmptyState({ page }: { page: NavPage }) {
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center',
     }}>
       <Icon name="server" size={22} color={t.text3} stroke={1.5} />
-      <div style={{ fontSize: 13.5, color: t.text2, fontWeight: 500 }}>{page.label} 需要正在运行的引擎</div>
+      <div style={{ fontSize: 13.5, color: t.text2, fontWeight: 500 }}>{tr('desktop_shell_page_engine', navPageLabel(page))}</div>
       <div style={{ fontSize: 12, color: t.text4, maxWidth: 420, lineHeight: 1.6 }}>
-        打开一个项目并等待引擎连接后，这里会显示实际设置。
+        {tr('desktop_shell_engine_required_desc')}
       </div>
     </div>
   );
@@ -285,7 +291,7 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
       <div
         data-testid="layer-switcher"
         role="group"
-        aria-label="设置存储范围"
+        aria-label={tr('desktop_shell_storage_scope')}
         className="settings-segmented"
         style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}
       >
@@ -319,7 +325,7 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
           tooltip is invisible to keyboard/screen-reader users regardless. */}
       {!hasProject && (
         <div id={LAYER_DISABLED_REASON_ID} data-testid="layer-switcher-disabled-reason" style={{ fontSize: 11, color: t.text4 }}>
-          打开一个项目后可编辑
+          {tr('desktop_shell_open_project_edit')}
         </div>
       )}
     </div>
@@ -396,7 +402,7 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
       else await bridge.newSession(path);
       setOpen(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法切换项目。');
+      setError(cause instanceof Error ? cause.message : tr('desktop_shell_switch_project_error'));
     } finally {
       setBusy(false);
     }
@@ -437,14 +443,14 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
               color: locked || busy ? t.text4 : t.text2,
               cursor: locked || busy ? 'not-allowed' : 'pointer',
             }}
-          >切换项目</button>
+          >{tr('settings_parity_switch_project')}</button>
         </div>
       )}
 
       {/* 快照还没到的时候不猜一个项目名：宁可说「还不知道」，也不要指着 B 写 A。 */}
       {needsProject && !projectDir && (
         <div data-testid="layer-project-unknown" style={{ fontSize: 11.5, color: t.text4 }}>
-          正在向引擎确认这一层写入哪个项目…
+          {tr('settings_parity_project_unknown')}
         </div>
       )}
 
@@ -455,11 +461,11 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
         }}>
           {/* 这个后果必须先说：引擎是按会话起的，换设置的项目就等于换掉当前对话。 */}
           <div data-testid="layer-project-switch-warning" style={{ fontSize: 11, color: t.warn, padding: '2px 6px 6px' }}>
-            切换项目会同时切换当前会话。
+            {tr('settings_parity_switch_project_warning')}
           </div>
           {projects.length === 0 && (
             <div style={{ fontSize: 11.5, color: t.text4, padding: '4px 6px' }}>
-              还没有添加项目文件夹，可在「项目与信任」页添加。
+              {tr('desktop_shell_add_project_hint')}
             </div>
           )}
           {projects.map((path) => (
@@ -480,7 +486,7 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
               <span style={{ fontWeight: 600, flexShrink: 0 }}>{projectDisplayName(path)}</span>
               {path === projectDir && (
                 <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 5, background: t.surfaceHover, color: t.text3, fontWeight: 600 }}>
-                  当前
+                  {tr('chat_agent_group_current')}
                 </span>
               )}
               <span className="mono" style={{
@@ -511,6 +517,7 @@ function NavIcon({ name, pageId }: { name: string; pageId: string }) {
 export function SettingsScreen({
   bridge, theme, onTheme, onClose, initialPageId, initialProviderId, pendingModelReference, linkRequest,
 }: SettingsScreenProps) {
+  const { locale } = useI18n();
   const t = useT();
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
   const [pageLinkRequest, setPageLinkRequest] = useState(linkRequest);
@@ -551,7 +558,7 @@ export function SettingsScreen({
   const hasProject = Boolean(bridge.bootstrap?.workspace?.path);
   const engineReady = bridge.connected && Boolean(activeSessionId);
   const activePage = SETTINGS_NAV.find((candidate) => candidate.id === page) ?? SETTINGS_NAV[0];
-  const nav = useMemo(() => groupedNav(query), [query]);
+  const nav = useMemo(() => groupedNav(query), [query, locale]);
 
   useEffect(() => {
     contentScrollRef.current?.scrollTo(0, 0);
@@ -581,7 +588,7 @@ export function SettingsScreen({
     try { await bridge.refreshSettingsSnapshot(); }
     catch (cause) {
       if (generation === snapshotRequestGeneration.current) {
-        setSnapshotRequestError({ sessionId: activeSessionId, message: cause instanceof Error ? cause.message : '无法读取设置。' });
+        setSnapshotRequestError({ sessionId: activeSessionId, message: cause instanceof Error ? cause.message : tr('desktop_shell_settings_error') });
       }
     }
   }, [activeSessionId, bridge.refreshSettingsSnapshot]);
@@ -662,8 +669,8 @@ export function SettingsScreen({
   } else if (activePage.layered && !snapshot) {
     canWriteHere = true;
     body = settingsReadError
-      ? <div role="alert">设置尚未读取。<button type="button" onClick={() => void refreshSnapshot()}>重试</button></div>
-      : <div role="status" data-testid="settings-snapshot-loading">正在读取设置…</div>;
+      ? <div role="alert">{tr('desktop_shell_settings_unread')}<button type="button" onClick={() => void refreshSnapshot()}>{tr('common_retry')}</button></div>
+      : <div role="status" data-testid="settings-snapshot-loading">{tr('desktop_shell_settings_loading')}</div>;
   } else {
     canWriteHere = true;
     const Component = PAGE_CONTENT[activePage.id];
@@ -693,7 +700,7 @@ export function SettingsScreen({
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
   const showLayerSwitcher = activePage.layered && canWriteHere;
-  const pageTitle = activePage.label;
+  const pageTitle = navPageLabel(activePage);
 
   return (
     <div
@@ -702,7 +709,7 @@ export function SettingsScreen({
       className="settings-screen no-drag"
       role="dialog"
       aria-modal="true"
-      aria-label="设置"
+      aria-label={tr('settings_title_main')}
       tabIndex={-1}
       style={{
         position: 'absolute', inset: 0, zIndex: 60, display: 'flex', flexDirection: 'column',
@@ -714,18 +721,18 @@ export function SettingsScreen({
     >
       <div className="settings-window-drag-region drag-region" aria-hidden="true" />
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <nav aria-label="设置分类" style={{
+        <nav aria-label={tr('desktop_settings_categories')} style={{
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflow: 'hidden',
         }}>
           <div style={{ flexShrink: 0, padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
-            <button ref={backRef} type="button" aria-label="Back to app" onClick={requestClose}
+            <button ref={backRef} type="button" aria-label={tr('desktop_back')} onClick={requestClose}
               className="settings-back-button"
               style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
                 marginBottom: 8, padding: '7px 10px', border: 0, borderRadius: 8, background: t.surfaceActive,
                 color: t.text, font: 'inherit', fontSize: 14, textAlign: 'left', cursor: 'pointer' }}>
               <Icon name="arrowLeft" size={17} stroke={1.8} />
-              <span>Back to app</span>
+              <span>{tr('desktop_back')}</span>
             </button>
             <div className="settings-search" style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8,
@@ -735,8 +742,8 @@ export function SettingsScreen({
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索设置"
-                aria-label="搜索设置"
+                placeholder={tr('desktop_settings_search')}
+                aria-label={tr('desktop_settings_search')}
                 style={{
                   flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent',
                   color: t.text, fontSize: 12.5, fontFamily: 'inherit',
@@ -747,13 +754,13 @@ export function SettingsScreen({
           <div className="settings-nav-scroll settings-scroll-area">
             {nav.length === 0 && (
               <div data-testid="nav-empty-state" style={{ padding: '18px 6px', color: t.text4, fontSize: 12 }}>
-                没有匹配的设置项
+                {tr('desktop_shell_settings_no_match')}
               </div>
             )}
             {nav.map((section) => (
               <div key={section.group} style={{ marginBottom: 14 }}>
                 <div style={{ padding: '10px 8px 4px', fontSize: 11, fontWeight: 600, color: t.text4, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                  {section.group}
+                  {navGroupLabel(section.group)}
                 </div>
                 {section.pages.map((navPage) => {
                   const active = navPage.id === activePage.id;
@@ -773,7 +780,7 @@ export function SettingsScreen({
                       }}
                     >
                       <NavIcon name={navPage.icon} pageId={navPage.id} />
-                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{navPage.label}</span>
+                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{navPageLabel(navPage)}</span>
                       {!navPage.implemented && (
                         <span style={{ fontSize: 9.5, color: t.text4, fontWeight: 600 }}>WIP</span>
                       )}
@@ -787,15 +794,15 @@ export function SettingsScreen({
 
         <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
-            <div className="settings-content-inner">
-              <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+            <div className={page === 'computer-use' ? 'settings-content-inner settings-computer-use-content' : 'settings-content-inner'}>
+              {page !== 'computer-use' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
                 <div>
                   <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
                 </div>
                 {showLayerSwitcher && (
                   <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
                 )}
-              </div>
+              </div>}
               {showLayerSwitcher && (
                 <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
               )}
@@ -804,7 +811,7 @@ export function SettingsScreen({
                   padding: '10px 14px', marginBottom: 18, background: t.surface, color: t.danger,
                   border: `1px solid ${t.border}`, borderRadius: 8, fontSize: 12.5, overflowWrap: 'anywhere',
                 }}>
-                  设置读取失败：{settingsReadError}
+                  {tr('desktop_shell_settings_failed', settingsReadError)}
                 </div>
               )}
               {body}

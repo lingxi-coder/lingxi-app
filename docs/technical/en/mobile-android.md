@@ -139,11 +139,36 @@ suspend fun capability(): MobileLinuxCapabilityFfi
 
 Inspect live backend availability and supported features.
 
+<a id="android-config-fields"></a>
+
+## Fill RuntimeConfig from the Android host
+
+The cross-platform FFI record also contains iOS resource and mount-policy fields. Android create_runtime does not consume the iOS authorization_file or iOS allowlist fields. Configure Android mounts and request policy through the Android runtime path rather than relying on those fields.
+
+| Field | Host value | Common mistake |
+| --- | --- | --- |
+| managedRoot | A stable app-private runtime directory below filesDir. | Using a cache directory that the OS may evict as the only copy of persistent runtime data. |
+| appSandboxRoot | The app-owned files root used to validate managed paths. | Passing a guest path such as /home/lingxi. |
+| abi | arm64-v8a or x86_64, matching the packaged native helpers. | Copying the installer manifest ABI arm64 into this field without mapping it. |
+| rootfsVersion / archiveSha256 | The exact image version and expected archive digest used for staging. | Treating a version label as proof that archive contents match. |
+| nativeLibraryDir | Context.applicationInfo.nativeLibraryDir. | Omitting extracted native helper libraries or packaging a different ABI. |
+
+<a id="android-handle-lifetime"></a>
+
+## Keep execution alive across Activity recreation
+
+Keep MobileLinuxRuntime in an application-owned component with a lifetime appropriate to the task. An Activity can be recreated while its process remains alive; creating another screen must not discard the only process/PTY/raw handle needed for cleanup. A host coroutine scope and any foreground-service policy remain application choices.
+
+1. Retain runtime plus the returned session or process handle, and route output to a bounded state holder.
+2. After screen recreation, use listTasks or taskStatus to reconcile state; continue readEvents with the backend cursor if you are monitoring runtime events.
+3. On a deliberate stop, await killProcess, closePty or closeRawStdio for the selected handle, then release the UI subscription.
+4. When the application no longer needs any runtime work, await shutdown. Android process death is a separate OS event and does not preserve in-memory SDK handles.
+
 <a id="command-example"></a>
 
 ## Command request
 
-This helper is copied from the Android device smoke test. It creates a disabled-network shell request by default and clears the timeout for raw stdio. Install and boot the runtime before calling execute or handle.openRawStdio.
+This helper adapts the Android device smoke request shape to the unprivileged guest home. It creates a disabled-network shell request by default and clears the timeout for raw stdio. Install and boot the runtime before calling execute or handle.openRawStdio.
 
 ### RealRuntimeSmokeTest.kt · helper excerpt
 
@@ -152,7 +177,7 @@ private fun command(script: String, network: NetworkPolicyFfi = NetworkPolicyFfi
                         python: Boolean = false, raw: Boolean = false) = MobileLinuxCommandRequestFfi(
         command = if (python) "/usr/bin/python3" else "/bin/sh",
         args = if (python) listOf("-u", "-c", script) else listOf("-c", script),
-        cwd = "/root", env = emptyList(), stdin = null,
+        cwd = "/home/lingxi", env = emptyList(), stdin = null,
         timeoutMs = if (raw) null else 15_000uL, network = network,
         resourceLimits = ResourceLimitsFfi(null, null, null, null), mounts = emptyList(),
     )
@@ -188,7 +213,7 @@ suspend fun executeOnce(config: RuntimeConfig): MobileLinuxCommandResultFfi {
     try {
         val result = runtime.execute(MobileLinuxCommandRequestFfi(
             command = "/bin/sh", args = listOf("-c", "printf 'ready\n'"),
-            cwd = "/root", env = emptyList(), stdin = null,
+            cwd = "/home/lingxi", env = emptyList(), stdin = null,
             timeoutMs = 10_000uL, network = NetworkPolicyFfi.DISABLED,
             resourceLimits = ResourceLimitsFfi(null, null, null, null),
             mounts = emptyList(),
@@ -214,17 +239,31 @@ The SDK exposes background processes but Android can stop an application process
 
 RealRuntimeSmokeTest exercises actual device requests and policy cases. It is the acceptance entry point, not evidence that this documentation edit ran instrumentation. Validate both arm64-v8a and x86_64 where supported, timeout descendants, binary stdio, terminal resize and denied network/memory policies on the artifact to be distributed.
 
+<a id="android-troubleshooting"></a>
+
+## Diagnose an Android integration failure
+
+| Symptom | Inspect first | Next action |
+| --- | --- | --- |
+| Runtime unavailable or PRoot cannot start | capability.reason, runtime ABI, nativeLibraryDir and packaged helper files. | Correct the package/ABI before changing command or model configuration. |
+| Missing or corrupt rootfs | status.state, status.last_error and the staged image version/digest. | Stage the expected verified image, then repairRootfs and boot; preserve the external workspace. |
+| Command returns but the feature fails | exitCode, stderr, timedOut and cancelled. | Show the command result separately from an FFI exception; do not equate a returned record with exit success. |
+| Terminal text or protocol frames are damaged | PTY versus raw stdio selection and decoder buffering across chunks. | Use a terminal decoder for PTY and a byte-framed parser for raw stdout. |
+| Cancellation leaves work running | Whether the owner awaited the handle-specific close/kill and checked its error. | Exercise whole-process-tree cancellation on the exact packaged device build. |
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt)
 
-- [mobile-linux-runtime/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/android/installer/src/main/kotlin/io/lingxi/mobilelinux/RootfsInstaller.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/android/installer/src/main/kotlin/io/lingxi/mobilelinux/RootfsInstaller.kt) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/android/gradle-plugin/src/main/java/io/lingxi/mobilelinux/gradle/MobileLinuxPlugin.java](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/android/gradle-plugin/src/main/java/io/lingxi/mobilelinux/gradle/MobileLinuxPlugin.java) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-android/src/runtime/config.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/runtime.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/examples/android/app/src/androidTest/java/io/lingxi/mobilelinux/sample/RealRuntimeSmokeTest.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/examples/android/app/src/androidTest/java/io/lingxi/mobilelinux/sample/RealRuntimeSmokeTest.kt) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/android/runtime/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxRuntime.kt) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/android/installer/src/main/kotlin/io/lingxi/mobilelinux/RootfsInstaller.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/android/installer/src/main/kotlin/io/lingxi/mobilelinux/RootfsInstaller.kt) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/android/gradle-plugin/src/main/java/io/lingxi/mobilelinux/gradle/MobileLinuxPlugin.java](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/android/gradle-plugin/src/main/java/io/lingxi/mobilelinux/gradle/MobileLinuxPlugin.java) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/config.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/runtime.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/examples/android/app/src/androidTest/java/io/lingxi/mobilelinux/sample/RealRuntimeSmokeTest.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/examples/android/app/src/androidTest/java/io/lingxi/mobilelinux/sample/RealRuntimeSmokeTest.kt) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/process.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/process.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/android/installer/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxGuestPaths.kt](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/android/installer/src/main/kotlin/io/lingxi/mobilelinux/MobileLinuxGuestPaths.kt) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -143,6 +143,8 @@ fun DrawerContent(
     apps: List<MyApp> = emptyList(),
     onOpenApps: () -> Unit = {},
     onOpenApp: (String) -> Unit = {},
+    /** Opens Remote Control, which follows the sessions of the user's computers. */
+    onOpenRemoteControl: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
 
@@ -260,6 +262,12 @@ fun DrawerContent(
                 count = projects.size,
                 tag = UiTags.DRAWER_ENTRY_PROJECTS,
                 onClick = onOpenProjects,
+            )
+            EntryRow(
+                icon = LXIconName.Link,
+                label = stringResource(R.string.remote_title),
+                tag = UiTags.DRAWER_ENTRY_REMOTE,
+                onClick = onOpenRemoteControl,
             )
             FilterChips(selected = ui.filter, onSelect = { ui.filter = it })
         }

@@ -1,7 +1,11 @@
+import { LANGUAGE_STORAGE_KEY } from '../../src/renderer/i18n/locale';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import { SESSION_PICKER_EVENT } from '../../src/shared/sessionWorkspace';
 import '../../src/renderer/global.css';
+
+// Test labels are deterministic across developer system languages.
+localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 
 // Real App, hook, composer and dialog; the host is entirely synthetic.
 const refs = [

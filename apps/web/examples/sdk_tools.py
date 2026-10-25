@@ -1,20 +1,24 @@
 """Isolated SDK snapshots shared by reader-example and Rustdoc checks.
 
-Only generated temporary manifests/lockfiles are changed. The consumer's local
-patch closure is explicit; metadata rejects accidentally retained SDK Git pins.
+Only generated temporary manifests/lockfiles are changed. Reader consumers use
+an explicit local patch closure; Rustdoc may retain the owner's exact Git pins.
 """
 from __future__ import annotations
 
 import hashlib
+import io
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import tomllib
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 SDKS = ("harness-runtime", "llm-client", "mobile-linux-runtime")
 WEB = Path(__file__).resolve().parents[1]
@@ -116,8 +120,35 @@ def command(args: list[str], *, cwd: Path, timeout: int = 1800) -> subprocess.Co
     return result
 
 
-def snapshot_repo(source: Path, destination: Path) -> None:
+def snapshot_repo(source: Path, destination: Path, *, source_mode: str = "working-tree", revision: str | None = None) -> None:
     """Copy tracked + nonignored source, including initialized Git submodules."""
+    if source_mode == "committed":
+        selected = revision or subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", selected):
+            raise RuntimeError(f"Expected a full snapshot revision for {source}")
+        archive = subprocess.check_output(["git", "-C", str(source), "archive", "--format=tar", selected])
+        destination.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            # Reject traversal and symlinks escaping the snapshot, while keeping
+            # relative links within it. Never dereference the dirty source tree.
+            tar.extractall(destination, filter="data")
+        tree = subprocess.check_output(["git", "-C", str(source), "ls-tree", "-r", "-z", selected])
+        for entry in filter(None, tree.split(b"\0")):
+            header, name = entry.split(b"\t", 1)
+            mode, kind, commit = header.decode().split()
+            if mode != "160000" or kind != "commit":
+                continue
+            relative = Path(os.fsdecode(name))
+            submodule = source / relative
+            if not (submodule / ".git").exists():
+                raise RuntimeError(f"Committed submodule is not initialized: {submodule}")
+            present = subprocess.run(["git", "-C", str(submodule), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True)
+            if present.returncode:
+                raise RuntimeError(f"Pinned submodule commit is unavailable: {relative}@{commit}")
+            snapshot_repo(submodule, destination / relative, source_mode="committed", revision=commit)
+        return
+    if source_mode != "working-tree" or revision is not None:
+        raise ValueError("Working-tree snapshots cannot select a Git revision")
     paths = subprocess.check_output(
         ["git", "-C", str(source), "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
     ).decode().split("\0")
@@ -135,20 +166,30 @@ def snapshot_repo(source: Path, destination: Path) -> None:
 
 
 class SdkSnapshot:
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, dependency_mode: str = "workspace", source_mode: str = "working-tree"):
+        if dependency_mode not in {"workspace", "declared"} or source_mode not in {"working-tree", "committed"}:
+            raise ValueError("Unknown SDK dependency or source mode")
+        self.dependency_mode = dependency_mode
+        self.source_mode = source_mode
         self.workspace = workspace.resolve()
         self.temp = tempfile.TemporaryDirectory(prefix="lingxi-handbook-")
         self.root = Path(self.temp.name).resolve()
+        self.source_revisions = {}
         for name in SDKS:
             if not (self.workspace / name / "Cargo.toml").exists():
                 raise RuntimeError(f"Missing SDK checkout: {self.workspace / name}")
-            snapshot_repo(self.workspace / name, self.root / name)
+            revision = subprocess.check_output(["git", "-C", str(self.workspace / name), "rev-parse", "HEAD"], text=True).strip()
+            self.source_revisions[name] = revision
+            snapshot_repo(self.workspace / name, self.root / name, source_mode=source_mode,
+                          revision=revision if source_mode == "committed" else None)
         toolchains = {name: tomllib.loads((self.root / name / "rust-toolchain.toml").read_text())["toolchain"]["channel"] for name in SDKS}
         if len(set(toolchains.values())) != 1:
             raise RuntimeError(f"SDK toolchain channels disagree: {toolchains}")
         shutil.copy2(self.root / "harness-runtime" / "rust-toolchain.toml", self.root / "rust-toolchain.toml")
         self.toolchain = next(iter(toolchains.values()))
         hasher = hashlib.sha256()
+        hasher.update(json.dumps({"sourceMode": source_mode, "dependencyMode": dependency_mode,
+                                 "revisions": self.source_revisions}, sort_keys=True).encode())
         for name in SDKS:
             for path in sorted((self.root / name).rglob("*")):
                 if path.is_file():
@@ -160,7 +201,8 @@ class SdkSnapshot:
         isolated_cargo_home(cached_home, self.root / "cargo-home")
         os.environ["CARGO_HOME"] = str(self.root / "cargo-home")
         self.expected = self._expected_packages()
-        self.overlay(self.root / "harness-runtime" / "Cargo.toml")
+        if dependency_mode == "workspace":
+            self.overlay(self.root / "harness-runtime" / "Cargo.toml")
 
     def _package_version(self, manifest: Path, package: dict) -> str:
         version = package.get("version", "0.0.0")
@@ -233,33 +275,101 @@ class SdkSnapshot:
             text = text.replace(f'path = "../{name}', f'path = "{self.root / name}')
         return text
 
-    def verify_metadata(self, manifest: Path, *, offline: bool = True, feature_args: list[str] | None = None) -> list[dict[str, str]]:
+    def _declared_git_pins(self, owner_repo: str) -> dict[str, str]:
+        """Read only dependency tables from the profile owner's root manifest."""
+        data = tomllib.loads((self.root / owner_repo / "Cargo.toml").read_text())
+        pins: dict[str, str] = {}
+
+        def visit(table: dict) -> None:
+            for key, value in table.items():
+                if not isinstance(value, dict):
+                    continue
+                if key in {"dependencies", "dev-dependencies", "build-dependencies"}:
+                    for dependency in value.values():
+                        if not isinstance(dependency, dict) or "git" not in dependency:
+                            continue
+                        url, revision = dependency["git"], dependency.get("rev")
+                        parsed = urlsplit(url)
+                        if (not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision)
+                                or parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                                or parsed.query or parsed.fragment):
+                            raise RuntimeError(f"Declared SDK dependency must use an HTTPS URL and full revision: {owner_repo}")
+                        if url in pins and pins[url] != revision:
+                            raise RuntimeError(f"Conflicting declared dependency revisions: {url}")
+                        pins[url] = revision
+                else:
+                    visit(value)
+
+        visit(data)
+        return pins
+
+    def _git_identity(self, package: dict, pins: dict[str, str], candidates: list[SdkPackageIdentity]) -> dict[str, str]:
+        source = package.get("source") or ""
+        parsed = urlsplit(source.removeprefix("git+"))
+        url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        revision = pins.get(url)
+        repository = parsed.path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        expected_repos = {identity.manifest.relative_to(self.root).parts[0] for identity in candidates}
+        if (not source.startswith("git+") or revision is None or query != [("rev", revision)]
+                or parsed.fragment != revision or (expected_repos and repository not in expected_repos)):
+            raise RuntimeError(f"Wrong SDK identity for {package['name']}@{package['version']}: undeclared Git URL or revision")
+        # This is a stable package locator, not a claim about the layout of a
+        # different revision's checkout. Never publish the Cargo cache path.
+        return {"package": package["name"], "manifest": f"{repository}::package/{package['name']}",
+                "source": "git", "revision": revision}
+
+    def verify_metadata(self, manifest: Path, *, offline: bool = True, feature_args: list[str] | None = None,
+                        owner_repo: str | None = None) -> list[dict[str, str]]:
+        declared = self.dependency_mode == "declared"
+        if declared and owner_repo not in SDKS:
+            raise ValueError("Declared dependency validation requires the profile's owner_repo")
+        pins = self._declared_git_pins(owner_repo) if declared else {}
         args = ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest)]
+        if declared:
+            args.append("--locked")
         args += feature_args or []
         if offline:
             args.append("--offline")
         metadata = json.loads(command(args, cwd=manifest.parent).stdout)
         identities = []
+        owned_packages = 0
         resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
         for package in metadata["packages"]:
             candidates = self.expected.get(package["name"], [])
-            if not candidates or package["id"] not in resolved:
+            if package["id"] not in resolved:
                 continue
             first_party = [identity for identity in candidates if not identity.vendored]
-            expected = [identity.manifest for identity in (first_party or candidates)
+            matching = [identity for identity in (first_party or candidates)
                         if identity.version == package["version"]]
+            owned = [identity for identity in (first_party or matching)
+                     if identity.manifest.relative_to(self.root).parts[0] == owner_repo] if declared else []
+            if declared and isinstance(package["source"], str) and package["source"].startswith("git+"):
+                if owned:
+                    raise RuntimeError(f"Wrong SDK identity for {package['name']}@{package['version']}: owner package must use its local snapshot")
+                identities.append(self._git_identity(package, pins, candidates))
+                continue
+            if not candidates:
+                continue
             # A generic vendored crate may coexist with other registry versions.
             # First-party names remain strict, including their snapshot version.
-            if not expected and not first_party:
+            if not matching and not first_party:
                 continue
+            expected = [identity.manifest for identity in matching
+                        if not declared or identity.manifest.relative_to(self.root).parts[0] == owner_repo]
             actual = Path(package["manifest_path"]).resolve()
             if actual not in expected or package["source"] is not None:
                 raise RuntimeError(
                     f"Wrong SDK identity for {package['name']}@{package['version']}: {actual}, {package['source']}; "
                     f"expected {expected or [(identity.version, identity.manifest) for identity in first_party]}"
                 )
-            identities.append({"package": package["name"], "manifest": str(actual.relative_to(self.root)), "source": "working-tree"})
-        if not identities:
+            source_state = "committed" if self.source_mode == "committed" else "working-tree"
+            identity = {"package": package["name"], "manifest": str(actual.relative_to(self.root)), "source": source_state}
+            if self.source_mode == "committed":
+                identity["revision"] = self.source_revisions[actual.relative_to(self.root).parts[0]]
+            identities.append(identity)
+            owned_packages += 1
+        if not identities or (declared and not owned_packages):
             raise RuntimeError(f"No SDK package was resolved by {manifest}")
         return sorted(identities, key=lambda entry: entry["package"])
 

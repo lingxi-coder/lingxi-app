@@ -2083,4 +2083,5 @@
     <string name="remote_send_failed">メッセージを送信できませんでした。もう一度お試しください。</string>
     <string name="remote_images_only_when_idle">実行中はテキストのみ送信できます。</string>
     <string name="remote_image_unusable">この画像は使用できません。</string>
+    <string name="permission_elevated_risk">リスクの高い操作</string>
 </resources>

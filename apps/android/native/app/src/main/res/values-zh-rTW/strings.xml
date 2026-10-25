@@ -2083,4 +2083,5 @@
     <string name="remote_send_failed">訊息未能傳送，請重試。</string>
     <string name="remote_images_only_when_idle">執行中只能傳送文字。</string>
     <string name="remote_image_unusable">無法使用這張圖片。</string>
+    <string name="permission_elevated_risk">較高風險</string>
 </resources>

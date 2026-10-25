@@ -2087,4 +2087,5 @@
     <string name="remote_send_failed">消息未能发送，请重试。</string>
     <string name="remote_images_only_when_idle">运行中只能发送文字。</string>
     <string name="remote_image_unusable">无法使用这张图片。</string>
+    <string name="permission_elevated_risk">较高风险</string>
 </resources>

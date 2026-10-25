@@ -2087,4 +2087,5 @@
     <string name="remote_send_failed">The message was not sent. Try again.</string>
     <string name="remote_images_only_when_idle">Only text can be sent while a turn is running.</string>
     <string name="remote_image_unusable">That image could not be used.</string>
+    <string name="permission_elevated_risk">Elevated Risk</string>
 </resources>

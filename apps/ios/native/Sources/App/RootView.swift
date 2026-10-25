@@ -139,6 +139,13 @@ struct RootView: View {
     @State private var sessionInspectorOpen = false
     @State private var sessionDetailsSheetOpen = false
     @State private var workspacePickerOpen = false
+    private struct FilesBrowserRequest: Identifiable {
+        let id = UUID()
+        let source: any ConversationSource
+        let sessionID: String
+        let path: String
+    }
+    @State private var filesBrowserRequest: FilesBrowserRequest?
     @State private var liveWorkspaceState: SessionWorkspaceState?
     @State private var workspacePickerSource: (any ConversationSource)?
     @State private var workspacePickerSessionID = ""
@@ -293,13 +300,19 @@ struct RootView: View {
         _sessionPinnedAt = State(initialValue: preferences.sessionPinnedAt())
         _cronResultsSeenAt = State(initialValue: preferences.cronResultsSeenAt())
         _pendingSessionFork = State(initialValue: nil)
-        let storedSessionID = ConversationModeRestorePolicy.sessionID(
+        var storedSessionID = ConversationModeRestorePolicy.sessionID(
             mode: initialMode,
             scoped: preferences.storedActiveSessionID(scope: initialScope, mode: initialMode),
             projectLastActive: projects.activeProject?.record.lastActiveSessionId,
             activeDirectory: projects.activeProject?.record.activeDirectory,
             sessions: projects.activeProject?.sessions ?? []
         )
+        #if DEBUG
+            // File UI fixtures own an isolated session; never restore a persisted user session over it.
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"] != nil {
+                storedSessionID = ""
+            }
+        #endif
         _activeSession = State(initialValue: storedSessionID)
         _confirmedSession = State(initialValue: storedSessionID)
         _pendingSessionRestoreID = State(initialValue: storedSessionID.isEmpty ? nil : storedSessionID)
@@ -611,7 +624,14 @@ struct RootView: View {
                     var preparedByCatalogRebuild = false
                     if !providerCatalogBootstrapped {
                         providerCatalogBootstrapped = true
-                        let catalogLoaded = await providerRepository.refreshCatalog()
+                        var catalogLoaded = false
+                        #if DEBUG
+                            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"] == nil {
+                                catalogLoaded = await providerRepository.refreshCatalog()
+                            }
+                        #else
+                            catalogLoaded = await providerRepository.refreshCatalog()
+                        #endif
                         if catalogLoaded, generation == sourceGeneration {
                             try await rebuildSource(
                                 snapshot: providerRepository.makeLaunchSnapshot(),
@@ -845,6 +865,7 @@ struct RootView: View {
                 onTogglePinned: { toggleSessionPinned(activeSession) },
                 onMakeScheduled: scheduleCurrentSession,
                 onOpenTerminal: openCurrentWorkspaceTerminal,
+                onOpenFiles: { filesBrowserRequest = .init(source: source, sessionID: source.model.activeSessionId, path: currentWorkspaceGuestPath) },
                 onArchive: archiveCurrentSession,
                 // A scheduled run's workspace never indexes its sessions, so a
                 // chat started there would be missing from the drawer.
@@ -922,6 +943,12 @@ struct RootView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
             .accessibilityIdentifier("conversation.session-details-sheet")
+        }
+        .sheet(item: $filesBrowserRequest) { request in
+            WorkspaceFilesView(repository: WorkspaceDirectoryRepository(), paths: .current(),
+                initialPath: request.path, protectedPaths: { workspaceProtectedDirectories },
+                canMutate: { request.source === source && request.sessionID == source.model.activeSessionId &&
+                    !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending })
         }
         .sheet(isPresented: $workspacePickerOpen, onDismiss: {
             workspacePickerSource = nil

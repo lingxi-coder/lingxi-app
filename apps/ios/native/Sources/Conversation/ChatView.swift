@@ -33,6 +33,7 @@ struct ChatView: View {
     var onTogglePinned: () -> Void = {}
     var onMakeScheduled: () -> Void = {}
     var onOpenTerminal: () -> Void = {}
+    var onOpenFiles: () -> Void = {}
     var onArchive: () -> Void = {}
     /// Replaces the plain fresh-conversation start of the new-chat button;
     /// nil starts the new chat in the current workspace.
@@ -123,6 +124,7 @@ struct ChatView: View {
          onTogglePinned: @escaping () -> Void = {},
          onMakeScheduled: @escaping () -> Void = {},
          onOpenTerminal: @escaping () -> Void = {},
+         onOpenFiles: @escaping () -> Void = {},
          onArchive: @escaping () -> Void = {},
          onNewChat: (() -> Void)? = nil,
          onOpenVoiceSettings: @escaping () -> Void = {},
@@ -143,6 +145,7 @@ struct ChatView: View {
         self.onTogglePinned = onTogglePinned
         self.onMakeScheduled = onMakeScheduled
         self.onOpenTerminal = onOpenTerminal
+        self.onOpenFiles = onOpenFiles
         self.onArchive = onArchive
         self.onNewChat = onNewChat
         self._draft = draft
@@ -569,6 +572,8 @@ struct ChatView: View {
 
     private var summaryMenu: some View {
         Menu {
+            Button(action: onOpenFiles) { Label(FilesStrings.text("files"), systemImage: "folder") }
+                .accessibilityIdentifier("conversation.files")
             ForEach(summaryCategories) { category in
                 Button {
                     summaryDetent = .medium

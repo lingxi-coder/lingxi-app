@@ -1,5 +1,7 @@
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
+import { CH_COMPUTER_SETTINGS } from '../shared/computerSettings.js';
+import type { ComputerSettingsStore } from './computerSettings.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { nativeTr, setNativeLocale } from '../shared/nativeLocale.js';
 import { applicationIcon } from './applicationIcon.js';
@@ -464,6 +466,9 @@ export class HostController {
 
   attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
 
+  private computerSettings?: ComputerSettingsStore;
+  attachComputerSettings(service: ComputerSettingsStore): void { this.computerSettings = service; }
+
   /** The Remote Control settings page's handlers; registered with the rest by `registerIpc`. */
   attachRemoteControl(ui: RemoteControlUi): void {
     this.remoteControlUi = ui;
@@ -590,6 +595,13 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    this.ipc.handle(CH_COMPUTER_SETTINGS, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.computerSettings) throw new Error('Computer settings are unavailable');
+      const result = await this.computerSettings.execute(command, () => this.assertSender(event));
+      this.assertSender(event);
+      return result;
+    });
     this.ipc.handle(CH_APPLICATION_ICON, async (event: IpcMainInvokeEvent, bundleId: unknown) => {
       this.assertSender(event);
       const icon = await applicationIcon(bundleId);
@@ -2244,7 +2256,7 @@ export class HostController {
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET,
       CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_WORKSPACE,
-      CH_WORKSPACE_FILES_SEARCH,
+      CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_PROVIDER_CONNECTION_TEST, CH_CODEX_LOGIN, CH_CODEX_CANCEL,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,

@@ -44,6 +44,10 @@ import { HostNotifier } from './notifications.js';
 import { notificationPresentation } from './notificationPresentation.js';
 import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
+import { ComputerSettingsStore } from './computerSettings.js';
+import { BrowserIntegration } from './browserIntegration.js';
+import { resolveServerBin } from './bridgeDiscovery.js';
+import { CH_COMPUTER_SETTINGS_CHANGED } from '../shared/computerSettings.js';
 import { requestMicrophoneAccess } from './microphoneAccess.js';
 import { ProjectSessionCatalog } from './session-catalog.js';
 import { ignoreBrokenPipe } from './process-streams.js';
@@ -79,6 +83,7 @@ const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
 let bridge: SessionRuntimeManager | null = null;
 let host: HostController | null = null;
+let browserIntegration: BrowserIntegration | null = null;
 let scheduled: ScheduledTaskService | null = null;
 let git: GitService | null = null;
 let terminals: TerminalManager | null = null;
@@ -314,6 +319,47 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
+  let lastComputerRevision = '';
+  const computerSettings = new ComputerSettingsStore(userData, {
+    showExtension: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
+    onChanged: () => {
+      const state = computerSettings.snapshot();
+      if (lastComputerRevision && state.revision !== lastComputerRevision) {
+        for (const summary of bridge?.runtimeSummaries ?? []) {
+          try {
+            const runtime = bridge?.get(summary.sessionId);
+            if (state.error) void runtime?.stopForComputerPolicyFailure().catch(error => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+            else runtime?.revokeComputerAccess();
+          }
+          catch (error) { diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
+        }
+      }
+      lastComputerRevision = state.revision;
+      host?.sendToWindows(CH_COMPUTER_SETTINGS_CHANGED, state);
+    },
+  });
+  lastComputerRevision = computerSettings.policy().revision;
+  let browserExecutable = '';
+  try { browserExecutable = resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }); }
+  catch { /* The setup action reports missing bridge resources. */ }
+  const browserDescriptor = join(userData, 'computer-use', 'browser-connection.json');
+  browserIntegration = new BrowserIntegration({
+    policy: () => computerSettings.policy(),
+    descriptorPath: browserDescriptor,
+    nativeHostPath: join(userData, 'computer-use', 'browser-native-host'),
+    bridgeExecutable: browserExecutable,
+    extensionDirectory: app.isPackaged ? join(process.resourcesPath, 'browser-extension') : join(app.getAppPath(), 'browser-extension'),
+    onChanged: () => host?.sendToWindows(CH_COMPUTER_SETTINGS_CHANGED, computerSettings.snapshot()),
+  });
+  computerSettings.attachBrowser(browserIntegration);
+  try { await browserIntegration.start(); }
+  catch (error) {
+    const failedBrowser = browserIntegration;
+    browserIntegration = null;
+    await failedBrowser.close().catch(() => {});
+    computerSettings.browserUnavailable('Browser integration could not start. Restart Desktop to try again.');
+    diagnostics.add('warn', 'host', `browser integration startup failed: ${sanitizeDiagnostic(error)}`);
+  }
   const audioSessionContext = (owner?: import('@lingxi/bridge-client').AudioOwnerDto) => {
     const sessionId = owner?.type === 'session' ? owner.session_id : settings.getPublic().activeSession?.sessionId;
     return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
@@ -497,6 +543,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       }));
       return {
         workspace,
+        settingsEnvironment: {
+          LINGXI_DESKTOP_COMPUTER_POLICY: computerSettings.executionPolicyPath,
+          LINGXI_DESKTOP_BROWSER_DESCRIPTOR: browserDescriptor,
+        },
         sessionId: ref.sessionId,
         trusted: settings.isTrustedWorkspace(workspace),
         allowInsights: settings.getInsightsAllowed(),
@@ -522,6 +572,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     credentialBroker,
     nativeAudio ?? undefined,
   );
+  host.attachComputerSettings(computerSettings);
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
@@ -712,6 +763,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const currentAudio = nativeAudio;
   nativeAudio = null;
   const currentBridge = bridge;
+  const currentBrowser = browserIntegration;
+  browserIntegration = null;
   bridge = null;
   const currentRemote = remoteControl;
   remoteControl = null;
@@ -723,6 +776,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   remoteUi = null;
   remotePolicy = null;
   void Promise.all([
+    currentBrowser?.close() ?? Promise.resolve(),
     currentLocalApps?.dispose() ?? Promise.resolve(),
     currentGit?.dispose() ?? Promise.resolve(),
     currentTerminals?.dispose() ?? Promise.resolve(),

@@ -260,6 +260,7 @@ async function main() {
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
+  cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
   stageModBun(resources, modCompiler);

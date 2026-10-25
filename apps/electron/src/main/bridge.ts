@@ -1,3 +1,4 @@
+import { assertComputerAccessSubset } from './computerAccessApproval.js';
 import {
   BridgeClient,
   SessionEventCorrelator,
@@ -236,6 +237,7 @@ export class SessionRuntime {
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
   private activeTurn = false;
+  private computerAccessInTurn = false;
   private activeTurnGeneration: number | undefined;
   private disconnectedForegroundPending = false;
   private liveConnectionRecovered = false;
@@ -1336,6 +1338,18 @@ export class SessionRuntime {
     return this.restartChain;
   }
 
+  /** Security revocation cannot wait for the user to close Side Chats. */
+  stopForComputerPolicyFailure(): Promise<void> {
+    try { this.revokeComputerAccess(); }
+    catch (error) { this.diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
+    this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
+      if (this.disposed) return;
+      try { await this.stopBridge(); }
+      finally { this.setState({ status: 'error', message: 'Computer permissions became unavailable. Restart this chat to continue.' }); }
+    });
+    return this.restartChain;
+  }
+
   private async startInternal(): Promise<void> {
     this.liveConnectionRecovered = false;
     this.configuredCustomProviderIds = [];
@@ -2094,11 +2108,13 @@ export class SessionRuntime {
         this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));
       }
       if (event.type === 'turn_started') {
+        this.computerAccessInTurn = false;
         if (!this.activeTurn) this.cancellingTurn = false;
         this.activeTurn = true;
         this.activeTurnGeneration = generation;
         this.activeTurnId = event.turn_id;
       }
+      if (event.type === 'tool_use_started' && (event.tool === 'computer' || event.tool === 'browser')) this.computerAccessInTurn = true;
       if (event.type === 'turn_ended' || event.type === 'session_ended') {
         this.activeTurn = false;
         this.activeTurnGeneration = undefined;
@@ -2506,12 +2522,20 @@ export class SessionRuntime {
   approveComputerAccess(requestId: number, response: unknown): void {
     const id = validateRequestId(requestId);
     const computerAccessResponse = validateComputerAccessResponse(response);
-    if (!this.pendingComputerAccessIds.has(id)) throw new Error('computer access request is not pending');
+    const pending = this.pendingComputerAccessIds.get(id);
+    if (!pending) throw new Error('computer access request is not pending');
+    assertComputerAccessSubset(pending, computerAccessResponse);
     this.requireClient().approveComputerAccess(id, computerAccessResponse);
     this.pendingComputerAccessIds.delete(id);
     this.notifyRemotePending();
     this.completePendingSessionResumeIfReady();
     this.notifyActivityChanged();
+  }
+
+  /** Policy mutation invalidates pending approvals and interrupts active native work. */
+  revokeComputerAccess(): void {
+    for (const id of [...this.pendingComputerAccessIds.keys()]) this.denyComputerAccess(id);
+    if (this.activeTurn && this.computerAccessInTurn) this.cancelTurn(undefined);
   }
 
   denyComputerAccess(requestId: number): void {

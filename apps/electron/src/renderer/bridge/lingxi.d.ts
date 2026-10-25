@@ -152,6 +152,7 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
   applicationIcon: import('../../shared/applicationIcon').ApplicationIconApi;
   localApps?: LocalAppsApi;
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;

@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "LingXi Browser",
+  "version": "1.0.0",
+  "description": "Connect Chrome to the permission controls in LingXi Desktop.",
+  "minimum_chrome_version": "125",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsBML10HN8zvwdugsQ2pXDt8+EPsPeneGlnnUYs9jb/iaxWzJ7mkZOQJN19uDVrFrtxKAedyOt6Tgy/6W4uiJytV19Uz1UdDJXjh8RvEDc8Hv6XMp9sGWZtMNrdm/IxFgTvwuHN8yaKi/ubhTRN3qErcgUulD7uKYp/eGyleV7Jw/H/n/WcK1Jjl4PA8c39V5n1IR3pKlnkgqu+B7ELa6NrISdfa1AnNHQLmdqgbkmpkTY7e24Pk6pMcV3spsbEn+kFqHptYHBzbLeir6ufTSPd6xseb8lWKE1cxZTrftW9bj3gkwdOs8tT1U6b0dtw+kjVtFlOD3tDQPilErydDc+QIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "history",
+    "downloads",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Reconnect LingXi Browser"
+  }
+}

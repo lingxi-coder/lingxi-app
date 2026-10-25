@@ -155,6 +155,7 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompile
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });
   const packagedSidecar = join(binDir, 'bridge-server');
+  cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
   const packagedModCompiler = stageModBun(resources, modCompiler);
@@ -197,6 +198,7 @@ async function assemblePortable(paths, metadata, electronDist, sidecar, modCompi
   mkdirSync(binDir, { recursive: true });
   const sidecarName = paths.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
   const packagedSidecar = join(binDir, sidecarName);
+  cpSync(join(packageRoot, 'browser-extension'), join(resources, 'browser-extension'), { recursive: true });
   copyFileSync(sidecar, packagedSidecar);
   stageModBun(resources, modCompiler);
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));

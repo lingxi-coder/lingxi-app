@@ -53,6 +53,7 @@ pub(crate) use platform_windows::WindowsFileSystem as HostFileSystem;
 pub mod audio_bridge;
 pub mod audio_provider;
 pub mod boot;
+pub mod browser_native_host;
 pub mod realtime_audio;
 pub use configuration_admin::config_admin;
 mod cron_host;

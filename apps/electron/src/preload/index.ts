@@ -1,5 +1,6 @@
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
+import { CH_COMPUTER_SETTINGS, CH_COMPUTER_SETTINGS_CHANGED, type ComputerSettingsApi } from '../shared/computerSettings.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { ModUiIpcQueue } from '../shared/modUiIpcQueue';
 import type { AccountApi, AccountState } from '../shared/account.js';
@@ -224,6 +225,7 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  computerSettings: ComputerSettingsApi;
   applicationIcon: ApplicationIconApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
@@ -340,6 +342,14 @@ function subscribeRuntimeEvents(callback: (payload: SequencedRuntimeEventEnvelop
 }
 
 const api: LingxiApi = {
+  computerSettings: {
+    execute: command => ipcRenderer.invoke(CH_COMPUTER_SETTINGS, command),
+    onChanged: listener => {
+      const callback = (_event: IpcRendererEvent, snapshot: Parameters<typeof listener>[0]) => listener(snapshot);
+      ipcRenderer.on(CH_COMPUTER_SETTINGS_CHANGED, callback);
+      return () => ipcRenderer.removeListener(CH_COMPUTER_SETTINGS_CHANGED, callback);
+    },
+  },
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
   localApps: {
     list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,

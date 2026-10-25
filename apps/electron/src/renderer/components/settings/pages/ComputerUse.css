@@ -102,3 +102,44 @@
 @media (prefers-contrast: more) {
   .computer-browser-table-scroll, .computer-browser-select, .computer-browser-table tbody tr { border-color: var(--computer-settings-text); }
 }
+
+.computer-settings-feedback { min-height: 24px; margin-bottom: 12px; color: var(--computer-settings-muted); font-size: 13px; line-height: 1.5; }
+.computer-settings-feedback p { margin: 0; }
+.computer-settings-error { color: var(--computer-settings-danger); overflow-wrap: anywhere; }
+.computer-settings-error button { color: inherit; background: transparent; border: 0; padding: 0 4px; font: inherit; text-decoration: underline; cursor: pointer; }
+.computer-settings-revoke { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 10px; color: var(--computer-settings-danger); background: color-mix(in srgb, var(--computer-settings-danger) 9%, transparent); cursor: pointer; }
+.computer-settings-revoke:disabled { cursor: default; opacity: .45; }
+.computer-settings-add-form { margin-top: 18px; font-size: 13px; }
+.computer-settings-add-form > label { display: block; margin-bottom: 8px; color: var(--computer-settings-text); font-weight: 500; }
+.computer-settings-add-form input { box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 12px; border: 1px solid var(--computer-settings-border); border-radius: 10px; background: var(--computer-settings-surface); color: var(--computer-settings-text); font: inherit; font-size: 14px; }
+.computer-settings-add-form input::placeholder { color: var(--computer-settings-muted); }
+.computer-settings-add-form > p { margin: 8px 0 0; color: var(--computer-settings-muted); font-size: 12px; line-height: 1.5; }
+.computer-settings-form-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.computer-settings-form-controls > input { flex: 1 1 220px; }
+.computer-settings-form-controls > button { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.computer-settings-form-controls > label { display: flex; align-items: center; gap: 8px; color: var(--computer-settings-muted); }
+.computer-settings-form-actions { justify-content: flex-end; }
+.computer-browser-site-form { margin: 0 0 18px; padding: 18px; border: 1px solid var(--computer-settings-border); border-radius: 14px; background: var(--computer-settings-surface); }
+.computer-browser-site-form .computer-settings-form-controls { margin-top: 14px; }
+.computer-browser-status p { margin: 0 0 10px; }
+.computer-browser-status p:last-child { margin-bottom: 0; }
+.computer-browser-table th:first-child { overflow-wrap: anywhere; }
+.computer-browser-table th:last-child, .computer-browser-table td:last-child { width: 34px; }
+.computer-browser-table th:first-child { width: auto; }
+.computer-browser-select:not(:disabled) { color: var(--computer-settings-text); cursor: pointer; }
+.computer-browser-toolbar .computer-browser-remove:not(:disabled) { opacity: 1; }
+.computer-use-row-title { overflow-wrap: anywhere; }
+.computer-settings-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.computer-use-settings :is(button, select, input, summary, a):focus-visible { outline: 2px solid var(--computer-settings-accent); outline-offset: 3px; }
+@media (max-width: 820px) {
+  .computer-use-control-row { flex-wrap: wrap; }
+  .computer-use-row-copy { flex-basis: 60%; }
+  .computer-use-row-action { margin-left: auto; }
+  .computer-settings-form-controls > label { flex-wrap: wrap; }
+}
+@media (prefers-contrast: more) {
+  .computer-settings-add-form input, .computer-browser-site-form { border-color: var(--computer-settings-text); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .computer-use-settings .settings-toggle, .computer-use-settings .settings-toggle > span { transition: none !important; }
+}

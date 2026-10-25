@@ -367,9 +367,12 @@ final class LingxiCodeUITests: XCTestCase {
 
     func testKeyboardPreservesComposerLayout() {
         let input = app.textViews["composer.input"]
-        let ids = ["composer.model", "composer.controls", "composer.voice", "composer.flow"]
+        let ids = ["composer.attachment", "composer.model", "composer.controls", "composer.voice", "composer.flow"]
         let inputFrame = input.frame
         let frames = ids.map { app.buttons[$0].frame }
+        for frame in frames {
+            XCTAssertEqual(frame.midY, app.buttons["composer.voice"].frame.midY, accuracy: 1)
+        }
         input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         for (id, frame) in zip(ids, frames) {
@@ -929,6 +932,27 @@ final class LingxiCodeUITests: XCTestCase {
     /// The chat's top bar keeps the summary menu and a new-chat button; the
     /// theme toggle moved into Appearance and the session details into the
     /// session panel that the title opens.
+    func testChatTopBarUsesSessionNameEvenForAnEmptyNamedSession() {
+        app.terminate()
+        let title = "修复 iOS 导航栏与会话标题同步"
+        app.launchEnvironment["LINGXI_UI_TEST_SESSION_TITLE"] = title
+        app.launchArguments += ["-conversation.global.code.active-session", "ui-named-session"]
+        app.launch()
+        let header = app.buttons["conversation.project-context"]
+        XCTAssertTrue(header.waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertEqual(header.label, title)
+        XCTAssertTrue(app.buttons["conversation.new-chat"].isHittable)
+        XCTAssertTrue(app.buttons["conversation.summary-menu"].isHittable)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Chat-Session-Title"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        header.tap()
+        let panel = app.descendants(matching: .any)["session-panel"].firstMatch
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(panel.staticTexts[title].exists, app.debugDescription)
+    }
+
     func testChatTopBarHasNewChatAndTitleButOnlySummariesInTheMenu() {
         let menu = app.buttons["conversation.summary-menu"]
         XCTAssertTrue(menu.waitForExistence(timeout: 8), app.debugDescription)

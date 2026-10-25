@@ -2,6 +2,29 @@ import XCTest
 @testable import LingxiCode
 
 final class RecentSessionsTests: XCTestCase {
+    @MainActor
+    func testConversationTitleUsesLiveCatalogEvenWhenTranscriptIsNew() {
+        let model = ConversationModel(persistDisclosures: false)
+        model.isNew = true
+        model.engineSessions = [EngineSession(
+            id: "named", title: "用户指定的 Session 名称", mode: .chat,
+            messageCount: 0, modifiedAt: nil, relativeTime: ""
+        )]
+        XCTAssertEqual(model.sessionReference(for: "named", cachedTitle: "旧名称").title,
+                       "用户指定的 Session 名称")
+        model.engineSessions = [EngineSession(
+            id: "named", title: "更新后的名称", mode: .chat,
+            messageCount: 0, modifiedAt: nil, relativeTime: ""
+        )]
+        XCTAssertEqual(model.sessionReference(for: "named", cachedTitle: "旧名称").title,
+                       "更新后的名称")
+        // A delayed catalog for a different session never supplies this title.
+        XCTAssertEqual(model.sessionReference(for: "other", cachedTitle: "全局缓存名称").title,
+                       "全局缓存名称")
+        XCTAssertEqual(model.sessionReference(for: "other").title,
+                       String(localized: "chat_new_conversation"))
+    }
+
     private var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

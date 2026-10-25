@@ -646,6 +646,17 @@ final class ConversationModel: ObservableObject {
         rebuildItemIndex()
     }
 
+    /// Catalog rows already apply the SDK's custom name > AI title > summary >
+    /// first prompt precedence. Display surfaces must not derive a second title
+    /// from transcript state, or let an empty/resuming session hide its name.
+    func sessionReference(for id: String, cachedTitle: String? = nil) -> SessionRef {
+        let listedTitle = engineSessions.first(where: { $0.id == id })?.title
+        let title = [listedTitle, cachedTitle].compactMap { $0 }.first {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? String(localized: "chat_new_conversation")
+        return SessionRef(id: id, title: title)
+    }
+
     func toggleTranscriptDisclosure(_ id: String) {
         if expandedToolCalls.contains(id) { expandedToolCalls.remove(id) }
         else { expandedToolCalls.insert(id) }

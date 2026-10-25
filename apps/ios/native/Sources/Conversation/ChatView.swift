@@ -466,16 +466,22 @@ struct ChatView: View {
             if !source.isTemporaryConversation {
                 ToolbarItem(placement: .principal) {
                     Button { sessionPanelOpen = true } label: {
-                        VStack(spacing: 1) {
-                            Text(sessionTitle).font(.subheadline.weight(.semibold)).foregroundStyle(t.text)
-                            Text("\(sessionMode.title) · \(workspaceName)")
-                                .font(.caption2).foregroundStyle(sessionMode.color(t))
+                        HStack(spacing: 4) {
+                            Text(sessionTitle)
+                                .font(.headline)
+                                .foregroundStyle(t.text)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(t.text3)
                         }
-                        .lineLimit(1)
+                        .frame(minHeight: 44)
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(String(localized: "chat_session_panel_a11y"))
+                    .accessibilityLabel(sessionTitle)
+                    .accessibilityHint(String(localized: "chat_session_panel_a11y"))
                     .accessibilityValue("\(sessionTitle), \(sessionMode.title) · \(workspaceName)")
                     .accessibilityIdentifier("conversation.project-context")
                 }
@@ -485,12 +491,14 @@ struct ChatView: View {
                         Button { sideChatSheetOpen = true } label: {
                             toolbarIcon("bubble.left.and.bubble.right", label: String(localized: "side_chats_title"))
                         }
+                        .tint(t.text)
                         .accessibilityIdentifier("conversation.side-chats")
                     }
                     #endif
                     Button(action: newChat) {
                         toolbarIcon("square.and.pencil", label: String(localized: "chat_new_chat"))
                     }
+                    .tint(t.text)
                     .accessibilityIdentifier("conversation.new-chat")
                     summaryMenu
                 }
@@ -499,25 +507,20 @@ struct ChatView: View {
     }
 
     private func toolbarIcon(_ symbol: String, label: String) -> some View {
-        Label {
-            Text(label)
-        } icon: {
-            Image(systemName: symbol)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 20, height: 20)
-        }
+        // The native toolbar supplies its touch target and optical sizing.
+        // A resizable symbol inside another 44pt frame enlarges the system
+        // chrome and takes space away from the conversation name.
+        Label(label, systemImage: symbol)
             .labelStyle(.iconOnly)
-            .font(.system(size: 17, weight: .medium))
+            .font(.system(size: 17, weight: .regular))
             .imageScale(.medium)
-            .frame(width: 44, height: 44)
-            .contentShape(.rect)
+            .foregroundStyle(t.text)
     }
 
     // MARK: session panel
 
     private var sessionTitle: String {
-        convo.isNew ? String(localized: "chat_new_conversation") : session.title
+        convo.sessionReference(for: session.id, cachedTitle: session.title).title
     }
 
     /// The new-chat strip is only for a chat that has not started yet.
@@ -580,7 +583,7 @@ struct ChatView: View {
         }
         .menuStyle(.automatic)
         .buttonStyle(.automatic)
-        .tint(t.accent)
+        .tint(t.text)
         .accessibilityLabel("Open conversation summary")
         .accessibilityIdentifier("conversation.summary-menu")
     }
@@ -810,14 +813,14 @@ struct ChatView: View {
                 .font(.system(size: 24, weight: .medium))
                 .foregroundStyle(t.accent)
             Text(projectName ?? String(localized: "chat_start_new_conversation"))
-                .font(.scaledSystem(20, weight: .semibold, relativeTo: .title2))
+                .font(.title2.weight(.semibold))
                 .foregroundStyle(t.text)
                 .lineLimit(2)
-            Text("Describe what you want LingXi to accomplish")
-                .font(.scaledSystem(14, relativeTo: .subheadline))
+            Text("chat_new_chat_hint")
+                .font(.subheadline)
                 .foregroundStyle(t.text3)
                 .multilineTextAlignment(.center)
-                .lineSpacing(7)
+                .lineSpacing(3)
                 .frame(maxWidth: 300)
         }
         .frame(maxWidth: .infinity, minHeight: 360)

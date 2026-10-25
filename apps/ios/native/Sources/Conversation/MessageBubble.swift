@@ -92,6 +92,8 @@ private struct MessageImages: View {
 struct MessageBubble: View, Equatable {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
+    @ScaledMetric(relativeTo: .body) private var collapsedHeight: CGFloat = 224
     let message: Message
     var detail: ConversationMessageDetail? = nil
     var expandedToolBlocks: Set<String> = []
@@ -138,18 +140,14 @@ struct MessageBubble: View, Equatable {
                     Spacer(minLength: 0)
                     if !message.text.isEmpty {
                         userContent
-                        // Desktop narration uses a 14pt body at 1.65 line
-                        // height. Keep it relative to .body so Dynamic Type
-                        // still scales the transcript as one readable unit.
-                        .font(.scaledSystem(14, relativeTo: .body))
-                        .lineSpacing(14 * 0.65)
-                        // Match Desktop's 13.6em narration reveal at 14pt.
-                        .frame(maxHeight: userIsCollapsed ? 190.4 : nil, alignment: .top)
+                        .font(.body)
+                        .lineSpacing(bodySize * 0.25)
+                        .frame(maxHeight: userIsCollapsed ? collapsedHeight : nil, alignment: .top)
                         .clipped()
                         .foregroundColor(t.text)
                         .padding(.horizontal, 18).padding(.vertical, 12)
                         .background(t.surfaceHover)
-                        .clipShape(.rect(cornerRadius: 16))
+                        .clipShape(.rect(cornerRadius: 20))
                         .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -195,7 +193,7 @@ struct MessageBubble: View, Equatable {
                     assistantContent
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(
-                            maxHeight: assistantIsCollapsed ? 190.4 : nil,
+                            maxHeight: assistantIsCollapsed ? collapsedHeight : nil,
                             alignment: .top
                         )
                         .clipped()
@@ -238,7 +236,7 @@ struct MessageBubble: View, Equatable {
         if userDisplayText.contains("\n") {
             AIText(markdown: userDisplayText)
         } else {
-            Text(AIText.parseInline(userDisplayText, size: 14))
+            Text(AIText.parseInline(userDisplayText, size: bodySize))
                 .textSelection(.enabled)
         }
     }
@@ -574,8 +572,6 @@ private struct MDBlockView: View, Equatable {
     @Environment(\.theme) private var t
     let block: MDBlock
 
-    private static let bodySize: CGFloat = 14
-
     static func == (lhs: MDBlockView, rhs: MDBlockView) -> Bool {
         lhs.block == rhs.block
     }
@@ -795,7 +791,7 @@ private struct MDLineView: View, Equatable {
     @Environment(\.theme) private var t
     let line: MDLine
 
-    private static let bodySize: CGFloat = 14
+    @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
 
     static func == (lhs: MDLineView, rhs: MDLineView) -> Bool {
         lhs.line == rhs.line
@@ -810,8 +806,8 @@ private struct MDLineView: View, Equatable {
         case let .numbered(marker, s):
             listRow(marker: marker, s)
         case let .heading(level, s):
-            Text(AIText.parseInline(s, size: Self.bodySize))
-                .font(.system(size: max(16, 25 - CGFloat(level) * 2), weight: .semibold))
+            Text(AIText.parseInline(s, size: bodySize))
+                .font(.system(size: bodySize + max(0, 8 - CGFloat(level) * 2), weight: .semibold))
                 .foregroundStyle(t.text)
                 .padding(.top, 8)
                 .accessibilityAddTraits(.isHeader)
@@ -838,7 +834,7 @@ private struct MDLineView: View, Equatable {
     private func listRow(marker: String, _ s: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(marker)
-                .font(.scaledSystem(Self.bodySize, relativeTo: .body))
+                .font(.system(size: bodySize))
                 .foregroundColor(t.text2)
                 .frame(minWidth: 14, alignment: .trailing)
             inlineText(s)
@@ -846,12 +842,11 @@ private struct MDLineView: View, Equatable {
     }
 
     private func inlineText(_ s: String) -> some View {
-        // Dynamic Type: the assistant body scales relative to .body. The inline
-        // spans carry their own fixed-point fonts (bold / code) inside the
-        // AttributedString; the outer .font sets the scalable default size.
-        Text(AIText.parseInline(s, size: Self.bodySize))
-            .font(.scaledSystem(Self.bodySize, relativeTo: .body))
-            .lineSpacing(Self.bodySize * 0.65)
+        // Pass the scaled size into inline spans as well, so emphasis and
+        // code grow together with the surrounding Dynamic Type body.
+        Text(AIText.parseInline(s, size: bodySize))
+            .font(.system(size: bodySize))
+            .lineSpacing(bodySize * 0.25)
             .foregroundColor(t.text)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -862,8 +857,6 @@ private struct MDLineView: View, Equatable {
 struct AIText: View, Equatable {
     @Environment(\.theme) private var t
     let markdown: String
-
-    private static let bodySize: CGFloat = 14
 
     static func == (lhs: AIText, rhs: AIText) -> Bool {
         lhs.markdown == rhs.markdown

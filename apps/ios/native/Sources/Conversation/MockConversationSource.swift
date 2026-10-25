@@ -42,6 +42,18 @@ final class MockConversationSource: ConversationSource {
             askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource(sessionMode: sessionMode)
+            if let title = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SESSION_TITLE"] {
+                source.model.messages = []
+                source.model.items = []
+                source.model.activeSessionId = "ui-named-session"
+                source.model.isNew = true
+                source.model.engineSessions = [EngineSession(
+                    id: "ui-named-session", title: title, mode: sessionMode,
+                    messageCount: 0, modifiedAt: Date(), relativeTime: ""
+                )]
+                source.model.engineSessionsLoaded = true
+                return source
+            }
             if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] == "1" {
                 var prompt = Message(
                     role: .user,

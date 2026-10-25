@@ -11,6 +11,7 @@ enum VoiceHoldGesturePolicy {
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var inputFocused: Bool
     @Binding var model: ModelOption
     // The picker is driven exclusively by the engine's curated, provider-qualified
@@ -345,36 +346,28 @@ struct Composer: View {
                         .accessibilityIdentifier("composer.fast-mode.error")
                 }
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 0) {
-                        attachmentButton
-                        if showsPermissionChip { permissionChip }
-                        Spacer(minLength: 8)
-                        contextWindow
-                        modelChip
-                        turnActions
-                    }
-                    VStack(spacing: 0) {
-                        configurationSummary
-                        HStack(spacing: 0) {
-                            attachmentButton
-                            Spacer(minLength: 0)
-                            turnActions
-                        }
-                    }
+                    toolbar(showsModelText: true)
+                    toolbar(showsModelText: false)
                 }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("composer.toolbar")
             }
-            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
+            .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 6)
             .background(t.composerBg)
-            .clipShape(.rect(cornerRadius: 16))
+            .clipShape(.rect(cornerRadius: 24))
             .overlay {
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(inputFocused ? t.accent.tint(0.52) : t.borderStrong,
+                RoundedRectangle(cornerRadius: 24)
+                    .stroke(inputFocused ? t.accent.opacity(0.45) : t.border.opacity(0.45),
                             lineWidth: inputFocused ? 1 : 0.5)
             }
-            .animation(.easeOut(duration: 0.18), value: inputFocused)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: inputFocused)
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
-        .animation(.easeOut(duration: 0.16), value: shouldShowSlashPanel)
+        // Let the transcript yield height instead of compressing controls out
+        // of the card when Dynamic Type increases the editor and model row.
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(1)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1), value: shouldShowSlashPanel)
         // A sheet, not a popover anchored to the chip: the picker's search field
         // raises the keyboard over exactly the space a popover above the
         // composer would occupy, and the system sizes a sheet against the
@@ -498,7 +491,7 @@ struct Composer: View {
             if voiceCapturePhase == .finishing {
                 ProgressView()
                     .tint(t.text2)
-                    .frame(width: 40, height: 40)
+                    .frame(width: 44, height: 44)
             } else {
                 LXIcon(
                     name: cancellingHold || isDictationListening ? .stop : .mic,
@@ -507,7 +500,7 @@ struct Composer: View {
                         : (holding || isDictationListening ? t.accent : t.text2),
                     stroke: 1.8
                 )
-                .frame(width: 40, height: 40)
+                .frame(width: 44, height: 44)
                 .background(
                     isDictationListening || holding
                         ? t.accent.tint(0.15)
@@ -538,7 +531,7 @@ struct Composer: View {
                 color: voiceInteractionMode == .flow ? t.accent : t.text2,
                 stroke: 1.8
             )
-            .frame(width: 40, height: 40)
+            .frame(width: 44, height: 44)
             .background(
                 voiceInteractionMode == .flow
                     ? t.accent.tint(0.15)
@@ -584,10 +577,11 @@ struct Composer: View {
     private var attachmentButton: some View {
         Button(action: onCameraClick) {
             LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
-                .frame(width: 40, height: 40)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .accessibilityLabel("composer_add_attachment")
+        .accessibilityIdentifier("composer.attachment")
     }
 
     @ViewBuilder
@@ -598,7 +592,7 @@ struct Composer: View {
             if isCancelling || slashCommandPending {
                 ProgressView()
                     .tint(t.text3)
-                    .frame(width: 40, height: 40)
+                    .frame(width: 44, height: 44)
                     .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
             } else if hasDraft {
                 // Desktop gives a drafted message precedence over Stop so
@@ -635,28 +629,44 @@ struct Composer: View {
         .opacity(sendEnabled ? 1 : 0.45)
     }
 
-    private var modelChip: some View {
+    private func modelChip(showsText: Bool) -> some View {
         Button {
             inputFocused = false
             modelOpen = true
         } label: {
-            HStack(spacing: 5) {
-                if fastModePending {
-                    ProgressView().controlSize(.mini)
-                } else if fastModeEnabled && supportsFastMode {
-                    Image(systemName: "bolt.fill")
-                        .accessibilityLabel("Fast Mode On")
-                        .accessibilityIdentifier("composer.fast-mode")
+            Group {
+                if showsText {
+                    HStack(spacing: 5) {
+                        if fastModePending {
+                            ProgressView().controlSize(.mini)
+                        } else if fastModeEnabled && supportsFastMode {
+                            Image(systemName: "bolt.fill")
+                                .accessibilityIdentifier("composer.fast-mode")
+                        }
+                        Text(chipLabel)
+                            .foregroundStyle(t.text)
+                        Text(reasoningLabel)
+                            .foregroundStyle(t.text3)
+                        LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 6)
+                    .frame(minHeight: 44)
+                } else {
+                    Group {
+                        if fastModePending {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: fastModeEnabled && supportsFastMode ? "bolt.fill" : "cpu")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundStyle(t.text2)
+                        }
+                    }
+                    .frame(width: 44, height: 44)
                 }
-                Text(chipLabel)
-                    .foregroundStyle(t.text)
-                Text(reasoningLabel)
-                    .foregroundStyle(t.text3)
-                LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
             }
-            .font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
-            .padding(.horizontal, 6)
-            .frame(minHeight: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .accessibilityLabel("Model and effort")
@@ -676,9 +686,9 @@ struct Composer: View {
             Label(permissionLabel, systemImage: effectivePermissionMode == "bypassPermissions"
                   ? "exclamationmark.shield" : "checkmark.shield")
                 .labelStyle(.iconOnly)
-                .font(.scaledSystem(17, weight: .medium, relativeTo: .body))
+                .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(effectivePermissionMode == "bypassPermissions" ? .orange : t.text2)
-                .frame(minWidth: 44, minHeight: 44)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
@@ -687,20 +697,17 @@ struct Composer: View {
         .accessibilityIdentifier("composer.controls")
     }
 
-    private var configurationSummary: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 0) {
-                if showsPermissionChip { permissionChip }
-                Spacer(minLength: 8)
-                contextWindow
-                modelChip
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 0) { permissionChip; contextWindow }
-                modelChip
-            }
+    /// Measure the complete row at its natural width before falling back to
+    /// icons. Truncating text would let the first candidate claim it fits.
+    private func toolbar(showsModelText: Bool) -> some View {
+        HStack(spacing: 0) {
+            attachmentButton
+            if showsPermissionChip { permissionChip }
+            Spacer(minLength: 0)
+            contextWindow
+            modelChip(showsText: showsModelText)
+            turnActions
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var supportsFastMode: Bool {
@@ -887,7 +894,7 @@ private struct ComposerActionButtonStyle: ButtonStyle {
             .contentShape(.rect)
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
             .opacity(configuration.isPressed ? 0.86 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 1), value: configuration.isPressed)
     }
 }
 
@@ -900,7 +907,7 @@ private struct ComposerTurnActionIcon: View {
         Image(systemName: systemName)
             .font(.system(size: symbolSize, weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 40, height: 40)
+            .frame(width: 44, height: 44)
             .background(background, in: Circle())
             .overlay {
                 Circle().stroke(.white.opacity(0.14), lineWidth: 0.5)

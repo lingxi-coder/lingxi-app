@@ -344,13 +344,9 @@ struct RootView: View {
     }
 
     private var session: SessionRef {
-        if let row = source.model.engineSessions.first(where: { $0.id == activeSession }) {
-            return row.ref
-        }
-        if let row = projectStore.activeProject?.sessions.first(where: { $0.sessionId == activeSession }) {
-            return SessionRef(id: row.sessionId, title: row.title)
-        }
-        return SessionRef(id: activeSession, title: String(localized: "chat_new_conversation"))
+        let cached = (projectStore.activeProject?.sessions ?? projectStore.globalSessions)
+            .first(where: { $0.sessionId == activeSession })
+        return source.model.sessionReference(for: activeSession, cachedTitle: cached?.title)
     }
 
     var body: some View {
@@ -414,9 +410,11 @@ struct RootView: View {
                             if (UIDevice.current.userInterfaceIdiom == .phone || geometry.size.width < 840) && navigation.path.isEmpty {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button(action: navigation.showSidebar) {
-                                        Label("drawer_open_sidebar_a11y", systemImage: "sidebar.left")
+                                        Label("drawer_open_sidebar_a11y", systemImage: UIDevice.current.userInterfaceIdiom == .phone
+                                              ? "line.3.horizontal" : "sidebar.left")
                                             .labelStyle(.iconOnly)
                                     }
+                                    .tint(theme.text)
                                     .accessibilityIdentifier("drawer.open")
                                 }
                             }

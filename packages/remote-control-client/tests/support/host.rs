@@ -40,6 +40,8 @@ pub struct HostConfig {
     pub initialize_error: Option<RemoteErrorCode>,
     /// Never answer `initialize`.
     pub initialize_hangs: bool,
+    /// Simulate approval arriving before the caller consumes the initialize reply.
+    pub approve_before_initialize_reply: bool,
     /// Answers for other methods; `None` falls back to `{}`.
     pub respond: Option<Arc<dyn Fn(&str, &Value) -> Option<Result<Value, RpcError>> + Send + Sync>>,
 }
@@ -54,6 +56,7 @@ impl Default for HostConfig {
             sign_with: None,
             initialize_error: None,
             initialize_hangs: false,
+            approve_before_initialize_reply: false,
             respond: None,
         }
     }
@@ -145,6 +148,21 @@ impl RequestHandler for HostHandler {
                     }
                     InitializeResult::PendingApproval { pairing_code: code }
                 };
+                if !known && config.approve_before_initialize_reply {
+                    let rpc = self
+                        .shared
+                        .conns
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|conn| conn.conn_id == self.conn_id)
+                        .and_then(|conn| conn.rpc.clone())
+                        .unwrap();
+                    self.shared.known.lock().unwrap().insert(device_id);
+                    rpc.notify(methods::AUTH_APPROVED, Some(json!({ "host": host_info() })))
+                        .await
+                        .unwrap();
+                }
                 let mut conns = self.shared.conns.lock().unwrap();
                 if let Some(conn) = conns.iter_mut().find(|c| c.conn_id == self.conn_id) {
                     conn.initialized = true;

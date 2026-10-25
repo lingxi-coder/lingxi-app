@@ -430,6 +430,7 @@ struct Inner {
     next_listener: AtomicU64,
     delivery: mpsc::UnboundedSender<Delivery>,
     state_tx: watch::Sender<ConnectionState>,
+    repairing: tokio::sync::Mutex<()>,
 }
 
 /// The viewer's connection to one computer. Cheap to clone.
@@ -517,6 +518,7 @@ impl ViewerConnection {
                 next_listener: AtomicU64::new(1),
                 delivery,
                 state_tx,
+                repairing: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -613,8 +615,23 @@ impl ViewerConnection {
 
     /// After `revoked`: the old device key is useless, so make a new one and ask again.
     pub async fn repair(&self) {
-        let _ = self.inner.deps.keys.reset_identity().await;
-        self.retry();
+        let Ok(_repair) = self.inner.repairing.try_lock() else {
+            return;
+        };
+        let (generation, reconnecting) = {
+            let core = self.inner.core.lock().expect("core");
+            if core.current.phase != ConnectionPhase::Failed
+                || core.current.failure.as_ref().map(|failure| failure.kind)
+                    != Some(FailureKind::Revoked)
+            {
+                return;
+            }
+            (core.generation, core.current.ever_ready)
+        };
+        if self.inner.deps.keys.reset_identity().await.is_ok() {
+            self.inner
+                .begin_if_generation(reconnecting, Some(generation));
+        }
     }
 
     /// End everything: cancel the dial, close the link, clean up the database.
@@ -667,23 +684,35 @@ impl Inner {
     }
 
     fn begin(self: &Arc<Self>, reconnecting: bool) {
+        self.begin_if_generation(reconnecting, None);
+    }
+
+    fn begin_if_generation(self: &Arc<Self>, reconnecting: bool, expected: Option<u64>) {
         let generation = {
             let mut core = self.core.lock().expect("core");
+            if expected.is_some_and(|generation| generation != core.generation) {
+                return;
+            }
             if let Some(retry) = core.retry.take() {
                 retry.abort();
             }
             core.generation += 1;
-            core.generation
-        };
-        self.update(|state| {
-            state.phase = if reconnecting {
+            if expected.is_some() {
+                core.failures = 0;
+            }
+            core.current.phase = if reconnecting {
                 ConnectionPhase::Reconnecting
             } else {
                 ConnectionPhase::Connecting
             };
-            state.pairing_code = None;
-            state.retry_at = None;
-        });
+            core.current.pairing_code = None;
+            core.current.retry_at = None;
+            core.current.attempt = core.failures;
+            let snapshot = core.current.clone();
+            self.state_tx.send_replace(snapshot.clone());
+            let _ = self.delivery.send(Delivery::State(snapshot));
+            core.generation
+        };
         let inner = Arc::clone(self);
         tokio::spawn(async move { inner.dial(generation).await });
     }
@@ -757,37 +786,47 @@ impl Inner {
         match result {
             AttemptResult::Cancelled => {}
             AttemptResult::Failed { failure, .. } => self.fail(failure),
-            AttemptResult::Ready(attempt, host) => self.publish(attempt, host),
+            AttemptResult::Ready(attempt, host) => self.publish(generation, attempt, host),
         }
     }
 
-    fn publish(self: &Arc<Self>, attempt: Arc<Attempt>, host: RemoteHostInfo) {
+    fn publish(self: &Arc<Self>, generation: u64, attempt: Arc<Attempt>, host: RemoteHostInfo) {
         let kind = attempt.kind();
-        {
-            let mut core = self.core.lock().expect("core");
-            core.live = Some(Arc::clone(&attempt));
-            core.ready_at = Some(Instant::now());
+        let mut core = self.core.lock().expect("core");
+        if generation != core.generation || attempt.cancel.is_cancelled() {
+            drop(core);
+            self.dispose(&attempt, "cancelled");
+            return;
         }
+        core.live = Some(Arc::clone(&attempt));
+        core.ready_at = Some(Instant::now());
         // Held notifications go out first, in order, before anything newer.
         {
             let mut data = attempt.data.lock().expect("attempt");
+            if let Some(reason) = data.rpc.as_ref().and_then(RpcPeer::closed_reason) {
+                drop(data);
+                drop(core);
+                self.link_closed(&attempt, &reason);
+                return;
+            }
             data.published = true;
             let held = std::mem::take(&mut data.held);
-            drop(data);
-            self.update(|state| {
-                state.phase = ConnectionPhase::Ready;
-                state.transport = Some(kind);
-                state.host = Some(host);
-                state.pairing_code = None;
-                state.failure = None;
-                state.retry_at = None;
-                state.ever_ready = true;
-            });
+            core.current.phase = ConnectionPhase::Ready;
+            core.current.transport = Some(kind);
+            core.current.host = Some(host);
+            core.current.pairing_code = None;
+            core.current.failure = None;
+            core.current.retry_at = None;
+            core.current.ever_ready = true;
+            core.current.attempt = core.failures;
+            let snapshot = core.current.clone();
+            self.state_tx.send_replace(snapshot.clone());
+            let _ = self.delivery.send(Delivery::State(snapshot));
             for (method, params) in held {
                 let _ = self.delivery.send(Delivery::Notification(method, params));
             }
+            let _ = self.delivery.send(Delivery::Ready);
         }
-        let _ = self.delivery.send(Delivery::Ready);
     }
 
     /// One dial: write an offer, get the answer, bring the link up, handshake.
@@ -796,7 +835,13 @@ impl Inner {
             cancel: CancellationToken::new(),
             data: Mutex::new(AttemptData::default()),
         });
-        self.core.lock().expect("core").dialing = Some(Arc::clone(&attempt));
+        {
+            let mut core = self.core.lock().expect("core");
+            if core.generation != generation {
+                return AttemptResult::Cancelled;
+            }
+            core.dialing = Some(Arc::clone(&attempt));
+        }
         let outcome = self.run_attempt(&attempt, requested).await;
         let current = self.current_generation();
         match outcome {
@@ -1401,7 +1446,11 @@ impl Inner {
             };
             tokio::spawn(async move { keys.pin(record).await });
         }
-        a.data.lock().expect("attempt").ready = true;
+        let mut data = a.data.lock().expect("attempt");
+        // Approval may arrive before this task consumes the initialize reply.
+        // The pending branch must not leave its later `awaiting = true` behind.
+        data.awaiting = false;
+        data.ready = true;
         Ok(host)
     }
 

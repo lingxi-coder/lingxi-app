@@ -1213,6 +1213,7 @@ struct Core {
     active: Mutex<Option<Active>>,
     hosts_task: Mutex<Option<JoinHandle<()>>>,
     delivery: JoinHandle<()>,
+    repairing: tokio::sync::Mutex<()>,
 }
 
 impl Drop for Core {
@@ -1292,6 +1293,7 @@ impl AndroidRemoteControlClient {
                 active: Mutex::new(None),
                 hosts_task: Mutex::new(None),
                 delivery: tokio::spawn(deliver(queue, listener, current)),
+                repairing: tokio::sync::Mutex::new(()),
             },
         }
     }
@@ -1311,8 +1313,22 @@ impl AndroidRemoteControlClient {
     }
 
     fn start_connection(&self, host_id: &str) -> Result<(), RemoteFfiError> {
+        self.start_connection_if_current(host_id, None)
+    }
+
+    fn start_connection_if_current(
+        &self,
+        host_id: &str,
+        expected: Option<u64>,
+    ) -> Result<(), RemoteFfiError> {
         let core = &self.core;
         let parts = &core.parts;
+        // Generation and active installation are one transaction: disconnect
+        // cannot finish between them and be undone by a stale constructor.
+        let mut active = core.active.lock().expect("active");
+        if expected.is_some_and(|generation| generation != core.current.load(Ordering::SeqCst)) {
+            return Ok(());
+        }
         let generation = core.current.fetch_add(1, Ordering::SeqCst) + 1;
         let mut deps = ViewerConnectionDeps::new(
             parts.uid.clone(),
@@ -1342,13 +1358,14 @@ impl AndroidRemoteControlClient {
             host_id: host_id.to_owned(),
         }));
         connection.start();
-        let previous = core.active.lock().expect("active").replace(Active {
+        let previous = active.replace(Active {
             host_id: host_id.to_owned(),
             connection,
             client,
             sessions_listener,
             watchers: HashMap::new(),
         });
+        drop(active);
         if let Some(previous) = previous {
             previous.shutdown();
         }
@@ -1530,6 +1547,15 @@ impl AndroidRemoteControlClient {
 
     /// After a `Revoked` failure: make a new device key and pair again.
     pub async fn repair_host(&self, host_id: String) -> Result<(), RemoteFfiError> {
+        if host_id.is_empty() {
+            return Err(RemoteFfiError::InvalidArgument {
+                message: "host_id is empty".into(),
+            });
+        }
+        let Ok(_repair) = self.core.repairing.try_lock() else {
+            return Ok(());
+        };
+        let generation = self.core.current.load(Ordering::SeqCst);
         let connection = self
             .core
             .active
@@ -1552,7 +1578,7 @@ impl AndroidRemoteControlClient {
                     .map_err(|error| RemoteFfiError::KeyStore {
                         message: error.to_string(),
                     })?;
-                self.connect(host_id).await
+                self.start_connection_if_current(&host_id, Some(generation))
             }
         }
     }

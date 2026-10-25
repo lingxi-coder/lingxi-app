@@ -120,7 +120,7 @@ real OS or Chrome acceptance test.
 Cross-repository validation uses an isolated product snapshot with only the
 feature's source overlays. The canonical checkout's unrelated staged/unstaged
 files are preserved. The App pins Harness commit
-`e19b7ebcffd5c2122f312f7ec6e778a23680fdb6`.
+`366a23e6146d347be7190ce3a18c5767088198b9`.
 
 Final focused validation includes 151 Rust Computer Use library tests, 43
 Electron policy/Browser/extension/interaction tests, two forced-sidecar-stop
@@ -135,7 +135,7 @@ click/type DOM changes, site denial, redirect denial, nested cross-site iframe
 navigation denial, revocation and removal. The compact sanitized receipt is
 [evidence/browser-real-2026-10-24.json](desktop-computer-use/evidence/browser-real-2026-10-24.json).
 Its source hashes bind the implementation under test. Signed Desktop package
-and OS Accessibility/TCC end-to-end acceptance remain separate, unrun gates.
+and OS Accessibility/TCC acceptance are tracked in the follow-up below.
 
 ## Signed native acceptance follow-up (2026-10-25)
 
@@ -188,3 +188,20 @@ queries, revokes grants/frames/held inputs on known OS loss, and uses a bounded
 AX message to verify effective accessibility; unavailable/busy queries reject
 only the current operation. The complete Computer Use regression has 161
 passing tests. The new signed-package roundtrip remains pending.
+
+The Screen Recording roundtrip follows the OS process-boundary notice: disable
+recording, restart only the owned application and private profile, then verify
+TCC denial and rejection of screenshots and old frames. After restoring recording,
+restart again and require an empty app-grant list before fresh dedicated approval.
+Each generation verifies the new App/sidecar PIDs and bounded TCC responsibility
+attribution before interpreting its permission state. Normal helper tests and
+independent script review pass; real roundtrip execution is still pending.
+
+The effective-AX candidate completed release compilation, Flare development
+signing, ZIP/static verification and full runtime smoke through the official
+wrapper. The [signed package receipt](desktop-computer-use/evidence/effective-ax-signed-package-2026-10-25.json)
+records the source and exact artifact hashes. In the subsequent real native run,
+the first dedicated access request failed with Accessibility verification
+unavailable while the system switches were on. No OS toggles were performed
+and all owned test processes and synthetic credentials were cleaned up. This
+candidate has not passed native/TCC acceptance; the live probe needs diagnosis.

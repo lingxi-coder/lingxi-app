@@ -880,7 +880,7 @@ async function assertDesktopGit(page, workspace, tempRoot) {
     const warning = document.querySelector('.git-branch-warning');
     return current?.textContent.includes('desktop-review-smoke')
       && current?.textContent.includes('Current')
-      && warning?.textContent.includes('1 file has changes');
+      && warning?.textContent.includes('Changed files: 1.');
   })()`), { label: 'current branch and uncommitted change warning' });
   const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(tmpdir(), 'lingxi-git-environment-packaged.png'), Buffer.from(environmentScreenshot.data, 'base64'));

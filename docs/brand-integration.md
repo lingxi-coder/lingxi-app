@@ -28,4 +28,17 @@
 - 应用市场：类型检查、33 项测试及生产构建通过；4 项需 Firebase 环境的测试按原有条件跳过；桌面/390 px 手机品牌预览通过。
 - Control：独立 worktree 的 Node/Web 类型检查、Electron 构建和定向测试通过；首次数据目录创建/既有数据保留/显式 profile 测试经独立复核通过。
 
-本轮是源码及构建资源交付。未部署官网或市场到生产，未安装或替换真机应用，未生成新的签名发行包，也未执行真实 Windows/Linux 安装验收。Control 的历史固定哈希签名脚本仍用于旧包，不适用于新包。
+客户端验证范围为源码及构建资源：未安装或替换真机应用，未生成新的签名发行包，也未执行真实 Windows/Linux 安装验收。Control 的历史固定哈希签名脚本仍用于旧包，不适用于新包。
+
+## 2026-10-25 生产前端发布
+
+用户授权后，官网与应用市场均已部署到 Firebase 项目 `lingxi-5e4b2`。仅发布 Hosting 静态内容与现有 Hosting 配置，没有部署 Functions、数据库规则或其他后端服务。
+
+| 入口 | 构建源提交 | Hosting site | 发布版本 |
+|---|---|---|---|
+| [官网](https://lingxios.net) | `68366a39c6adf42876312b5f134a6676c08885df` | `lingxi-5e4b2` | `46bba03772d8f1cd` |
+| [应用市场](https://lingxi-5e4b2-market.web.app) | `98f96db24660f549d1b6c56d5d4d6a3e02991cab` | `lingxi-5e4b2-market` | `28e1d18deebb8d13` |
+
+两个部署任务均返回成功。生产域名的首页、favicon、Apple touch icon 和品牌 SVG 共 11 项资源均返回 HTTP 200，SHA-256 与本次构建文件逐项一致。浏览器验证新字标正常加载，桌面及 390 px 手机页面正常，手机页面无横向溢出。市场 `/api/v1/health`、`/api/v1/capabilities`、`/api/v1/apps` 均返回 HTTP 200。
+
+本次生产验证为公开页面与接口的只读检查，没有登录、发布应用或修改业务数据。客户端安装与签名验收范围不因前端发布而改变。

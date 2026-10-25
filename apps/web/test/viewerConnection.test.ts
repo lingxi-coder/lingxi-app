@@ -399,3 +399,59 @@ test('a revocation notice on a live connection ends it as revoked, without recon
   assert.equal(connection.state.failure?.auto, false);
   assert.equal(await h.keys.pinnedHost(h.host.hostId), undefined);
 });
+
+test('a delayed pairing repair cannot restart a connection after stop, and duplicate clicks share one reset', async () => {
+  const h = await harness();
+  const oldId = await h.trustDevice();
+  h.host.revokedDevices.add(oldId);
+  const connection = h.connect();
+  connection.start();
+  await h.until(connection, 'failed');
+  assert.equal(connection.state.failure?.kind, 'revoked');
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const reset = h.keys.resetIdentity.bind(h.keys);
+  let resets = 0;
+  h.keys.resetIdentity = async () => { resets++; await blocked; await reset(); };
+  const offersBefore = h.host.offers.length;
+  try {
+    const first = connection.repair();
+    const duplicate = connection.repair();
+    connection.stop();
+    release();
+    await Promise.all([first, duplicate]);
+    await settle();
+    h.clock.advance(60_000);
+    await settle();
+    assert.equal(connection.state.phase, 'idle', 'unmount is final even when key deletion finishes later');
+    assert.equal(h.host.offers.length, offersBefore, 'no unmanaged pairing attempt is sent');
+    assert.equal(resets, 1, 'a double click must not delete a freshly created identity twice');
+  } finally {
+    connection.stop();
+    h.keys.resetIdentity = reset;
+  }
+});
+
+test('a late repeated repair click cannot delete the new identity after redial has started', async () => {
+  const h = await harness();
+  const oldId = await h.trustDevice();
+  h.host.revokedDevices.add(oldId);
+  const connection = h.connect();
+  connection.start();
+  await h.until(connection, 'failed');
+  const reset = h.keys.resetIdentity.bind(h.keys);
+  let resets = 0;
+  h.keys.resetIdentity = async () => { resets++; await reset(); };
+  try {
+    await connection.repair();
+    await connection.repair();
+    await h.until(connection, 'awaiting_approval');
+    assert.equal(resets, 1);
+    const newIdentity = await h.keys.identity();
+    assert.notEqual(newIdentity.id, oldId);
+    assert.equal([...h.host.connections.values()].at(-1)!.offer.device.id, newIdentity.id);
+  } finally {
+    connection.stop();
+    h.keys.resetIdentity = reset;
+  }
+});

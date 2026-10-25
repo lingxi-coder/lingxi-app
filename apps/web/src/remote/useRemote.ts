@@ -199,7 +199,7 @@ export interface RemoteHost {
  * the rest of its wait.
  */
 export function useRemoteHost(uid: string, rtdb: Rtdb, hostId: string | null): RemoteHost | null {
-  const [host, setHost] = useState<RemoteHost | null>(null);
+  const [host, setHost] = useState<{ uid: string; rtdb: Rtdb; hostId: string; remote: RemoteHost } | null>(null);
   useEffect(() => {
     if (hostId === null) {
       setHost(null);
@@ -221,7 +221,7 @@ export function useRemoteHost(uid: string, rtdb: Rtdb, hostId: string | null): R
     document.addEventListener('visibilitychange', nudge);
     window.addEventListener('online', nudge);
     connection.start();
-    setHost({ connection, client });
+    setHost({ uid, rtdb, hostId, remote: { connection, client } });
     return () => {
       document.removeEventListener('visibilitychange', nudge);
       window.removeEventListener('online', nudge);
@@ -230,7 +230,9 @@ export function useRemoteHost(uid: string, rtdb: Rtdb, hostId: string | null): R
       setHost(null);
     };
   }, [uid, rtdb, hostId]);
-  return host;
+  // Effects replace the connection after rendering. Never mount a new route's
+  // session against the previous account or computer in the intervening render.
+  return host?.uid === uid && host.rtdb === rtdb && host.hostId === hostId ? host.remote : null;
 }
 
 export function useConnectionState(connection: ViewerConnection | null): ConnectionState | null {

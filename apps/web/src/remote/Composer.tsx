@@ -32,7 +32,8 @@ export function Composer({ locale, running, disabled, onSend, onStop }: Composer
     if (!canSend) return;
     onSend(text, running ? [] : images);
     setText('');
-    setImages([]);
+    // A text follow-up cannot carry images. Keep the unsent draft until idle.
+    if (!running) setImages([]);
     setProblem(null);
   };
 

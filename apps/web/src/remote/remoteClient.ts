@@ -99,18 +99,18 @@ export function questionAnswers(
   chosen: ReadonlyMap<string, readonly string[]>,
   other: ReadonlyMap<string, string>,
 ): Record<string, string> {
-  const answers: Record<string, string> = {};
+  const entries: Array<[string, string]> = [];
   for (const question of request.questions) {
     const text = other.get(question.question)?.trim();
     if (!question.multi_select) {
       const label = text ? text : chosen.get(question.question)?.[0];
-      if (label) answers[question.question] = label;
+      if (label) entries.push([question.question, label]);
       continue;
     }
     const labels = [...(chosen.get(question.question) ?? []), ...(text ? [text] : [])];
-    if (labels.length > 0) answers[question.question] = labels.join(', ');
+    if (labels.length > 0) entries.push([question.question, labels.join(', ')]);
   }
-  return answers;
+  return Object.fromEntries(entries);
 }
 
 type Request = ViewerConnection['request'];
@@ -140,6 +140,7 @@ export class SessionController {
 
   private active = false;
   private attachId = 0;
+  private historyId = 0;
   private cursor: RemoteCursor | undefined;
   private baseMessages: MessageDto[] = [];
   private firstMessageIndex = 0;
@@ -147,6 +148,7 @@ export class SessionController {
   private builder = new TranscriptBuilder();
   private assembly: { epoch: string; first: number; messages: MessageDto[]; records: RemoteSeqRecord[] } | undefined;
   private held: RemoteSeqRecord[] = [];
+  private droppedThroughSeq: number | undefined;
   private awaitingAttach = false;
   private resetTimer: unknown;
   private readonly seenTurns = new Set<number>();
@@ -193,6 +195,7 @@ export class SessionController {
     if (!this.active) return;
     this.active = false;
     this.attachId += 1;
+    this.invalidateHistory();
     this.io.clock.clearTimeout(this.resetTimer);
     if (this.connected()) void this.io.request('session.detach', { session_id: this.sessionId }).catch(() => undefined);
   }
@@ -204,6 +207,7 @@ export class SessionController {
 
   connectionLost(): void {
     this.attachId += 1;
+    this.invalidateHistory();
     this.assembly = undefined;
     this.awaitingAttach = false;
     if (this.current.status === 'loading' || this.current.status === 'live') this.commit({ status: 'offline' });
@@ -211,9 +215,11 @@ export class SessionController {
 
   private async attach(): Promise<void> {
     const id = ++this.attachId;
+    this.invalidateHistory();
     this.io.clock.clearTimeout(this.resetTimer);
     this.assembly = undefined;
     this.held = [];
+    this.droppedThroughSeq = undefined;
     this.awaitingAttach = true;
     this.commit({ status: 'loading', error: undefined });
     const resume = this.cursor === undefined ? undefined : { epoch: this.cursor.epoch, after_seq: this.cursor.seq };
@@ -233,8 +239,7 @@ export class SessionController {
           return;
         }
         this.commit({ status: 'live', pending: result.pending });
-        this.flushHeld();
-        this.sendPresence();
+        if (this.flushHeld()) this.sendPresence();
       } else if (this.current.status === 'live' && this.cursor?.epoch === result.epoch) {
         this.sendPresence(); // the snapshot was complete before the reply was handled
       }
@@ -266,6 +271,7 @@ export class SessionController {
   handleSnapshot(params: SessionSnapshotParams): void {
     switch (params.phase) {
       case 'begin':
+        this.invalidateHistory();
         this.assembly = { epoch: params.epoch, first: params.first_message_index, messages: [], records: [] };
         this.commit({ status: 'loading', error: undefined });
         this.io.clock.clearTimeout(this.resetTimer);
@@ -304,8 +310,7 @@ export class SessionController {
       loadingOlder: false,
       outgoing: this.current.outgoing.filter((prompt) => prompt.turnId === undefined || !this.seenTurns.has(prompt.turnId)),
     });
-    this.flushHeld();
-    if (!this.awaitingAttach) this.sendPresence();
+    if (this.flushHeld() && !this.awaitingAttach) this.sendPresence();
   }
 
   private controlsFromRecords(): ConversationControlsDto | undefined {
@@ -319,15 +324,27 @@ export class SessionController {
   handleEvent(item: RemoteSeqRecord): void {
     if (this.assembly !== undefined || this.awaitingAttach || this.current.status === 'loading') {
       if (this.held.length < MAX_BUFFERED_EVENTS) this.held.push(item);
+      else this.droppedThroughSeq = Math.max(this.droppedThroughSeq ?? item.seq, item.seq);
       return;
     }
     this.applyLive(item);
   }
 
-  private flushHeld(): void {
+  private flushHeld(): boolean {
     const held = this.held.sort((a, b) => a.seq - b.seq);
     this.held = [];
+    const dropped = this.droppedThroughSeq;
+    this.droppedThroughSeq = undefined;
+    if (dropped !== undefined && (this.cursor === undefined || dropped > this.cursor.seq)) {
+      // A full buffer is recoverable, but advancing past the omitted records
+      // would make them impossible to recover with a delta. Request a new base.
+      this.cursor = undefined;
+      this.commit({ status: 'loading' });
+      if (this.active && this.connected()) void this.attach();
+      return false;
+    }
     for (const item of held) this.applyLive(item);
+    return true;
   }
 
   private applyLive(item: RemoteSeqRecord): void {
@@ -361,10 +378,12 @@ export class SessionController {
   }
 
   handleReset(): void {
+    this.invalidateHistory();
     this.cursor = undefined;
     this.baseMessages = [];
     this.records = [];
     this.held = [];
+    this.droppedThroughSeq = undefined;
     this.assembly = undefined;
     this.firstMessageIndex = 0;
     this.seenTurns.clear();
@@ -379,6 +398,7 @@ export class SessionController {
 
   handleClosed(): void {
     this.attachId += 1;
+    this.invalidateHistory();
     this.commit({ status: 'closed' });
   }
 
@@ -477,7 +497,8 @@ export class SessionController {
 
   /** Fetch the page of messages before the ones held. */
   async loadOlder(): Promise<void> {
-    if (!this.current.hasOlder || this.current.loadingOlder) return;
+    if (this.current.status !== 'live' || !this.connected() || !this.current.hasOlder || this.current.loadingOlder) return;
+    const id = ++this.historyId;
     this.commit({ loadingOlder: true });
     try {
       const result = await this.io.request('session.history', {
@@ -485,6 +506,7 @@ export class SessionController {
         before_index: this.firstMessageIndex,
         limit: HISTORY_PAGE,
       });
+      if (id !== this.historyId) return;
       this.baseMessages = [...result.messages, ...this.baseMessages];
       this.firstMessageIndex = result.first_index;
       const running = this.current.transcript.conversation.running;
@@ -496,8 +518,14 @@ export class SessionController {
         loadingOlder: false,
       });
     } catch {
-      this.commit({ loadingOlder: false });
+      if (id === this.historyId) this.commit({ loadingOlder: false });
     }
+  }
+
+  /** A history page belongs to one transcript base, never to a later reset or attach. */
+  private invalidateHistory(): void {
+    this.historyId += 1;
+    if (this.current.loadingOlder) this.commit({ loadingOlder: false });
   }
 
   /** The bytes of an image the desktop keeps, as a `data:` URL; fetched once. */

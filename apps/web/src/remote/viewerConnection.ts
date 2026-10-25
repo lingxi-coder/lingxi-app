@@ -334,6 +334,7 @@ export class ViewerConnection {
   private failures = 0;
   private readyAt = 0;
   private retryTimer: unknown;
+  private repairPending: Promise<void> | undefined;
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
   private readonly readyListeners = new Set<() => void>();
   private readonly notificationListeners = new Set<NotificationListener>();
@@ -415,9 +416,18 @@ export class ViewerConnection {
   }
 
   /** After `revoked`: the old device key is useless, so make a new one and ask again. */
-  async repair(): Promise<void> {
-    await this.deps.keys.resetIdentity();
-    this.retry();
+  repair(): Promise<void> {
+    if (this.repairPending !== undefined) return this.repairPending;
+    if (this.current.phase !== 'failed' || this.current.failure?.kind !== 'revoked') return Promise.resolve();
+    const generation = this.generation;
+    const operation = this.deps.keys.resetIdentity().then(() => {
+      // Leaving the page or starting another dial cancels this repair's retry.
+      if (generation === this.generation) this.retry();
+    }).finally(() => {
+      if (this.repairPending === operation) this.repairPending = undefined;
+    });
+    this.repairPending = operation;
+    return operation;
   }
 
   /** End everything: cancel the dial, close the link, clean up the database. */

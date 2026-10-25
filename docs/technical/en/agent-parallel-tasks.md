@@ -42,7 +42,9 @@ Desktop’s background-agent decorator connects detached Agent work to LocalAgen
 
 ## Build a monitor using the protocol
 
-TaskList returns TaskRow events and can correlate an authoritative TaskListComplete receipt using request_id. TaskOutput returns TaskOutputChunk with content, total_lines and truncated. Follow the host’s offset contract for later reads; do not derive an offset from JavaScript string length or assume a truncated result delivered every line. Agent listings/transcripts differ from task output and are scoped to the mounted session.
+Desktop Bridge returns TaskRow events and, when request_id is supplied, an authoritative TaskListComplete receipt carrying that id. Current MobileHost ignores request_id and emits only TaskRow events; it has no task-list completion receipt. Keep receipt-based snapshot reconciliation specific to a host that implements it, and do not wait for TaskListComplete on MobileHost.
+
+TaskOutput returns TaskOutputChunk with content, total_lines and truncated. Follow the host’s offset contract for later reads; do not derive an offset from JavaScript string length or assume a truncated result delivered every line. Agent listings/transcripts differ from task output and are scoped to the mounted session.
 
 ### JSON · independent monitoring commands
 
@@ -83,16 +85,20 @@ The existence of collaboration/task types does not prove desktop, mobile or cros
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/agent/src/pool.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/agent/src/pool/capacity.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/agent/src/handle.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/desktop/background_agent.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/tasks/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tasks/src/registry.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/tasks/src/state.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tasks/src/state.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/commands.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/events.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/listings.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/agent/src/pool.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/agent/src/pool/capacity.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/agent/src/handle.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/background_agent.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tasks/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tasks/src/registry.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tasks/src/state.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tasks/src/state.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/commands.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/events.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/listings.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/router.rs) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/apps/bridge-server/src/router/tasks.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/router/tasks.rs) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
 
-- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; Referenced input fingerprint sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
+- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; Referenced input fingerprint sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

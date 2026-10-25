@@ -42,7 +42,9 @@ StateMachinePool 有显式 max_concurrent 容量。普通槽位在物理容量�
 
 ## 使用协议构建监视器
 
-TaskList 返回 TaskRow 事件，并可用 request_id 关联权威 TaskListComplete 回执。TaskOutput 返回包含 content、total_lines 与 truncated 的 TaskOutputChunk。后续读取应遵循宿主 offset 契约，不按 JavaScript 字符串长度推导偏移，也不能假定截断结果已交付全部行。Agent 列表／对话不同于任务输出，并限定在已挂载会话范围。
+Desktop Bridge 返回 TaskRow 事件；提供 request_id 时，还返回携带该 id 的权威 TaskListComplete 回执。当前 MobileHost 忽略 request_id，只发送 TaskRow，没有任务列表完成回执。基于回执的快照协调仅适用于已实现该能力的宿主，不应在 MobileHost 上等待 TaskListComplete。
+
+TaskOutput 返回包含 content、total_lines 与 truncated 的 TaskOutputChunk。后续读取应遵循宿主 offset 契约，不按 JavaScript 字符串长度推导偏移，也不能假定截断结果已交付全部行。Agent 列表／对话不同于任务输出，并限定在已挂载会话范围。
 
 ### JSON · 独立监视命令
 
@@ -83,16 +85,20 @@ TaskList 返回 TaskRow 事件，并可用 request_id 关联权威 TaskListCompl
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/agent/src/pool.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/agent/src/pool/capacity.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/agent/src/handle.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/desktop/background_agent.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/tasks/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tasks/src/registry.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/tasks/src/state.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tasks/src/state.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/commands.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/events.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/listings.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/agent/src/pool.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/agent/src/pool/capacity.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/agent/src/handle.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/background_agent.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tasks/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tasks/src/registry.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tasks/src/state.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tasks/src/state.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/commands.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/events.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/listings.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/router.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/apps/bridge-server/src/router/tasks.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/router/tasks.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
 
-- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; 所据文件指纹 sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
+- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; 所据文件指纹 sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; 所据文件指纹 sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

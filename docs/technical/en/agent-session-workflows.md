@@ -11,7 +11,7 @@ Choose the right session operation and distinguish cancellation, saved history a
 | Ask another question now | Run again on the mounted SessionHandle | Keep the conversation; wait for the preceding turn. |
 | Start an independent conversation | NewSession | The host creates/mounts a session and emits SessionStarted. |
 | Open saved history | ResumeSession | Name a target; SessionResumed confirms the mounted id and messages. |
-| Explore another branch | ForkSession | The host creates a new branch; creation alone does not mount it. |
+| Explore another branch | ForkSession on MobileHost | MobileHost creates a new branch; creation alone does not mount it. Desktop Bridge does not currently handle this command. |
 | Stop the current work only | CancellationToken / Cancel | End a turn without deleting history or shutting down the host. |
 
 <a id="resume-over-the-protocol"></a>
@@ -39,16 +39,18 @@ The objects illustrate ordering, not batching. The public Harness facade has no 
 
 ## Fork without overwriting the source
 
+This recipe follows the current MobileHost implementation. Desktop Bridge does not route ForkSession, so a desktop client must not offer this command or wait for SessionForked until its host implements it. The shared protocol type alone does not establish support.
+
 ForkSession accepts SessionModeDto chat or code and keeps the current session’s workspace according to its command contract. Treat its result as a new conversation identity. A source id in a lifecycle command does not change the rule that normal live commands target the mounted connection.
 
 - Retain the source entry until the host confirms the new branch.
 - Do not fork by editing saved JSONL in place or reusing the source id.
 
-1. Send ForkSession and wait for SessionForked; retain the returned new branch id.
+1. On MobileHost, send ForkSession and wait for SessionForked; retain the returned new branch id.
 2. Mount that id with ResumeSession, or open the host connection for that branch. Wait for SessionResumed or the host’s authoritative mounted-session confirmation.
 3. Only then send a follow-up prompt. Sending a prompt immediately after creation can still target the original mounted session.
 
-### JSON · fork into code mode
+### JSON · MobileHost fork into code mode
 
 ```json
 {
@@ -93,7 +95,7 @@ async fn run_until_stopped(
 }
 ```
 
-Verification method: Compile check (harness-guide-cooperative-cancellation)
+Verification method: Environment validation (harness-guide-cooperative-cancellation)
 
 <a id="saved-is-not-running"></a>
 
@@ -113,13 +115,17 @@ Verification method: Compile check (harness-guide-cooperative-cancellation)
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/api.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/commands.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/events.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/listings.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/desktop/sdk.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/session/src/jsonl/loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/session/src/jsonl/loader.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/api.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/commands.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/events.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/listings.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/sdk.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/session/src/jsonl/loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/session/src/jsonl/loader.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/server.rs) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/router.rs) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
 
-- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; Referenced input fingerprint sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
+- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; Referenced input fingerprint sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

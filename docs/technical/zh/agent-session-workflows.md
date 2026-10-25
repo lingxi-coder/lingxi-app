@@ -11,7 +11,7 @@
 | 现在继续提问 | 在已挂载 SessionHandle 上再次 run | 保留对话，先等待上一轮结束。 |
 | 开始独立对话 | NewSession | 宿主创建并挂载会话，发送 SessionStarted。 |
 | 打开保存历史 | ResumeSession | 指定目标；SessionResumed 确认挂载 id 和消息。 |
-| 探索另一分支 | ForkSession | 宿主创建新分支；创建成功本身不代表已挂载该分支。 |
+| 探索另一分支 | MobileHost 上的 ForkSession | MobileHost 创建新分支；创建成功本身不代表已挂载该分支。当前 Desktop Bridge 未处理此命令。 |
 | 只停止当前工作 | CancellationToken／Cancel | 结束轮次，不删除历史，也不关闭宿主。 |
 
 <a id="resume-over-the-protocol"></a>
@@ -39,16 +39,18 @@
 
 ## 分支而不覆盖原对话
 
+本配方对应当前 MobileHost 实现。Desktop Bridge 未接通 ForkSession，因此桌面客户端在宿主实现前不应提供该命令，也不应等待 SessionForked。仅存在共享协议类型不能证明已支持。
+
 ForkSession 的 SessionModeDto 值为 chat 或 code；按命令契约保留当前会话工作空间。应将结果作为新对话标识。生命周期命令携带来源 id，并不改变普通实时命令作用于已挂载连接的规则。
 
 - 宿主确认新分支前，保留原会话入口。
 - 不要通过原地编辑已保存 JSONL 或复用来源 id 来实现分支。
 
-1. 发送 ForkSession，等待 SessionForked，并保存返回的新分支 id。
+1. 在 MobileHost 上发送 ForkSession，等待 SessionForked，并保存返回的新分支 id。
 2. 通过 ResumeSession 挂载该 id，或打开宿主中属于该分支的连接；等待 SessionResumed 或宿主权威的挂载确认。
 3. 确认后再发送追问；仅创建分支后立即发提示词，仍可能作用于原来挂载的会话。
 
-### JSON · 分支到 code 模式
+### JSON · MobileHost 分支到 code 模式
 
 ```json
 {
@@ -93,7 +95,7 @@ async fn run_until_stopped(
 }
 ```
 
-验证方式: 编译检查 (harness-guide-cooperative-cancellation)
+验证方式: 需环境验证 (harness-guide-cooperative-cancellation)
 
 <a id="saved-is-not-running"></a>
 
@@ -113,13 +115,17 @@ async fn run_until_stopped(
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/api.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/commands.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/events.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/listings.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/desktop/sdk.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
-- [harness-runtime/crates/session/src/jsonl/loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/session/src/jsonl/loader.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/api.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/commands.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/events.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/client/src/protocol/listings.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/listings.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/sdk.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/session/src/jsonl/loader.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/session/src/jsonl/loader.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/server.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/bridge-server/src/router.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
 
-- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; 所据文件指纹 sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
+- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; 所据文件指纹 sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; 所据文件指纹 sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -14,7 +14,7 @@ interface ApiEntry {
   summary: string;
   file: string;
   line: number;
-  sourceState: 'committed' | 'working-tree';
+  sourceState: 'committed' | 'unpublished' | 'working-tree';
   url?: string;
 }
 
@@ -22,6 +22,7 @@ interface ApiRepository {
   sdk: string;
   revision: string;
   sourceUrl: string;
+  published?: boolean;
   dirty: boolean;
   treeFingerprint: string;
   productPinnedRevision?: string;
@@ -62,7 +63,11 @@ test('SDK catalog has usable declarations and links only byte-identical committe
     assert.equal(typeof entry.summary, 'string');
     assert.ok(Number.isInteger(entry.line) && entry.line > 0);
     if (entry.sourceState === 'committed') {
+      assert.notEqual(repo.published, false);
       assert.equal(entry.url, `${repo.sourceUrl}/blob/${repo.revision}/${entry.file}#L${entry.line}`);
+    } else if (entry.sourceState === 'unpublished') {
+      assert.equal(repo.published, false);
+      assert.equal(entry.url, undefined);
     } else {
       assert.equal(entry.sourceState, 'working-tree');
       assert.equal(catalog.sourceMode, 'working-tree');
@@ -226,6 +231,7 @@ function fixture(t: { after: (cleanup: () => void) => void }) {
     }
     git(repo, 'add', '.');
     git(repo, 'commit', '-qm', 'API baseline');
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
   }
   const generate = (sourceMode: ApiCatalog['sourceMode']) => {
     const output = join(workspace, `api-${sourceMode}.json`);
@@ -236,6 +242,65 @@ function fixture(t: { after: (cleanup: () => void) => void }) {
   };
   return { workspace, generate };
 }
+
+test('unpublished committed API revisions omit links without claiming working-tree changes', (t) => {
+  const { workspace, generate } = fixture(t);
+  const repo = join(workspace, 'llm-client');
+  const published = git(repo, 'rev-parse', 'HEAD');
+  write(join(repo, 'src/lib.rs'), 'pub struct LocalOnlyApi {}\n');
+  git(repo, 'add', 'src/lib.rs');
+  git(repo, 'commit', '-qm', 'unpublished API change');
+  const revision = git(repo, 'rev-parse', 'HEAD');
+  assert.notEqual(revision, published);
+  for (const mode of ['committed', 'working-tree'] as const) {
+    const current = generate(mode).catalog;
+    const metadata = current.repositories.find((item) => item.sdk === 'llm');
+    assert.equal(metadata?.revision, revision);
+    assert.equal(metadata?.published, false);
+    assert.equal(metadata?.dirty, false, 'a local commit is not a dirty file');
+    const entry = current.entries.find((item) => item.name === 'LocalOnlyApi');
+    assert.equal(entry?.sourceState, 'unpublished');
+    assert.equal(entry?.url, undefined);
+  }
+
+  write(join(repo, 'src/lib.rs'), 'pub struct WorkingApi {}\n');
+  const changed = generate('working-tree').catalog;
+  assert.equal(changed.entries.find((item) => item.name === 'WorkingApi')?.sourceState, 'working-tree');
+  assert.equal(changed.repositories.find((item) => item.sdk === 'llm')?.dirty, true);
+  git(repo, 'restore', 'src/lib.rs');
+  git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  const available = generate('committed').catalog;
+  assert.equal(available.repositories.find((item) => item.sdk === 'llm')?.published, true);
+  assert.equal(available.entries.find((item) => item.name === 'LocalOnlyApi')?.sourceState, 'committed');
+  assert.equal(available.entries.find((item) => item.name === 'LocalOnlyApi')?.url,
+    `https://github.com/lingxi-coder/llm-client/blob/${revision}/src/lib.rs#L1`);
+
+  // The bridge uses its last source commit; publication of a descendant branch
+  // is enough even when HEAD contains a later unpushed documentation commit.
+  const bridge = join(workspace, 'lingxi-app');
+  const bridgeRevision = git(bridge, 'rev-parse', 'HEAD');
+  write(join(bridge, 'README.md'), 'published descendant\n');
+  git(bridge, 'add', 'README.md');
+  git(bridge, 'commit', '-qm', 'published documentation');
+  git(bridge, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  write(join(bridge, 'README.md'), 'unpublished descendant\n');
+  git(bridge, 'add', 'README.md');
+  git(bridge, 'commit', '-qm', 'unpublished documentation');
+  const bridgeCatalog = generate('committed').catalog;
+  assert.equal(bridgeCatalog.repositories.find((item) => item.sdk === 'bridge')?.revision, bridgeRevision);
+  assert.equal(bridgeCatalog.repositories.find((item) => item.sdk === 'bridge')?.published, true);
+  assert.ok(bridgeCatalog.entries.filter((item) => item.sdk === 'bridge').every((item) => item.url));
+});
+
+test('a repository without known origin branches does not invent published source links', (t) => {
+  const { workspace, generate } = fixture(t);
+  git(join(workspace, 'mobile-linux-runtime'), 'update-ref', '-d', 'refs/remotes/origin/main');
+  const current = generate('committed').catalog;
+  const metadata = current.repositories.find((item) => item.sdk === 'mobile');
+  assert.equal(metadata?.published, false);
+  assert.equal(metadata?.dirty, false);
+  assert.ok(current.entries.filter((item) => item.sdk === 'mobile').every((item) => item.sourceState === 'unpublished' && !item.url));
+});
 
 test('committed mode reads HEAD while working-tree mode tracks changed, staged, new and deleted UTF-8 inputs', (t) => {
   const { workspace, generate } = fixture(t);

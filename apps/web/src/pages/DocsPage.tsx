@@ -49,18 +49,20 @@ export function DocSectionContent({ section, locale, cards = false }: { section:
   </>;
 }
 
-export interface ApiEntry { sdk: string; name: string; kind: string; signature: string; summary: string; file: string; line: number; url?: string; sourceState: 'committed' | 'working-tree' }
+export interface ApiEntry { sdk: string; name: string; kind: string; signature: string; summary: string; file: string; line: number; url?: string; sourceState: ResolvedDocSource['sourceState'] }
 interface ApiCatalog {
   generatedAt: string;
   sourceMode: 'committed' | 'working-tree';
-  repositories: Array<{ sdk: string; revision: string; sourceUrl: string; dirty: boolean; treeFingerprint: string; productPinnedRevision?: string }>;
+  repositories: Array<{ sdk: string; revision: string; sourceUrl: string; dirty: boolean; published?: boolean; treeFingerprint: string; productPinnedRevision?: string }>;
   entries: ApiEntry[];
 }
 
 export function ApiDeclaration({ entry, locale }: { entry: ApiEntry; locale: Locale }) {
-  const worktree = entry.sourceState === 'working-tree';
-  const url = worktree ? undefined : entry.url;
-  return <article className="developer-api-entry"><div><h3>{url ? <a href={url} target="_blank" rel="noreferrer">{entry.name} ↗</a> : entry.name}</h3><span>{entry.sdk} / {entry.kind}</span></div><pre><code>{entry.signature}</code></pre>{entry.summary ? <p>{entry.summary}</p> : null}<div className="developer-api-source-row">{url ? <a className="developer-api-source" href={url} target="_blank" rel="noreferrer">{entry.file}:{entry.line}</a> : <span className="developer-api-source">{entry.file}:{entry.line}</span>}{worktree || !url ? <span className="developer-source-badge">{locale === 'zh' ? '未提交源码' : 'Working tree source'}</span> : null}</div></article>;
+  const url = entry.sourceState === 'committed' ? entry.url : undefined;
+  const badge = entry.sourceState === 'unpublished' ? (locale === 'zh' ? '未发布源码' : 'Unpublished source')
+    : entry.sourceState === 'working-tree' ? (locale === 'zh' ? '未提交源码' : 'Working tree source')
+      : !url ? (locale === 'zh' ? '源码链接不可用' : 'Source link unavailable') : undefined;
+  return <article className="developer-api-entry"><div><h3>{url ? <a href={url} target="_blank" rel="noreferrer">{entry.name} ↗</a> : entry.name}</h3><span>{entry.sdk} / {entry.kind}</span></div><pre><code>{entry.signature}</code></pre>{entry.summary ? <p>{entry.summary}</p> : null}<div className="developer-api-source-row">{url ? <a className="developer-api-source" href={url} target="_blank" rel="noreferrer">{entry.file}:{entry.line}</a> : <span className="developer-api-source">{entry.file}:{entry.line}</span>}{badge ? <span className="developer-source-badge">{badge}</span> : null}</div></article>;
 }
 
 interface RustdocManifest { profiles: Array<{ id: string; label: { en: string; zh: string }; url: string; state: 'ready' | 'unavailable'; reason?: string }> }
@@ -71,13 +73,15 @@ function DocBaseline({ locale }: { locale: Locale }) {
 }
 
 export function DocSourceItem({ source, locale }: { source: ResolvedDocSource; locale: Locale }) {
-  return <li><span className="developer-source-repo">{source.repo}</span><div>{source.sourceState === 'committed' && source.url ? <a href={source.url} target="_blank" rel="noreferrer">{source.path} ↗</a> : <code>{source.path}</code>}{source.sourceState === 'working-tree' ? <span className="developer-source-badge">{locale === 'zh' ? '未提交源码' : 'Working tree source'}</span> : null}</div><code className="developer-source-revision">{source.revision}</code></li>;
+  const badge = source.sourceState === 'unpublished' ? (locale === 'zh' ? '未发布源码' : 'Unpublished source')
+    : source.sourceState === 'working-tree' ? (locale === 'zh' ? '未提交源码' : 'Working tree source') : undefined;
+  return <li><span className="developer-source-repo">{source.repo}</span><div>{source.sourceState === 'committed' && source.url ? <a href={source.url} target="_blank" rel="noreferrer">{source.path} ↗</a> : <code>{source.path}</code>}{badge ? <span className="developer-source-badge">{badge}</span> : null}</div><code className="developer-source-revision">{source.revision}</code></li>;
 }
 
 function DocSources({ page, locale }: { page: DocPage; locale: Locale }) {
   const sources = resolveDocSources(page);
   const t = (en: string, zh: string) => locale === 'zh' ? zh : en;
-  return <div className="developer-doc-sources"><h2>{t('Source attribution', '源码依据')}</h2><p>{t('These files establish this page’s workspace baseline. File links are available only when their content matches the recorded commit.', '以下文件构成本页的工作区基线。文件内容与记录的提交一致时才提供源码链接。')}</p>{sources.length ? <ul>{sources.map((source) => <DocSourceItem key={`${source.repo}/${source.path}`} source={source} locale={locale} />)}</ul> : <a href={page.sourceUrl} target="_blank" rel="noreferrer">{t('Browse repository', '查看仓库')} ↗</a>}</div>;
+  return <div className="developer-doc-sources"><h2>{t('Source attribution', '源码依据')}</h2><p>{t('These files establish this page’s workspace baseline. File links require content matching a published commit.', '以下文件构成本页的工作区基线。仅当文件内容与已发布提交匹配时，才提供源码链接。')}</p>{sources.length ? <ul>{sources.map((source) => <DocSourceItem key={`${source.repo}/${source.path}`} source={source} locale={locale} />)}</ul> : <a href={page.sourceUrl} target="_blank" rel="noreferrer">{t('Browse repository', '查看仓库')} ↗</a>}</div>;
 }
 
 function ApiReference({ locale }: { locale: Locale }) {

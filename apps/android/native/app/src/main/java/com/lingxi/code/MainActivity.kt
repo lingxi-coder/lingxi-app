@@ -513,29 +513,11 @@ class MainActivity : ComponentActivity() {
 
                     // First-run setup wizard — shown until onboarding completes;
                     // sits above settings so the replay path covers it too. On
-                    // finish it persists the chosen profile + flips setupDone.
+                    // finish it only flips setupDone.
                     SetupWizardOverlay(
                         visible = !prefs.setupDone,
-                        initialAssistantName = prefs.assistantName,
-                        initialUserName = prefs.userName,
-                        initialVoiceprint = prefs.voiceprint,
-                        initialModelId = prefs.defaultModelId,
-                        initialVoiceLang = prefs.voiceLang,
-                        onFinish = { assistantName, userName, voiceprint, modelId, voiceLang ->
+                        onFinish = {
                             scope.launch {
-                                store.setAssistantName(assistantName)
-                                store.setUserName(userName)
-                                store.setVoiceprint(voiceprint)
-                                store.setDefaultModel(modelId)
-                                store.setVoiceLang(voiceLang)
-                                settingsStore.updateVoice { current ->
-                                    val migratedLanguage = when (voiceLang.lowercase()) {
-                                        "zh" -> "zh-CN"
-                                        "en" -> "en-US"
-                                        else -> current.language
-                                    }
-                                    current.copy(language = migratedLanguage)
-                                }
                                 store.setSetupDone(true)
                             }
                         },

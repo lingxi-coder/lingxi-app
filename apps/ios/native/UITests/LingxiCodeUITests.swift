@@ -1078,84 +1078,32 @@ final class LingxiCodeUITests: XCTestCase {
         add(lowerScreenshot)
     }
 
-    func testOnboardingHeaderStaysAtTopAndPrimaryActionIsVisible() {
+    func testOnboardingWelcomeEntersAppDirectly() {
         app.terminate()
         app.launchEnvironment["LINGXI_FORCE_ONBOARDING"] = "1"
         app.launch()
 
-        let header = app.descendants(matching: .any)["onboarding.header"]
+        let welcome = app.descendants(matching: .any)["onboarding.welcome"]
         let content = app.descendants(matching: .any)["onboarding.content"]
         let primaryAction = app.buttons["onboarding.primaryAction"]
-        XCTAssertTrue(header.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(welcome.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(content.exists)
-        XCTAssertTrue(primaryAction.exists)
         XCTAssertTrue(primaryAction.isHittable)
-
-        let screen = app.frame
-        XCTAssertLessThan(header.frame.minY, screen.height * 0.18)
         XCTAssertGreaterThan(primaryAction.frame.minY, content.frame.minY)
-        XCTAssertLessThanOrEqual(primaryAction.frame.maxY, screen.maxY)
+        XCTAssertLessThanOrEqual(primaryAction.frame.maxY, app.frame.maxY)
+        XCTAssertFalse(content.textFields.firstMatch.exists, app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["onboarding.header"].exists)
+        XCTAssertFalse(app.buttons["onboarding.back"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["onboarding.done"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "引导-欢迎页"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
 
         primaryAction.tap()
-        XCTAssertTrue(app.staticTexts["给你的灵犀起个名字"].waitForExistence(timeout: 3))
-        primaryAction.tap()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["onboarding.model.step"].waitForExistence(timeout: 3),
-            app.debugDescription
-        )
-        XCTAssertFalse(app.staticTexts["我该怎么称呼你？"].exists, app.debugDescription)
-        let modelScreenshot = XCTAttachment(screenshot: app.screenshot())
-        modelScreenshot.name = "引导-模型设置"
-        modelScreenshot.lifetime = .keepAlways
-        add(modelScreenshot)
-
-        let apiKeyPreset = app.buttons["onboarding.model.preset.anthropic"]
-        XCTAssertTrue(apiKeyPreset.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(scrollUntilHittable(apiKeyPreset, in: content), app.debugDescription)
-        apiKeyPreset.tap()
-        let apiKeyField = app.secureTextFields["provider.api-key"]
-        XCTAssertTrue(apiKeyField.waitForExistence(timeout: 5), app.debugDescription)
-        let apiKeyScreenshot = XCTAttachment(screenshot: app.screenshot())
-        apiKeyScreenshot.name = "引导-API密钥设置"
-        apiKeyScreenshot.lifetime = .keepAlways
-        add(apiKeyScreenshot)
-        app.buttons["provider.cancel"].tap()
-        XCTAssertTrue(waitUntilGone(apiKeyField, timeout: 5), app.debugDescription)
-        let passwordAlert = app.alerts["Save Password?"]
-        let passwordSheet = app.sheets["Save Password?"]
-        if passwordAlert.waitForExistence(timeout: 1) || passwordSheet.waitForExistence(timeout: 1) {
-            let savePasswordPrompt = passwordAlert.exists ? passwordAlert : passwordSheet
-            savePasswordPrompt.buttons["Not Now"].tap()
-            XCTAssertTrue(waitUntilGone(savePasswordPrompt, timeout: 5), app.debugDescription)
-        }
-
-        let oauthPreset = app.buttons["onboarding.model.preset.openai-chatgpt"]
-        XCTAssertTrue(scrollUntilHittable(oauthPreset, in: content), app.debugDescription)
-        oauthPreset.tap()
-        XCTAssertTrue(app.buttons["provider.oauth.login"].waitForExistence(timeout: 5), app.debugDescription)
-        let oauthScreenshot = XCTAttachment(screenshot: app.screenshot())
-        oauthScreenshot.name = "引导-OAuth设置"
-        oauthScreenshot.lifetime = .keepAlways
-        add(oauthScreenshot)
-        app.buttons["provider.cancel"].tap()
-        primaryAction.tap()
-
-        XCTAssertTrue(
-            app.descendants(matching: .any)["onboarding.web.step"].waitForExistence(timeout: 3),
-            app.debugDescription
-        )
-        XCTAssertTrue(app.buttons["onboarding.web.search"].exists, app.debugDescription)
-        XCTAssertTrue(app.buttons["onboarding.web.fetch"].exists, app.debugDescription)
-        let webScreenshot = XCTAttachment(screenshot: app.screenshot())
-        webScreenshot.name = "引导-Web设置"
-        webScreenshot.lifetime = .keepAlways
-        add(webScreenshot)
-        primaryAction.tap()
-
-        let voiceTitle = app.staticTexts["配置语音能力"]
-        XCTAssertTrue(voiceTitle.waitForExistence(timeout: 3), app.debugDescription)
-        XCTAssertTrue(voiceTitle.isHittable)
-        XCTAssertTrue(primaryAction.isHittable)
+        XCTAssertTrue(waitUntilGone(welcome, timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilGone(primaryAction, timeout: 5), app.debugDescription)
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 5), app.debugDescription)
     }
 
     /// The picker: grouped by provider, searchable, and recently-picked models
@@ -1366,6 +1314,6 @@ final class StartupResponsivenessUITests: XCTestCase {
             2,
             "rootfs installation must not block setup interactions"
         )
-        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 2), app.debugDescription)
+        XCTAssertTrue(primaryAction.waitForNonExistence(timeout: 2), app.debugDescription)
     }
 }

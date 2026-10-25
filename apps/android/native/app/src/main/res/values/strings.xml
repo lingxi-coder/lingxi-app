@@ -662,7 +662,7 @@
     <string name="onboarding_voiceprint_subtitle">让灵犀听声识人，只对你的声音响应、唤起属于你的记忆。可稍后在设置里完成。</string>
     <string name="onboarding_voiceprint_title">录入你的声纹</string>
     <string name="onboarding_wake_word_preview">嘿，%1$s</string>
-    <string name="onboarding_welcome_subtitle">花一分钟，让它认识你——之后你只需开口，它就会回应。</string>
+    <string name="onboarding_welcome_subtitle">写代码、理思路、做项目，让灵犀陪你把想法变成现实。</string>
     <string name="onboarding_welcome_title">欢迎使用灵犀</string>
     <string name="oss_android_bundle_body">本 Android 组合产品按 GNU GPLv3 分发。原有 MIT、Apache、LGPL 及 Alpine 软件包继续保留各自声明。构建产物同时携带 NOTICE、SPDX SBOM、固定摘要和对应源码信息。</string>
     <string name="oss_android_bundle_title">Android 组合发行物</string>

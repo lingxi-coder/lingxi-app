@@ -98,7 +98,7 @@ class NativeStyleUiTest {
         rule.setContent {
             LingXiTheme(darkTheme = dark.value) {
                 Surface(Modifier.fillMaxSize()) {
-                    if (onboarding.value) SetupWizardOverlay(true, "Lingxi", "", false, "", "", { _, _, _, _, _ -> })
+                    if (onboarding.value) SetupWizardOverlay(visible = true, onFinish = { onboarding.value = false })
                     else ChatScreen(state = ChatState(session = SessionRef("native-audit", "Conversation"), messages = listOf(
                             com.lingxi.code.model.Message(com.lingxi.code.model.Role.User, "Help me review the project and plan the next steps."),
                             com.lingxi.code.model.Message(com.lingxi.code.model.Role.Ai,
@@ -111,17 +111,12 @@ class NativeStyleUiTest {
             rule.runOnIdle { dark.value = night; onboarding.value = false }
             capture("chat-${if (night) "dark" else "light"}")
             rule.runOnIdle { onboarding.value = true }
+            rule.onNodeWithText(context.getString(R.string.onboarding_welcome_title)).assertIsDisplayed()
+            rule.onNode(hasSetTextAction()).assertDoesNotExist()
+            rule.onNodeWithContentDescription(context.getString(R.string.onboarding_back)).assertDoesNotExist()
             capture("onboarding-${if (night) "dark" else "light"}")
-            rule.onNodeWithText(context.getString(R.string.onboarding_cta_start)).performClick()
-            capture("onboarding-assistant-${if (night) "dark" else "light"}")
-            rule.onNodeWithText(context.getString(R.string.onboarding_cta_continue)).performClick()
-            rule.onNode(hasSetTextAction()).performTextInput("Tester")
-            androidx.test.espresso.Espresso.closeSoftKeyboard()
-            capture("onboarding-user-${if (night) "dark" else "light"}")
-            rule.onNodeWithText(context.getString(R.string.onboarding_cta_continue)).performClick()
-            capture("onboarding-voice-${if (night) "dark" else "light"}")
-            rule.onNodeWithText(context.getString(R.string.onboarding_cta_continue)).performClick()
-            capture("onboarding-ready-${if (night) "dark" else "light"}")
+            rule.onNodeWithText(context.getString(R.string.onboarding_cta_finish)).performClick()
+            rule.runOnIdle { assertFalse(onboarding.value) }
         }
     }
     @Test fun primaryPagesInBothAppearances() {

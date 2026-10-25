@@ -1,22 +1,13 @@
 package com.lingxi.code.onboarding
 
-import com.lingxi.code.voice.offline.localizedDisplayName
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,79 +15,34 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.ui.draw.clip
-import com.lingxi.code.voice.offline.ModelState
-import com.lingxi.code.voice.offline.GeneratedOfflineModelEntry
-import com.lingxi.code.voice.offline.GeneratedVoiceModelCatalog
-import com.lingxi.code.voice.offline.GeneratedVoicePack
-import com.lingxi.code.voice.offline.VoicePackProgress
-import com.lingxi.code.voice.offline.VoiceModelDownloader
-import com.lingxi.code.voice.offline.voicePackProgress
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
-import com.lingxi.code.components.oklch
 import com.lingxi.code.voice.OrbCanvas
 import com.lingxi.code.voice.OrbPhase
-import java.util.Locale
 
-// MARK: - First-run setup wizard (心流 onboarding)
-//
-// Port of the prototype's `SetupWizard` (lingxi-iphone.html), mirroring the iOS
-// `SetupWizardView`. The active Android flow has 5 steps over the sci-fi orb
-// backdrop: welcome → name the assistant (wake word) → your name → choose an
-// offline voice pack → finish. Voiceprint enrollment is temporarily excluded
-// from onboarding; an existing voiceprint preference is preserved unchanged.
-// Provider/model selection is deliberately deferred to the real provider catalog
-// in Settings rather than showing prototype model rows here. On finish it hands
-// the chosen values back via [onFinish] (MainActivity persists them + flips setupDone).
-
-private const val TOTAL = 5
-private enum class VpState { Idle, Rec, Done }
+// A single welcome page, mirroring iOS. [onFinish] only marks onboarding complete.
 
 @Composable
 fun SetupWizardOverlay(
     visible: Boolean,
-    initialAssistantName: String,
-    initialUserName: String,
-    initialVoiceprint: Boolean,
-    initialModelId: String,
-    initialVoiceLang: String,
-    onFinish: (assistantName: String, userName: String, voiceprint: Boolean, modelId: String, voiceLang: String) -> Unit,
+    onFinish: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(
@@ -105,86 +51,18 @@ fun SetupWizardOverlay(
         exit = fadeOut(tween(300)),
         modifier = modifier,
     ) {
-        SetupWizardContent(
-            initialAssistantName, initialUserName, initialVoiceprint, initialModelId, initialVoiceLang, onFinish,
-        )
+        SetupWizardContent(onFinish = onFinish)
     }
 }
 
 @Composable
-private fun SetupWizardContent(
-    initialAssistantName: String,
-    initialUserName: String,
-    initialVoiceprint: Boolean,
-    initialModelId: String,
-    initialVoiceLang: String,
-    onFinish: (String, String, Boolean, String, String) -> Unit,
-) {
-    var step by remember { mutableIntStateOf(0) }
-    var assistantName by remember { mutableStateOf(initialAssistantName) }
-    var userName by remember { mutableStateOf(initialUserName) }
-    var modelId by remember { mutableStateOf(initialModelId) }
-    var voiceLang by remember { mutableStateOf(initialVoiceLang) }
-    val modelStates by VoiceModelDownloader.states.collectAsState()
-
-    // System back goes to the previous step instead of dismissing the whole
-    // wizard (only step 0 lets back fall through to exit).
-    BackHandler(enabled = step > 0) { step = (step - 1).coerceAtLeast(0) }
-
-    val ctaDisabled = when (step) {
-        1 -> assistantName.isBlank()
-        2 -> userName.isBlank()
-        else -> false
-    }
-    val cta = when (step) {
-        0 -> stringResource(R.string.onboarding_cta_start)
-        TOTAL - 1 -> stringResource(R.string.onboarding_cta_finish)
-        else -> stringResource(R.string.onboarding_cta_continue)
-    }
-
-    fun next() {
-        if (step < TOTAL - 1) step += 1
-        else onFinish(assistantName.trim(), userName.trim(), initialVoiceprint, modelId, voiceLang)
-    }
-
+private fun SetupWizardContent(onFinish: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).imePadding()) {
-            // header — back chevron + segmented progress
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp).heightIn(min = 40.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (step > 0) {
-                    androidx.compose.material3.IconButton(onClick = { step = (step - 1).coerceAtLeast(0) }) {
-                        androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.onboarding_back))
-                    }
-                } else {
-                    Spacer(Modifier.size(48.dp))
-                }
-                Spacer(Modifier.width(12.dp))
-                Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    repeat(TOTAL) { k ->
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .height(3.dp)
-                                .background(
-                                    if (k <= step) androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary)
-                                    else androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outlineVariant),
-                                    RoundedCornerShape(99.dp),
-                                ),
-                        )
-                    }
-                }
-                Spacer(Modifier.width(12.dp))
-                Spacer(Modifier.size(48.dp))
-            }
-
+        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
             // body
             Column(
                 modifier = Modifier
@@ -195,83 +73,25 @@ private fun SetupWizardContent(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                when (step) {
-                    0 -> {
-                        OrbCanvas(phase = OrbPhase.Idle, modifier = Modifier.fillMaxWidth().height(220.dp), cyFrac = 0.5f)
-                        WizH(stringResource(R.string.onboarding_welcome_title))
-                        WizSub(stringResource(R.string.onboarding_welcome_subtitle))
-                    }
-                    1 -> {
-                        Badge(LXIconName.Sparkle)
-                        WizH(stringResource(R.string.onboarding_assistant_title))
-                        val wakeWordName = assistantName.ifBlank { stringResource(R.string.app_name) }
-                        WizSub(stringResource(R.string.onboarding_assistant_wake_hint, wakeWordName))
-                        WizField(assistantName, stringResource(R.string.app_name)) { assistantName = it.take(12) }
-                        Spacer(Modifier.height(18.dp))
-                        Row(
-                            modifier = Modifier
-                                .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
-                                .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Canvas(Modifier.size(7.dp)) { drawCircle(oklch(0.72f, 0.18f, 150f)) }
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                stringResource(R.string.onboarding_wake_word_preview, wakeWordName),
-                                color = MaterialTheme.colorScheme.onSurface,
-                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        }
-                    }
-                    2 -> {
-                        Badge(LXIconName.Skill)
-                        WizH(stringResource(R.string.onboarding_user_title))
-                        WizSub(stringResource(R.string.onboarding_user_subtitle))
-                        WizField(userName, stringResource(R.string.onboarding_user_placeholder)) { userName = it.take(16) }
-                    }
-                    3 -> VoicePackStep(
-                        states = modelStates,
-                        selected = voiceLang,
-                        onSelect = { voiceLang = it },
-                        onDownload = { lang -> voiceLang = lang; VoiceModelDownloader.startPack(lang) },
-                    )
-                    else -> {
-                        Badge(LXIconName.Brain)
-                        WizH(stringResource(R.string.onboarding_done_title))
-                        WizSub(stringResource(R.string.onboarding_done_subtitle_detail))
-                    }
-                }
+                OrbCanvas(phase = OrbPhase.Idle, modifier = Modifier.fillMaxWidth().height(220.dp), cyFrac = 0.5f)
+                WizH(stringResource(R.string.onboarding_welcome_title))
+                WizSub(stringResource(R.string.onboarding_welcome_subtitle))
             }
 
             // footer
             Column(Modifier.padding(horizontal = 30.dp).padding(top = 14.dp, bottom = 42.dp)) {
                 androidx.compose.material3.Button(
-                    onClick = { next() }, enabled = !ctaDisabled,
+                    onClick = onFinish,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
                 ) {
-                    Text(cta, style = MaterialTheme.typography.labelLarge)
+                    Text(stringResource(R.string.onboarding_cta_finish), style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.width(8.dp))
-                    LXIcon(if (step == TOTAL - 1) LXIconName.Sparkle else LXIconName.ArrowRight,
+                    LXIcon(LXIconName.ArrowRight,
                         color = MaterialTheme.colorScheme.onPrimary)
                 }
             }
         }
     }
-}
-
-@Composable
-private fun Badge(icon: LXIconName) {
-    Box(
-        modifier = Modifier
-            .size(66.dp)
-            .background(androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary), RoundedCornerShape(20.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        LXIcon(icon, size = 30.dp, color = MaterialTheme.colorScheme.onPrimary, stroke = 1.9f)
-    }
-    Spacer(Modifier.height(22.dp))
 }
 
 @Composable
@@ -286,222 +106,4 @@ private fun WizSub(text: String) {
     Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, lineHeight = 23.sp,
         textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 290.dp))
     Spacer(Modifier.height(26.dp))
-}
-
-@Composable
-private fun WizField(value: String, placeholder: String, onChange: (String) -> Unit) {
-    androidx.compose.material3.OutlinedTextField(value, onChange,
-        modifier = Modifier.fillMaxWidth(), label = { Text(placeholder) }, singleLine = true,
-        textStyle = MaterialTheme.typography.bodyLarge)
-}
-
-// MARK: - Offline voice language-pack step ------------------------------------
-
-@Composable
-private fun VoicePackStep(
-    states: Map<String, ModelState>,
-    selected: String,
-    onSelect: (String) -> Unit,
-    onDownload: (String) -> Unit,
-) {
-    Badge(LXIconName.Mic)
-    WizH(stringResource(R.string.onboarding_voice_pack_title))
-    WizSub(stringResource(R.string.onboarding_voice_pack_subtitle))
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-        GeneratedVoiceModelCatalog.packs.forEach { pack ->
-            VoicePackRow(
-                pack = pack,
-                progress = voicePackProgress(states, pack),
-                selected = selected == pack.language,
-                onSelect = { onSelect(pack.language) },
-                onDownload = { onDownload(pack.language) },
-            )
-        }
-        // "暂不下载" — keep the system voice; download later from settings.
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(if (selected == "") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(15.dp))
-                .border(1.dp, if (selected == "") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
-                .clickable { onSelect("") }
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(stringResource(R.string.onboarding_voice_pack_skip), color = MaterialTheme.colorScheme.onSurface, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                Text(stringResource(R.string.onboarding_voice_pack_skip_detail), color = MaterialTheme.colorScheme.onSurfaceVariant, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-            }
-            RadioDot(selected == "")
-        }
-    }
-}
-
-@Composable
-private fun VoicePackRow(
-    pack: GeneratedVoicePack,
-    progress: VoicePackProgress,
-    selected: Boolean,
-    onSelect: () -> Unit,
-    onDownload: () -> Unit,
-) {
-    val sizeText = formatDownloadSize(pack.totalBytes)
-    val agg = progress.state
-    val activeModel = progress.activeModel
-    val activeLabel = activeModel?.let { voiceModelZhLabel(it) }.orEmpty()
-    val activePosition = if (activeModel != null && progress.activeModelIndex >= 0) {
-        "（${progress.activeModelIndex + 1}/${pack.models.size}）"
-    } else {
-        ""
-    }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(15.dp))
-            .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
-            .clickable { onSelect() }
-            .padding(16.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(pack.localizedTitle(), color = MaterialTheme.colorScheme.onSurface, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                Text("${pack.localizedSubtitle()} · $sizeText", color = MaterialTheme.colorScheme.onSurfaceVariant, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-            }
-            RadioDot(selected)
-        }
-        Spacer(Modifier.height(10.dp))
-        val activeModelLabel = "$activeLabel$activePosition"
-        when (agg) {
-            is ModelState.Ready -> Text(
-                stringResource(R.string.onboarding_voice_pack_ready),
-                color = oklch(0.74f, 0.15f, 155f),
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-            )
-            is ModelState.Queued -> VoicePackProgressStatus(
-                progress = progress,
-                status = stringResource(R.string.onboarding_voice_pack_queued, activeModelLabel),
-            )
-            is ModelState.Verifying -> VoicePackProgressStatus(
-                progress = progress,
-                status = stringResource(R.string.onboarding_voice_pack_verifying, activeModelLabel),
-            )
-            is ModelState.Extracting -> {
-                val next = progress.nextModel?.let { voiceModelZhLabel(it) }
-                val extracting = stringResource(R.string.onboarding_voice_pack_extracting, activeModelLabel)
-                val extractingNext = next?.let { stringResource(R.string.onboarding_voice_pack_extracting_next, it) }
-                VoicePackProgressStatus(
-                    progress = progress,
-                    status = buildString {
-                        append(extracting)
-                        extractingNext?.let(::append)
-                    },
-                )
-            }
-            is ModelState.Downloading -> {
-                val status = if (progress.downloadedBytes == 0L) {
-                    stringResource(R.string.onboarding_voice_pack_connecting, activeModelLabel)
-                } else {
-                    stringResource(R.string.onboarding_voice_pack_downloading, activeModelLabel)
-                }
-                VoicePackProgressStatus(progress = progress, status = status)
-            }
-            is ModelState.Failed -> DownloadBtn(
-                stringResource(R.string.onboarding_voice_pack_failed, activeModelLabel, agg.message),
-                onDownload,
-            )
-            ModelState.NotInstalled -> DownloadBtn(
-                stringResource(R.string.onboarding_voice_pack_download_action, sizeText),
-                onDownload,
-            )
-        }
-    }
-}
-
-/**
- * [GeneratedOfflineModelEntry.displayName] and [GeneratedVoicePack.title]/[.subtitle] stay the
- * literal zh-Hans copy on the model (`voice/offline/VoiceModels.kt` is a
- * plain, engine-agnostic catalog with no Android/Compose dependency — kept
- * that way so [com.lingxi.code.voice.offline.VoiceModelDownloaderTest] stays
- * pure JVM). Both call sites here always resolve the "zh" bucket regardless
- * of the app's own language (a model like "Zipformer 中文 14M" describes the
- * model in a fixed script, unlike [com.lingxi.code.theme.AppLanguageStore]'s
- * self-referential language-picker names), so these `id`-keyed lookups
- * resolve the real localized text at render time.
- */
-@Composable
-private fun voiceModelZhLabel(entry: GeneratedOfflineModelEntry): String = when (entry.id) {
-    "sherpa.zipformer-zh-14m-mobile" -> stringResource(R.string.voice_model_name_zipformer_zh_14m)
-    "sherpa.moonshine-tiny-en" -> stringResource(R.string.voice_model_name_moonshine_tiny_en)
-    "sherpa.melo-zh-en" -> stringResource(R.string.voice_model_name_melo_zh_en)
-    "sherpa.kitten-nano-en" -> stringResource(R.string.voice_model_name_kitten_nano_en)
-    else -> entry.localizedDisplayName("zh")
-}
-
-@Composable
-private fun GeneratedVoicePack.localizedTitle(): String =
-    if (language == "zh") stringResource(R.string.voice_pack_title_zh) else title
-
-@Composable
-private fun GeneratedVoicePack.localizedSubtitle(): String =
-    if (language == "zh") stringResource(R.string.voice_pack_subtitle_zh) else subtitle
-
-@Composable
-private fun VoicePackProgressStatus(
-    progress: VoicePackProgress,
-    status: String,
-) {
-    val pct = if (progress.totalBytes > 0L) {
-        (progress.downloadedBytes.toFloat() / progress.totalBytes).coerceIn(0f, 1f)
-    } else {
-        0f
-    }
-    Box(
-        Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Box(
-            Modifier.fillMaxWidth(pct).height(6.dp).clip(RoundedCornerShape(99.dp))
-                .background(oklch(0.66f, 0.2f, 288f)),
-        )
-    }
-    Spacer(Modifier.height(6.dp))
-    Text(
-        "$status · ${formatDownloadPercent(progress.downloadedBytes, progress.totalBytes)}" +
-            "（${formatDownloadSize(progress.downloadedBytes)} / ${formatDownloadSize(progress.totalBytes)}）",
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-    )
-}
-
-private fun formatDownloadSize(bytes: Long): String {
-    val kib = bytes.toDouble() / 1024.0
-    val mib = kib / 1024.0
-    val gib = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
-    return when {
-        gib >= 1.0 -> String.format(Locale.US, "%.1f GB", gib)
-        mib >= 1.0 -> String.format(Locale.US, "%.1f MB", mib)
-        kib >= 1.0 -> String.format(Locale.US, "%.0f KB", kib)
-        else -> "$bytes B"
-    }
-}
-
-private fun formatDownloadPercent(bytes: Long, total: Long): String {
-    if (total <= 0L) return "0%"
-    val percent = (bytes.toDouble() / total * 100.0).coerceIn(0.0, 100.0)
-    return when {
-        percent < 0.1 -> String.format(Locale.US, "%.2f%%", percent)
-        percent < 10.0 -> String.format(Locale.US, "%.1f%%", percent)
-        else -> String.format(Locale.US, "%.0f%%", percent)
-    }
-}
-
-@Composable
-private fun RadioDot(on: Boolean) {
-    androidx.compose.material3.RadioButton(selected = on, onClick = null)
-}
-
-@Composable
-private fun DownloadBtn(text: String, onClick: () -> Unit) {
-    androidx.compose.material3.Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-        Text(text)
-    }
 }

@@ -662,7 +662,7 @@
     <string name="onboarding_voiceprint_subtitle">Let LingXi recognize you by voice, responding only to your voice and recalling memories that belong to you. You can finish this later in Settings.</string>
     <string name="onboarding_voiceprint_title">Record your voiceprint</string>
     <string name="onboarding_wake_word_preview">Hey, %1$s</string>
-    <string name="onboarding_welcome_subtitle">Spend a minute getting acquainted — after that, just speak, and it\'ll respond.</string>
+    <string name="onboarding_welcome_subtitle">Write code, explore ideas, and build projects with LingXi.</string>
     <string name="onboarding_welcome_title">Welcome to LingXi</string>
     <string name="oss_android_bundle_body">This Android bundle is distributed under the GNU GPLv3. The original MIT, Apache, LGPL, and Alpine packages retain their own license notices. Build artifacts include a NOTICE file, SPDX SBOM, pinned checksums, and corresponding source information.</string>
     <string name="oss_android_bundle_title">Android Combined Distribution</string>

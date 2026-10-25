@@ -335,7 +335,15 @@ class ChatViewModel(
             }
             launch {
                 boundSource.sessionState.collect { engine ->
-                    if (sourceGeneration == generation) _sessions.value = engine
+                    if (sourceGeneration == generation) {
+                        _sessions.value = engine
+                        // The SDK catalog resolves custom title, AI title, summary and first prompt.
+                        // Keep the header and drawer synchronized, including later renames.
+                        _state.update { current ->
+                            val row = engine.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(current.session.id) }
+                            if (row == null) current else current.copy(session = current.session.copy(title = row.title))
+                        }
+                    }
                 }
             }
             launch {
@@ -1849,7 +1857,10 @@ class ChatViewModel(
             // collector or clearing the optimistic prompt and widget slots.
             if (current.session.id == "new") {
                 _state.update {
-                    it.copy(session = it.session.copy(id = restored.sessionId), sessionReady = true)
+                    val catalogTitle = _sessions.value.rows.firstOrNull { row ->
+                        canonicalSessionId(row.uuid) == canonicalSessionId(restored.sessionId)
+                    }?.title
+                    it.copy(session = it.session.copy(id = restored.sessionId, title = catalogTitle ?: it.session.title), sessionReady = true)
                 }
                 reportBackgroundTurnState()
                 return
@@ -1872,8 +1883,8 @@ class ChatViewModel(
         restoredTranscriptSessionId = restored.sessionId
             .takeIf { restored.kind == SessionActivationKind.Resumed }
             ?.let(::canonicalSessionId)
-        val title = _state.value.session.takeIf { it.id == restored.sessionId }?.title
-            ?: _sessions.value.rows.firstOrNull { it.uuid == restored.sessionId }?.title
+        val title = _sessions.value.rows.firstOrNull { canonicalSessionId(it.uuid) == canonicalSessionId(restored.sessionId) }?.title
+            ?: _state.value.session.takeIf { canonicalSessionId(it.id) == canonicalSessionId(restored.sessionId) }?.title
             ?: _state.value.session.title
         _state.update {
             it.copy(

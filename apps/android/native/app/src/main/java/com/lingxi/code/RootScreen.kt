@@ -83,7 +83,7 @@ import com.lingxi.code.drawer.DrawerProductionData
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.conversation.SessionPanel
 import com.lingxi.code.conversation.SessionPanelModel
-import com.lingxi.code.conversation.WorkspacePickerSheet
+import com.lingxi.code.conversation.WorkspaceDirectorySheet
 import com.lingxi.code.conversation.permissionModeLabel
 import com.lingxi.code.project.ProjectPage
 import com.lingxi.code.project.ProjectsPage
@@ -1799,7 +1799,11 @@ fun RootScreen(
     // A scheduled-task workspace is not a place to start chatting: new chats from
     // there go to the global workspace.
     val newChatScope = if (sourceScope == ConversationScope.Scheduled) ConversationScope.Global else sourceScope
-    val currentWorkspaceName = when (val current = newChatScope) {
+    val liveWorkspace by currentEngineSource.workspaceState.collectAsStateWithLifecycle()
+    val currentWorkspaceName = liveWorkspace?.cwd?.takeIf { it.isNotBlank() }?.let { path ->
+        if (path == com.lingxi.code.project.MobileUserStorage.directories(context).guestHome) "~"
+        else path.substringAfterLast('/').ifBlank { path }
+    } ?: when (val current = newChatScope) {
         ConversationScope.Global, ConversationScope.Scheduled -> stringResource(R.string.common_global)
         is ConversationScope.Project ->
             drawerProductionData.projects.orEmpty().firstOrNull { it.id == current.projectId }?.name
@@ -2442,28 +2446,34 @@ fun RootScreen(
         if (workspacePickerOpen) {
             val pickerSource = remember { currentEngineSource }
             val pickerSessionId = remember { pickerSource.workspaceState.value?.sessionId.orEmpty() }
-            WorkspacePickerSheet(
+            WorkspaceDirectorySheet(
                 projects = drawerProductionData.projects.orEmpty(),
                 currentScope = newChatScope,
                 onDismiss = { workspacePickerOpen = false },
-                directories = projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.record
-                    ?.let { listOf(it.directory) + it.additionalDirectories }.orEmpty(),
-                activeDirectory = projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.record?.activeDirectory,
+                currentDirectory = liveWorkspace?.cwd,
+                runtimeStatus = stringResource(com.lingxi.code.settings.linuxRuntimeStateLabel(settingsState.linuxRuntime.rootfsState)),
+                directories = liveWorkspace?.additionalDirectories.orEmpty(),
+                protectedPaths = {
+                    projectState.projects.flatMap { project ->
+                        listOf(project.record.directory, project.record.activeDirectory,
+                            project.record.directory.substringBeforeLast('/')) +
+                            project.record.additionalDirectories + project.sessions.mapNotNull { it.workspaceDirectory }
+                    } + listOfNotNull(pickerSource.workspaceState.value?.cwd, pickerSource.workspaceState.value?.projectRoot) +
+                        pickerSource.workspaceState.value?.additionalDirectories.orEmpty() +
+                        sessionState.rows.mapNotNull { it.workspaceDirectory }
+                },
+                canMutate = { !chatViewModel.state.value.requiresBackgroundExecution && !chatViewModel.state.value.sessionTransitioning && !chatViewModel.state.value.cancellationInFlight &&
+                    chatViewModel.engineSource.value === pickerSource &&
+                    pickerSource.workspaceState.value?.sessionId.orEmpty() == pickerSessionId },
                 onPickDirectory = { path ->
-                    workspacePickerOpen = false
-                    scope.launch { runCatching {
-                        check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
-                        pickerSource.changeWorkspace(path, pickerSessionId)
-                    }
-                        .onFailure { chatViewModel.reportHostError(it.message.orEmpty()) } }
+                    check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
+                    pickerSource.changeWorkspace(path, pickerSessionId)
+                    check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
                 },
                 onAddDirectory = { path ->
-                    workspacePickerOpen = false
-                    scope.launch { runCatching {
-                        check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
-                        pickerSource.addWorkspaceDirectory(path, pickerSessionId)
-                    }
-                        .onFailure { chatViewModel.reportHostError(it.message.orEmpty()) } }
+                    check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
+                    pickerSource.addWorkspaceDirectory(path, pickerSessionId)
+                    check(chatViewModel.engineSource.value === pickerSource) { context.getString(R.string.workspace_session_changed) }
                 },
                 onPick = { target ->
                     workspacePickerOpen = false

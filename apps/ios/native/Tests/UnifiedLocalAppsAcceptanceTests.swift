@@ -62,7 +62,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
                     hostPath: external.path, guestPath: homeGuest, readOnly: false, purpose: .external)])
                 XCTFail("External overlays must not replace runtime-managed HOME paths")
             } catch MobileLinuxOperationFfiError.InvalidRequest(let message) {
-                XCTAssertTrue(message.contains("persistent guest homes"), message)
+                XCTAssertTrue(message.contains("persistent guest home"), message)
             }
             // Public app requests reserve HOME for the managed user/workspace.
             // Exercise external overlays at an allowed temporary guest location,

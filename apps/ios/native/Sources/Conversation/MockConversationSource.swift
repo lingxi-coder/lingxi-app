@@ -42,6 +42,9 @@ final class MockConversationSource: ConversationSource {
             askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource(sessionMode: sessionMode)
+            if let message = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_RUNTIME_ERROR"] {
+                source.model.error = ConversationError(kind: .host, message: message)
+            }
             if let fixture = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"],
                fixture.hasPrefix("ui-files-"), fixture.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) {
                 let paths = WorkspaceDirectoryPaths.current()

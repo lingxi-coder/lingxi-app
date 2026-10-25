@@ -8,6 +8,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
@@ -32,6 +34,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
@@ -67,6 +73,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -995,70 +1002,102 @@ internal fun ComputerUseSetupBanner(
     )
 }
 
-/**
- * A persistent, dismissible, kind-aware error banner above the composer.
- *
- * Unlike [StatusRow] (a dim, single-line, auto-overwritten status), this is a
- * filled danger-tinted row with a kind-specific headline and a × dismiss button,
- * driven by [ChatState.error]. It survives until the user dismisses it or starts
- * a new turn — so a failed reply is never lost to a transient flash (spec item 4).
- */
+/** A compact error summary with the complete, copyable diagnostic in a native sheet. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
     val t = LingXiTheme.palette
-    val headline = when (error.kind) {
+    val context = LocalContext.current
+    val resumeFailure = stringResource(R.string.chat_resume_session_failed)
+    val headline = if (error.message.startsWith(resumeFailure)) resumeFailure else when (error.kind) {
         ChatErrorKind.AUTH -> stringResource(R.string.chat_error_auth_headline)
         ChatErrorKind.NETWORK -> stringResource(R.string.chat_error_transport)
         ChatErrorKind.GENERIC -> stringResource(R.string.chat_error_generic_headline)
     }
+    var showDetails by remember(error) { mutableStateOf(false) }
+    var copied by remember(error) { mutableStateOf(false) }
+    val shape = RoundedCornerShape(18.dp)
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier
             .testTag(UiTags.CHAT_ERROR)
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 5.dp),
+            .padding(horizontal = 14.dp)
+            .padding(top = 8.dp)
+            .clip(shape)
+            .background(t.surface)
+            .border(0.5.dp, t.danger.copy(alpha = 0.18f), shape),
     ) {
-        Box(
-            modifier = Modifier
-                .size(18.dp)
-                .clip(CircleShape)
-                .background(t.danger),
-            contentAlignment = Alignment.Center,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.weight(1f)
+                .clickable(role = Role.Button) { showDetails = true }
+                .testTag("conversation.runtime-error.details")
+                .padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
         ) {
-            LXIcon(name = LXIconName.X, size = 11.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onError, stroke = 2.4f)
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = headline,
-                color = t.danger,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            androidx.compose.foundation.text.selection.SelectionContainer {
-                Text(
-                    text = error.message,
-                    color = t.text2,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    lineHeight = (12.5f * 1.4f).sp,
-                )
+            Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = t.danger,
+                modifier = Modifier.size(22.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(headline, color = t.text,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(stringResource(R.string.chat_error_view_details), color = t.text2,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    LXIcon(LXIconName.ChevronR, size = 11.dp, color = t.text2)
+                }
             }
         }
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onDismiss)
-                .testTag(UiTags.CHAT_ERROR_DISMISS),
-            contentAlignment = Alignment.Center,
+        IconButton(onClick = onDismiss,
+            modifier = Modifier.size(48.dp).testTag(UiTags.CHAT_ERROR_DISMISS)) {
+            Box(Modifier.size(28.dp).clip(CircleShape).background(t.surfaceHover),
+                contentAlignment = Alignment.Center) {
+                LXIcon(LXIconName.X, size = 12.dp, color = t.text2,
+                    contentDescription = stringResource(R.string.chat_dismiss_error))
+            }
+        }
+    }
+    if (showDetails) {
+        ModalBottomSheet(
+            onDismissRequest = { showDetails = false; copied = false },
+            containerColor = t.surface,
+            contentColor = t.text,
         ) {
-            LXIcon(
-                name = LXIconName.X,
-                size = 14.dp,
-                color = t.text3,
-                stroke = 2f,
-                contentDescription = stringResource(R.string.chat_dismiss_error),
-            )
+            Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.chat_error_details_title),
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f))
+                    IconButton(onClick = {
+                        context.getSystemService(android.content.ClipboardManager::class.java)
+                            .setPrimaryClip(android.content.ClipData.newPlainText(headline, error.message))
+                        copied = true
+                    }, modifier = Modifier.testTag("conversation.runtime-error.copy")) {
+                        LXIcon(if (copied) LXIconName.Check else LXIconName.Copy, size = 20.dp,
+                            color = t.accent,
+                            contentDescription = stringResource(if (copied) R.string.chat_message_copied else R.string.chat_message_copy))
+                    }
+                    IconButton(onClick = { showDetails = false; copied = false },
+                        modifier = Modifier.testTag("conversation.runtime-error.close-details")) {
+                        LXIcon(LXIconName.X, size = 20.dp, color = t.text2,
+                            contentDescription = stringResource(R.string.common_close))
+                    }
+                }
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text(headline, style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
+                        color = t.text)
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(error.message, color = t.text2,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.fillMaxWidth().testTag("conversation.runtime-error.message"))
+                    }
+                }
+            }
         }
     }
 }

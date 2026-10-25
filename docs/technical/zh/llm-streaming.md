@@ -181,16 +181,16 @@ PreparedCall 的 WebSocket 执行需要实现 connect_websocket 的 Transport。
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/stream.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/stream.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/client/session.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/session.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/llm.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/stream_assembly.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/stream_assembly.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/framing/sse.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/framing/sse.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/framing/eventstream.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/framing/eventstream.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/model_stream.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/model_stream.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/structured_output.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/message.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/message.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/usage_report.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/stream.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/session.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/llm.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/stream_assembly.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/framing/sse.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/framing/eventstream.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/model_stream.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/structured_output.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/message.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/usage_report.rs — 未发布源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
 - llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; 所据文件指纹 sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; 产品固定版本 ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 

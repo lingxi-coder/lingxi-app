@@ -100,15 +100,15 @@ realtime and audio_realtime_contract suites use mock connections to validate que
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/realtime/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/mod.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/realtime/audio.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/audio.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/realtime/normalize.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/normalize.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/realtime/websocket.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/websocket.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/providers/openai/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/providers/openai/realtime.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/providers/google/live.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/providers/google/live.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/realtime.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/audio_realtime_contract.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/audio_realtime_contract.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/provider_realtime_clients.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/provider_realtime_clients.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/realtime/mod.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/realtime/audio.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/realtime/normalize.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/realtime/websocket.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/openai/realtime.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/providers/google/live.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/realtime.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/audio_realtime_contract.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/provider_realtime_clients.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
 - llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 

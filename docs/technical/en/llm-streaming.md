@@ -181,16 +181,16 @@ A final End event and complete UsageReport are different facts. Provider streams
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/stream.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/stream.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/client/session.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/session.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/llm.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/stream_assembly.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/stream_assembly.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/framing/sse.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/framing/sse.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/framing/eventstream.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/framing/eventstream.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/model_stream.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/model_stream.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/structured_output.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/message.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/message.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/usage_report.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/stream.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/session.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/llm.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/stream_assembly.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/framing/sse.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/framing/eventstream.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/model_stream.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/structured_output.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/message.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/usage_report.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
 - llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 

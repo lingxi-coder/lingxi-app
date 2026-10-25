@@ -284,18 +284,18 @@ A completed response produces a reusable ContinuationRef only with stable accoun
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/options.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/prepared.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/executor.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/client/requests.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/requests.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/llm.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/codecs/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/codecs/mod.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/transport.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/transport.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/execution_contracts.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/client/chat.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/chat.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/message.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/message.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/json_payload.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/json_payload.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
-- [llm-client/src/protocol/continuation.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/continuation.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/options.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/prepared.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/executor.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/requests.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/llm.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/codecs/mod.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/transport.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/tests/execution_contracts.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/client/chat.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/message.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/json_payload.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- llm-client/src/protocol/continuation.rs — Unpublished source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
 - llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 

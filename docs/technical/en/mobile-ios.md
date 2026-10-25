@@ -8,7 +8,7 @@ Consume SwiftPM and XCFramework products, provide iSH fakefs resources, and cont
 
 The package exposes MobileLinuxRuntime for Swift applications and MobileLinuxNativeSupport for applications already embedding Rust. The full product links MobileLinuxRuntimeFFI and MobileLinuxNativeSupport; the support product adds sqlite3, resolv, z and c++ linker libraries.
 
-The checked-in repository-root Package.swift points to v0.1.0-rc.2 binary assets built from source 9e8e19a473728722183fcbfa0814398c1dd8a8ff and contains their actual checksums. Asset availability and release device acceptance must be checked against that release. Do not replace checksums with placeholder values.
+The checked-in repository-root Package.swift points to v0.1.0-rc.3 binary assets built from source 6b033d41a2b6b736fda1e8f996f55a4b20bd885d and contains their actual checksums. Asset availability and release device acceptance must be checked against that release. Do not replace checksums with placeholder values.
 
 For local SwiftPM, stage the two built frameworks in ios/Artifacts and matching generated bindings in ios/Bindings, then add the local ios package. The local manifest cannot resolve from a clean checkout without those binary artifacts.
 
@@ -64,6 +64,26 @@ bash scripts/build/prepare-ios-rootfs.sh \
 ```
 
 Verification method: API excerpt
+
+<a id="ios-config-fields"></a>
+
+## Choose stable Swift configuration values
+
+| Input | Rule | Why it matters |
+| --- | --- | --- |
+| managedRoot / appSandboxRoot | App-private absolute host paths, normalized before the session is created. | Separate replaceable image state from persistent guest user storage. |
+| workspaceHostPath / stableWorkspaceId | A configured host directory and a non-empty ID with no /. The values . and .. are rejected. | The guest project path is /home/lingxi/lingxi/<stable-id>; changing a screen title should not change project identity. |
+| rootfsArchivePath / archiveSha256 | The explicit converted fakefs ZIP path and its digest. | The original tarball digest does not authenticate a converted ZIP. |
+| rootfsPatchPath / defaultMountPath | Explicit resource locations matching the framework build. | The native bridge does not infer the application bundle or search environment variables for them. |
+| protectedHostRoots / allowedMountRoots / allowedGuestRoots | Protected host trees plus explicit host and guest prefixes for additional mounts. | An empty extra allowlist admits no extra non-workspace mounts. |
+
+<a id="ios-session-identity"></a>
+
+## Understand kernel identity and workspace sessions
+
+The process-wide iSH registry compares immutable configuration separately from workspaceHostPath and stableWorkspaceId. A second session can therefore target another configured workspace while keeping the same kernel/rootfs identity. A different immutable configuration is rejected at construction with InvalidRequest; it is not a request to silently replace an existing kernel.
+
+After the kernel starts, repair/reset cannot unload it and return RestartRequired. shutdown closes the logical session and its transient work; it does not create a fresh process. Persist the user’s requested recovery action and let the host restart deliberately rather than repeatedly constructing a new wrapper.
 
 <a id="swift-wrapper"></a>
 
@@ -183,6 +203,19 @@ func writePty(handle: MobileLinuxPtySessionHandleFfi, input: Data) async throws
 
 Write terminal bytes.
 
+<a id="ios-terminal-and-protocols"></a>
+
+## Handle terminals and child protocols in Swift
+
+| Surface | Input / output | Lifecycle detail |
+| --- | --- | --- |
+| PTY | Generated bindings use Data; output contains terminal control sequences as well as text. | The iSH runtime supports one PTY at a time. Close the existing session before opening another. |
+| resizePty | Terminal dimensions are rows and columns in cells, not pixel sizes. | Use nonzero dimensions and discard the old handle after close. |
+| Raw stdio | Separate stdout and stderr Data buffers; bounded read maxBytes is 1...1048576. | No PTY byte translation; accumulate protocol frames across reads and await closeRawStdio. |
+| Background process | spawnBackground returns a process handle, not an OS background-execution entitlement. | The app owns scene/OS lifetime and explicitly awaits killProcess when stopping the task. |
+
+Keep terminal rendering and UI state on the UI executor, and keep execution ownership outside a transient view. A Swift Task cancellation is not a substitute for checking the SDK close/kill result.
+
 <a id="swift-example"></a>
 
 ## Command helper
@@ -205,7 +238,7 @@ Verification method: API excerpt
 
 ## Kernel lifetime and restart
 
-An app process has one immutable iSH kernel/rootfs configuration, while sessions may use different workspace paths and stable IDs. Changing an initialized kernel configuration or repairing/resetting after boot can return RestartRequired. The host owns the app restart experience.
+An app process has one immutable iSH kernel/rootfs configuration, while sessions may use different workspace paths and stable IDs. Constructing a conflicting immutable configuration returns InvalidRequest. Repairing or resetting after the kernel has started returns RestartRequired; the host owns the application restart experience.
 
 <a id="ios-end-to-end"></a>
 
@@ -224,7 +257,7 @@ func executeOnce(config: RuntimeConfig) async throws -> MobileLinuxCommandResult
     _ = try await runtime.boot()
     do {
         let request = MobileLinuxCommandRequestFfi(
-            command: "/bin/sh", args: ["-c", "printf 'ready\n'"], cwd: "/root",
+            command: "/bin/sh", args: ["-c", "printf 'ready\n'"], cwd: "/home/lingxi",
             env: [], stdin: nil, timeoutMs: 10_000, network: .disabled,
             resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: nil,
                 maxProcesses: nil, maxOpenFiles: nil), mounts: [])
@@ -244,7 +277,7 @@ Verification method: Environment validation (ios-runtime-lifecycle)
 
 ## Process identity and acceptance boundary
 
-Stable workspace identity is independent of the immutable process kernel identity. Switching workspaces must preserve the kernel/rootfs configuration. When repair, reset or configuration change returns RestartRequired, persist the requested state and surface a deliberate host restart action; do not loop boot attempts in the same process.
+Stable workspace identity is independent of the immutable process kernel identity. Switching workspaces must preserve the kernel/rootfs configuration. A conflicting constructor configuration is InvalidRequest; repair/reset after kernel initialization is RestartRequired. Persist the requested recovery state and surface a deliberate host restart action instead of looping boot attempts in the same process.
 
 Swift concurrency does not itself grant background execution time. The application owns OS suspension, scene transitions and resource cleanup. An iOS simulator native-support slice deliberately reports unavailable guest execution; API generation and simulator linking cannot replace a signed physical-device run.
 
@@ -254,14 +287,17 @@ SDKDeviceSmoke is the physical-device acceptance source. Validate the exact fram
 
 [Source repository](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/ios/SDK/MobileLinuxRuntime.swift)
 
-- [mobile-linux-runtime/ios/SDK/MobileLinuxRuntime.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/ios/SDK/MobileLinuxRuntime.swift) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/ios/Package.swift) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/config.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/lifecycle.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/implementation.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/examples/ios/App/SDKDeviceSmoke.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/examples/ios/App/SDKDeviceSmoke.swift) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/scripts/build/prepare-ios-rootfs.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/build/prepare-ios-rootfs.sh) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/ios/SDK/MobileLinuxRuntime.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/ios/SDK/MobileLinuxRuntime.swift) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/ios/Package.swift) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/config.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/lifecycle.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/implementation.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/examples/ios/App/SDKDeviceSmoke.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/examples/ios/App/SDKDeviceSmoke.swift) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/scripts/build/prepare-ios-rootfs.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/build/prepare-ios-rootfs.sh) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/validation.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/Package.swift) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

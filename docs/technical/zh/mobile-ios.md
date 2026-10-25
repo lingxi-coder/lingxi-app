@@ -8,7 +8,7 @@
 
 该 package 为 Swift 应用暴露 MobileLinuxRuntime，为已嵌入 Rust 的应用暴露 MobileLinuxNativeSupport。完整产品链接 MobileLinuxRuntimeFFI 与 MobileLinuxNativeSupport；支持产品加入 sqlite3、resolv、z 和 c++ 链接库。
 
-仓库根目录中已提交的 Package.swift 指向 v0.1.0-rc.2 二进制资源，声明源码版本为 9e8e19a473728722183fcbfa0814398c1dd8a8ff，并包含实际 checksums。资源是否可用及发布版本的真机验收需核对该次发布。不要用占位值替换 checksums。
+仓库根目录中已提交的 Package.swift 指向 v0.1.0-rc.3 二进制资源，声明源码版本为 6b033d41a2b6b736fda1e8f996f55a4b20bd885d，并包含实际 checksums。资源是否可用及发布版本的真机验收需核对该次发布。不要用占位值替换 checksums。
 
 本地 SwiftPM 接入时，将两个构建完成的 frameworks 放到 ios/Artifacts，并把匹配的生成绑定放到 ios/Bindings，然后添加本地 ios package。缺少这些二进制产物时，本地 manifest 无法从干净检出目录解析。
 
@@ -64,6 +64,26 @@ bash scripts/build/prepare-ios-rootfs.sh \
 ```
 
 验证方式: 接口摘录
+
+<a id="ios-config-fields"></a>
+
+## 选择稳定的 Swift 配置值
+
+| 输入 | 规则 | 作用 |
+| --- | --- | --- |
+| managedRoot／appSandboxRoot | 应用私有的宿主绝对路径，创建会话前进行规范化。 | 分离可替换镜像状态与持久 guest 用户存储。 |
+| workspaceHostPath／stableWorkspaceId | 已配置的宿主目录与非空稳定 ID；ID 不能含 /，也不能为 . 或 ..。 | guest 项目路径为 /home/lingxi/lingxi/<stable-id>；修改页面标题不应改变项目身份。 |
+| rootfsArchivePath／archiveSha256 | 转换后的 fakefs ZIP 的显式路径及其摘要。 | 源 tarball 的摘要不能校验转换后的 ZIP。 |
+| rootfsPatchPath／defaultMountPath | 与 framework 构建匹配的显式资源位置。 | 原生桥接不会推断应用 bundle 或通过环境变量查找它们。 |
+| protectedHostRoots／allowedMountRoots／allowedGuestRoots | 受保护宿主目录，以及额外挂载允许使用的 host／guest 前缀。 | 额外白名单为空时，不允许额外的非工作区挂载。 |
+
+<a id="ios-session-identity"></a>
+
+## 区分内核身份与工作区会话
+
+进程级 iSH registry 将不可变配置与 workspaceHostPath、stableWorkspaceId 分开比较。因此，第二个会话可以使用另一个已配置工作区，同时保持相同内核／rootfs 身份。构建时发现不同不可变配置会返回 InvalidRequest，不会静默替换已存在内核。
+
+内核启动后，repair／reset 无法卸载它，会返回 RestartRequired。shutdown 关闭逻辑会话及其临时任务，并不会创建新进程。保存用户请求的恢复动作，由宿主主动重启，不要反复创建新的包装对象。
 
 <a id="swift-wrapper"></a>
 
@@ -183,6 +203,19 @@ func writePty(handle: MobileLinuxPtySessionHandleFfi, input: Data) async throws
 
 写入终端字节。
 
+<a id="ios-terminal-and-protocols"></a>
+
+## 在 Swift 中处理终端与子进程协议
+
+| 接口 | 输入／输出 | 生命周期细节 |
+| --- | --- | --- |
+| PTY | 生成绑定使用 Data；输出既包含文字，也包含终端控制序列。 | iSH 运行时同时支持一个 PTY；新建前关闭现有会话。 |
+| resizePty | 终端尺寸是字符单元的行列数，不是像素尺寸。 | 使用非零尺寸；关闭后丢弃旧句柄。 |
+| Raw stdio | stdout 与 stderr 使用分开的 Data 缓冲；有界读取 maxBytes 为 1...1048576。 | 不会执行 PTY 字节转换；跨读取累积协议帧，并等待 closeRawStdio。 |
+| 后台进程 | spawnBackground 返回进程句柄，不代表获得操作系统后台执行权限。 | 应用负责 scene／操作系统生命周期，停止任务时显式等待 killProcess。 |
+
+终端渲染和 UI 状态在 UI 执行器上处理，执行所有权应位于临时视图之外。取消 Swift Task 不能替代检查 SDK close／kill 的返回结果。
+
 <a id="swift-example"></a>
 
 ## 命令辅助函数
@@ -205,7 +238,7 @@ func writePty(handle: MobileLinuxPtySessionHandleFfi, input: Data) async throws
 
 ## 内核生命周期与重启
 
-一个应用进程具有一份不可变的 iSH 内核与 rootfs 配置，会话可以使用不同工作区路径和稳定 ID。修改已初始化的内核配置，或在启动后 repair/reset，可能返回 RestartRequired。宿主负责应用重启体验。
+应用进程只能使用一个不可变 iSH 内核／rootfs 配置，会话可以使用不同工作区路径与稳定 ID。构建冲突的不可变配置会返回 InvalidRequest；内核启动后修复或重置会返回 RestartRequired。应用重启体验由宿主负责。
 
 <a id="ios-end-to-end"></a>
 
@@ -224,7 +257,7 @@ func executeOnce(config: RuntimeConfig) async throws -> MobileLinuxCommandResult
     _ = try await runtime.boot()
     do {
         let request = MobileLinuxCommandRequestFfi(
-            command: "/bin/sh", args: ["-c", "printf 'ready\n'"], cwd: "/root",
+            command: "/bin/sh", args: ["-c", "printf 'ready\n'"], cwd: "/home/lingxi",
             env: [], stdin: nil, timeoutMs: 10_000, network: .disabled,
             resourceLimits: ResourceLimitsFfi(maxCpuSeconds: nil, maxMemoryMb: nil,
                 maxProcesses: nil, maxOpenFiles: nil), mounts: [])
@@ -244,7 +277,7 @@ func executeOnce(config: RuntimeConfig) async throws -> MobileLinuxCommandResult
 
 ## 进程身份与验收边界
 
-稳定工作区身份与进程不可变内核身份相互独立。切换工作区须保留内核／rootfs 配置。当 repair、reset 或配置变更返回 RestartRequired，保存所请求状态并提供明确的宿主重启动作，不要在同一进程内循环 boot。
+稳定工作区身份与进程不可变内核身份相互独立。切换工作区须保留内核／rootfs 配置。构建冲突配置返回 InvalidRequest；内核初始化后的 repair／reset 返回 RestartRequired。保存所请求的恢复状态，提供明确的宿主重启动作，不要在同一进程内循环 boot。
 
 Swift 并发本身不授予后台执行时间。应用负责系统挂起、scene 切换及资源清理。iOS 模拟器 native-support 切片会明确报告 guest 执行不可用；API 生成和模拟器链接不能替代已签名真机运行。
 
@@ -254,14 +287,17 @@ SDKDeviceSmoke 是真机验收源码。框架与资源包须作为一组验证�
 
 [源码仓库](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/ios/SDK/MobileLinuxRuntime.swift)
 
-- [mobile-linux-runtime/ios/SDK/MobileLinuxRuntime.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/ios/SDK/MobileLinuxRuntime.swift) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/ios/Package.swift) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/config.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/lifecycle.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/implementation.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/examples/ios/App/SDKDeviceSmoke.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/examples/ios/App/SDKDeviceSmoke.swift) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/scripts/build/prepare-ios-rootfs.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/build/prepare-ios-rootfs.sh) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/ios/SDK/MobileLinuxRuntime.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/ios/SDK/MobileLinuxRuntime.swift) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/ios/Package.swift) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/config.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/lifecycle.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/implementation.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/examples/ios/App/SDKDeviceSmoke.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/examples/ios/App/SDKDeviceSmoke.swift) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/scripts/build/prepare-ios-rootfs.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/build/prepare-ios-rootfs.sh) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/validation.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/Package.swift) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; 所据文件指纹 sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; 产品固定版本 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; 所据文件指纹 sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; 产品固定版本 d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

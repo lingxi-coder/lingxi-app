@@ -21,7 +21,7 @@ Canonical dispatcher identity for the tool.
 ### Tool::input_schema
 
 ```text
-fn input_schema(&self) -> &serde_json::Value
+fn input_schema(&self) -> &Utf16JsonProjection
 ```
 
 Advertise the tool’s input JSON Schema.
@@ -29,7 +29,7 @@ Advertise the tool’s input JSON Schema.
 ### Tool::validate_input
 
 ```text
-async fn validate_input(&self, input: &serde_json::Value, ctx: &ToolUseContext) -> Result<(), ValidationError>
+async fn validate_input(&self, input: &Utf16JsonProjection, ctx: &ToolUseContext) -> Result<(), ValidationError>
 ```
 
 Validate tool-specific conditions before side effects; the default implementation succeeds.
@@ -37,7 +37,7 @@ Validate tool-specific conditions before side effects; the default implementatio
 ### Tool::check_permissions
 
 ```text
-async fn check_permissions(&self, input: &serde_json::Value, ctx: &ToolUseContext) -> permission::PermissionResult
+async fn check_permissions(&self, input: &Utf16JsonProjection, ctx: &ToolUseContext) -> permission::PermissionResult
 ```
 
 Compute the invocation-specific permission decision before dispatch.
@@ -45,7 +45,7 @@ Compute the invocation-specific permission decision before dispatch.
 ### Tool::call
 
 ```text
-async fn call(&self, input: serde_json::Value, ctx: ToolUseContext, progress_tx: ToolProgressSender) -> Result<ToolCallResult, ToolError>
+async fn call(&self, input: Utf16JsonProjection, ctx: ToolUseContext, progress_tx: ToolProgressSender) -> Result<ToolCallResult, ToolError>
 ```
 
 Execute validated, permission-checked input and return the model-facing result.
@@ -120,7 +120,7 @@ Create a bounded 64-slot channel for tool-defined progress JSON.
 ### ToolProgress
 
 ```text
-pub struct ToolProgress { pub tool_use_id: lingxi_core::types::ToolUseId, pub data: serde_json::Value }
+pub struct ToolProgress { pub tool_use_id: lingxi_core::types::ToolUseId, pub data: Utf16JsonProjection }
 ```
 
 Correlate one progress payload with its originating tool use.
@@ -160,16 +160,80 @@ Verification method: Environment validation
 
 These commands are reproducible checks, not a claim that every registered tool is safe on every device. Device input, shell isolation and external service acceptance are checked in their host.
 
+<a id="custom-tool-checklist"></a>
+
+## Implement a useful custom tool
+
+A custom tool needs a complete Tool implementation and a host composition that registers it. Begin with a small operation whose input, result and side effects you can explain to both the model and the user.
+
+| Implement | Contract | Common mistake |
+| --- | --- | --- |
+| name, input_schema and input_repair_metadata | A canonical identity, source-preserving schema and explicit input-repair facts. | Registering aliases as separate capabilities or advertising an unknown repair contract. |
+| is_enabled, is_read_only and is_concurrency_safe | Visibility and scheduling facts for this actual invocation. | Marking a mutating operation read-only to avoid approval or serialization. |
+| description, prompt and max_result_size_chars | Model-facing guidance and an explicit result-size policy. | Returning unbounded raw output without considering the model-facing result. |
+| validate_input and check_permissions | Tool-specific validation and a decision before side effects. | Starting network/filesystem work during validation or permission checks. |
+| call and ToolCallResult | Execution under the dispatcher with an explicit model result. | Calling the tool body directly from a transport or provider adapter. |
+
+Current tool inputs and schemas use lingxi_core::types::utf16_json::Utf16JsonProjection. JSON is still the data format, but arbitrary external schemas and strings should retain their source projection instead of being treated as ordinary serde_json::Value.
+
+<a id="tool-results-and-errors"></a>
+
+## Return results that the model can act on
+
+ToolCallResult separates data, an optional faithful model-facing string and error state. The dispatcher can derive model text from data, or use model_content when supplied. MCP error results can be returned as accepted results with is_error set; a transport failure remains a failed call.
+
+| Failure | Meaning | Handle it by |
+| --- | --- | --- |
+| InvalidInput / ValidationError | The request does not satisfy the tool contract. | Return actionable validation detail; ask for corrected input before retrying. |
+| PermissionDenied | Policy or the user refused this invocation. | Surface the denial and let the agent choose an allowed alternative. |
+| InteractionRequired | This host cannot provide the required live interaction channel. | Supply the intended host interaction or choose a suitable noninteractive operation. |
+| Aborted / Io | Execution was interrupted or the underlying operation failed. | Keep partial state and check idempotency before reissuing a side-effecting operation. |
+| EditWithoutRead | The session has no accepted read state for the edit target. | Read the current target in the mounted session, then construct a fresh edit. |
+
+### Rust · result construction excerpt
+
+```rust
+use tool_api::{source_text_projection, ToolCallResult};
+
+fn completed_summary() -> ToolCallResult {
+    ToolCallResult::from_data(source_text_projection("Saved the report."))
+}
+```
+
+Verification method: API excerpt
+
+<a id="hooks-and-mcp"></a>
+
+## Add hooks and MCP without bypassing dispatch
+
+Use hooks to observe or control lifecycle boundaries, and MCP to add tools owned by an external server connection. These are different extension mechanisms: a hook does not replace the tool registry, and connecting a server does not authorize all its tool calls.
+
+| Need | Source-backed seam | Lifecycle rule |
+| --- | --- | --- |
+| Validate or annotate a tool invocation | HookEventType::PreToolUse / PostToolUse / PostToolUseFailure | Choose the correct event and respect its control result; do not run the side effect from an observation hook. |
+| Update user/project hooks | HookRegistry::replace_source_hooks | Replace one source bucket after validation; retain plugin and session hook ownership. |
+| Add server tools | McpRegistry::connect and ToolRegistry::register_mcp_tools | Retain connection identity for refresh/disconnect. Let the production composition coordinate connection and tool registration. |
+| Remove a server | ToolRegistry::unregister_mcp_tools | Remove only that connection partition and complete the owned transport teardown. |
+
+- [Hook and extension lifecycle](extensions-lifecycle.md)
+
+HookDefinition includes blocking, timeout, priority and source. Blocking hooks are awaited; nonblocking hooks use the asynchronous registry. A timeout or failed hook is not a successful policy decision. Configure failure behavior at the supported event boundary.
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/tool-api/src/tool_trait.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/tool_trait.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/tool-api/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/context.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/registry.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/tool-api/src/progress.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/progress.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/orchestrator/src/turn_loop/tool_dispatch.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/tool-api/src/tool_trait.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tool-api/src/tool_trait.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/tool-api/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tool-api/src/context.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tool-api/src/registry.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/tool-api/src/progress.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/tool-api/src/progress.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/orchestrator/src/turn_loop/tool_dispatch.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/core/src/host/permission_gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/core/src/host/permission_gate.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/hooks/src/definition.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/hooks/src/definition.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/hooks/src/events.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/hooks/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/hooks/src/registry.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/mcp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/mcp/src/registry.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; Referenced input fingerprint sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

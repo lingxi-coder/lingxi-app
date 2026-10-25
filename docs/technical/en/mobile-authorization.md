@@ -15,7 +15,7 @@ RuntimeConfig.authorization_file is an optional iOS value forwarded to the nativ
 ## iOS mount policy
 
 - Request mounts cannot overlap managed runtime storage or configured protectedHostRoots, including ancestors. Mounting the app sandbox root itself is rejected.
-- Workspace mounts must match workspaceHostPath and /workspace/<stableWorkspaceId>. Request mounts cannot replace persistent guest /root.
+- Workspace mounts must match workspaceHostPath and /home/lingxi/lingxi/<stableWorkspaceId>. Request mounts cannot replace persistent guest /home/lingxi or administrator /root.
 - Non-workspace mounts require both an allowedMountRoots host prefix and an allowedGuestRoots guest prefix. Empty allowlists therefore admit no extra request mounts.
 
 ### types.rs · mount record excerpt
@@ -32,6 +32,17 @@ pub struct MobileLinuxMountSpecFfi {
 Verification method: API excerpt
 
 These explicit host/guest allowlist fields are consumed by the iOS backend. Android has a different runtime configuration and validation path; do not assume iOS policy fields configure Android.
+
+<a id="mount-recipes"></a>
+
+## Mount a project without exposing runtime storage
+
+1. Choose a stable guest coordinate with guest_paths::workspace(id), and supply the matching host workspace in runtime configuration.
+2. Use MountPurpose::Workspace for the exact configured workspace pair. Additional external data needs its own mount purpose and both host and guest allowlist coverage on iOS.
+3. Reject requests that replace /home/lingxi, /root or protected managed storage. The managed-home workspace exception applies only to the exact canonical host twin of that workspace.
+4. Use the current mount snapshot for presentation translation. map_guest_path_to_host and map_host_path_to_guest are lexical longest-prefix mappings; they do not themselves authorize file writes.
+
+For host file access, resolve_guest_path additionally honors a matching mount’s read_only bit and rejects guest-owned paths without a safe host mapping. Do not fall back from an unmapped guest /home or /root path to an unrestricted native filesystem path.
 
 <a id="network-and-limits"></a>
 
@@ -64,7 +75,7 @@ Requires network_policy_enforced for policies stricter than Allowed and memory_l
 
 Pin the expected archive SHA-256 at the application boundary. The manifest is not a replacement for that trust decision. Verify archive identity, immutable inventory, symlink paths and SBOM before activation. RootfsStore.authorize_manifest_file validates immutable executable allowlist entries and rejects writable guest locations.
 
-Default guest writable roots are /root, /tmp, /var/tmp and /workspace. Keep managed runtime storage app-private and separate from externally mounted user workspaces.
+Default guest writable roots are /home/lingxi, /root, /tmp, /var/tmp and /home/lingxi/lingxi. Keep managed runtime storage app-private and separate from externally mounted user workspaces.
 
 <a id="errors"></a>
 
@@ -128,6 +139,22 @@ A requested limit could not be guaranteed or was exceeded.
 
 An iOS simulator uses an unavailable backend. App-level operating-system permissions and physical-device acceptance remain host responsibilities.
 
+<a id="recovery-decisions"></a>
+
+## Choose recovery from the typed error
+
+| Error / state | Interpretation | Recovery |
+| --- | --- | --- |
+| InvalidRequest | The concrete request or runtime identity is invalid. | Fix the indicated argument, path, mount pair, raw read size or immutable iOS configuration; retrying unchanged inputs will not help. |
+| Integrity / Corrupt | The selected image or immutable inventory failed verification. | Restore the pinned verified resource, then repair the managed rootfs. Keep project data outside image replacement. |
+| Unavailable / Unsupported | The current backend/device cannot provide execution or the selected surface. | Inspect capability.reason and choose a supported device/surface explicitly. A simulator does not become supported by retrying boot. |
+| NetworkPolicyUnavailable / ResourceLimitExceeded | A required policy cannot be guaranteed, or its resource budget was exceeded. | Report the named guarantee and keep the chosen admission policy. Ask the host to change the operation or budget deliberately. |
+| RestartRequired | The initialized iSH kernel cannot perform the requested repair/reset in this process. | Persist the recovery intent and restart the host process before modifying rootfs. |
+| Timeout or timed_out result | A configured operation budget expired; the exact return form belongs to the selected API. | Show timeout separately from a nonzero exit, await cleanup, and inspect the command budget before retrying. |
+
+- [Android diagnosis](mobile-android.md#android-troubleshooting)
+- [iOS kernel and session identity](mobile-ios.md#ios-session-identity)
+
 <a id="attribution"></a>
 
 ## Distribution notices
@@ -159,14 +186,18 @@ Request mount ancestors of protected paths, a mismatched stable workspace, missi
 
 [Source repository](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/crates/mobile-linux-api/src/mobile_linux.rs)
 
-- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/mobile_linux.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/execution.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/verification.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/verification.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/install.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/validation.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/mounts.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-android/src/runtime/mounts.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/scripts/tests/test_resource_contracts.py](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/tests/test_resource_contracts.py) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/execution.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/verification.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/verification.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/install.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/validation.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/mounts.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/mounts.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/scripts/tests/test_resource_contracts.py](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/tests/test_resource_contracts.py) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/guest_path.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/guest_path.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/user_workspace.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/user_workspace.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/lifecycle.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/config.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -14,6 +14,28 @@ RealtimeTransport provides a split connection; RealtimeCodec maps host inputs an
 | RealtimeControl | Bounded nonblocking send; synchronous QueueFull; explicit interrupt/continue/close/abort |
 | RealtimeEvents / RealtimeDriver | The host drains events while driver owns network progress and lifecycle events |
 
+<a id="realtime-application-loop"></a>
+
+## A realtime session in five steps
+
+1. Choose a provider connector and a host-compatible transport/executor. Confirm the connector capabilities admit the required audio formats and conversation features.
+2. Connect RealtimeSession, retain the control handle, and keep consuming the event handle while the driver runs. A connected socket alone does not execute the application event loop.
+3. Split microphone/audio input into small bounded frames before sending. Handle queue-full errors by pausing the producer or applying an explicit host policy.
+4. For a tool request, correlate the completed call ID, execute only a registered and authorized host tool, send the tool result, and request continuation when the connector requires it.
+5. On user interruption, use the control interruption path and synchronize local playback. On shutdown, close/abort and retain the host conversation state needed for an explicit reconnect.
+
+<a id="realtime-limits-reference"></a>
+
+## Queue and frame limits
+
+| RealtimeLimits field | Default | Meaning |
+| --- | --- | --- |
+| outbound_capacity | 8 | Bounded queued inputs; send can report backpressure |
+| event_capacity | 32 | Bounded decoded event queue; the host must continue consuming |
+| max_frame_bytes | 1 MiB | Maximum frame size, not a recommended microphone chunk size |
+
+History import, interruption and continuation are separate operations. Do not assume reconnect restores provider state, starts a response, or replays microphone bytes automatically.
+
 <a id="agent-conversation"></a>
 
 ## Native Agent audio connector
@@ -78,16 +100,16 @@ realtime and audio_realtime_contract suites use mock connections to validate que
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/realtime/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/mod.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/realtime/audio.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/audio.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/realtime/normalize.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/normalize.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/realtime/websocket.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/websocket.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/openai/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openai/realtime.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/google/live.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/google/live.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/realtime.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/audio_realtime_contract.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/audio_realtime_contract.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/provider_realtime_clients.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/provider_realtime_clients.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/realtime/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/mod.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/realtime/audio.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/audio.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/realtime/normalize.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/normalize.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/realtime/websocket.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/websocket.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/providers/openai/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/providers/openai/realtime.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/providers/google/live.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/providers/google/live.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/realtime.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/audio_realtime_contract.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/audio_realtime_contract.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/provider_realtime_clients.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/provider_realtime_clients.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

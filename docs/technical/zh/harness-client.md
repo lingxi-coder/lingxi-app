@@ -148,20 +148,80 @@ cargo test --locked -p client --features test-support
 
 验证方式: 需环境验证
 
-当前工作树协议常量为 21.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。
+本次检查的客户端协议常量为 29.0.0。连接独立客户端前，始终查看基线与宿主固定依赖版本。设备回调、断线时顺序及重放展示仍需目标宿主检查。
+
+<a id="event-consumer"></a>
+
+## 构建客户端事件消费者
+
+| 事件 | 用途 | 关联方式 |
+| --- | --- | --- |
+| SessionStarted／SessionResumed | 挂载或替换可见对话。 | session_id 属于该连接挂载的宿主。 |
+| TurnStarted | 将已准入提示词标记为活动。 | SendPrompt 回传的可选 turn_id。 |
+| TextDelta | 向当前展示追加助手文本。 | 按顺序的事件流；此 DTO 不额外提供逐增量 turn_id。 |
+| ToolUseStarted／ToolUseResult | 展示进度、输入、结果与错误状态。 | 通过 id 匹配，不用工具显示名称。 |
+| MessageComplete | 提供完整助手消息时确定最终展示。 | 使用消息标识与有序 blocks；message 可以缺省。 |
+| TurnEnded／Error | 确定宿主执行终态展示。 | 分别保留 outcome、停止原因、成本或结构化错误类别。 |
+
+不要假定每个事件都有 session_id 或 turn_id。协议将会话选择设计为连接属性。复用多个连接的传输应维护自身经过认证的连接到会话映射。
+
+<a id="permission-roundtrip"></a>
+
+## 完成权限请求与响应闭环
+
+1. 从宿主持有的 PermissionRequestSink 接收权限请求，将连接级 request_id 与展示的卡片一起保存。
+2. 展示请求操作及引擎提供的动作。遵守 suppress_always_allow_rule 与 auto_mode_prompt，客户端不能自行推导更大权限的资格。
+3. 通过持有该挂起请求的连接，发送带该 request_id 的 ApprovePermission 或 DenyPermission。
+4. 收到 PermissionRequestResolved 后移除或确定卡片状态。Approved、Denied、Cancelled 与 Expired 都是终态；过期点击可能在取消竞态中失效。
+
+### ClientCommand JSON · 单次允许
+
+```json
+{
+  "type": "approve_permission",
+  "request_id": 7,
+  "response": { "type": "allow_once" }
+}
+```
+
+验证方式: 接口摘录
+
+### AdapterPermissionGate::resolve
+
+```text
+pub async fn resolve(&self, request_id: u64, response: PermissionResponseDto, tool_name_hint: &str) -> bool
+```
+
+请求未知或已没有等待接收方时返回 false。应按保存的请求标识路由，工具名提示不能替代它。
+
+<a id="client-error-handling"></a>
+
+## 处理错误而不猜测成功
+
+| 信号 | 客户端响应 | 避免 |
+| --- | --- | --- |
+| 传输错误 | 保留部分内容、报告失败，并使用宿主重连策略。 | 假定带副作用的提示词从未执行，并自动重发。 |
+| 协议／内部错误 | 保留诊断信息，验证准确的宿主／客户端绑定版本。 | 把缺失或格式错误的事件转换成已完成消息。 |
+| MaxTurns | 说明配置的执行预算已结束，并保留对话。 | 仅因轮次结束，就报告用户任务完成。 |
+| 未来未知 enum 变体 | 遵循宿主兼容性契约，必要时展示明确的不支持状态。 | 为无法识别的载荷伪造授权或操作成功。 |
+
+- [取消、终态结果与部分输出](harness-sessions.md#cancellation-recipe)
 
 ## 源码与文档基线
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/lib.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/Cargo.toml) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/version.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/version.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/commands.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/events.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/adapter/output_stream.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/client/src/protocol/message.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/client/src/protocol/message.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/lib.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/Cargo.toml) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/protocol/version.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/version.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/commands.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/events.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/adapter/output_stream.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/protocol/message.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/message.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/adapter/turn.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/adapter/turn.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/adapter/permission_gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/adapter/permission_gate.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/client/src/protocol/permission.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/client/src/protocol/permission.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; 所据文件指纹 sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; 产品固定版本 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; 所据文件指纹 sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

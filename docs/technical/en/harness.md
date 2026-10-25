@@ -136,16 +136,56 @@ Choose desktop::build_harness for a Rust host that owns its permission surface, 
 
 Existing sdk_surface tests check the opaque SDK contract; platform composition and real provider execution require their own checks. A build result is not a live model or device acceptance result.
 
+<a id="choose-entrypoint"></a>
+
+## Choose the entry point for your application
+
+Start with the host you are building. A chat window, a batch worker and a mobile application have different input, permission and shutdown requirements, even when they use the same agent loop.
+
+| You want to | Start with | Supply from the host |
+| --- | --- | --- |
+| Embed a Rust chat or desktop UI | desktop::build_harness | DesktopConfig, OutputStream and PermissionGate |
+| Run a noninteractive job | headless::run | HeadlessHostServices, byte readers/writers, and host signals |
+| Integrate Android or iOS | mobile::build_mobile | MobileConfig, Platform, event listener and permission sink |
+| Wrap an already assembled composition | HarnessBuilder::new | SessionService and LifecycleService from the same composition |
+
+- [Platform assembly and shutdown](harness-lifecycle.md#platform-assembly)
+
+<a id="first-agent-workflow"></a>
+
+## Wire your first agent workflow
+
+1. Prepare an application workspace and model/provider configuration. Choose a composition profile and keep all direct Harness dependencies on the same source revision.
+2. Create the output destination before assembling the runtime. If your UI consumes ClientEvent DTOs, wrap one shared ClientEventSink with AdapterOutputStream.
+3. Provide a permission gate that can reach the user or apply an explicit noninteractive policy. Admit a prompt only after the host has a mounted session.
+4. Pass RunInput and a host-owned CancellationToken to session().run. Read text and tool activity from the output stream while awaiting its terminal result.
+5. Keep the returned outcome, session identity and cost snapshot. When closing the application, stop new prompts, drain active turns and then inspect shutdown().complete.
+
+- [Copy the complete service-injection example](harness.md#builder)
+- [Run, cancel and inspect a turn](harness-sessions.md)
+- [Connect a client event sink](harness-client.md#output-adapter)
+
+<a id="startup-troubleshooting"></a>
+
+## Troubleshoot startup
+
+| Symptom | Check first | Next action |
+| --- | --- | --- |
+| The builder succeeds but nothing runs | HarnessBuilder retains services; it does not submit a prompt. | Call the mounted SessionHandle::run and consume its output destination. |
+| Text never reaches the interface | OutputStream or ClientEventSink ownership and delivery. | Verify the same sink is attached before startup; keep transport writes off the execution callback. |
+| An operation waits on approval | The host permission request/response route. | Resolve the exact request_id, or supply the intended noninteractive policy before running. |
+| Shared Rust types do not match | Duplicate Git/path identities in cargo metadata. | Use the complete consumer manifest and one reviewed source identity for companion crates. |
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/lib.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/api.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/Cargo.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/Cargo.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/rust-toolchain.toml) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/runtime/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/lib.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/api.rs) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/Cargo.toml) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/Cargo.toml) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
+- [harness-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/rust-toolchain.toml) — Committed source (0e28910fd624638e6c5d1f92eca4899a7938d188)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; Referenced input fingerprint sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

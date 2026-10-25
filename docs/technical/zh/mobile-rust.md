@@ -91,6 +91,57 @@ async fn run_streaming(&self, request: LinuxCommandRequest, sink: Arc<dyn Proces
 
 通过 sink 传递 stdout 行与 stderr 字节块，并返回最终结果。
 
+<a id="command-fields"></a>
+
+## 命令参数与结果检查
+
+请求由可执行文件与参数数组组成。只有显式启动 shell，例如 command=/bin/sh、args=[-c, script]，才会解释管道、变量展开和重定向。不需要 shell 的功能应将用户选择的参数与 shell 源码分开。
+
+| 参数／结果 | 契约 | 调用方决策 |
+| --- | --- | --- |
+| command、args | command 非空；args 是独立参数，不是拼接后的命令字符串。 | 优先使用已安装的 guest 可执行文件与明确参数数组。 |
+| cwd | 可选的 guest 绝对路径，不是原生宿主路径。 | 首个命令可使用 /home/lingxi；项目命令使用已配置的 guest 项目路径。 |
+| env | Rust 使用 BTreeMap；FFI 使用 key／value 记录。环境变量名不能为空，不能含 = 或 NUL。 | 显式传入值；不要假定值内部会执行 shell 展开。 |
+| stdin、timeout_ms | 有限命令可携带文本输入；指定的 timeout 必须大于零。 | 二进制或持续输入使用 raw stdio；按操作设置合理时间预算。 |
+| network、resource_limits、mounts | 请求的策略与文件系统暴露范围；成功后仍需核对对应执行回执。 | 准入前选择所需策略；策略错误不表示可以自动改为更弱隔离后重试。 |
+| exit_code、timed_out、cancelled | 返回结果仍可能描述命令失败或中断；SDK 错误是另一条返回路径。 | 标记成功前检查这三个字段，并保留 stderr 用于诊断。 |
+
+<a id="stream-consumption"></a>
+
+## 消费实时输出而不阻塞执行
+
+ProcessStreamSink 分别提供 stdout_line(String) 与 stderr_chunk(Vec<u8>) 回调。普通 stdout 行末会被移除；stderr chunk 不保证按行或完整 UTF-8 字符划分。Android 读取器还会为异常长行发送有界 stdout 片段，因此回调不能充当通用二进制协议分帧边界。
+
+同时消费 stdout 与 stderr。先将输出送入有界宿主队列，再由 UI 执行器渲染。sink 返回 ProcessError 会停止交付，并使平台运行器清理其拥有的命令；缓慢 sink 会施加背压，而不是无限占用宿主内存。
+
+可移植 trait 提供先 run、再回放输出的默认实现。功能要求实时输出时，应检查 streaming_output 并使用所选后端的实现。收到部分输出不表示执行成功；仍须等待命令结果并检查终态字段。
+
+### 可复用流式辅助函数 · 宿主提供运行时与 sink
+
+```rust
+use mobile_linux_api::{
+    LinuxCommandRequest, LinuxCommandResult, MobileLinuxError,
+    MobileLinuxRuntime, ProcessStreamSink,
+};
+use std::sync::Arc;
+
+pub async fn stream_command(
+    runtime: &dyn MobileLinuxRuntime,
+    request: LinuxCommandRequest,
+    sink: Arc<dyn ProcessStreamSink>,
+) -> Result<LinuxCommandResult, MobileLinuxError> {
+    let network = request.network;
+    let limits = request.resource_limits;
+    let result = runtime.run_streaming(request, sink).await?;
+    result.enforcement.ensure_for(network, limits)?;
+    Ok(result)
+}
+```
+
+验证方式: 编译检查 (mobile-stream-command)
+
+此辅助函数假定宿主已拥有并启动运行时。调用方仍检查命令退出状态并负责 shutdown。
+
 <a id="task-lifecycle"></a>
 
 ## 运行时与后台任务
@@ -230,6 +281,18 @@ async fn close_raw_stdio(&self, handle: &RawStdioSessionHandle) -> Result<(), Mo
 
 FFI 版本接收 MobileLinuxCommandRequestFfi，拒绝已设置的 stdin 或 timeout_ms，并要求读取 max_bytes 在 1..1048576 范围内。通过返回的会话 ID 控制写入与生命周期。
 
+<a id="raw-read-loop"></a>
+
+## 实现 raw stdio 读取循环
+
+1. 使用明确的命令、参数和策略创建 RawStdioOpenRequest；由运行时所有者保留返回的会话句柄。
+2. 通过 write_raw_stdio 写入协议帧；协议分帧不应依赖 SDK 随后的读取分块方式。
+3. 每次读取有界数据，例如 65,536 字节。把 stdout 追加到协议解析器，同时将 stderr 送往诊断通道；两个缓冲区都不保证包含完整消息。
+4. 缓冲区为空且 closed=false 不表示 EOF。再次轮询前按宿主调度策略让出执行权或等待。仅在 closed 为 true 时结束，并处理可选 exit_code。
+5. 正常完成、协议失败或用户取消时，都要等待 close_raw_stdio。关闭操作负责进程树清理；离开页面或停止读取循环不能替代关闭。
+
+FFI raw 会话拒绝命令请求中的 stdin 与 timeout_ms，输入和生命周期由 write／close 调用管理。FFI max_bytes 范围是 1..1048576，不要用零字节读取探测就绪状态。
+
 <a id="events"></a>
 
 ## 事件与任务快照
@@ -257,6 +320,19 @@ async fn task_status(&self, task_id: &str) -> Result<Option<MobileLinuxTaskSnaps
 ```
 
 按 ID 读取任务；None 表示没有匹配任务。
+
+<a id="event-cursor"></a>
+
+## 使用事件游标与任务快照恢复监控
+
+| 操作 | 语义 | 宿主处理 |
+| --- | --- | --- |
+| read_events(None, limit) | 读取当前保留且序号大于零的事件；单批最多 512 条。 | 使用非零有界 limit，保存已处理事件中的最大 sequence。 |
+| read_events(Some(last), limit) | 返回 sequence 严格大于 last 的事件。 | 处理完一批再推进；传递游标前不要给 last 加一。 |
+| TaskStatusChanged／PtyClosed | 终态和退出细节独立于输出帧。 | 根据终态停止运行指示，不要根据 stdout 暂时安静推断结束。 |
+| list_tasks／task_status | 当前任务快照；未知 ID 的 task_status 可以返回 None。 | 用快照重建 UI；不要把 None 当作命令成功。 |
+
+RuntimeHandle.run_command_streaming 回调使用单次调用的 run-N 标识与 sequence 0。不要用回调元数据覆盖后端 read_events 游标；运行时事件缓冲区不是持久化会话存储。
 
 <a id="mounts"></a>
 
@@ -348,7 +424,7 @@ pub async fn execute_once(
     let execution = runtime.run(LinuxCommandRequest {
         command: "/bin/sh".into(),
         args: vec!["-c".into(), "printf 'ready\n'".into()],
-        cwd: Some("/root".into()),
+        cwd: Some("/home/lingxi".into()),
         env: BTreeMap::new(),
         stdin: None,
         timeout_ms: Some(10_000),
@@ -387,15 +463,18 @@ run 用于收集文本，run_streaming 用于增量 stdout 行与 stderr 字节�
 
 [源码仓库](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/crates/mobile-linux-api/src/mobile_linux.rs)
 
-- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/execution.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/runtime.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/install.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/lifecycle.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-android/src/runtime/implementation.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/implementation.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/tests.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/tests.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/execution.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/runtime.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/install.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/lifecycle.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/implementation.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/implementation.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/tests.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/tests.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/process.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/process.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/streaming.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/streaming.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/validation.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; 所据文件指纹 sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; 产品固定版本 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; 所据文件指纹 sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; 产品固定版本 d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -70,18 +70,18 @@ cargo check --locked -p tui -p tui-core
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/cli/host/src/entrypoint.rs)
 
-- [lingxi-app/apps/cli/host/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/Cargo.toml) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/entrypoint.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/entrypoint.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/argv.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/init.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/init.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/mode.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/mode.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/headless_host.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/headless_host.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/sigint.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/sigint.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/host/src/exit_codes.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/host/src/exit_codes.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [lingxi-app/apps/cli/tui/src/lib.rs](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/apps/cli/tui/src/lib.rs) — 已提交源码 (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/headless/mod.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [lingxi-app/apps/cli/host/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/Cargo.toml) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/entrypoint.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/entrypoint.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/argv.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/init.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/init.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/mode.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/mode.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/headless_host.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/headless_host.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/sigint.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/sigint.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/host/src/exit_codes.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/host/src/exit_codes.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [lingxi-app/apps/cli/tui/src/lib.rs](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/apps/cli/tui/src/lib.rs) — 已提交源码 (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/0e28910fd624638e6c5d1f92eca4899a7938d188/crates/runtime/src/headless/mod.rs) — 已提交源码 (0e28910fd624638e6c5d1f92eca4899a7938d188)
 
-- lingxi-app: HEAD 04b1b6ea095a3e35e6ab76e12d1d78966339d9dd; 所据文件指纹 sha256:e1c71b86dc9ad57148b7dad737d7ec053c7d8ce74d3e216a6b104e01638ba03f
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; 所据文件指纹 sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; 产品固定版本 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- lingxi-app: HEAD 77b17c505508c8de002408ca6dddf4c8cf5d2187; 所据文件指纹 sha256:542c75ebbb66242ca76885685c120d7913ec9ad0b9b72f6af8865d05c76a6cd0
+- harness-runtime: HEAD 0e28910fd624638e6c5d1f92eca4899a7938d188; 所据文件指纹 sha256:b6b36966a8f4c48b8d0813ea03f73cd617387ddaf2531d8254e4a5ac81f48255; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

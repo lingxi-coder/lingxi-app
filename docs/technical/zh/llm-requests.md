@@ -46,6 +46,101 @@ pub async fn complete_in(self, profile: &str, request: &ChatRequest, options: &R
 
 显式选择起始连接。complete() 则根据模型解析路由。
 
+<a id="input-field-guide"></a>
+
+## 常用输入字段与默认值
+
+| 字段 | 含义 / 默认值 | 何时设置 |
+| --- | --- | --- |
+| model | 已配置模型选择器；ChatRequest::new 必须提供 | 从所选连接选择，不猜测显示名是否可用于请求 |
+| messages | 默认为空的有序对话输入 | 首条用户消息，以及无状态重放所需的完整助手/工具轮次 |
+| max_tokens | 可选输出上限，不是输入上下文上限 | 限制响应体量；支持推理时为推理输出留出空间 |
+| tools / tool_choice | 默认无函数；ToolChoice::Auto | 声明宿主函数，并选择 Auto、Any、None 或指定 Tool |
+| output_format | 默认为 OutputFormat::Text | 需要 JSON 对象或 Schema 约束的最终答案时设置 |
+| continuation | 默认不带供应商状态引用 | 使用已完成且账户匹配的 ContinuationRef，仅发送新输入 |
+
+可选控制项由所选模型和协议校验。显式指定不支持的选项会报错，客户端不会把每个供应商特性静默转换为其他协议。
+
+<a id="request-option-guide"></a>
+
+## 应按请求传入的选项
+
+修改某次模型请求不应改变其他会话共用的全局密钥、超时或推理设置。每次应用请求传入新的 RequestOptions，复用长期存活的客户端句柄。
+
+| 选项 | 应用契约 |
+| --- | --- |
+| credential | 主连接的有效密钥；由宿主刷新与存储 |
+| fallback_credentials | 按精确备用连接名索引的密钥；不隐式复制主密钥 |
+| total_timeout | 包含响应读取的整次操作预算；流式请求需显式设置才有总时限 |
+| account_scope | 供应商续接的稳定非敏感身份；下一轮须属于同一账户 |
+| file_account_scope | 独立限定符合条件的供应商上传复用账户 |
+| mcp_authorizations | 按声明 label/name 索引的新鲜远程凭据，不写入历史 |
+
+<a id="function-tool-roundtrip"></a>
+
+## 完成一次函数工具闭环
+
+函数声明描述模型可以请求的能力，并不会执行代码。宿主校验完成的 ToolUse 结果，运行已登记实现，以原调用 ID 添加 ToolResult，再发起下一次请求。轮次上限、取消路径和权限决策由宿主负责。
+
+这个已核对源码的示例只提供无副作用的内存文章查询。传入 request 需已有用户消息，所选路由须支持严格工具输入。它拒绝未登记/带命名空间的调用和非法参数，不按模型提供的名称任意执行，也不承担通用 Agent 运行时。
+
+### 有界工具循环 · 宿主实现
+
+```rust
+use lingxi_llm_client::{LlmClient, RequestOptions};
+use lingxi_llm_client::protocol::{
+    ChatRequest, ChatResponse, ContentBlock, ConversationMessage,
+    MessageRole, StopReason, ToolChoice, ToolSpec,
+};
+
+pub async fn answer_with_lookup(
+    client: &LlmClient,
+    profile: &str,
+    mut request: ChatRequest,
+    options: &RequestOptions,
+) -> Result<ChatResponse, Box<dyn std::error::Error>> {
+    request.tools = vec![serde_json::from_str::<ToolSpec>(r#"{
+        "name":"lookup_article", "description":"Read one local help article by ID.",
+        "input_schema":{"type":"object","properties":{"article":{"type":"string"}},
+            "required":["article"],"additionalProperties":false}, "strict":true
+    }"#)?];
+    request.tool_choice = ToolChoice::Auto;
+    for _ in 0..3 {
+        let response = client.chat().complete_in(profile, &request, options).await?;
+        if !response.tool_input_issues.is_empty() {
+            return Err("tool input was not valid JSON".into());
+        }
+        if response.stop_reason != StopReason::ToolUse { return Ok(response); }
+        let mut results = Vec::new();
+        for (id, namespace, name, input) in response.message.tool_uses() {
+            if namespace.is_some() || name != "lookup_article" {
+                return Err("tool is not registered by this host".into());
+            }
+            let article = input.string_at("/article").ok_or("article must be a string")?;
+            let found = article == "quickstart";
+            results.push(ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: if found { "Use the LLM Client quickstart." } else { "Article not found." }.into(),
+                is_error: Some(!found), blocks: None, cache_reference: None, toolset_name: None,
+            });
+        }
+        if results.is_empty() { return Err("tool-use response has no callable tool".into()); }
+        request.messages.push(response.message);
+        request.messages.push(ConversationMessage {
+            role: MessageRole::User, content: results, native_options: Vec::new(),
+        });
+    }
+    Err("tool round limit reached".into())
+}
+```
+
+验证方式: 编译检查 (llm-function-tool-roundtrip)
+
+- [Harness 工具与权限](harness-tools.md)
+- [工具与输出的结构化约定](llm-controls.md)
+
+添加工具结果前保留完整助手消息：下一请求可能依赖工具 ID、供应商原生内容和推理签名。需要权限、工具调度与持久会话时，应接入 Harness。
+
 <a id="request-options"></a>
 
 ## RequestOptions
@@ -189,15 +284,19 @@ ConversationMessage 携带标准 ContentBlock 与协议标记 native_options。�
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/options.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/prepared.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/executor.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/requests.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/requests.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/llm.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/codecs/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/codecs/mod.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/transport.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/transport.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/execution_contracts.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/options.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/prepared.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/executor.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/requests.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/requests.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/llm.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/codecs/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/codecs/mod.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/transport.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/transport.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/execution_contracts.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/chat.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/chat.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/message.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/message.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/json_payload.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/json_payload.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/continuation.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/continuation.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; 所据文件指纹 sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; 产品固定版本 ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

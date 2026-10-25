@@ -15,7 +15,7 @@ RuntimeConfig.authorization_file 是可选的 iOS 配置值，会转发给原生
 ## iOS 挂载策略
 
 - 请求挂载不能与托管运行时存储或 protectedHostRoots 重叠，包括它们的祖先目录。直接挂载应用沙箱根目录会被拒绝。
-- 工作区挂载必须匹配 workspaceHostPath 和 /workspace/<stableWorkspaceId>。请求挂载不能替换持久 guest /root。
+- 工作区挂载必须匹配 workspaceHostPath 和 /home/lingxi/lingxi/<stableWorkspaceId>。请求挂载不能替换持久 guest /home/lingxi 或管理员 /root。
 - 非工作区挂载必须同时匹配 allowedMountRoots 的 host 前缀与 allowedGuestRoots 的 guest 前缀。因此，空白名单不允许额外请求挂载。
 
 ### 挂载记录摘录
@@ -32,6 +32,17 @@ pub struct MobileLinuxMountSpecFfi {
 验证方式: 接口摘录
 
 这些显式 host/guest 白名单字段由 iOS 后端消费。Android 使用不同的运行时配置与验证路径；不要假定 iOS 策略字段会配置 Android。
+
+<a id="mount-recipes"></a>
+
+## 挂载项目而不暴露运行时存储
+
+1. 使用 guest_paths::workspace(id) 选择稳定 guest 坐标，并在运行时配置中提供对应宿主工作区。
+2. 精确匹配已配置的工作区 host／guest 对时使用 MountPurpose::Workspace。额外外部数据需要独立挂载用途；iOS 还要求 host 与 guest 白名单同时覆盖。
+3. 拒绝替换 /home/lingxi、/root 或受保护托管存储的请求。托管 HOME 中工作区的例外，仅适用于该工作区精确、规范化的宿主 backing 目录。
+4. 展示时使用当前挂载快照进行路径转换。map_guest_path_to_host 与 map_host_path_to_guest 是词法最长前缀映射，本身不会授权文件写入。
+
+访问宿主文件时，resolve_guest_path 还会遵守匹配挂载的 read_only 位，并拒绝没有安全宿主映射的 guest 路径。不要把未映射的 guest /home 或 /root 路径降级为不受约束的原生文件系统路径。
 
 <a id="network-and-limits"></a>
 
@@ -64,7 +75,7 @@ pub fn ensure_for(self, network: NetworkPolicy, limits: ResourceLimits) -> Resul
 
 在应用边界固定预期压缩包 SHA-256。manifest 不能替代这一信任决策。激活前验证压缩包身份、不可变清单、符号链接路径与 SBOM。RootfsStore.authorize_manifest_file 校验不可变可执行文件白名单，并拒绝可写 guest 位置。
 
-默认 guest 可写根目录为 /root、/tmp、/var/tmp 与 /workspace。托管运行时存储应保持应用私有，并与外部挂载的用户工作区分开。
+默认 guest 可写根目录为 /home/lingxi、/root、/tmp、/var/tmp 与 /home/lingxi/lingxi。托管运行时存储应保持应用私有，并与外部挂载的用户工作区分开。
 
 <a id="errors"></a>
 
@@ -128,6 +139,22 @@ ResourceLimitExceeded(String)
 
 iOS 模拟器使用不可用后端。应用级操作系统权限与真机验收仍由宿主负责。
 
+<a id="recovery-decisions"></a>
+
+## 根据类型化错误选择恢复方式
+
+| 错误／状态 | 含义 | 恢复方式 |
+| --- | --- | --- |
+| InvalidRequest | 具体请求或运行时身份无效。 | 修正提示的参数、路径、挂载对、raw 读取大小或 iOS 不可变配置；原样重试没有帮助。 |
+| Integrity／Corrupt | 选定镜像或不可变文件清单未通过校验。 | 恢复固定的已校验资源，再修复托管 rootfs；替换镜像时保持项目数据独立。 |
+| Unavailable／Unsupported | 当前后端／设备不能执行或不支持所选接口。 | 检查 capability.reason，并显式选择受支持设备／接口。反复 boot 不会让模拟器获得 guest 执行能力。 |
+| NetworkPolicyUnavailable／ResourceLimitExceeded | 无法保证所需策略，或已超出资源预算。 | 报告具体保证，并保持既定准入策略；由宿主主动调整操作或预算。 |
+| RestartRequired | 本进程中已初始化的 iSH 内核不能执行所请求的修复／重置。 | 保存恢复意图，在修改 rootfs 前重启宿主进程。 |
+| Timeout 或 timed_out 结果 | 操作时间预算耗尽；具体返回形式取决于所选 API。 | 分别展示超时与非零退出，等待清理，并在重试前检查命令预算。 |
+
+- [Android 排查](mobile-android.md#android-troubleshooting)
+- [iOS 内核与会话身份](mobile-ios.md#ios-session-identity)
+
 <a id="attribution"></a>
 
 ## 分发声明
@@ -159,14 +186,18 @@ SDK Rust 源码保留 MIT OR Apache-2.0，部分 crate 或源码有明确例外�
 
 [源码仓库](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/crates/mobile-linux-api/src/mobile_linux.rs)
 
-- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/execution.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/verification.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/verification.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/install.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/validation.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/mounts.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-android/src/runtime/mounts.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/scripts/tests/test_resource_contracts.py](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/tests/test_resource_contracts.py) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/execution.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/verification.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/verification.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/install.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/validation.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/mounts.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/mounts.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/scripts/tests/test_resource_contracts.py](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/tests/test_resource_contracts.py) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/guest_path.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/guest_path.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/user_workspace.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/user_workspace.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/lifecycle.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/config.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; 所据文件指纹 sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; 产品固定版本 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; 所据文件指纹 sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; 产品固定版本 d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

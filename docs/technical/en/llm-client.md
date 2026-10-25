@@ -2,6 +2,68 @@
 
 A standalone Rust client for provider protocols, typed requests, streaming, images, embeddings, and model catalogs.
 
+<a id="choose-call-pattern"></a>
+
+## Choose a call pattern
+
+Start with complete_in when the application needs one final answer. Switch to stream_in when people need to see progress. Use a prepared call only when the host needs an admission checkpoint or one physical-attempt ledger; the same ChatRequest and credentials model applies to all three.
+
+| Entry | What you receive | Host action |
+| --- | --- | --- |
+| chat().complete_in | ChatResponse or LlmError | Inspect stop_reason, preserve the assistant message and usage |
+| chat().stream_in | ModelStream, then asynchronous events | Render deltas; retain native blocks; distinguish End, EOF and read errors |
+| snapshot().prepare_on | PreparedCall for one exact connection | Admit and dispatch once; capture accounting before decode; finish cleanup |
+| provider::<T>(profile) | Provider-specific resource handle | Use only that resource’s account scope and lifecycle |
+
+- [Request parameters and tool round trips](llm-requests.md)
+- [Display a streaming response](llm-streaming.md)
+
+<a id="bounded-first-call"></a>
+
+## A bounded application call
+
+This function accepts a configured profile/model and a credential from its caller. It adds an output budget and a 45-second total deadline without changing the shared client. The caller still needs to choose a model present on that profile and handle the returned stop reason.
+
+### Application helper · source-checked, not live-account acceptance
+
+```rust
+use std::time::Duration;
+use lingxi_llm_client::{LlmClient, RequestOptions};
+use lingxi_llm_client::protocol::{ChatRequest, ChatResponse, ConversationMessage, LlmError, Secret};
+
+pub async fn ask_once(
+    client: &LlmClient,
+    profile: &str,
+    model: &str,
+    credential: Secret<String>,
+    prompt: &str,
+) -> Result<ChatResponse, LlmError> {
+    let mut request = ChatRequest::new(model);
+    request.messages.push(ConversationMessage::user_text(prompt));
+    request.max_tokens = Some(512);
+    let options = RequestOptions {
+        credential: Some(credential),
+        total_timeout: Some(Duration::from_secs(45)),
+        ..Default::default()
+    };
+    client.chat().complete_in(profile, &request, &options).await
+}
+```
+
+Verification method: Compile check (llm-bounded-first-call)
+
+complete_in uses the configured high-level routing policy. If the host requires at most one generation dispatch, use prepare_on and dispatch_once rather than adding an outer retry loop.
+
+<a id="first-answer-checks"></a>
+
+## Read the answer as a result, not just text
+
+1. Read response.stop_reason before presenting a success state. A token-limit result is partial; ToolUse asks for another host-controlled step; Refusal is an explicit outcome.
+2. Use response.message.text() for display, and persist response.message itself for conversation replay. The text convenience method omits thinking and tool blocks.
+3. Record executed_profile, model, response_id and usage alongside the host’s request ID. Missing usage is unknown, not free.
+
+- [Handle failure and usage states](llm-execution-accounting.md)
+
 <a id="install"></a>
 
 ## Use the documented working tree
@@ -226,15 +288,18 @@ Verification method: Environment validation (llm-pinned-manifest)
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/04b1b6ea095a3e35e6ab76e12d1d78966339d9dd/Cargo.toml) — Committed source (04b1b6ea095a3e35e6ab76e12d1d78966339d9dd)
-- [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/Cargo.toml) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/lib.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/builder.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/live.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/live.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/llm.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/presets.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/presets.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/77b17c505508c8de002408ca6dddf4c8cf5d2187/Cargo.toml) — Committed source (77b17c505508c8de002408ca6dddf4c8cf5d2187)
+- [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/Cargo.toml) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/lib.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/builder.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/live.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/live.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/llm.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/presets.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/presets.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/chat.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/chat.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/options.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/usage_report.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- lingxi-app: HEAD 04b1b6ea095a3e35e6ab76e12d1d78966339d9dd; Referenced input fingerprint sha256:e1c71b86dc9ad57148b7dad737d7ec053c7d8ce74d3e216a6b104e01638ba03f
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- lingxi-app: HEAD 77b17c505508c8de002408ca6dddf4c8cf5d2187; Referenced input fingerprint sha256:542c75ebbb66242ca76885685c120d7913ec9ad0b9b72f6af8865d05c76a6cd0
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -16,6 +16,49 @@ RequestOptions.protocol overrides the profile default through explicitly registe
 | snapshot.prepare_on → dispatch_once | One exact connection, one generation dispatch; no automatic retry/fallback | Host admission and physical-attempt ledger |
 | Audio / images / embeddings / native mutations | Operation-specific single-dispatch and unknown-outcome contracts | Independent service lifecycle |
 
+<a id="error-action-reference"></a>
+
+## Error-to-action reference
+
+Use error.kind() for broad classification and preserve the structured ProviderResponse fields when available. HTTP status alone omits provider-specific context; a retry label alone does not establish that replay is safe.
+
+| Category | Investigate | Retry decision |
+| --- | --- | --- |
+| Authentication / PermissionDenied | Credential freshness, exact profile/account and provider entitlement | Refresh or repair in the host; do not leak a key to another endpoint |
+| RateLimited / QuotaExceeded | retry_after where reported, account limits and configured fallback triggers | Honor a host retry budget and execution-safety policy |
+| InvalidRequest / UnsupportedCapability | Input schema, options, model and concrete route capabilities | Fix the request; repeating the same invalid bytes is not recovery |
+| ContextOverflow / RequestTooLarge | Context-token limit versus serialized body byte limit | Compact/select content in the host; do not silently drop history |
+| Transport / TransportTimeout | Whether dispatch happened, any visible output, partial usage and request ID | Record uncertainty before considering another physical attempt |
+| ModelUnavailable / ProviderInternal / Overloaded | Provider diagnostics and the configured admission/fallback policy | Only the permitted trigger and safe replay path may switch routes |
+
+<a id="attempt-record-fields"></a>
+
+## What to keep in an attempt record
+
+| Record | Purpose |
+| --- | --- |
+| Host request/attempt identity and timestamps | Correlate one user action with every physical dispatch |
+| Selected/executed profile, model and frozen pricing | Explain routing and calculate against the actual captured configuration |
+| Provider request/response IDs when reported | Reconcile errors and uncertain outcomes with provider evidence |
+| UsageReport and InferenceReport before decode | Retain measurements even when application JSON/tool validation fails |
+| Terminal stop reason, read failure or cancellation | Distinguish partial output from a completed answer |
+| Resource cleanup / reconciliation state | Track files or cloud jobs that may outlive this attempt |
+
+Store account identities as non-secret scope IDs. Do not log credentials, request-local MCP authorizations or complete provider bodies that contain sensitive user content merely to obtain diagnostics.
+
+<a id="usage-state-reference"></a>
+
+## Missing, partial and complete usage
+
+Input, output, cache-read and cache-write buckets are normalized to avoid double counting. Reasoning tokens are part of output tokens, and one-hour cache-write tokens are part of cache-write tokens; do not add those subsets again. Provider-reported cost, catalog estimates and account invoices are different evidence.
+
+| UsageState | How to present it |
+| --- | --- |
+| Missing | No authoritative measurement was observed; display unknown |
+| Partial | Keep measured fields but label the total incomplete |
+| Complete | Use the consistent reported usage and actual inference facts for supported estimates |
+| Invalid | Retain diagnostic evidence but reject it as a valid complete total |
+
 <a id="failure-classes"></a>
 
 ## Errors and host retry decisions
@@ -98,22 +141,22 @@ execution_contracts, failover and pricing tests validate local behavior with moc
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/executor.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/resolve.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/prepared.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/route.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/route.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/options.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/client/frozen_pricing.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/usage_report.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/provider.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/protocol/llm.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/account/service.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/account/service.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/account/types.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/account/types.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/account/execution.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/account/execution.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/execution_contracts.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/failover.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/failover.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/server_fallback_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/server_fallback_pricing.rs) — Committed source (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/executor.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/resolve.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/prepared.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/route.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/route.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/options.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/client/frozen_pricing.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/usage_report.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/provider.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/protocol/llm.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/account/service.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/account/service.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/account/types.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/account/types.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/account/execution.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/account/execution.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/execution_contracts.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/failover.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/failover.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/server_fallback_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/server_fallback_pricing.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; Referenced input fingerprint sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; Product pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

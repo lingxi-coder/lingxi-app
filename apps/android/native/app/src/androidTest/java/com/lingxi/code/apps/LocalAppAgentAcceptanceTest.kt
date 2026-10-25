@@ -32,6 +32,20 @@ class LocalAppAgentAcceptanceTest {
         node?.let(::appendNode)
     }
 
+    private fun findAccessibilityNodeByText(
+        node: android.view.accessibility.AccessibilityNodeInfo?,
+        text: String,
+    ): android.view.accessibility.AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.text?.toString()?.contains(text) == true || node.contentDescription?.toString()?.contains(text) == true) {
+            return node
+        }
+        for (index in 0 until node.childCount) {
+            findAccessibilityNodeByText(node.getChild(index), text)?.let { return it }
+        }
+        return null
+    }
+
     private suspend fun browserCall(
         launch: AppLaunch,
         method: String,
@@ -114,6 +128,40 @@ class LocalAppAgentAcceptanceTest {
             delay(250)
         }
         error("unreachable")
+    }
+
+    /** Browser-side proof is an empty, app-owned Chat created only after page assertions and DOM update. */
+    private suspend fun awaitBrowserReport(launch: AppLaunch, nonce: String, runId: String): JSONObject =
+        withTimeout(30_000) {
+            val successTitle = "agui:p:$nonce:$runId"
+            val errorPrefix = "agui:e:$nonce:$runId:"
+            while (true) {
+                val chats = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONArray
+                val rows = (0 until chats.length()).map { chats.getJSONObject(it) }
+                val failures = rows.filter { it.optString("title").startsWith(errorPrefix) }
+                check(failures.size <= 1) { "Multiple browser-side error markers for runId=$runId" }
+                failures.singleOrNull()?.let { failure ->
+                    val parts = failure.getString("title").removePrefix(errorPrefix).split(':')
+                    error("Browser-side acceptance failed: phase=${parts.getOrNull(0) ?: "?"}, code=${parts.getOrNull(1) ?: "?"}")
+                }
+                val matches = rows.filter { it.optString("title") == successTitle }
+                check(matches.size <= 1) { "Duplicate browser-side acceptance marker for runId=$runId" }
+                matches.singleOrNull()?.let { return@withTimeout it }
+                delay(250)
+            }
+            error("Browser-side acceptance report wait ended unexpectedly")
+        }
+
+    private suspend fun failOnBrowserErrorReport(launch: AppLaunch, nonce: String, runId: String) {
+        val errorPrefix = "agui:e:$nonce:$runId:"
+        val chats = agentCall(launch, "agent.chats.list", JSONObject().put("limit", 50)) as JSONArray
+        val failures = (0 until chats.length()).map { chats.getJSONObject(it) }
+            .filter { it.optString("title").startsWith(errorPrefix) }
+        check(failures.size <= 1) { "Multiple browser-side error markers for runId=$runId" }
+        failures.singleOrNull()?.let { failure ->
+            val parts = failure.getString("title").removePrefix(errorPrefix).split(':')
+            error("Browser-side acceptance failed: phase=${parts.getOrNull(0) ?: "?"}, code=${parts.getOrNull(1) ?: "?"}")
+        }
     }
 
     private suspend fun configure(apps: UnifiedLocalApps, id: String, photo: Boolean = true, tools: Set<String> = emptySet()): JSONObject {
@@ -201,9 +249,14 @@ class LocalAppAgentAcceptanceTest {
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val photo = File(context.filesDir, "local-app-acceptance-fixtures/test-photo.jpg").readBytes()
+        val photoSha256 = java.security.MessageDigest.getInstance("SHA-256").digest(photo)
+            .joinToString("") { "%02x".format(it) }
+        assertEquals("File acceptance uses only the approved public image fixture",
+            "bfbaf6828607d9b94fb54056877497ac32926aa75c09de4abd61bc05ba24e2a7", photoSha256)
         val imageBase64 = Base64.encodeToString(photo, Base64.NO_WRAP)
         val runId = "external-file-" + UUID.randomUUID()
         val threadId = "external-thread-" + UUID.randomUUID()
+        val reportNonce = UUID.randomUUID().toString().replace("-", "").take(8)
         val quotedImage = JSONObject.quote(imageBase64)
         val page = """
             <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Agent acceptance</title>
@@ -212,6 +265,7 @@ class LocalAppAgentAcceptanceTest {
             <script type="module">
             (async()=>{
               const output=document.getElementById('result');
+              let phase='B';
               const bootstrap={
                 importMode:'dynamic-esm',sdkImport:'/__local_app_sdk.js',
                 scriptOrder:['inline type=module','dynamic import /__local_app_sdk.js'],
@@ -219,10 +273,16 @@ class LocalAppAgentAcceptanceTest {
               };
               try {
                 await import('/__local_app_sdk.js');
+                phase='S';
                 bootstrap.globals={localApp:typeof window.localApp,bridge:typeof window.__lingxiLocalAppBridge,agui:typeof window.LingxiLocalAppAGUI,configuration:typeof window.__LINGXI_APP_CONFIGURATION__};
                 const bytes=Uint8Array.from(atob($quotedImage),c=>c.charCodeAt(0));
                 const file=new File([bytes],'acceptance-photo.jpg',{type:'image/jpeg'});
                 const part=await localApp.agent.file(file);
+                phase='F';
+                if(part.type!=='image'||part.source?.type!=='data'||part.source?.mimeType!=='image/jpeg'||
+                   part.metadata?.['com.lingxi.localApp']?.filename!=='acceptance-photo.jpg'){
+                  throw new Error('Invalid AG-UI File ContentPart.');
+                }
                 const client=localApp.agent.createClient({threadId:'$threadId'});
                 const message={id:'message-$runId',role:'user',content:[
                     {type:'text',text:'Identify the visible food in English in food and one visible detail in detail. Use the result tool; no business tools.'},
@@ -236,8 +296,14 @@ class LocalAppAgentAcceptanceTest {
                     filename:item.metadata?.['com.lingxi.localApp']?.filename||null
                   }))
                 };
+                if(inputSummary.messageCount!==1||inputSummary.partTypes.join(',')!=='text,image'||
+                   inputSummary.parts[1].sourceType!=='data'||inputSummary.parts[1].mimeType!=='image/jpeg'||
+                   inputSummary.parts[1].filename!=='acceptance-photo.jpg'){
+                  throw new Error('Invalid File RunAgentInput ContentPart summary.');
+                }
                 client.addMessage(message);
                 const callbacks=[];
+                phase='R';
                 const run=await client.runAgent({
                   runId:'$runId',
                   forwardedProps:{'com.lingxi.localApp':{
@@ -253,15 +319,31 @@ class LocalAppAgentAcceptanceTest {
                 }
                 const storedTask=await localApp.agent.tasks.get('$runId');
                 if(storedTask.threadId!=='$threadId') throw new Error('Task thread does not match the submitted AG-UI input.');
+                phase='P';
                 const reconnect=localApp.agent.createClient({threadId:storedTask.threadId});
                 const replayCallbacks=[];
                 const replay=await reconnect.connectAgent({runId:'$runId'},{onEvent({event}){replayCallbacks.push(event.type);}});
                 if(!replay.result||!Array.isArray(replay.newMessages)||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'){
                   throw new Error('AG-UI reconnect did not replay the recorded terminal event.');
                 }
-                output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',bootstrap,inputSummary,runId:'$runId',run,callbacks,replay,replayCallbacks});
+                if(replay.result.food!==run.result.food||replay.result.detail!==run.result.detail||
+                   replayCallbacks[0]!=='RUN_STARTED'||replayCallbacks.includes('RUN_ERROR')){
+                  throw new Error('AG-UI replay result or callback order did not match the completed run.');
+                }
+                const eventPage=await localApp.agent.tasks.events({runId:'$runId'});
+                if(eventPage.events.filter(event=>event.type==='RUN_STARTED').length!==1||
+                   eventPage.events[eventPage.events.length-1]?.type!=='RUN_FINISHED'){
+                  throw new Error('Read-only reconnect started a duplicate run or missed RUN_FINISHED.');
+                }
+                phase='V';
+                output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',bootstrap,inputSummary,runId:'$runId',run,callbacks,replay,replayCallbacks,eventTypes:eventPage.events.map(event=>event.type)});
+                await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+                await localApp.agent.chats.create({title:'agui:p:$reportNonce:$runId'});
               } catch(error) {
-                output.textContent='AGUI_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,error:String(error),code:error.code||null});
+                const code=String(error&&typeof error.code==='string'?error.code:'browser_error').toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,8)||'error';
+                output.textContent='AGUI_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,phase,code});
+                await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+                try { if(window.localApp?.agent?.chats?.create) await localApp.agent.chats.create({title:'agui:e:$reportNonce:$runId:'+phase+':'+code}); } catch(_reportError) {}
               }
             })();
             </script>
@@ -282,8 +364,7 @@ class LocalAppAgentAcceptanceTest {
                         val root = instrumentation.uiAutomation.rootInActiveWindow
                         browserPackage = root?.packageName?.toString().orEmpty()
                         if (!consentClickAttempted && root != null) {
-                            var action = root.findAccessibilityNodeInfosByText("允许并打开浏览器")
-                                ?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                            var action = findAccessibilityNodeByText(root, "允许并打开浏览器")
                             consentButtonFound = action != null
                             while (action != null && !action.isClickable) action = action.parent
                             if (action != null) {
@@ -303,7 +384,7 @@ class LocalAppAgentAcceptanceTest {
                 assertTrue("Foreground stop/view notification exists before browser handoff", LocalAppProcessService.notificationReady(app.id))
                 val launch = apps.start(app.id)
                 var listed: JSONObject? = null
-                withTimeout(180_000) {
+                withTimeout(30_000) {
                     while (true) {
                         var cursor: String? = null
                         var match: JSONObject? = null
@@ -323,6 +404,7 @@ class LocalAppAgentAcceptanceTest {
                         val pageText = visibleUiText(instrumentation.uiAutomation.rootInActiveWindow)
                         assertFalse("Browser page failed before submitting an AG-UI run: $pageText",
                             pageText.contains("AGUI_PAGE_DIAGNOSTIC"))
+                        failOnBrowserErrorReport(launch, reportNonce, runId)
                         delay(500)
                     }
                 }
@@ -367,41 +449,10 @@ class LocalAppAgentAcceptanceTest {
                 assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
                 assertEquals("Reconnecting must not start a second run", 1,
                     (0 until events.length()).count { events.getJSONObject(it).optString("type") == "RUN_STARTED" })
-                var browserResult: JSONObject? = null
-                withTimeout(30_000) {
-                    while (true) {
-                        val root = instrumentation.uiAutomation.rootInActiveWindow
-                        val callback = root?.findAccessibilityNodeInfosByText("CALLBACK_EVENT_ORDER_PASS")
-                            ?.firstOrNull { it.text?.toString()?.contains("CALLBACK_EVENT_ORDER_PASS") == true }
-                        if (callback != null) {
-                            val callbackText = callback.text.toString()
-                            val parsed = runCatching { JSONObject(callbackText) }.getOrNull()
-                            checkNotNull(parsed) { "Browser success output is not JSON: $callbackText" }
-                            browserResult = parsed
-                            break
-                        }
-                        delay(250)
-                    }
-                }
-                val inputSummary = checkNotNull(browserResult).getJSONObject("inputSummary")
-                assertEquals(threadId, inputSummary.getString("threadId"))
-                assertEquals(runId, inputSummary.getString("runId"))
-                assertEquals(1, inputSummary.getInt("messageCount"))
-                assertEquals(JSONArray().put("text").put("image").toString(), inputSummary.getJSONArray("partTypes").toString())
-                val summaryParts = inputSummary.getJSONArray("parts")
-                assertEquals("text", summaryParts.getJSONObject(0).getString("type"))
-                assertEquals("image", summaryParts.getJSONObject(1).getString("type"))
-                assertEquals("data", summaryParts.getJSONObject(1).getString("sourceType"))
-                assertEquals("image/jpeg", summaryParts.getJSONObject(1).getString("mimeType"))
-                assertEquals("acceptance-photo.jpg", summaryParts.getJSONObject(1).getString("filename"))
-                val browserBootstrap = checkNotNull(browserResult).getJSONObject("bootstrap")
-                assertEquals("dynamic-esm", browserBootstrap.getString("importMode"))
-                assertEquals("/__local_app_sdk.js", browserBootstrap.getString("sdkImport"))
-                assertEquals("object", browserBootstrap.getJSONObject("globals").getString("localApp"))
-                assertEquals("module", browserBootstrap.getJSONArray("scriptTypes").getString(0))
+                val browserMarker = awaitBrowserReport(launch, reportNonce, runId)
                 File(context.filesDir, "external-browser-agent-acceptance.json").writeText(
                     JSONObject().put("browserPackage", browserPackage).put("appId", app.id).put("task", task)
-                        .put("page", checkNotNull(browserResult)).toString(2))
+                        .put("browserMarkerTitle", browserMarker.getString("title")).toString(2))
                 instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
                     File(context.filesDir, "external-browser-agent-acceptance.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
                     bitmap.recycle()
@@ -415,6 +466,7 @@ class LocalAppAgentAcceptanceTest {
         val apps = UnifiedLocalApps.get(context)
         val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
         val runId = "external-chat-" + UUID.randomUUID()
+        val reportNonce = UUID.randomUUID().toString().replace("-", "").take(8)
         val page = """
             <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Chat acceptance</title>
             <style>#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
@@ -422,9 +474,11 @@ class LocalAppAgentAcceptanceTest {
             <script type="module">
             (async()=>{
               const output=document.getElementById('result');
+              let phase='B';
               const bootstrap={importMode:'dynamic-esm',sdkImport:'/__local_app_sdk.js'};
               try {
                 await import('/__local_app_sdk.js');
+                phase='S';
                 bootstrap.localAppType=typeof window.localApp;
                 const chat=await localApp.agent.chats.create({title:'AG-UI Chat acceptance $runId'});
                 const isolated=await localApp.agent.chats.create({title:'AG-UI Chat isolation $runId'});
@@ -437,33 +491,55 @@ class LocalAppAgentAcceptanceTest {
                     tools:[],skills:[],maxTurns:8,timeoutMs:180000
                   }}
                 };
+                phase='R';
                 const result=await chat.send(input);
                 if(!result.result||result.result.answer!=='ORBIT'||!Array.isArray(result.newMessages)){
                   throw new Error('Persistent Chat did not return the structured AG-UI result.');
                 }
                 const task=await localApp.agent.tasks.get('$runId');
+                phase='H';
                 const history=await chat.history({limit:50});
+                phase='O';
                 const reopened=await localApp.agent.chats.open(chat.id);
+                phase='Q';
                 const reopenedHistory=await reopened.history({limit:50});
+                phase='I';
                 const isolatedHistory=await isolated.history({limit:50});
+                phase='L';
                 const listed=await localApp.agent.chats.list({limit:50});
+                phase='E';
                 const eventPage=await localApp.agent.tasks.events({runId:'$runId'});
+                phase='P';
+                const reconnect=localApp.agent.createClient({threadId:task.threadId});
+                const replayCallbacks=[];
+                const replay=await reconnect.connectAgent({runId:'$runId'},{onEvent({event}){replayCallbacks.push(event.type);}});
                 const summary={
                   chatId:chat.id,runId:'$runId',threadId:input.threadId,taskThreadId:task.threadId,taskState:task.state,
                   result:result.result,historyRoles:history.messages.map(message=>message.role),
                   historyIds:history.messages.map(message=>message.id),reopenedIds:reopenedHistory.messages.map(message=>message.id),
                   isolatedMessageCount:isolatedHistory.messages.length,
                   chatListed:Array.isArray(listed)&&listed.some(item=>item.chatId===chat.id),
-                  eventTypes:eventPage.events.map(event=>event.type)
+                  eventTypes:eventPage.events.map(event=>event.type),replayCallbacks
                 };
                 if(task.threadId!==chat.id||task.state!=='succeeded'||history.messages.length<2||
                    reopenedHistory.messages.length!==history.messages.length||isolatedHistory.messages.length!==0||
-                   !summary.chatListed||!eventPage.events.some(event=>event.type==='RUN_FINISHED')){
+                   !summary.chatListed||!eventPage.events.some(event=>event.type==='RUN_FINISHED')||
+                   eventPage.events.filter(event=>event.type==='RUN_STARTED').length!==1||
+                   !replay.result||replay.result.answer!=='ORBIT'||!Array.isArray(replay.newMessages)||
+                   replayCallbacks[0]!=='RUN_STARTED'||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'||
+                   replayCallbacks.includes('RUN_ERROR')){
                   throw new Error('Persistent Chat history, isolation, or task correlation failed: '+JSON.stringify(summary));
                 }
-                output.textContent=JSON.stringify({acceptance:'CHAT_FLOW_PASS',bootstrap,summary});
+                phase='V';
+                output.textContent=JSON.stringify({acceptance:'CHAT_FLOW_PASS',bootstrap,summary,replay});
+                await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+                phase='M';
+                await localApp.agent.chats.create({title:'agui:p:$reportNonce:$runId'});
               } catch(error) {
-                output.textContent='CHAT_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,error:String(error),code:error.code||null});
+                const code=String(error&&typeof error.code==='string'?error.code:'browser_error').toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,8)||'error';
+                output.textContent='CHAT_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,phase,code});
+                await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+                try { if(window.localApp?.agent?.chats?.create) await localApp.agent.chats.create({title:'agui:e:$reportNonce:$runId:'+phase+':'+code}); } catch(_reportError) {}
               }
             })();
             </script>
@@ -484,8 +560,7 @@ class LocalAppAgentAcceptanceTest {
                         val root = instrumentation.uiAutomation.rootInActiveWindow
                         browserPackage = root?.packageName?.toString().orEmpty()
                         if (!consentClickAttempted && root != null) {
-                            var action = root.findAccessibilityNodeInfosByText("允许并打开浏览器")
-                                ?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                            var action = findAccessibilityNodeByText(root, "允许并打开浏览器")
                             consentButtonFound = action != null
                             while (action != null && !action.isClickable) action = action.parent
                             if (action != null) {
@@ -505,7 +580,7 @@ class LocalAppAgentAcceptanceTest {
                 assertTrue(LocalAppProcessService.notificationReady(app.id))
                 val launch = apps.start(app.id)
                 var listedTask: JSONObject? = null
-                withTimeout(180_000) {
+                withTimeout(30_000) {
                     while (true) {
                         var cursor: String? = null
                         var match: JSONObject? = null
@@ -523,6 +598,7 @@ class LocalAppAgentAcceptanceTest {
                         val pageText = visibleUiText(instrumentation.uiAutomation.rootInActiveWindow)
                         assertFalse("Browser Chat failed before submitting an AG-UI run: $pageText",
                             pageText.contains("CHAT_PAGE_DIAGNOSTIC"))
+                        failOnBrowserErrorReport(launch, reportNonce, runId)
                         delay(500)
                     }
                 }
@@ -575,12 +651,14 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals("The isolated browser-created Chat stays empty", 0, isolatedMessages.length())
                 assertEquals("Only the browser-created run was started", 1,
                     (0 until events.length()).count { events.getJSONObject(it).optString("type") == "RUN_STARTED" })
+                val browserMarker = awaitBrowserReport(launch, reportNonce, runId)
 
                 val evidence = JSONObject()
-                    .put("acceptance", "CHAT_FLOW_HOST_READBACK_PASS")
+                    .put("acceptance", "CHAT_FLOW_PASS")
                     .put("browserPackage", browserPackage)
                     .put("appId", app.id)
                     .put("runId", runId)
+                    .put("browserMarkerTitle", browserMarker.getString("title"))
                     .put("chatId", chatId)
                     .put("isolatedChatId", isolatedChat.getString("chatId"))
                     .put("taskState", task.getString("state"))

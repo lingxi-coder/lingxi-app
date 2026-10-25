@@ -1,10 +1,5 @@
 package com.lingxi.code.settings
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,26 +12,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -46,12 +36,9 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
-import com.lingxi.code.components.ModelDetailsDialog
-import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.mix
 import com.lingxi.code.components.tint
-import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.ProviderKind
@@ -125,9 +112,10 @@ fun ProviderListPage(
 ) {
     val t = LingXiTheme.palette
     val arr = state.providers(kind)
+    var advancedExpanded by remember(kind) { mutableStateOf(false) }
 
     Column(Modifier.fillMaxWidth()) {
-        Blurb(kind.blurb())
+        if (kind != ProviderKind.Llm) Blurb(kind.blurb())
 
         SettingsSection(label = stringResource(R.string.settings_provider_added_count_fmt, arr.size)) {
             if (arr.isEmpty()) {
@@ -180,44 +168,57 @@ fun ProviderListPage(
                     }
                 }
             }
-            Column(Modifier.padding(top = 22.dp)) {
-                SettingsSection(
+            SettingsSection {
+                SettingsRow(
                     label = stringResource(R.string.settings_section_advanced),
-                ) {
-                    SettingsRow(
-                        icon = LXIconName.Workflow,
-                        iconColor = t.accent,
-                        label = stringResource(R.string.settings_provider_vision_delegation),
-                        sub = stringResource(R.string.settings_provider_vision_delegation_hint),
-                        chevron = false,
-                        isLast = true,
-                        trailing = {
-                            com.lingxi.code.components.LXToggle(
-                                checked = state.visionDelegationEnabled,
-                                onCheckedChange = { store.setVisionDelegationEnabled(it) },
-                            )
-                        },
-                    )
-                }
+                    chevron = false,
+                    isLast = true,
+                    trailing = { LXIcon(if (advancedExpanded) LXIconName.Chevron else LXIconName.ChevronR) },
+                    onTap = { advancedExpanded = !advancedExpanded },
+                    modifier = Modifier.testTag("provider.list.advanced"),
+                )
             }
-            Column(Modifier.padding(top = 22.dp)) {
-                SettingsSection {
-                    val pages = listOf(
-                        SettingsRoutes.CUSTOM_PROVIDERS to "Custom providers & routing",
-                        SettingsRoutes.providerList(ProviderKind.Search.name) to "Web search providers",
-                        SettingsRoutes.providerList(ProviderKind.Fetch.name) to "Web fetch providers",
-                        SettingsRoutes.CREDENTIALS to "Provider credentials",
-                    )
-                    pages.forEachIndexed { index, (route, title) ->
+            if (advancedExpanded) {
+                Column(Modifier.padding(top = 22.dp)) {
+                    SettingsSection(
+                        label = stringResource(R.string.settings_section_advanced),
+                    ) {
                         SettingsRow(
-                            label = settingsLabel(title),
-                            isLast = index == pages.lastIndex,
-                            modifier = Modifier.testTag(UiTags.settingsPage(route)),
-                            onTap = { onNavigate(route) },
+                            icon = LXIconName.Workflow,
+                            iconColor = t.accent,
+                            label = stringResource(R.string.settings_provider_vision_delegation),
+                            sub = stringResource(R.string.settings_provider_vision_delegation_hint),
+                            chevron = false,
+                            isLast = true,
+                            trailing = {
+                                com.lingxi.code.components.LXToggle(
+                                    checked = state.visionDelegationEnabled,
+                                    onCheckedChange = { store.setVisionDelegationEnabled(it) },
+                                )
+                            },
                         )
                     }
                 }
+                Column(Modifier.padding(top = 22.dp)) {
+                    SettingsSection {
+                        val pages = listOf(
+                            SettingsRoutes.CUSTOM_PROVIDERS to "Custom providers & routing",
+                            SettingsRoutes.providerList(ProviderKind.Search.name) to "Web search providers",
+                            SettingsRoutes.providerList(ProviderKind.Fetch.name) to "Web fetch providers",
+                            SettingsRoutes.CREDENTIALS to "Provider credentials",
+                        )
+                        pages.forEachIndexed { index, (route, title) ->
+                            SettingsRow(
+                                label = settingsLabel(title),
+                                isLast = index == pages.lastIndex,
+                                modifier = Modifier.testTag(UiTags.settingsPage(route)),
+                                onTap = { onNavigate(route) },
+                            )
+                        }
+                    }
+                }
             }
+
         }
     }
 }
@@ -413,7 +414,11 @@ fun ProviderEditPage(
         return
     }
     val preset = kind.preset(of = editing)
-    var showKey by remember { mutableStateOf(false) }
+    var showKey by remember(providerId) { mutableStateOf(false) }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    var modelSheet by remember(providerId) { mutableStateOf<String?>(null) }
+    var showAdvanced by remember(providerId) { mutableStateOf(false) }
     var keyDraft by remember(providerId) { mutableStateOf("") }
     var removalMessage by remember(providerId) { mutableStateOf<String?>(null) }
     var removing by remember(providerId) { mutableStateOf(false) }
@@ -421,8 +426,6 @@ fun ProviderEditPage(
     var credentialBusy by remember(providerId) { mutableStateOf(false) }
     var connectionBusy by remember(providerId) { mutableStateOf(false) }
     var connectionMessage by remember(providerId) { mutableStateOf<String?>(null) }
-    var selectedModelDetails by remember(providerId) { mutableStateOf<CatalogModelDetails?>(null) }
-    val context = LocalContext.current
     val resources = LocalResources.current
     var credentialMessage by remember(providerId, editing.credentialConfigured) {
         mutableStateOf(
@@ -450,6 +453,53 @@ fun ProviderEditPage(
     )
 
     Column(Modifier.fillMaxWidth()) {
+        FieldLabel(stringResource(R.string.settings_display_name))
+        SettingsField(
+            value = editing.name,
+            onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(name = v) } },
+            mono = false,
+            modifier = Modifier.padding(bottom = 14.dp),
+        )
+
+        FieldLabel(stringResource(R.string.settings_api_url))
+        SettingsField(
+            value = editing.url,
+            onValueChange = { v ->
+                connectionMessage = null
+                store.updateProvider(kind, providerId) { it.copy(url = v) }
+                store.markProviderConnectionUnverified(kind, providerId)
+            },
+            placeholder = preset.defaultUrl,
+        )
+        FieldHint(stringResource(R.string.settings_provider_url_hint_fmt, preset.defaultUrl.ifEmpty { "—" }))
+
+        FieldLabel(stringResource(R.string.settings_provider_api_key))
+        KeyField(
+            value = keyDraft,
+            placeholder = if (editing.credentialConfigured) {
+                preset.keyPrefix + stringResource(R.string.settings_provider_key_saved_placeholder)
+            } else {
+                preset.keyPrefix + "..."
+            },
+            show = showKey,
+            onToggleShow = { showKey = !showKey },
+            onValueChange = { v ->
+                if (v != keyDraft) {
+                    connectionMessage = null
+                    store.markProviderConnectionUnverified(kind, providerId)
+                }
+                keyDraft = v
+            },
+        )
+        FieldHint(
+            when {
+                kind != ProviderKind.Llm -> stringResource(R.string.settings_provider_hint_local_only)
+                !builtInSupported -> stringResource(R.string.settings_provider_hint_not_in_catalog)
+                editing.credentialConfigured -> stringResource(R.string.settings_provider_hint_overwrite)
+                else -> stringResource(R.string.settings_provider_hint_secure_store)
+            },
+        )
+
         StatusBanner(
             status = editing.status,
             message = connectionMessage,
@@ -477,53 +527,6 @@ fun ProviderEditPage(
                 connectionBusy = false
             }
         }
-
-        FieldLabel(stringResource(R.string.settings_display_name))
-        SettingsField(
-            value = editing.name,
-            onValueChange = { v -> store.updateProvider(kind, providerId) { it.copy(name = v) } },
-            mono = false,
-            modifier = Modifier.padding(bottom = 14.dp),
-        )
-
-        FieldLabel(stringResource(R.string.settings_api_url))
-        SettingsField(
-            value = editing.url,
-            onValueChange = { v ->
-                connectionMessage = null
-                store.updateProvider(kind, providerId) { it.copy(url = v) }
-                store.markProviderConnectionUnverified(kind, providerId)
-            },
-            placeholder = preset.defaultUrl,
-        )
-        FieldHint(stringResource(R.string.settings_provider_url_hint_fmt, preset.defaultUrl.ifEmpty { "—" }))
-
-        FieldLabel("API Key")
-        KeyField(
-            value = keyDraft,
-            placeholder = if (editing.credentialConfigured) {
-                preset.keyPrefix + stringResource(R.string.settings_provider_key_saved_placeholder)
-            } else {
-                preset.keyPrefix + "..."
-            },
-            show = showKey,
-            onToggleShow = { showKey = !showKey },
-            onValueChange = { v ->
-                if (v != keyDraft) {
-                    connectionMessage = null
-                    store.markProviderConnectionUnverified(kind, providerId)
-                }
-                keyDraft = v
-            },
-        )
-        FieldHint(
-            when {
-                kind != ProviderKind.Llm -> stringResource(R.string.settings_provider_hint_local_only)
-                !builtInSupported -> stringResource(R.string.settings_provider_hint_not_in_catalog)
-                editing.credentialConfigured -> stringResource(R.string.settings_provider_hint_overwrite)
-                else -> stringResource(R.string.settings_provider_hint_secure_store)
-            },
-        )
 
         if (kind == ProviderKind.Llm) {
             SettingsSection(
@@ -587,278 +590,36 @@ fun ProviderEditPage(
         }
 
         if (kind == ProviderKind.Llm) {
-            ProviderConnectionsSection(
-                provider = editing,
-                presetDefaultUrl = preset.defaultUrl,
-                onChange = { next ->
-                    connectionMessage = null
-                    store.updateProvider(kind, providerId) { next }
-                    store.markProviderConnectionUnverified(kind, providerId)
-                },
-            )
-        }
-
-        if (kind == ProviderKind.Llm) {
-            if (catalogModels.isNotEmpty()) {
-                ModelPicker(
-                    models = catalogModels,
-                    selected = editing.model,
-                    accent = preset.color,
-                    onSelect = { m ->
-                        connectionMessage = null
-                        store.updateProvider(kind, providerId) { it.copy(model = m) }
-                        store.markProviderConnectionUnverified(kind, providerId)
-                    },
-                    onShowDetails = { selectedModelDetails = it },
-                )
-            } else {
-                Text(
-                    stringResource(
-                        if (state.llmCatalogLoaded) {
-                            R.string.settings_provider_preset_not_in_catalog
-                        } else {
-                            R.string.settings_provider_catalog_loading
-                        },
-                    ),
-                    color = t.text4,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp, bottom = 10.dp),
-                )
-            }
-            FieldLabel(stringResource(R.string.settings_provider_model_id))
-            SettingsField(
-                value = editing.model,
-                onValueChange = { v ->
-                    connectionMessage = null
-                    store.updateProvider(kind, providerId) { it.copy(model = v) }
-                    store.markProviderConnectionUnverified(kind, providerId)
-                },
-                placeholder = catalogModels.firstOrNull()?.modelId ?: "llama-3.3-70b",
-                modifier = Modifier.padding(bottom = 14.dp),
-            )
-            FieldHint(
-                if (catalogModels.isNotEmpty()) {
-                    stringResource(R.string.settings_provider_models_count_fmt, catalogModels.size)
-                } else {
-                    stringResource(R.string.settings_provider_preset_not_in_catalog)
-                },
-            )
-            val visibility = ProviderModelVisibility(
-                showInModelPicker = editing.showInModelPicker,
-                visibleModelIds = editing.visibleModelIds,
-            )
-            val selectedModelIds = ProviderModelVisibilityRules.selectedCatalogModelIds(
-                candidateModelIds = catalogModels.map { it.modelId },
-                visibility = visibility,
-            )
-            Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(top = 10.dp, bottom = 14.dp),
-            ) {
+            SettingsSection {
                 SettingsRow(
-                    label = stringResource(R.string.settings_provider_show_in_picker),
-                    sub = stringResource(
-                        R.string.settings_provider_visible_models_count_fmt,
-                        selectedModelIds.size,
-                        catalogModels.size,
-                    ),
-                    chevron = false,
-                    trailing = {
-                        com.lingxi.code.components.LXToggle(
-                            checked = editing.showInModelPicker,
-                            onCheckedChange = { checked ->
-                                store.updateProvider(kind, providerId) {
-                                    it.copy(showInModelPicker = checked)
-                                }
-                            },
+                    label = stringResource(R.string.settings_provider_default_model),
+                    value = catalogModels.firstOrNull { it.modelId == editing.model }?.displayName
+                        ?: editing.model.ifBlank { stringResource(R.string.settings_provider_unconfigured) },
+                    onTap = { focusManager.clearFocus(); keyboard?.hide(); modelSheet = "default" },
+                    modifier = Modifier.testTag("provider.models.open"),
+                )
+                SettingsRow(
+                    label = stringResource(R.string.settings_provider_visible_models),
+                    value = if (!editing.showInModelPicker) stringResource(R.string.settings_badge_disabled) else {
+                        val selected = ProviderModelVisibilityRules.selectedCatalogModelIds(
+                            catalogModels.map { it.modelId },
+                            ProviderModelVisibility(showInModelPicker = editing.showInModelPicker, visibleModelIds = editing.visibleModelIds),
                         )
+                        "${selected.size} / ${catalogModels.size}"
                     },
-                )
-                if (catalogModels.isNotEmpty()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(t.surface)
-                            .border(0.5.dp, t.border, RoundedCornerShape(10.dp)),
-                    ) {
-                        catalogModels.forEachIndexed { index, modelDetails ->
-                            val selected = selectedModelIds.contains(modelDetails.modelId)
-                            Column {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            val base = editing.visibleModelIds ?: catalogModels.map { it.modelId }
-                                            val updated = if (selected) {
-                                                base.filterNot { it == modelDetails.modelId }
-                                            } else {
-                                                (base + modelDetails.modelId).distinct()
-                                            }
-                                            store.updateProvider(kind, providerId) {
-                                                it.copy(
-                                                    showInModelPicker = editing.showInModelPicker,
-                                                    visibleModelIds = updated,
-                                                )
-                                            }
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                ) {
-                                    Box(
-                                        contentAlignment = Alignment.Center,
-                                        modifier = Modifier
-                                            .size(16.dp)
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .border(1.25.dp, if (selected) t.accent else t.border, RoundedCornerShape(4.dp))
-                                            .background(if (selected) t.accent.tint(0.16f) else Color.Transparent),
-                                    ) {
-                                        if (selected) {
-                                            LXIcon(name = LXIconName.Check, size = 11.dp, color = t.accent, stroke = 2.1f)
-                                        }
-                                    }
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                                    ) {
-                                        Text(
-                                            modelDetails.displayName,
-                                            color = t.text,
-                                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        Text(
-                                            modelDetails.modelId,
-                                            color = t.text4,
-                                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                                            fontFamily = LXFont.mono,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                    ModelDetailsInfoButton(onClick = { selectedModelDetails = modelDetails })
-                                }
-                                if (index < catalogModels.lastIndex) {
-                                    Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
-                                }
-                            }
-                        }
-                    }
-                }
-                if (editing.showInModelPicker && selectedModelIds.isEmpty()) {
-                    Text(
-                        stringResource(R.string.settings_provider_picker_hidden_empty),
-                        color = t.statusTesting,
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    )
-                }
-            }
-        }
-
-        if (kind == ProviderKind.Llm) {
-            SettingsSection(
-                label = stringResource(R.string.settings_section_credentials),
-                footer = credentialMessage,
-            ) {
-                SettingsRow(
-                    label = stringResource(R.string.settings_provider_save_credential),
-                    sub = if (builtInSupported) stringResource(R.string.settings_provider_write_secure_store) else stringResource(R.string.settings_provider_preset_not_in_catalog),
-                    chevron = false,
-                    trailing = {
-                        Text(
-                            stringResource(R.string.voice_save_button),
-                            color = if (builtInSupported) t.accent else t.text4,
-                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable(
-                                    enabled = builtInSupported &&
-                                        keyDraft.isNotBlank() &&
-                                        !credentialBusy &&
-                                        !applying &&
-                                        !connectionBusy,
-                                ) {
-                                    credentialBusy = true
-                                    val submittedDraft = keyDraft
-                                    store.saveProviderCredential(kind, providerId, submittedDraft) { error ->
-                                        credentialMessage =
-                                            error?.let { resources.getString(R.string.settings_provider_save_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_saved_secure)
-                                        if (error == null) {
-                                            if (keyDraft == submittedDraft) keyDraft = ""
-                                            else credentialMessage = resources.getString(R.string.settings_provider_credential_not_saved)
-                                        }
-                                        credentialBusy = false
-                                    }
-                                }
-                                .padding(horizontal = 7.dp, vertical = 5.dp),
-                        )
-                    },
-                )
-                SettingsRow(
-                    label = stringResource(R.string.settings_provider_clear_credential),
-                    sub = if (editing.credentialConfigured) stringResource(R.string.settings_provider_clear_credential_sub) else stringResource(R.string.settings_provider_no_saved_credential),
-                    chevron = false,
+                    onTap = { focusManager.clearFocus(); keyboard?.hide(); modelSheet = "visibility" },
                     isLast = true,
-                    trailing = {
-                        Text(
-                            stringResource(R.string.settings_provider_clear_key),
-                            color = if (editing.credentialConfigured && builtInSupported) t.danger else t.text4,
-                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable(
-                                    enabled = editing.credentialConfigured &&
-                                        builtInSupported &&
-                                        !credentialBusy &&
-                                        !applying &&
-                                        !connectionBusy,
-                                ) {
-                                    credentialBusy = true
-                                    store.clearProviderCredential(kind, providerId) { error ->
-                                        credentialMessage =
-                                            error?.let { resources.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_cleared)
-                                        credentialBusy = false
-                                    }
-                                }
-                                .padding(horizontal = 7.dp, vertical = 5.dp),
-                        )
-                    },
+                    modifier = Modifier.testTag("provider.models.visibility"),
                 )
             }
         }
 
         SettingsSection {
             SettingsRow(
-                label = stringResource(R.string.settings_provider_enable), chevron = false,
-                trailing = {
-                    com.lingxi.code.components.LXToggle(
-                        checked = editing.enabled,
-                        onCheckedChange = { v -> store.updateProvider(kind, providerId) { it.copy(enabled = v) } },
-                    )
-                },
-            )
-            SettingsRow(
-                label = stringResource(R.string.settings_provider_set_default), chevron = false, isLast = true,
-                onTap = {
-                    store.setDefaultProvider(kind, providerId)
-                    if (kind == ProviderKind.Llm) {
-                        onReconnectEngine()
-                    }
-                },
-                trailing = {
-                    if (editing.isDefault) {
-                        LXIcon(name = LXIconName.Check, size = 16.dp, color = t.accent, stroke = 2.2f)
-                    } else {
-                        Text(stringResource(R.string.settings_status_not_enabled), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                    }
-                },
+                label = stringResource(R.string.settings_section_advanced),
+                onTap = { focusManager.clearFocus(); keyboard?.hide(); showAdvanced = true },
+                isLast = true,
+                modifier = Modifier.testTag("provider.advanced"),
             )
         }
 
@@ -901,8 +662,147 @@ fun ProviderEditPage(
                 modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp),
             )
         }
-        selectedModelDetails?.let { details ->
-            ModelDetailsDialog(details = details, onDismiss = { selectedModelDetails = null })
+    }
+    if (modelSheet != null) {
+        ProviderModelSheet(
+            provider = editing,
+            models = catalogModels,
+            catalogLoaded = state.llmCatalogLoaded,
+            manageVisibility = modelSheet == "visibility",
+            onUpdate = { next ->
+                store.updateProvider(kind, providerId) {
+                    it.copy(showInModelPicker = next.showInModelPicker, visibleModelIds = next.visibleModelIds)
+                }
+            },
+            onSelect = { model ->
+                connectionMessage = null
+                store.updateProvider(kind, providerId) { it.copy(model = model) }
+                store.markProviderConnectionUnverified(kind, providerId)
+            },
+            onDismiss = { modelSheet = null },
+        )
+    }
+    if (showAdvanced) {
+        com.lingxi.code.components.ModelSelectionSheet(
+            title = stringResource(R.string.settings_section_advanced),
+            onDismiss = { showAdvanced = false },
+        ) {
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
+                if (kind == ProviderKind.Llm) {
+                    ProviderConnectionsSection(
+                        provider = editing,
+                        presetDefaultUrl = preset.defaultUrl,
+                        onChange = { next ->
+                            connectionMessage = null
+                            store.updateProvider(kind, providerId) { next }
+                            store.markProviderConnectionUnverified(kind, providerId)
+                        },
+                    )
+                }
+
+                if (kind == ProviderKind.Llm) {
+                    SettingsSection(
+                        label = stringResource(R.string.settings_section_credentials),
+                        footer = credentialMessage,
+                    ) {
+                        SettingsRow(
+                            label = stringResource(R.string.settings_provider_save_credential),
+                            sub = if (builtInSupported) stringResource(R.string.settings_provider_write_secure_store) else stringResource(R.string.settings_provider_preset_not_in_catalog),
+                            chevron = false,
+                            trailing = {
+                                Text(
+                                    stringResource(R.string.voice_save_button),
+                                    color = if (builtInSupported) t.accent else t.text4,
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable(
+                                            enabled = builtInSupported &&
+                                                keyDraft.isNotBlank() &&
+                                                !credentialBusy &&
+                                                !applying &&
+                                                !connectionBusy,
+                                        ) {
+                                            credentialBusy = true
+                                            val submittedDraft = keyDraft
+                                            store.saveProviderCredential(kind, providerId, submittedDraft) { error ->
+                                                credentialMessage =
+                                                    error?.let { resources.getString(R.string.settings_provider_save_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_saved_secure)
+                                                if (error == null) {
+                                                    if (keyDraft == submittedDraft) keyDraft = ""
+                                                    else credentialMessage = resources.getString(R.string.settings_provider_credential_not_saved)
+                                                }
+                                                credentialBusy = false
+                                            }
+                                        }
+                                        .padding(horizontal = 7.dp, vertical = 5.dp),
+                                )
+                            },
+                        )
+                        SettingsRow(
+                            label = stringResource(R.string.settings_provider_clear_credential),
+                            sub = if (editing.credentialConfigured) stringResource(R.string.settings_provider_clear_credential_sub) else stringResource(R.string.settings_provider_no_saved_credential),
+                            chevron = false,
+                            isLast = true,
+                            trailing = {
+                                Text(
+                                    stringResource(R.string.settings_provider_clear_key),
+                                    color = if (editing.credentialConfigured && builtInSupported) t.danger else t.text4,
+                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable(
+                                            enabled = editing.credentialConfigured &&
+                                                builtInSupported &&
+                                                !credentialBusy &&
+                                                !applying &&
+                                                !connectionBusy,
+                                        ) {
+                                            credentialBusy = true
+                                            store.clearProviderCredential(kind, providerId) { error ->
+                                                credentialMessage =
+                                                    error?.let { resources.getString(R.string.settings_provider_clear_failed_fmt, it) } ?: resources.getString(R.string.settings_provider_credential_cleared)
+                                                credentialBusy = false
+                                            }
+                                        }
+                                        .padding(horizontal = 7.dp, vertical = 5.dp),
+                                )
+                            },
+                        )
+                    }
+                }
+
+                SettingsSection {
+                    SettingsRow(
+                        label = stringResource(R.string.settings_provider_enable), chevron = false,
+                        trailing = {
+                            com.lingxi.code.components.LXToggle(
+                                checked = editing.enabled,
+                                onCheckedChange = { v -> store.updateProvider(kind, providerId) { it.copy(enabled = v) } },
+                            )
+                        },
+                    )
+                    SettingsRow(
+                        label = stringResource(R.string.settings_provider_set_default), chevron = false, isLast = true,
+                        onTap = {
+                            store.setDefaultProvider(kind, providerId)
+                            if (kind == ProviderKind.Llm) {
+                                onReconnectEngine()
+                            }
+                        },
+                        trailing = {
+                            if (editing.isDefault) {
+                                LXIcon(name = LXIconName.Check, size = 16.dp, color = t.accent, stroke = 2.2f)
+                            } else {
+                                Text(stringResource(R.string.settings_status_not_enabled), color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                            }
+                        },
+                    )
+                }
+
+            }
         }
     }
 }
@@ -999,54 +899,19 @@ private fun StatusBanner(
     onTest: () -> Unit,
 ) {
     val t = LingXiTheme.palette
-    val dot = status.dot(t)
     val testing = status == ConnStatus.Testing
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 18.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(dot.mix(t.surface, 0.08f))
-            .border(0.5.dp, dot.tint(0.24f), RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-    ) {
-        PulsingDot(color = dot, pulsing = status == ConnStatus.Testing)
-        Column(
-            modifier = Modifier
-                .padding(start = 8.dp, end = 8.dp)
-                .weight(1f),
-        ) {
-            Text(
-                status.localizedLabel(),
-                color = t.text2,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-            )
-            if (!message.isNullOrBlank()) {
-                Text(
-                    message,
-                    color = if (status == ConnStatus.Error) t.danger else t.text3,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    lineHeight = 14.sp,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
+    androidx.compose.material3.ListItem(
+        headlineContent = { Text(status.localizedLabel(), color = if (status == ConnStatus.Error) t.danger else t.text) },
+        supportingContent = message?.takeIf { it.isNotBlank() }?.let {{ Text(it, color = t.text3) }},
+        leadingContent = if (testing) {{ androidx.compose.material3.CircularProgressIndicator(Modifier.size(24.dp)) }} else null,
+        trailingContent = {
+            androidx.compose.material3.TextButton(onClick = onTest, enabled = enabled && !testing) {
+                Text(if (testing) stringResource(R.string.settings_provider_testing) else actionLabel)
             }
-        }
-        Text(
-            if (testing) stringResource(R.string.settings_provider_testing) else actionLabel,
-            color = if (enabled && !testing) t.text2 else t.text4,
-            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier
-                .clip(RoundedCornerShape(7.dp))
-                .background(t.windowBg)
-                .border(0.5.dp, t.border, RoundedCornerShape(7.dp))
-                .clickable(enabled = enabled && !testing, onClick = onTest)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-        )
-    }
+        },
+        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+    )
 }
 
 /**
@@ -1161,54 +1026,10 @@ private fun ProviderTextAction(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    val t = LingXiTheme.palette
-    Text(
-        label,
-        color = if (enabled) t.accent else t.text4,
-        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 5.dp),
-    )
+    androidx.compose.material3.TextButton(onClick = onClick, enabled = enabled) { Text(label) }
 }
 
-/** An 8dp dot with an optional pulsing ring (used while a connection is testing). */
-@Composable
-private fun PulsingDot(color: Color, pulsing: Boolean) {
-    val transition = rememberInfiniteTransition(label = "statusDot")
-    val ringScale by transition.animateFloat(
-        initialValue = 1.0f, targetValue = 1.9f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Restart),
-        label = "ringScale",
-    )
-    val ringAlpha by transition.animateFloat(
-        initialValue = 0.55f, targetValue = 0f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Restart),
-        label = "ringAlpha",
-    )
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(8.dp)) {
-        if (pulsing) {
-            Box(
-                Modifier
-                    .size(8.dp)
-                    .scale(ringScale)
-                    .alpha(ringAlpha)
-                    .clip(CircleShape)
-                    .background(color),
-            )
-        }
-        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-    }
-}
-
-/**
- * The API-key field: a masked [PasswordVisualTransformation] text field with an
- * inline 显示 / 隐藏 toggle and a copy affordance (copy is decorative — keys are
- * mock). Built here rather than overloading [SettingsField] to keep that helper
- * single-purpose.
- */
+/** A native password field; a stored key is represented only by its placeholder. */
 @Composable
 private fun KeyField(
     value: String,
@@ -1217,127 +1038,20 @@ private fun KeyField(
     onToggleShow: () -> Unit,
     onValueChange: (String) -> Unit,
 ) {
-    val t = LingXiTheme.palette
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(t.surface)
-            .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
-            .padding(start = 12.dp, end = 6.dp, top = 11.dp, bottom = 11.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                val style = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(color = t.text, fontFamily = LXFont.mono)
-                if (value.isEmpty() && placeholder.isNotEmpty()) {
-                    Text(placeholder, style = style.copy(color = t.text4), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                BasicTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    textStyle = style,
-                    singleLine = true,
-                    cursorBrush = SolidColor(t.accent),
-                    visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation('•'),
-                    modifier = Modifier.fillMaxWidth(),
-                )
+    androidx.compose.material3.OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        placeholder = { Text(placeholder) },
+        singleLine = true,
+        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+            keyboardType = androidx.compose.ui.text.input.KeyboardType.Password,
+        ),
+        visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation('•'),
+        trailingIcon = {
+            androidx.compose.material3.TextButton(onClick = onToggleShow) {
+                Text(stringResource(if (show) R.string.settings_provider_hide_key else R.string.settings_provider_show_key))
             }
-            Text(
-                if (show) stringResource(R.string.settings_provider_hide_key) else stringResource(R.string.settings_provider_show_key),
-                color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onToggleShow)
-                    .padding(horizontal = 7.dp, vertical = 5.dp),
-            )
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable {}
-                    .padding(horizontal = 5.dp, vertical = 4.dp),
-            ) {
-                LXIcon(name = LXIconName.Copy, size = 13.dp, color = t.text3, stroke = 1.8f)
-            }
-        }
-    }
-}
-
-/** The LLM default-model single-select radio list. */
-@Composable
-private fun ModelPicker(
-    models: List<CatalogModelDetails>,
-    selected: String,
-    accent: Color,
-    onSelect: (String) -> Unit,
-    onShowDetails: (CatalogModelDetails) -> Unit,
-) {
-    val t = LingXiTheme.palette
-    Column(Modifier.fillMaxWidth()) {
-        FieldLabel(stringResource(R.string.settings_provider_default_model))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 14.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(t.surface)
-                .border(0.5.dp, t.border, RoundedCornerShape(10.dp)),
-        ) {
-            models.forEachIndexed { i, m ->
-                val sel = selected == m.modelId
-                Column {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(m.modelId) }
-                            .padding(horizontal = 12.dp, vertical = 11.dp),
-                    ) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(16.dp)
-                                .clip(CircleShape)
-                                .border(1.5.dp, if (sel) accent else t.border, CircleShape),
-                        ) {
-                            if (sel) Box(Modifier.size(8.dp).clip(CircleShape).background(accent))
-                        }
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(
-                                m.displayName,
-                                color = t.text,
-                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                m.modelId,
-                                color = t.text3,
-                                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                                fontFamily = LXFont.mono,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            m.metadata.summaryItems
-                                .takeIf { it.isNotEmpty() }
-                                ?.joinToString(" · ")
-                                ?.let { summary ->
-                                    Text(
-                                        summary,
-                                        color = t.text4,
-                                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                        }
-                        ModelDetailsInfoButton(onClick = { onShowDetails(m) })
-                    }
-                    if (i < models.size - 1) Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
-                }
-            }
-        }
-    }
+        },
+        modifier = Modifier.fillMaxWidth().testTag("provider.api-key"),
+    )
 }

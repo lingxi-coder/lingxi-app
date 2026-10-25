@@ -1,38 +1,30 @@
 package com.lingxi.code.conversation
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.ReasoningControl
 import com.lingxi.code.theme.LingXiTheme
 
 /**
- * The effort row at the top of the model menu: Auto plus the provider's levels,
- * the same choices as iOS `ConversationEffortControl`. A locked control shows
- * its value and the engine's reason instead of choices.
+ * Native radio choices, disclosed from the model sheet's settings row.
+ * A locked control shows its value and the engine's reason instead of choices.
  */
 @Composable
 internal fun EffortPicker(
@@ -41,51 +33,32 @@ internal fun EffortPicker(
     modifier: Modifier = Modifier,
 ) {
     val t = LingXiTheme.palette
-    Column(modifier = modifier.padding(start = 15.dp, end = 15.dp, top = 8.dp, bottom = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.composer_effort),
-                color = t.text3,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-            )
-            Text(text = effortLabel(control.selection), color = t.text2, fontSize = 11.sp)
-        }
-        val choices = listOf(ReasoningControl.AUTOMATIC) + control.levels
+    val choices = (listOf(ReasoningControl.AUTOMATIC) + control.levels).distinct()
+    Column(modifier = modifier.fillMaxWidth().testTag(UiTags.COMPOSER_EFFORT)) {
+        Text(
+            stringResource(R.string.composer_effort),
+            color = t.text3,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+        )
         if (control.editable && control.disabledReason == null && control.levels.isNotEmpty()) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .horizontalScroll(rememberScrollState())
-                    .testTag(UiTags.COMPOSER_EFFORT),
-            ) {
+            Column(Modifier.selectableGroup()) {
                 choices.forEach { id ->
                     val active = id == control.selection
-                    Text(
-                        text = effortLabel(id),
-                        color = if (active) t.accent else t.text2,
-                        fontSize = 12.sp,
-                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .background(if (active) t.accent.copy(alpha = 0.16f) else t.surfaceHover)
-                            .semantics { selected = active }
-                            .clickable(role = Role.RadioButton) { onSelect(id) }
-                            .heightIn(min = 32.dp)
-                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                    ListItem(
+                        headlineContent = { Text(effortLabel(id)) },
+                        leadingContent = { RadioButton(selected = active, onClick = null) },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        modifier = Modifier.selectable(selected = active, role = Role.RadioButton) { onSelect(id) },
                     )
                 }
             }
+        } else {
+            Text(effortLabel(control.selection), color = t.text2, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
         }
         control.disabledReason?.let { reason ->
-            Text(
-                text = reason,
-                color = t.text3,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+            Text(reason, color = t.text3, style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
         }
     }
 }

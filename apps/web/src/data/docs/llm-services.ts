@@ -1,10 +1,10 @@
-import type { DocPage, DocText } from './types';
+import type { DocPage, DocSection, DocText } from './types';
 
 const t = (en: string, zh: string): DocText => ({ en, zh });
 const sources = (...paths: string[]) => paths.map(path => ({ repo: 'llm-client' as const, path }));
 const currentSource = 'https://github.com/lingxi-coder/llm-client';
 
-export const llmServicePages: DocPage[] = [
+const referencePages: DocPage[] = [
   {
     id: 'llm-files', group: 'llm', packageName: 'lingxi-llm-client', sourceUrl: currentSource,
     title: t('Attachments & provider files', '附件与供应商文件'),
@@ -263,18 +263,17 @@ pub async fn submit_background(
         id: 'structured-output', title: t('Strict output and local validation', '严格输出与本地校验'),
         paragraphs: [t('OutputFormat is Text, JsonObject or JsonSchema { name, schema, strict }. It is separate from strict function-tool inputs. Encoders preserve schema constraints and reject unsupported/conflicting options; they do not rewrite schemas to make a call succeed. Local schema validation disables external network/file resolution. Decode only a completed response; refusal, truncation, tools and pause are separate outcomes.', 'OutputFormat 为 Text、JsonObject 或 JsonSchema { name, schema, strict }，独立于严格函数工具输入。编码器保留 Schema 约束并拒绝不支持或冲突的选项，不为调用成功而改写 Schema。本地校验禁用外部网络/文件解析。仅对完成响应解码；拒绝、截断、工具与暂停是不同结果。')],
         code: [{ label: t('Complete and validate the same output contract', '完成并校验同一输出约定'), language: 'rust', verification: 'compile', exampleId: 'llm-structured-output', code: `use lingxi_llm_client::{LlmClient, RequestOptions};
-use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage, OutputFormat};
-use serde_json::{json, Value};
+use lingxi_llm_client::protocol::{ChatRequest, ConversationMessage, JsonPayload, OutputFormat};
 
 pub async fn structured_answer(
     client: &LlmClient,
     options: &RequestOptions,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<JsonPayload, Box<dyn std::error::Error>> {
     let mut request = ChatRequest::new("gpt-6-luna");
     request.output_format = OutputFormat::JsonSchema {
         name: "answer".into(), strict: true,
-        schema: json!({"type":"object","properties":{"answer":{"type":"string"}},
-            "required":["answer"],"additionalProperties":false}),
+        schema: JsonPayload::parse(r#"{"type":"object","properties":{"answer":{"type":"string"}},
+            "required":["answer"],"additionalProperties":false}"#)?,
     };
     request.messages.push(ConversationMessage::user_text("Give a short greeting."));
     let response = client.chat().complete_in("openai", &request, options).await?;
@@ -382,3 +381,978 @@ pub async fn account_snapshot(
     ],
   },
 ];
+
+// Task-oriented recipes supplement the detailed API reference above.
+const practicalGuides: Record<string, { sources: string[]; sections: DocSection[] }> = {
+  "llm-files": {
+    "sources": [
+      "src/files/types.rs",
+      "src/files/service.rs"
+    ],
+    "sections": [
+      {
+        "id": "file-workflow-choice",
+        "title": {
+          "en": "Choose attachment input or explicit file management",
+          "zh": "选择附件输入或显式文件管理"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Goal",
+                "zh": "目标"
+              },
+              {
+                "en": "Workflow",
+                "zh": "流程"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Ask about a user attachment",
+                  "zh": "询问用户附件内容"
+                },
+                {
+                  "en": "Store an immutable host revision, configure AttachmentResolver, and put its AttachmentRef in ChatRequest",
+                  "zh": "存储不可变宿主修订，配置 AttachmentResolver，再把 AttachmentRef 放入 ChatRequest"
+                }
+              ],
+              [
+                {
+                  "en": "Reuse a provider file across requests",
+                  "zh": "跨请求复用供应商文件"
+                },
+                {
+                  "en": "Upload through the typed provider files resource; retain ProviderFileRef and its exact account/endpoint scope",
+                  "zh": "通过类型化供应商文件资源上传，保存 ProviderFileRef 与其精确账户/端点作用域"
+                }
+              ],
+              [
+                {
+                  "en": "Download or delete a remote resource",
+                  "zh": "下载或删除远程资源"
+                },
+                {
+                  "en": "Check that specific file operation is supported, then use the original scoped reference",
+                  "zh": "检查该具体文件操作受支持，再使用原作用域引用"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "Do not replace a conversation’s host AttachmentRef with an expiring provider ID. A remote file can expire or become inaccessible while the original authorized host attachment remains the user’s durable content.",
+            "zh": "不要用会过期的供应商 ID 替换对话中的宿主 AttachmentRef。远程文件可能过期或失去访问权，但已授权的宿主原始附件仍是用户的持久内容。"
+          }
+        ]
+      },
+      {
+        "id": "file-error-actions",
+        "title": {
+          "en": "Handle upload and readiness outcomes",
+          "zh": "处理上传与就绪结果"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Outcome",
+                "zh": "结果"
+              },
+              {
+                "en": "Next step",
+                "zh": "下一步"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Unsupported operation / scope mismatch",
+                  "zh": "不支持操作 / 作用域不符"
+                },
+                {
+                  "en": "Stop before reading or uploading again; correct route, purpose, media type and account",
+                  "zh": "先停止重复读取或上传，修正路由、用途、媒体类型与账户"
+                }
+              ],
+              [
+                {
+                  "en": "FileUploadError::OutcomeUnknown",
+                  "zh": "FileUploadError::OutcomeUnknown"
+                },
+                {
+                  "en": "Record the uncertain attempt; use supported listing/metadata to reconcile before another upload",
+                  "zh": "记录不确定尝试，通过支持的列表/元数据核对，再决定是否重新上传"
+                }
+              ],
+              [
+                {
+                  "en": "ProviderFileProcessing",
+                  "zh": "ProviderFileProcessing"
+                },
+                {
+                  "en": "Retain the returned file reference and resume readiness polling",
+                  "zh": "保留返回文件引用，继续就绪轮询"
+                }
+              ],
+              [
+                {
+                  "en": "Expired or missing file",
+                  "zh": "文件过期或缺失"
+                },
+                {
+                  "en": "Revalidate the host attachment and replay policy; a replacement upload is not universally safe",
+                  "zh": "重新校验宿主附件与重放策略，重新上传并非始终安全"
+                }
+              ]
+            ]
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Keep attachment data out of retries",
+              "zh": "重试时保留附件与调用边界"
+            },
+            "href": "/docs/llm-execution-accounting"
+          }
+        ]
+      }
+    ]
+  },
+  "llm-audio": {
+    "sources": [
+      "src/audio/types.rs",
+      "src/audio/mod.rs"
+    ],
+    "sections": [
+      {
+        "id": "audio-application-recipe",
+        "title": {
+          "en": "Wire speech into an application",
+          "zh": "在应用中接入语音"
+        },
+        "steps": [
+          {
+            "en": "Select an exact AudioRoute and query capabilities. Choose the declared audio model, operation, voice and format instead of inheriting the current chat model.",
+            "zh": "选择精确 AudioRoute 并查询能力。选择声明的音频模型、操作、声音与格式，而不是继承当前 Chat 模型。"
+          },
+          {
+            "en": "For synthesis, submit complete text with SynthesisRequest. For file transcription, provide the supported AudioInput and TranscriptionRequest. Device microphone access and file selection happen in the host first.",
+            "zh": "合成时用 SynthesisRequest 提交完整文本；文件转写时提供受支持的 AudioInput 与 TranscriptionRequest。设备麦克风授权与文件选择由宿主先完成。"
+          },
+          {
+            "en": "Consume output according to its actual type: byte stream or provider URL. Bound collected bytes; for raw PCM also retain the required sample rate/channel/encoding declaration.",
+            "zh": "按实际返回类型消费字节流或供应商 URL。限制收集字节数；原始 PCM 还需保留采样率、声道与编码声明。"
+          },
+          {
+            "en": "Record terminal metadata and usage when available, then close playback resources owned by the application. Cancelling audio reads does not prove the provider performed no synthesis.",
+            "zh": "可用时记录终止元数据与用量，再关闭应用持有的播放资源。取消音频读取不能证明供应商没有执行合成。"
+          }
+        ]
+      },
+      {
+        "id": "audio-troubleshooting",
+        "title": {
+          "en": "Diagnose audio before retrying",
+          "zh": "重试前排查音频问题"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Symptom",
+                "zh": "现象"
+              },
+              {
+                "en": "Check",
+                "zh": "检查项"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "No supported voice/model",
+                  "zh": "没有支持的声音/模型"
+                },
+                {
+                  "en": "capabilities for the exact route and common adapter, not chat compatibility",
+                  "zh": "检查精确路由与统一适配器能力，不依据 Chat 兼容性判断"
+                }
+              ],
+              [
+                {
+                  "en": "Noise or wrong playback speed",
+                  "zh": "噪声或播放速度错误"
+                },
+                {
+                  "en": "Actual encoding, sample rate and channel count; the SDK does not own device resampling",
+                  "zh": "实际编码、采样率与声道数；SDK 不负责设备重采样"
+                }
+              ],
+              [
+                {
+                  "en": "Collection reaches a byte limit",
+                  "zh": "收集达到字节上限"
+                },
+                {
+                  "en": "Use incremental consumption or a host-selected larger bound; do not allocate without a bound",
+                  "zh": "采用增量消费或宿主选择的更大上限，避免无上限分配"
+                }
+              ],
+              [
+                {
+                  "en": "Error after dispatch",
+                  "zh": "发送后报错"
+                },
+                {
+                  "en": "AudioError.kind and dispatch; distinguish rejected, accepted and unknown outcomes before resubmission",
+                  "zh": "查看 AudioError.kind 与 dispatch，区分拒绝、已接受、未知结果后再决定是否重发"
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "llm-realtime": {
+    "sources": [
+      "src/realtime/mod.rs"
+    ],
+    "sections": [
+      {
+        "id": "realtime-application-loop",
+        "title": {
+          "en": "A realtime session in five steps",
+          "zh": "实时会话的五个步骤"
+        },
+        "steps": [
+          {
+            "en": "Choose a provider connector and a host-compatible transport/executor. Confirm the connector capabilities admit the required audio formats and conversation features.",
+            "zh": "选择供应商连接器及宿主兼容的传输/执行器，确认连接器能力允许所需音频格式与对话特性。"
+          },
+          {
+            "en": "Connect RealtimeSession, retain the control handle, and keep consuming the event handle while the driver runs. A connected socket alone does not execute the application event loop.",
+            "zh": "连接 RealtimeSession，保留 control 句柄，在 driver 运行期间持续消费 event 句柄。套接字连接成功本身不会执行应用事件循环。"
+          },
+          {
+            "en": "Split microphone/audio input into small bounded frames before sending. Handle queue-full errors by pausing the producer or applying an explicit host policy.",
+            "zh": "发送前将麦克风/音频输入拆成有界小帧。队列已满时暂停生产者，或执行明确的宿主策略。"
+          },
+          {
+            "en": "For a tool request, correlate the completed call ID, execute only a registered and authorized host tool, send the tool result, and request continuation when the connector requires it.",
+            "zh": "收到工具请求时关联已完成调用的 ID，只执行已登记且已授权的宿主工具，发送结果，并在连接器要求时请求续接。"
+          },
+          {
+            "en": "On user interruption, use the control interruption path and synchronize local playback. On shutdown, close/abort and retain the host conversation state needed for an explicit reconnect.",
+            "zh": "用户打断时使用 control 中断路径并同步本地播放。关闭时执行 close/abort，保留显式重连所需的宿主对话状态。"
+          }
+        ]
+      },
+      {
+        "id": "realtime-limits-reference",
+        "title": {
+          "en": "Queue and frame limits",
+          "zh": "队列与帧大小限制"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "RealtimeLimits field",
+                "zh": "RealtimeLimits 字段"
+              },
+              {
+                "en": "Default",
+                "zh": "默认值"
+              },
+              {
+                "en": "Meaning",
+                "zh": "含义"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "outbound_capacity",
+                  "zh": "outbound_capacity"
+                },
+                {
+                  "en": "8",
+                  "zh": "8"
+                },
+                {
+                  "en": "Bounded queued inputs; send can report backpressure",
+                  "zh": "输入队列有界，send 可能返回背压错误"
+                }
+              ],
+              [
+                {
+                  "en": "event_capacity",
+                  "zh": "event_capacity"
+                },
+                {
+                  "en": "32",
+                  "zh": "32"
+                },
+                {
+                  "en": "Bounded decoded event queue; the host must continue consuming",
+                  "zh": "解码事件队列有界，宿主必须持续消费"
+                }
+              ],
+              [
+                {
+                  "en": "max_frame_bytes",
+                  "zh": "max_frame_bytes"
+                },
+                {
+                  "en": "1 MiB",
+                  "zh": "1 MiB"
+                },
+                {
+                  "en": "Maximum frame size, not a recommended microphone chunk size",
+                  "zh": "单帧最大值，不是建议的麦克风分片大小"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "History import, interruption and continuation are separate operations. Do not assume reconnect restores provider state, starts a response, or replays microphone bytes automatically.",
+          "zh": "历史导入、中断与续接是不同操作。不要假设重连会自动恢复供应商状态、开始响应或重放麦克风字节。"
+        }
+      }
+    ]
+  },
+  "llm-native-services": {
+    "sources": [
+      "src/protocol/llm.rs",
+      "src/client/options.rs"
+    ],
+    "sections": [
+      {
+        "id": "tool-execution-choice",
+        "title": {
+          "en": "Choose who executes the tool",
+          "zh": "明确工具由谁执行"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Mechanism",
+                "zh": "机制"
+              },
+              {
+                "en": "Executes on",
+                "zh": "执行位置"
+              },
+              {
+                "en": "Application integration",
+                "zh": "应用接法"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "ChatRequest.tools",
+                  "zh": "ChatRequest.tools"
+                },
+                {
+                  "en": "Your host",
+                  "zh": "你的宿主"
+                },
+                {
+                  "en": "Validate completed tool calls, apply permission policy, run registered code and append ToolResult",
+                  "zh": "校验完成的调用，执行权限策略，运行登记代码，再追加 ToolResult"
+                }
+              ],
+              [
+                {
+                  "en": "ChatRequest.hosted_tools",
+                  "zh": "ChatRequest.hosted_tools"
+                },
+                {
+                  "en": "Provider infrastructure",
+                  "zh": "供应商基础设施"
+                },
+                {
+                  "en": "Enable an admitted typed tool and retain provider-native results, citations and usage",
+                  "zh": "启用已准入的类型化工具，保留原生结果、引用与用量"
+                }
+              ],
+              [
+                {
+                  "en": "Hosted remote MCP",
+                  "zh": "托管远程 MCP"
+                },
+                {
+                  "en": "Remote MCP service via the provider",
+                  "zh": "供应商连接的远程 MCP 服务"
+                },
+                {
+                  "en": "Supply request-local server authorization; handle any provider approval/continuation outcome",
+                  "zh": "传入请求级服务器授权，处理供应商审批与续接结果"
+                }
+              ],
+              [
+                {
+                  "en": "Harness local tools / MCP",
+                  "zh": "Harness 本地工具 / MCP"
+                },
+                {
+                  "en": "Harness-managed host execution",
+                  "zh": "Harness 管理的宿主执行"
+                },
+                {
+                  "en": "Use Harness registration, permissions, lifecycle and durable session integration",
+                  "zh": "接入 Harness 登记、权限、生命周期与持久会话"
+                }
+              ]
+            ]
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Complete a local function round trip",
+              "zh": "完成本地函数闭环"
+            },
+            "href": "/docs/llm-requests#function-tool-roundtrip"
+          }
+        ]
+      },
+      {
+        "id": "cloud-job-recovery",
+        "title": {
+          "en": "Persist cloud job identity before polling",
+          "zh": "轮询前保存云端任务身份"
+        },
+        "steps": [
+          {
+            "en": "Persist the returned resource reference with the application job record immediately after a successful submit. Keep profile, account, endpoint and resource scope together.",
+            "zh": "成功 submit 后立即把返回资源引用和应用任务记录一起保存，连接、账户、端点与资源作用域应保持成组。"
+          },
+          {
+            "en": "After a restart, query the saved reference with fresh credentials for the same account. Polling is a read operation on the existing job, not another submit.",
+            "zh": "重启后使用同一账户的新鲜凭据查询保存的引用。轮询读取现有任务，不是再次 submit。"
+          },
+          {
+            "en": "Distinguish cancel from delete. Cancelling asks the provider to stop work; deleting a stored result is a separate resource-lifecycle action where supported.",
+            "zh": "区分 cancel 与 delete。取消请求供应商停止工作；删除已存储结果是受支持时另一种资源生命周期操作。"
+          },
+          {
+            "en": "If submit/cancel acknowledgement is lost, retain the unknown-outcome state and reconcile against supported provider APIs. Do not turn a network error into a second side effect.",
+            "zh": "如果 submit/cancel 回执丢失，保留未知结果状态，并通过受支持供应商 API 核对。不能把网络错误直接变成第二次副作用。"
+          }
+        ]
+      }
+    ]
+  },
+  "llm-controls": {
+    "sources": [
+      "src/protocol/json_payload.rs",
+      "src/protocol/structured.rs",
+      "src/client/stream.rs"
+    ],
+    "sections": [
+      {
+        "id": "output-contract-choice",
+        "title": {
+          "en": "Choose the smallest output contract",
+          "zh": "选择恰当的输出约定"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Contract",
+                "zh": "约定"
+              },
+              {
+                "en": "Use",
+                "zh": "用途"
+              },
+              {
+                "en": "What to validate",
+                "zh": "需要校验"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "OutputFormat::Text",
+                  "zh": "OutputFormat::Text"
+                },
+                {
+                  "en": "Human-readable prose",
+                  "zh": "供人阅读的文本"
+                },
+                {
+                  "en": "Stop reason and application-specific content requirements",
+                  "zh": "终止原因与应用内容要求"
+                }
+              ],
+              [
+                {
+                  "en": "OutputFormat::JsonObject",
+                  "zh": "OutputFormat::JsonObject"
+                },
+                {
+                  "en": "A JSON object whose fields the application checks",
+                  "zh": "由应用自行检查字段的 JSON 对象"
+                },
+                {
+                  "en": "Object root, required application fields and valid value types",
+                  "zh": "对象根节点、应用必需字段与值类型"
+                }
+              ],
+              [
+                {
+                  "en": "OutputFormat::JsonSchema",
+                  "zh": "OutputFormat::JsonSchema"
+                },
+                {
+                  "en": "A typed object/array contract admitted by the route",
+                  "zh": "路由允许的类型化对象/数组约定"
+                },
+                {
+                  "en": "Original schema, final response, schema match and target-type deserialization",
+                  "zh": "原始 Schema、最终响应、Schema 匹配与目标类型反序列化"
+                }
+              ],
+              [
+                {
+                  "en": "ToolSpec.strict",
+                  "zh": "ToolSpec.strict"
+                },
+                {
+                  "en": "Constrain function-tool input",
+                  "zh": "约束函数工具参数"
+                },
+                {
+                  "en": "Tool arguments separately from the final-answer output contract",
+                  "zh": "工具参数校验独立于最终答案输出约定"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "Use JsonPayload::parse for an exact JSON schema source, or from_generated_value for a small schema built by your own configuration UI. Provider JSON and partial tool arguments should remain source-carrying data until a completed, validated application boundary.",
+            "zh": "精确 JSON Schema 源文使用 JsonPayload::parse；由自己配置界面构造的小型 Schema 可用 from_generated_value。供应商 JSON 和未完整的工具参数应保留为携带源文的数据，直到到达完整且已校验的应用边界。"
+          }
+        ]
+      },
+      {
+        "id": "structured-result-errors",
+        "title": {
+          "en": "Recover from structured result failures",
+          "zh": "处理结构化结果失败"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "StructuredOutputErrorKind",
+                "zh": "StructuredOutputErrorKind"
+              },
+              {
+                "en": "Meaning",
+                "zh": "含义"
+              },
+              {
+                "en": "Action",
+                "zh": "动作"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Incomplete",
+                  "zh": "Incomplete"
+                },
+                {
+                  "en": "Not a final completed answer, or response still contains tool use",
+                  "zh": "不是完整最终答案，或响应仍包含工具调用"
+                },
+                {
+                  "en": "Handle refusal/truncation/tool flow before parsing application data",
+                  "zh": "先处理拒绝、截断或工具流程，再解析应用数据"
+                }
+              ],
+              [
+                {
+                  "en": "NoContract",
+                  "zh": "NoContract"
+                },
+                {
+                  "en": "The request used the text contract",
+                  "zh": "请求使用了文本约定"
+                },
+                {
+                  "en": "Set the intended JSON output_format explicitly",
+                  "zh": "显式设置所需 JSON output_format"
+                }
+              ],
+              [
+                {
+                  "en": "InvalidJson / SchemaMismatch",
+                  "zh": "InvalidJson / SchemaMismatch"
+                },
+                {
+                  "en": "Final output is invalid JSON or violates the requested schema",
+                  "zh": "最终输出 JSON 非法或违反所请求 Schema"
+                },
+                {
+                  "en": "Retain the response and usage; reject it as application data",
+                  "zh": "保留响应与用量，不将其当作应用数据接受"
+                }
+              ],
+              [
+                {
+                  "en": "InvalidSchema / Deserialization",
+                  "zh": "InvalidSchema / Deserialization"
+                },
+                {
+                  "en": "Local schema or target Rust type cannot accept the value",
+                  "zh": "本地 Schema 或目标 Rust 类型无法接受该值"
+                },
+                {
+                  "en": "Fix the application contract/type rather than weakening provider constraints silently",
+                  "zh": "修正应用约定/类型，不静默弱化供应商约束"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "StructuredOutputError retains the response. StructuredStreamError also retains observed events for read failure, missing End, size limits and validation failure. Logging a content error must not discard the associated usage facts.",
+          "zh": "StructuredOutputError 保留响应。StructuredStreamError 对读取失败、缺少 End、大小上限与校验失败还保留已观测事件。记录内容错误时不应丢弃相关用量事实。"
+        }
+      },
+      {
+        "id": "schema-design-recipe",
+        "title": {
+          "en": "Make a schema usable by the application",
+          "zh": "让 Schema 真正服务应用"
+        },
+        "steps": [
+          {
+            "en": "Start from the object the application consumes: stable field names, explicit types and only the required fields. Keep any enum values aligned with the application’s actual accepted IDs.",
+            "zh": "从应用实际消费的对象出发，使用稳定字段名、显式类型及必要字段。枚举值应与应用真实接受的 ID 一致。"
+          },
+          {
+            "en": "Choose a route with the required strict-schema support before sending. A compatible protocol or a model name alone does not establish support for every schema keyword.",
+            "zh": "发送前选择具有所需严格 Schema 支持的路由。兼容协议或模型名称本身不能证明支持所有 Schema 关键字。"
+          },
+          {
+            "en": "Pass the same OutputFormat to the request and structured_json/structured. For a stream, collect the complete response first; do not parse each text delta as JSON.",
+            "zh": "将同一 OutputFormat 用于请求和 structured_json/structured。流式响应先收集完整结果，不将各个文本增量独立解析为 JSON。"
+          },
+          {
+            "en": "Keep validation failure separate from transport failure and retry policy. A complete but invalid business result is not a reason to bypass the contract or automatically switch accounts.",
+            "zh": "将校验失败与传输失败、重试策略分开。已完成但不合业务要求的结果，不能成为绕过约定或自动切换账户的理由。"
+          }
+        ]
+      }
+    ]
+  },
+  "llm-execution-accounting": {
+    "sources": [
+      "src/protocol/usage_report.rs"
+    ],
+    "sections": [
+      {
+        "id": "error-action-reference",
+        "title": {
+          "en": "Error-to-action reference",
+          "zh": "错误与处理动作速查"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Category",
+                "zh": "错误类别"
+              },
+              {
+                "en": "Investigate",
+                "zh": "检查内容"
+              },
+              {
+                "en": "Retry decision",
+                "zh": "重试判断"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Authentication / PermissionDenied",
+                  "zh": "Authentication / PermissionDenied"
+                },
+                {
+                  "en": "Credential freshness, exact profile/account and provider entitlement",
+                  "zh": "凭据是否新鲜、连接/账户是否匹配、供应商权限"
+                },
+                {
+                  "en": "Refresh or repair in the host; do not leak a key to another endpoint",
+                  "zh": "由宿主刷新或修复，不向其他端点泄露密钥"
+                }
+              ],
+              [
+                {
+                  "en": "RateLimited / QuotaExceeded",
+                  "zh": "RateLimited / QuotaExceeded"
+                },
+                {
+                  "en": "retry_after where reported, account limits and configured fallback triggers",
+                  "zh": "可用 retry_after、账户限制与已配置回退触发器"
+                },
+                {
+                  "en": "Honor a host retry budget and execution-safety policy",
+                  "zh": "遵守宿主重试预算与执行安全策略"
+                }
+              ],
+              [
+                {
+                  "en": "InvalidRequest / UnsupportedCapability",
+                  "zh": "InvalidRequest / UnsupportedCapability"
+                },
+                {
+                  "en": "Input schema, options, model and concrete route capabilities",
+                  "zh": "输入 Schema、选项、模型与具体路由能力"
+                },
+                {
+                  "en": "Fix the request; repeating the same invalid bytes is not recovery",
+                  "zh": "修正请求；重复相同非法字节不是恢复"
+                }
+              ],
+              [
+                {
+                  "en": "ContextOverflow / RequestTooLarge",
+                  "zh": "ContextOverflow / RequestTooLarge"
+                },
+                {
+                  "en": "Context-token limit versus serialized body byte limit",
+                  "zh": "上下文 token 上限与序列化请求体字节上限"
+                },
+                {
+                  "en": "Compact/select content in the host; do not silently drop history",
+                  "zh": "由宿主压缩或筛选内容，不静默丢弃历史"
+                }
+              ],
+              [
+                {
+                  "en": "Transport / TransportTimeout",
+                  "zh": "Transport / TransportTimeout"
+                },
+                {
+                  "en": "Whether dispatch happened, any visible output, partial usage and request ID",
+                  "zh": "是否已发送、是否已有输出、部分用量与请求 ID"
+                },
+                {
+                  "en": "Record uncertainty before considering another physical attempt",
+                  "zh": "考虑下一次实际调用前先记录结果不确定性"
+                }
+              ],
+              [
+                {
+                  "en": "ModelUnavailable / ProviderInternal / Overloaded",
+                  "zh": "ModelUnavailable / ProviderInternal / Overloaded"
+                },
+                {
+                  "en": "Provider diagnostics and the configured admission/fallback policy",
+                  "zh": "供应商诊断与已配置准入/回退策略"
+                },
+                {
+                  "en": "Only the permitted trigger and safe replay path may switch routes",
+                  "zh": "只有允许的触发器与安全重放路径才可切换路由"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "Use error.kind() for broad classification and preserve the structured ProviderResponse fields when available. HTTP status alone omits provider-specific context; a retry label alone does not establish that replay is safe.",
+            "zh": "通用分类使用 error.kind()，可用时同时保留 ProviderResponse 的结构化字段。仅看 HTTP 状态会丢失供应商语境，仅有可重试标签也不能证明重放安全。"
+          }
+        ]
+      },
+      {
+        "id": "attempt-record-fields",
+        "title": {
+          "en": "What to keep in an attempt record",
+          "zh": "一次调用记录应保存什么"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Record",
+                "zh": "记录项"
+              },
+              {
+                "en": "Purpose",
+                "zh": "用途"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Host request/attempt identity and timestamps",
+                  "zh": "宿主请求/尝试身份与时间"
+                },
+                {
+                  "en": "Correlate one user action with every physical dispatch",
+                  "zh": "将用户动作与各次实际发送关联"
+                }
+              ],
+              [
+                {
+                  "en": "Selected/executed profile, model and frozen pricing",
+                  "zh": "所选/执行连接、模型与固定价格"
+                },
+                {
+                  "en": "Explain routing and calculate against the actual captured configuration",
+                  "zh": "解释路由，并以实际捕获配置计算"
+                }
+              ],
+              [
+                {
+                  "en": "Provider request/response IDs when reported",
+                  "zh": "供应商已报告的请求/响应 ID"
+                },
+                {
+                  "en": "Reconcile errors and uncertain outcomes with provider evidence",
+                  "zh": "关联供应商证据，核对错误与未知结果"
+                }
+              ],
+              [
+                {
+                  "en": "UsageReport and InferenceReport before decode",
+                  "zh": "解码前的 UsageReport 与 InferenceReport"
+                },
+                {
+                  "en": "Retain measurements even when application JSON/tool validation fails",
+                  "zh": "即使应用 JSON/工具校验失败也保留测量事实"
+                }
+              ],
+              [
+                {
+                  "en": "Terminal stop reason, read failure or cancellation",
+                  "zh": "终止原因、读取失败或取消"
+                },
+                {
+                  "en": "Distinguish partial output from a completed answer",
+                  "zh": "区分部分输出与完成答案"
+                }
+              ],
+              [
+                {
+                  "en": "Resource cleanup / reconciliation state",
+                  "zh": "资源清理 / 核对状态"
+                },
+                {
+                  "en": "Track files or cloud jobs that may outlive this attempt",
+                  "zh": "跟踪可能在调用结束后仍存活的文件或云端任务"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "Store account identities as non-secret scope IDs. Do not log credentials, request-local MCP authorizations or complete provider bodies that contain sensitive user content merely to obtain diagnostics.",
+          "zh": "账户身份保存为非敏感作用域 ID。为了诊断，不应直接记录凭据、请求级 MCP 授权或包含敏感用户内容的完整供应商响应体。"
+        }
+      },
+      {
+        "id": "usage-state-reference",
+        "title": {
+          "en": "Missing, partial and complete usage",
+          "zh": "缺失、部分与完整用量"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "UsageState",
+                "zh": "UsageState"
+              },
+              {
+                "en": "How to present it",
+                "zh": "如何呈现"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Missing",
+                  "zh": "Missing"
+                },
+                {
+                  "en": "No authoritative measurement was observed; display unknown",
+                  "zh": "未观测到权威测量值，显示未知"
+                }
+              ],
+              [
+                {
+                  "en": "Partial",
+                  "zh": "Partial"
+                },
+                {
+                  "en": "Keep measured fields but label the total incomplete",
+                  "zh": "保留已测字段，并标记总量不完整"
+                }
+              ],
+              [
+                {
+                  "en": "Complete",
+                  "zh": "Complete"
+                },
+                {
+                  "en": "Use the consistent reported usage and actual inference facts for supported estimates",
+                  "zh": "以一致的已报告用量和实际推理事实进行受支持估算"
+                }
+              ],
+              [
+                {
+                  "en": "Invalid",
+                  "zh": "Invalid"
+                },
+                {
+                  "en": "Retain diagnostic evidence but reject it as a valid complete total",
+                  "zh": "保留诊断事实，不作为有效完整总量"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "Input, output, cache-read and cache-write buckets are normalized to avoid double counting. Reasoning tokens are part of output tokens, and one-hour cache-write tokens are part of cache-write tokens; do not add those subsets again. Provider-reported cost, catalog estimates and account invoices are different evidence.",
+            "zh": "输入、输出、缓存读取与缓存写入桶经过标准化，避免重复计数。推理 token 属于输出 token，一小时缓存写入 token 属于缓存写入 token，不能再把这些子集相加。供应商报告成本、目录估算与账户发票是不同证据。"
+          }
+        ]
+      }
+    ]
+  }
+};
+
+export const llmServicePages: DocPage[] = referencePages.map((page) => {
+  const guide = practicalGuides[page.id];
+  if (!guide) return page;
+  const sources = [...(page.sources ?? [])];
+  for (const path of guide.sources) {
+    if (!sources.some((source) => source.repo === 'llm-client' && source.path === path)) {
+      sources.push({ repo: 'llm-client', path });
+    }
+  }
+  return { ...page, sources, sections: [page.sections[0]!, ...guide.sections, ...page.sections.slice(1)] };
+});

@@ -67,7 +67,7 @@ body:has(.developer-mobile-menu[open], .developer-search-modal[open]) { overflow
 .developer-lead { margin: 20px 0 28px; font-size: 16px; line-height: 1.85; color: var(--ink-2); text-wrap: pretty; }
 .developer-note { display: flex; align-items: flex-start; gap: 12px; margin: 24px 0; padding: 16px 18px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 16%, transparent); border-radius: 9px; color: var(--accent); font-size: 14px; line-height: 1.8; }
 .developer-note > svg { flex-shrink: 0; margin-top: 3px; }
-.developer-note p { margin: 0 !important; font-size: inherit !important; color: inherit !important; }
+.developer-note p { min-width: 0; overflow-wrap: anywhere; margin: 0 !important; font-size: inherit !important; color: inherit !important; }
 .developer-note a { text-decoration: underline; text-underline-offset: 3px; font-weight: 550; }
 .developer-note a span { display: inline-block; }
 .developer-intro-note { margin-bottom: 44px; }
@@ -113,6 +113,7 @@ body:has(.developer-mobile-menu[open], .developer-search-modal[open]) { overflow
 .developer-api-baseline { margin: 24px 0; padding-left: 14px; border-left: 2px solid var(--line); font-size: 12px; color: var(--ink-2); }
 .developer-api-baseline > span { font-weight: 600; color: var(--ink); }
 .developer-api-baseline p { margin: 8px 0 0; line-height: 1.8; }
+.developer-reference-context > .developer-api-baseline, .developer-reference-context > .developer-rustdoc { margin: 16px; }
 .developer-api-source-row { gap: 10px; flex-wrap: wrap; align-items: center !important; justify-content: flex-start !important; }
 .developer-api-source-row .developer-source-badge { color: var(--ink-2); }
 .developer-baseline { margin: 24px 0; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 12px; color: var(--ink-2); }
@@ -148,6 +149,7 @@ body:has(.developer-mobile-menu[open], .developer-search-modal[open]) { overflow
 .developer-rustdoc p { margin: 0; color: var(--ink-2); font-size: 12px; line-height: 1.8; }
 .developer-rustdoc ul { margin: 0; padding: 0; list-style: none; display: grid; }
 .developer-rustdoc a { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; color: var(--accent); font-size: 12px; }
+.developer-rustdoc-unavailable { display: block; padding: 10px 0; font-size: 12px; color: var(--ink-3); }
 .developer-rustdoc a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .developer-toc { align-self: start; position: sticky; top: 116px; max-height: calc(100dvh - 116px); overflow-y: auto; padding-top: 50px; padding-bottom: 24px; font-size: 12px; scrollbar-width: thin; }
 .developer-toc h2 { color: var(--ink); font-size: 12px; font-weight: 600; margin: 0 0 14px; }

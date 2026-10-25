@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { SETTINGS_NAV, searchNav } from '../src/renderer/components/settings/nav';
 import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
 
-test('the nav declares all nineteen pages across four groups', () => {
-  assert.equal(SETTINGS_NAV.length, 19);
+test('the nav declares all twenty pages across four groups', () => {
+  assert.equal(SETTINGS_NAV.length, 20);
   assert.deepEqual(
     [...new Set(SETTINGS_NAV.map((p) => p.group))],
     ['个人', '模型与服务', '编码', '高级'],
@@ -33,7 +33,7 @@ test('layered is a data property, not a group property — account formats and o
 });
 
 test('client-owned pages do not need the engine', () => {
-  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice', 'notifications', 'remote-control']) {
+  for (const id of ['account', 'appearance', 'projects', 'diagnostics', 'about', 'voice', 'notifications', 'remote-control', 'computer-use']) {
     assert.equal(
       SETTINGS_NAV.find((p) => p.id === id)?.needsEngine, false,
       `${id} lives in the client and must stay usable with no engine`,
@@ -110,4 +110,12 @@ test('configuration files are discoverable in diagnostics without a raw editor p
   assert.equal(PAGE_CONTENT['raw-json'], undefined);
   assert.equal(SETTINGS_NAV.some((page) => page.id === 'raw-json'), false);
   assert.deepEqual(searchNav('settings.json').map((page) => page.id), ['diagnostics']);
+});
+
+test('computer access settings can be found without an engine or a settings layer', () => {
+  assert.equal(searchNav('computer use')[0]?.id, 'computer-use');
+  assert.equal(searchNav('应用控制')[0]?.id, 'computer-use');
+  const page = SETTINGS_NAV.find((entry) => entry.id === 'computer-use');
+  assert.equal(page?.layered, false);
+  assert.equal(page?.needsEngine, false);
 });

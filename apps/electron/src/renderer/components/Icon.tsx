@@ -79,6 +79,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'folder': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>;
     case 'folderPlus': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M12 11v6M9 14h6" /></svg>;
     case 'terminal': return <svg {...p}><path d="m4 7 6 5-6 5M12 19h8" /></svg>;
+    case 'pointer': return <svg {...p}><path d="m4 3 7 19 3-8 8-3L4 3Z" /></svg>;
     case 'hand': return <svg {...p}><path d="M6.5 11V7.5a1.5 1.5 0 0 1 3 0V10M9.5 10V5.5a1.5 1.5 0 0 1 3 0V10M12.5 10V6.5a1.5 1.5 0 0 1 3 0v4M15.5 10V8.5a1.5 1.5 0 0 1 3 0V14c0 4.4-2.8 7-7 7-3.2 0-5-1.5-6.4-4L3.3 13.8a1.6 1.6 0 0 1 2.7-1.7l1.5 2" /></svg>;
     case 'shieldCheck': return <svg {...p}><path d="M12 3 20 6v5c0 5.2-3.4 8.4-8 10-4.6-1.6-8-4.8-8-10V6l8-3Z" /><path d="m8.5 12 2.2 2.2 4.8-5" /></svg>;
     case 'shieldAlert': return <svg {...p}><path d="M12 3 20 6v5c0 5.2-3.4 8.4-8 10-4.6-1.6-8-4.8-8-10V6l8-3Z" /><path d="M12 8v5M12 16.5v.1" /></svg>;

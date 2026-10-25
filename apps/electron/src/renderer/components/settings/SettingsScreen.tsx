@@ -18,6 +18,7 @@ import { General } from './pages/General';
 import { Hooks } from './pages/Hooks';
 import { McpServers } from './pages/McpServers';
 import { Permissions } from './pages/Permissions';
+import { ComputerUse } from './pages/ComputerUse';
 import { Plugins } from './pages/Plugins';
 import { ArchivedChats } from './pages/ArchivedChats';
 import { Projects } from './pages/Projects';
@@ -187,6 +188,7 @@ export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps
   'provider-credentials': ProviderCredentials,
   'custom-providers': CustomProviders,
   permissions: Permissions,
+  'computer-use': ComputerUse,
   'tools-agent': ToolsAgent,
   fusion: Fusion,
   skills: Skills,
@@ -789,15 +791,15 @@ export function SettingsScreen({
 
         <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
-            <div className="settings-content-inner">
-              <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+            <div className={page === 'computer-use' ? 'settings-content-inner settings-computer-use-content' : 'settings-content-inner'}>
+              {page !== 'computer-use' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
                 <div>
                   <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
                 </div>
                 {showLayerSwitcher && (
                   <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
                 )}
-              </div>
+              </div>}
               {showLayerSwitcher && (
                 <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
               )}

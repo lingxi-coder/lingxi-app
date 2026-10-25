@@ -1,0 +1,226 @@
+{
+  "startedAtUtc": "2026-10-25T10:20:44.573Z",
+  "sidecarSha256": "3acade63607b96d4e4db16f85df4685ba3d1895ae27b05288e77ddf83b18a717",
+  "scriptSha256": "39723b1d86f97e73bff1444aac752dad0088a5878820e436de1bf1dc21aa3dc7",
+  "permissionMode": "default",
+  "genericToolRule": null,
+  "checks": [
+    {
+      "name": "fixture-bundle-identity-and-open-by-id",
+      "passed": true,
+      "fixtureId": "org.lingxi.permission-target.685472f9-51df-4e92-877d-cc9c3f4a503e",
+      "shadowId": "org.lingxi.permission-shadow.685472f9-51df-4e92-877d-cc9c3f4a503e",
+      "separatePids": true
+    },
+    {
+      "name": "master-disabled-no-effects",
+      "passed": true
+    },
+    {
+      "name": "dedicated-approval-denial",
+      "passed": true
+    },
+    {
+      "name": "dedicated-approval-grant",
+      "passed": true
+    },
+    {
+      "name": "tcc-responsibility-is-the-signed-application",
+      "passed": true,
+      "responsibleBundleId": "com.lingxi.code.development",
+      "accessingBundleId": "com.lingxi.code.bridge-server.development"
+    },
+    {
+      "name": "unauthorized-visible-application-masked",
+      "passed": true,
+      "bundleId": "org.lingxi.permission-shadow.685472f9-51df-4e92-877d-cc9c3f4a503e",
+      "sourceRect": [
+        1744,
+        1084,
+        1200,
+        520
+      ],
+      "region": {
+        "allBlack": true,
+        "nonBlackPixels": 0,
+        "rect": [
+          1157,
+          720,
+          787,
+          338
+        ],
+        "pixels": 266006
+      },
+      "visible": true
+    },
+    {
+      "name": "authorized-real-screenshot",
+      "passed": true,
+      "imageSha256": "d5c340594e3944fe139119dd2a1b122974554d4388d279f2d2b3d1288a2d9c77",
+      "filtering": "mask",
+      "pixels": {
+        "width": 2000,
+        "height": 1299,
+        "blackSamples": 254666,
+        "nonBlackSamples": 34145,
+        "sampleRGB": [
+          0.888800323009491,
+          0.3483395576477051,
+          0.7061576843261719
+        ]
+      },
+      "originalWidth": 3024,
+      "originalHeight": 1964
+    },
+    {
+      "name": "native-click-effect",
+      "passed": true
+    },
+    {
+      "name": "native-type-effect",
+      "passed": true
+    },
+    {
+      "name": "permanent-grant-effective",
+      "passed": true
+    },
+    {
+      "name": "permanent-revocation-no-effects",
+      "passed": true
+    },
+    {
+      "name": "ask-reset-does-not-revive",
+      "passed": true
+    },
+    {
+      "name": "active-batch-revocation-stops-next-effect",
+      "passed": true
+    },
+    {
+      "name": "re-enable-no-old-grants",
+      "passed": true
+    },
+    {
+      "name": "tcc-responsibility-is-the-signed-application",
+      "passed": true,
+      "responsibleBundleId": "com.lingxi.code.development",
+      "accessingBundleId": "com.lingxi.code.bridge-server.development"
+    },
+    {
+      "name": "os-accessibility-revocation-no-effects",
+      "passed": true,
+      "toolReportedError": true
+    },
+    {
+      "name": "os-accessibility-revocation-no-type-effects",
+      "passed": true,
+      "toolReportedError": false
+    }
+  ],
+  "tcc": [
+    {
+      "label": "dedicated access deny",
+      "at": "2026-10-25T10:20:54.096Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    },
+    {
+      "label": "dedicated application grant",
+      "at": "2026-10-25T10:20:55.224Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    },
+    {
+      "label": "fresh grant before active revocation",
+      "at": "2026-10-25T10:21:07.695Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    },
+    {
+      "label": "grant before OS revocation",
+      "at": "2026-10-25T10:21:14.515Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    }
+  ],
+  "responsibleApplicationVerified": true,
+  "tccResponsibility": [
+    {
+      "timestamp": "2026-10-25 03:20:53.802386-0700",
+      "responsibleBundleId": "com.lingxi.code.development",
+      "responsiblePid": 2390,
+      "responsiblePathMatchesSignedApp": true,
+      "accessingBundleId": "com.lingxi.code.bridge-server.development",
+      "accessingPid": 2626,
+      "accessingPath": "<signed-app>/Contents/Resources/bin/bridge-server",
+      "eventSha256": "75f5e52c0cd196228db307bc29b6e7179d9de349c31210ba72d90268156377d3"
+    },
+    {
+      "timestamp": "2026-10-25 03:20:58.061136-0700",
+      "responsibleBundleId": "com.lingxi.code.development",
+      "responsiblePid": 2390,
+      "responsiblePathMatchesSignedApp": true,
+      "accessingBundleId": "com.lingxi.code.bridge-server.development",
+      "accessingPid": 2626,
+      "accessingPath": "<signed-app>/Contents/Resources/bin/bridge-server",
+      "eventSha256": "199b0f4da164481fb4eb1a22d4bdef084fba63ab8d157a2afdb67718b174fadf"
+    },
+    {
+      "timestamp": "2026-10-25 03:20:59.213886-0700",
+      "responsibleBundleId": "com.lingxi.code.development",
+      "responsiblePid": 2390,
+      "responsiblePathMatchesSignedApp": true,
+      "accessingBundleId": "com.lingxi.code.bridge-server.development",
+      "accessingPid": 2626,
+      "accessingPath": "<signed-app>/Contents/Resources/bin/bridge-server",
+      "eventSha256": "be47524afe014e65a6a83083ff4878756e5df08a526295cce307aff024d48bae"
+    },
+    {
+      "timestamp": "2026-10-25 03:20:59.286503-0700",
+      "responsibleBundleId": "com.lingxi.code.development",
+      "responsiblePid": 2390,
+      "responsiblePathMatchesSignedApp": true,
+      "accessingBundleId": "com.lingxi.code.bridge-server.development",
+      "accessingPid": 2626,
+      "accessingPath": "<signed-app>/Contents/Resources/bin/bridge-server",
+      "eventSha256": "0db0525b2332eae5bd341ad906d94c68716c3c6465820317fa2806b68d064c6c"
+    },
+    {
+      "timestamp": "2026-10-25 03:21:02.411367-0700",
+      "responsibleBundleId": "com.lingxi.code.development",
+      "responsiblePid": 2390,
+      "responsiblePathMatchesSignedApp": true,
+      "accessingBundleId": "com.lingxi.code.bridge-server.development",
+      "accessingPid": 2626,
+      "accessingPath": "<signed-app>/Contents/Resources/bin/bridge-server",
+      "eventSha256": "e2f4841edbf6047320c29b30c9f571cb1c574acab880b37769566461f83cfffd"
+    },
+    {
+      "timestamp": "2026-10-25 03:21:02.427068-0700",
+      "responsibleBundleId": "com.lingxi.code.development",
+      "responsiblePid": 2390,
+      "responsiblePathMatchesSignedApp": true,
+      "accessingBundleId": "com.lingxi.code.bridge-server.development",
+      "accessingPid": 2626,
+      "accessingPath": "<signed-app>/Contents/Resources/bin/bridge-server",
+      "eventSha256": "9624b2cf7c8499625daf67cc86a19ebd728c6a9323549b0ea6ca943743d6b699"
+    }
+  ],
+  "syntheticCredentialRemoved": true,
+  "realAppProcessExited": true,
+  "launcherExited": true,
+  "ownedProcessesExited": true,
+  "shadowUnregistered": true,
+  "fixtureUnregistered": true,
+  "cleanupPassed": true,
+  "finishedAtUtc": "2026-10-25T10:21:56.508Z",
+  "status": "core-passed-os-revocation-status-mismatch",
+  "harnessRevision": "e19b7ebcffd5c2122f312f7ec6e778a23680fdb6",
+  "systemRoundtripPassed": false,
+  "observation": "With verified LingXi TCC responsibility and system Accessibility disabled, target clicking failed and independently observed typing made no change; the old request_access probe still reported an application grant instead of missing TCC. System switch restored to its original enabled state.",
+  "nextFix": "Live read-only OS checks and effective bounded AX messaging probe in Harness 366a23e6146d347be7190ce3a18c5767088198b9; requires a new signed-package OS roundtrip."
+}

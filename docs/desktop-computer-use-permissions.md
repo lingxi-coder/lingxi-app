@@ -174,3 +174,17 @@ Final package and system roundtrip results will be recorded separately after
 the new pinned build and operator steps complete. The development acceptance
 build uses release optimization with LTO disabled due to constrained disk;
 it is not default thin-LTO, Developer ID notarization or distribution acceptance.
+
+Normal LaunchServices launch was necessary for the OS tests: directly spawning
+the executable made Codex the TCC responsible application. The workflow now
+checks this run's bounded system attribution events and requires the signed
+LingXi application as the responsible process before any OS toggle. The
+updated e19 package passes the default generic/dedicated pipeline without a
+persisted explicit computer allow rule. With that verified responsibility,
+Accessibility removal blocked actual clicking and typing, but its original
+prompt-returned status did not expose the missing permission. This is recorded
+as an incomplete roundtrip, not acceptance. Harness `366a23e6` separates live
+queries, revokes grants/frames/held inputs on known OS loss, and uses a bounded
+AX message to verify effective accessibility; unavailable/busy queries reject
+only the current operation. The complete Computer Use regression has 161
+passing tests. The new signed-package roundtrip remains pending.

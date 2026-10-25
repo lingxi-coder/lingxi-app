@@ -46,6 +46,7 @@ async function waitFor(fn, label, timeout = 60_000) {
   throw new Error(`Timed out: ${label}`);
 }
 async function userContinue(name, detail) {
+  if (name.includes('revocation')) await verifyResponsibleApplication();
   phase(name, { ...detail, control: 'After completing the indicated system UI action, write control.json with {"action":"retry"}. Use {"action":"abort"} to stop.' });
   await waitFor(() => {
     const path = join(root, 'control.json'); if (!existsSync(path)) return false;
@@ -69,6 +70,12 @@ class Cdp {
   close() { this.ws.close(); }
 }
 let page, appChild, fixtureChild, shadowChild, provider, providerId;
+let appProcessIdentity, launchedUserDataDirectory;
+const appExecutable = join(options.app, 'Contents/MacOS/LingXi Code');
+const bridgeExecutable = join(options.app, 'Contents/Resources/bin/bridge-server');
+const runStarted = new Date(receipt.startedAtUtc);
+receipt.launchMethod = 'LaunchServices open -n -W -a exact signed bundle';
+receipt.responsibleApplicationVerified = false;
 let fixtureRegistered = false, shadowRegistered = false;
 async function evaluate(expression) {
   const result = await page.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
@@ -78,6 +85,95 @@ async function evaluate(expression) {
 async function invoke(name, ...args) { return evaluate(`window.lingxi.${name}(...${JSON.stringify(args)})`); }
 async function settings(command) { return evaluate(`window.lingxi.computerSettings.execute(${JSON.stringify(command)})`); }
 async function mutate(action, patch) { const current = await settings({ action: 'get' }); return settings({ action, revision: current.revision, ...patch }); }
+
+// /usr/bin/open is only a waiting launcher, not the application process.
+// Identity always includes the exact signed executable and unique test profile.
+function canonicalArgumentPaths(path) { return [...new Set([path, realpathSync.native(path)])]; }
+function commandMatchesOwnedApp(command) {
+  return command.startsWith(`${appExecutable} `) && launchedUserDataDirectory
+    && canonicalArgumentPaths(launchedUserDataDirectory).some(path => (command.includes(`--user-data-dir=${path} `) || command.endsWith(`--user-data-dir=${path}`)));
+}
+function ownedAppProcesses() {
+  const rows = execFileSync('/bin/ps', ['-ax', '-o', 'pid=,command='], { encoding: 'utf8' });
+  return rows.split('\n').flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/); if (!match || !commandMatchesOwnedApp(match[2])) return [];
+    return [{ pid: Number(match[1]), command: match[2] }];
+  });
+}
+function ownedAppPidStillMatches() {
+  if (!appProcessIdentity) return false;
+  const result=spawnSync('/bin/ps',['-p',String(appProcessIdentity.pid),'-o','command='],{encoding:'utf8'});
+  if(result.error || result.stderr.trim() || result.status===null || result.status>1)throw new Error('Cannot safely inspect the owned application PID');
+  if (result.status !== 0) return false;
+  const command=result.stdout.trim();
+  if (!commandMatchesOwnedApp(command)) throw new Error('Application PID identity changed; refusing to signal an unrelated process');
+  return true;
+}
+function localLogTime(date) {
+  const two=value=>String(value).padStart(2,'0');
+  return `${date.getFullYear()}-${two(date.getMonth()+1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+}
+function currentOwnedBridgePids() {
+  const rows=execFileSync('/bin/ps',['-ax','-o','pid=,command='],{encoding:'utf8'});
+  const ownedRoots=canonicalArgumentPaths(root);
+  return rows.split('\n').flatMap(line=>{
+    const match=line.trim().match(/^(\d+)\s+(.*)$/);if(!match || !match[2].startsWith(`${bridgeExecutable} `) || !ownedRoots.some(path=>match[2].includes(`${path}/`)))return [];
+    return [Number(match[1])];
+  });
+}
+async function verifyResponsibleApplication() {
+  const ownedBridgePids=currentOwnedBridgePids();
+  assert.ok(ownedBridgePids.length>0,"Cannot identify this run's exact packaged bridge process for TCC attribution");
+  const predicate='process == "tccd" AND eventMessage CONTAINS "AUTHREQ_ATTRIBUTION" AND eventMessage CONTAINS "com.lingxi.code.bridge-server.development"';
+  const evidence=[];
+  // A short retry accommodates unified-log publication lag without creating
+  // new permission requests or changing any system setting.
+  for(let attempt=0;attempt<4;attempt++){
+    const result=spawnSync('/usr/bin/log',['show','--start',localLogTime(runStarted),'--end',localLogTime(new Date()),'--style','ndjson','--predicate',predicate],{encoding:'utf8',timeout:15000,maxBuffer:4*1024*1024});
+    if(result.status!==0){receipt.responsibilityObservationError='TCC attribution logs are unavailable; run this explicit acceptance with permission to read the bounded system log.';save();throw new Error(receipt.responsibilityObservationError)}
+    for(const line of result.stdout.split('\n')){
+      let row;try{row=JSON.parse(line)}catch{continue}
+      const message=row.eventMessage ?? '';const responsible=message.match(/responsible=\{TCCDProcess: identifier=([^,]+), pid=(\d+),[^}]*responsible_path=([^,}]+)/);
+      const accessor=message.match(/accessing=\{TCCDProcess: identifier=com\.lingxi\.code\.bridge-server\.development, pid=(\d+),[^}]*binary_path=([^}]+)/);
+      if(!responsible || !accessor || !ownedBridgePids.includes(Number(accessor[1])))continue;
+      if(accessor[2].trim()!==bridgeExecutable)continue;
+      // Persist only this run's attribution, never the raw TCC log or other apps.
+      const record={timestamp:row.timestamp ?? null,responsibleBundleId:responsible[1],responsiblePid:Number(responsible[2]),responsiblePathMatchesSignedApp:responsible[3].trim()===appExecutable,accessingBundleId:'com.lingxi.code.bridge-server.development',accessingPid:Number(accessor[1]),accessingPath:'<signed-app>/Contents/Resources/bin/bridge-server',eventSha256:createHash('sha256').update(message).digest('hex')};
+      if(!evidence.some(prior=>JSON.stringify(prior)===JSON.stringify(record)))evidence.push(record);
+    }
+    const verified=evidence.some(record=>record.responsibleBundleId==='com.lingxi.code.development' && record.responsiblePid===appProcessIdentity?.pid && record.responsiblePathMatchesSignedApp);
+    receipt.tccResponsibility=evidence;receipt.responsibleApplicationVerified=verified;save();
+    if(verified){check('tcc-responsibility-is-the-signed-application',{responsibleBundleId:'com.lingxi.code.development',accessingBundleId:'com.lingxi.code.bridge-server.development'});return}
+    await delay(500);
+  }
+  phase('tcc-responsibility-unverified',{attributions:evidence,instruction:'OS revocation cannot be accepted until the current bridge is attributed to the signed LingXi development application.'});
+  throw new Error('The current bridge TCC responsibility is not verified as the signed LingXi application; refusing an ambiguous OS revocation test');
+}
+async function terminateOwnedApp() {
+  if(!launchedUserDataDirectory){receipt.realAppProcessExited=true;return}
+  // Resolve even a failed pre-debugger startup so no LaunchServices child leaks.
+  let matches=ownedAppProcesses();
+  assert.ok(matches.length<=1,'Multiple processes match the unique acceptance profile; refusing ambiguous cleanup');
+  if(!appProcessIdentity && matches.length===1)appProcessIdentity=matches[0];
+  if(appProcessIdentity && ownedAppPidStillMatches()){try{await waitFor(()=>!ownedAppPidStillMatches(),'graceful signed application close',3000)}catch{/* Revalidate exact PID identity before each fallback signal below. */}}
+  if(appProcessIdentity){
+    for(const signal of ['SIGTERM','SIGKILL']){
+      if(!ownedAppPidStillMatches())break;
+      process.kill(appProcessIdentity.pid,signal);
+      try{await waitFor(()=>!ownedAppPidStillMatches(),`owned signed application exit after ${signal}`,3000)}catch{if(signal==='SIGKILL')throw new Error('Owned signed application survived exact-identity teardown')}
+    }
+  }
+  matches=ownedAppProcesses();assert.deepEqual(matches,[],'An application with this exact unique test profile survived teardown');
+  receipt.realAppProcessExited=true;
+  if(appChild){
+    try{await waitFor(()=>appChild.exitCode!==null || appChild.signalCode!==null,'LaunchServices waiting launcher exit',5000)}catch{
+      // It is safe to stop only our waiting open process after the real app is gone.
+      appChild.kill('SIGTERM');await waitFor(()=>appChild.exitCode!==null || appChild.signalCode!==null,'owned open waiter exit',3000);
+    }
+    receipt.launcherExited=true;
+  }
+  assert.deepEqual(ownedAppProcesses(),[],'A delayed LaunchServices launch survived cleanup');
+}
 
 // An actual NSApplication target: all generated input terminates here. Its
 // JSON receipt is independent of tool results and proves visible side effects.
@@ -107,7 +203,7 @@ function registerFixture(bundle, id) {
 
 const swiftSource = `import Cocoa
 final class Delegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
- var window:NSWindow!; var field:NSTextField!; var button:NSButton!; var marker:NSBox!; var clicks=0;var lastYield="";var lastYieldNonce=""
+ var window:NSWindow!; var field:NSTextField!; var button:NSButton!; var marker:NSBox!; var clicks=0;var lastYield="";var lastYieldNonce="";var clickHistory:[[String:Any]]=[]
  let state=CommandLine.arguments[1]; let control=CommandLine.arguments[2]
  let unauthorized=CommandLine.arguments.contains("--unauthorized")
  func rect(_ view:NSView)->[Int] {
@@ -117,10 +213,19 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
  func point(_ view:NSView)->[Int] {let r=rect(view);return [r[0]+r[2]/2,r[1]+r[3]/2]}
  func save(){
   let screen=NSScreen.screens.first!
-  let d:[String:Any]=["pid":ProcessInfo.processInfo.processIdentifier,"bundleId":Bundle.main.bundleIdentifier ?? "","unauthorized":unauthorized,"clicks":clicks,"text":field.stringValue,"fieldFocused":field.currentEditor() != nil && window.firstResponder === field.currentEditor(),"button":point(button),"field":point(field),"marker":point(marker),"markerRect":rect(marker),"contentRect":rect(window.contentView!),"screen":["width":Int(screen.frame.width*screen.backingScaleFactor),"height":Int(screen.frame.height*screen.backingScaleFactor),"scale":screen.backingScaleFactor],"lastYield":lastYield,"lastYieldNonce":lastYieldNonce,"visible":window.isVisible && window.occlusionState.contains(.visible),"frontmost":NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier]
+  let d:[String:Any]=["pid":ProcessInfo.processInfo.processIdentifier,"bundleId":Bundle.main.bundleIdentifier ?? "","unauthorized":unauthorized,"clicks":clicks,"clickHistory":clickHistory,"text":field.stringValue,"fieldFocused":field.currentEditor() != nil && window.firstResponder === field.currentEditor(),"button":point(button),"field":point(field),"marker":point(marker),"markerRect":rect(marker),"contentRect":rect(window.contentView!),"screen":["width":Int(screen.frame.width*screen.backingScaleFactor),"height":Int(screen.frame.height*screen.backingScaleFactor),"scale":screen.backingScaleFactor],"lastYield":lastYield,"lastYieldNonce":lastYieldNonce,"visible":window.isVisible && window.occlusionState.contains(.visible),"frontmost":NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Bundle.main.bundleIdentifier]
   if let bytes=try? JSONSerialization.data(withJSONObject:d,options:[.sortedKeys]){try? bytes.write(to:URL(fileURLWithPath:state),options:.atomic)}
  }
- @objc func clicked(){clicks += 1;save()}
+ @objc func clicked(){
+  clicks += 1
+  var record:[String:Any]=["at":ISO8601DateFormatter().string(from:Date()),"epochMilliseconds":Date().timeIntervalSince1970*1000,"clickIndex":clicks]
+  if let event=NSApp.currentEvent{
+   record["eventType"]=event.type.rawValue;record["eventUptimeSeconds"]=event.timestamp
+   let point=window.convertPoint(toScreen:event.locationInWindow);let screen=NSScreen.screens.first!;record["positionPhysical"]=[point.x*screen.backingScaleFactor,(screen.frame.maxY-point.y)*screen.backingScaleFactor]
+   if [.leftMouseDown,.leftMouseUp,.rightMouseDown,.rightMouseUp,.otherMouseDown,.otherMouseUp].contains(event.type){record["eventNumber"]=event.eventNumber;record["clickCount"]=event.clickCount}
+  }else{record["eventType"]="none"}
+  clickHistory.append(record);if clickHistory.count>30{clickHistory.removeFirst(clickHistory.count-30)};save()
+ }
  func controlTextDidChange(_ obj:Notification){save()}
  func applicationDidFinishLaunching(_ n:Notification){
   let screen=NSScreen.screens.first!;let width=min(600,(screen.frame.width-120)/2);let x=unauthorized ? screen.frame.width-40-width:40
@@ -190,16 +295,34 @@ async function showControlledPair() {
 async function activateFixture() { await activateOwnedTarget(fixtureBundle,fixtureStatePath,fixtureControlPath,fixtureId); }
 const key = `synthetic-${randomUUID()}`;
 const actions = new Map(); let sessionId;
+const toolEmissionCounts = new Map();
+const providerRequests = [];
+let providerFailure, providerRequestSequence=0;
+function effectSnapshot() {
+  if(!existsSync(fixtureStatePath))return null;
+  const state=fixtureState();return {pid:state.pid,clicks:state.clicks,textLength:state.text.length,textSha256:createHash('sha256').update(state.text).digest('hex'),frontmost:state.frontmost,fieldFocused:state.fieldFocused,clickHistory:state.clickHistory ?? []};
+}
+function effectTrace(stage, toolId, action, label) {
+  const row={at:new Date().toISOString(),stage,toolId,action,label,fixture:effectSnapshot()};
+  writeFileSync(join(root,'effect-log.jsonl'),JSON.stringify(row)+'\n',{flag:'a',mode:0o600});
+  receipt.effectTraceCount=(receipt.effectTraceCount ?? 0)+1;
+}
+function diagnosticSnapshot() {
+  return {providerRequestCount:providerRequestSequence,toolEmissionCounts:Object.fromEntries(toolEmissionCounts),providerRequests:providerRequests.slice(-60),providerFailure:providerFailure ?? null,finalFixture:effectSnapshot()};
+}
+
 async function observeSession() {
   await evaluate(`(() => {window.__computerAcceptance?.unsubs?.forEach(off=>off());const s={events:[],requests:[],genericRequests:[],unsubs:[]};window.__computerAcceptance=s;s.unsubs.push(window.lingxi.onEvent(e=>{if(e.sessionId===${JSON.stringify(sessionId)})s.events.push(e.event)}));s.unsubs.push(window.lingxi.onComputerAccess(e=>{if(e.sessionId===${JSON.stringify(sessionId)})s.requests.push(e.event)}));s.unsubs.push(window.lingxi.onPermission(e=>{if(e.sessionId===${JSON.stringify(sessionId)})s.genericRequests.push(e.event)}));return true})()`);
 }
 async function requestAction(input, label, resolveRequest = null, allowCancelled = false) {
   const marker = `COMPUTER_ACCEPTANCE_${randomUUID()}`;
   const toolId = `accept-${randomUUID()}`; actions.set(marker, { input, toolId });
+  effectTrace('before',toolId,input.action,label);
   await evaluate('window.__computerAcceptance.events=[]; window.__computerAcceptance.requests=[]; window.__computerAcceptance.genericRequests=[]; true');
   await invoke('sendPrompt', sessionId, marker);
   const handled = new Set();
   const events = await waitFor(async () => {
+    if(providerFailure)throw new Error(providerFailure);
     const state = await evaluate('({events:window.__computerAcceptance.events,requests:window.__computerAcceptance.requests,genericRequests:window.__computerAcceptance.genericRequests})');
     if (state.genericRequests.length) {
       const request = state.genericRequests[0];
@@ -220,7 +343,9 @@ async function requestAction(input, label, resolveRequest = null, allowCancelled
   assert.ok(reported?.tool_denial_kind !== 'permission-rule' && !reported?.tool_denial_kind?.startsWith('automode-'),
     `${label}: a generic permission/classifier failure is not native policy acceptance`);
   const safeResult = reported?.type === 'image' ? { ...reported, file: { ...reported.file, base64: '[omitted from receipt]' } } : reported;
-  phase('tool-result', { label, isError: result?.is_error ?? null, result: safeResult });
+  effectTrace('after',toolId,input.action,label);
+  receipt.diagnostics=diagnosticSnapshot();
+  phase('tool-result', { label, toolId, emissionCount:toolEmissionCounts.get(toolId) ?? 0, isError: result?.is_error ?? null, result: safeResult });
   return { result, events };
 }
 // Preserve chromatic identity across display profiles and JPEG conversion.
@@ -310,6 +435,13 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   const paths = runtimePathsForHome(home); mkdirSync(paths.userDataDir, { recursive: true, mode: 0o700 });
   writeFileSync(paths.settingsPath, JSON.stringify(createPackagedSettings({ workspace })), { mode: 0o600 });
   provider = createServer(async (request, response) => {
+    const trace={requestId:++providerRequestSequence,at:new Date().toISOString(),method:request.method,path:request.url.split('?')[0],authenticated:request.headers.authorization===`Bearer ${key}`};
+    providerRequests.push(trace);if(providerRequests.length>200)providerRequests.shift();
+    const traceUpdate=patch=>{Object.assign(trace,patch);writeFileSync(join(root,'provider-request-log.jsonl'),JSON.stringify({...trace,observedAt:new Date().toISOString()})+'\n',{flag:'a',mode:0o600})};
+    request.once('aborted',()=>traceUpdate({requestAborted:true}));
+    response.once('finish',()=>traceUpdate({responseFinished:true}));
+    response.once('close',()=>traceUpdate({responseClosed:true,closedBeforeFinish:!response.writableFinished}));
+    traceUpdate({phase:'received'});
     try {
     if (request.headers.authorization !== `Bearer ${key}`) { response.writeHead(401).end(); return; }
     if (request.method === 'GET') {
@@ -322,15 +454,19 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
     const payload = JSON.parse(body); const messages = payload.messages ?? [];
     const user = [...messages].reverse().find(message => message.role === 'user');
     const selection = [...actions].find(([marker]) => JSON.stringify(user?.content).includes(marker));
+    traceUpdate({phase:'parsed',model:payload.model=== 'acceptance-model' ? payload.model:'<other-model>',messageCount:messages.length,roles:messages.map(message=>message.role),selectedMarkerSha256:selection ? createHash('sha256').update(selection[0]).digest('hex'):null,toolId:selection?.[1].toolId ?? null,action:selection?.[1].input.action ?? null,containsExactToolResult:!!selection && messages.some(message=>message.tool_call_id===selection[1].toolId),assistantToolCallIds:messages.flatMap(message=>message.role==='assistant' ? (message.tool_calls ?? []).map(call=>call.id):[]).slice(-30),toolResultIds:messages.filter(message=>message.role==='tool').map(message=>message.tool_call_id).slice(-30)});
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const send = data => response.write(`data: ${JSON.stringify(data)}\n\n`);
     if (selection && !messages.some(message => message.tool_call_id === selection[1].toolId)) {
       assert.ok(payload.tools?.some(tool => tool.function?.name === 'computer'), 'Real computer tool must be registered');
       const { input, toolId } = selection[1];
+      const emissionCount=(toolEmissionCounts.get(toolId) ?? 0)+1;toolEmissionCounts.set(toolId,emissionCount);traceUpdate({emissionCount});
+      if(emissionCount>1){providerFailure=`Synthetic provider attempted to emit duplicate tool call ${toolId}; this run is invalid, not accepted by deduplication.`;receipt.diagnostics=diagnosticSnapshot();save();throw new Error(providerFailure)}
       // Submitting a prompt can activate Desktop's composer. Restore only the
       // owned target immediately before emitting keyboard tools so focus is
       // established at execution time, rather than before prompt submission.
       if (['type', 'key', 'key_down', 'key_up', 'hold_key'].includes(input.action)) await activateFixture();
+      effectTrace('provider-emitted',toolId,input.action,'synthetic model tool emission');
       send({ choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: toolId, type: 'function', function: { name: 'computer', arguments: JSON.stringify(input) } }] } }] });
       send({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
     } else {
@@ -338,15 +474,23 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
       send({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
     }
     response.end('data: [DONE]\n\n');
-    } catch (error) { receipt.providerError = String(error.message ?? error); save(); if (!response.headersSent) response.writeHead(500); response.end(); }
+    } catch (error) { traceUpdate({phase:'error',error:String(error.message ?? error)}); providerFailure=String(error.message ?? error); receipt.providerError = String(error.message ?? error); save(); if (!response.headersSent) response.writeHead(500); response.end(); }
   });
   await new Promise((resolvePromise, rejectPromise) => { provider.once('error', rejectPromise); provider.listen(0, '127.0.0.1', resolvePromise); });
   const portServer = createServer(); await new Promise(resolvePromise => portServer.listen(0, '127.0.0.1', resolvePromise)); const port = portServer.address().port; await new Promise(resolvePromise => portServer.close(resolvePromise));
   const env = sanitizePackagedAppEnvironment(process.env, { HOME: home, TMPDIR: temp, LINGXI_CONFIG_DIR: join(home, '.lingxi') });
-  delete env.ANTHROPIC_AUTH_TOKEN;
-  appChild = spawn(join(options.app, 'Contents/MacOS/LingXi Code'), [`--user-data-dir=${paths.userDataDir}`, `--remote-debugging-port=${port}`], { cwd: dirname(options.app), env, stdio: ['ignore','pipe','pipe'] });
-  appChild.stdout.on('data', chunk => writeFileSync(join(root, 'app.stdout.log'), chunk, { flag: 'a', mode: 0o600 }));
-  appChild.stderr.on('data', chunk => writeFileSync(join(root, 'app.stderr.log'), chunk, { flag: 'a', mode: 0o600 }));
+  for(const name of Object.keys(env))if(/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name))delete env[name];
+  // LaunchServices creates the normal application responsibility boundary.
+  // Directly spawning Contents/MacOS inherits the test runner's TCC identity.
+  const launchEnvironment=Object.fromEntries(['HOME','TMPDIR','TMP','TEMP','PATH','LANG','LC_ALL','LC_CTYPE','USER','LOGNAME','SHELL','LINGXI_CONFIG_DIR'].filter(name=>env[name]!==undefined).map(name=>[name,env[name]]));
+  const stdoutPath=join(root,'app.stdout.log'),stderrPath=join(root,'app.stderr.log');
+  writeFileSync(stdoutPath,'',{mode:0o600});writeFileSync(stderrPath,'',{mode:0o600});
+  launchedUserDataDirectory=paths.userDataDir;
+  appChild=spawn('/usr/bin/open',['-n','-W','-a',options.app,'-i','/dev/null','-o',stdoutPath,'--stderr',stderrPath,...Object.entries(launchEnvironment).flatMap(([name,value])=>['--env',`${name}=${value}`]),'--args',`--user-data-dir=${paths.userDataDir}`,`--remote-debugging-port=${port}`],{cwd:dirname(options.app),env,stdio:['ignore','pipe','pipe']});
+  const launcherLog=join(root,'open-launcher.log');
+  for(const stream of [appChild.stdout,appChild.stderr])stream.on('data',chunk=>writeFileSync(launcherLog,chunk,{flag:'a',mode:0o600}));
+  appProcessIdentity=await waitFor(()=>{const owned=ownedAppProcesses();assert.ok(owned.length<=1,'Expected exactly one signed app for the unique test profile');return owned[0]},'LaunchServices signed application PID');
+  receipt.applicationPid=appProcessIdentity.pid;save();
   const rendererUrl = pathToFileURL(join(options.app, 'Contents/Resources/app.asar/out/renderer/index.html')).href;
   const target = await waitFor(async () => { try { const response = await fetch(`http://127.0.0.1:${port}/json/list`); const targets = await response.json(); return targets.find(target => target.type === 'page' && target.url === rendererUrl); } catch { return false; } }, 'signed renderer target');
   page = new Cdp(target.webSocketDebuggerUrl); await page.send('Page.enable');
@@ -416,6 +560,7 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   let grant = await access(true, 'dedicated application grant');
   while (grant.tccObserved) grant = await access(true, 'dedicated grant after OS retry');
   requireSuccess(grant, 'application grant'); assert.ok(JSON.parse(grant.result.result_json).granted.includes(fixtureId)); check('dedicated-approval-grant');
+  await verifyResponsibleApplication();
   const grantedList=await requestAction({action:'list_granted_applications'},'verify independent target is not granted');requireSuccess(grantedList,'granted list');assert.ok(!grantedList.result.result_json.includes(shadowId),'The independent comparison application must remain unauthorized');
   requireSuccess(await requestAction({ action: 'open_application', bundle_id: fixtureId }, 'open granted target'), 'open target'); await waitFor(()=>fixtureState().frontmost,'real Computer Use open_application activates its granted target',10000); await activateFixture();
   const size = await requestAction({ action: 'display_size' }, 'native display size'); requireSuccess(size, 'display size');
@@ -428,7 +573,7 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   const initialPixels = JSON.parse(execFileSync(fixtureExecutable, ['--inspect', imagePath], { encoding: 'utf8' }));
   const marker = fixtureState().marker; const imageMarker = [Math.round(marker[0] * initialPixels.width / image.width), Math.round(marker[1] * initialPixels.height / image.height)];
   const pixels = JSON.parse(execFileSync(fixtureExecutable, ['--inspect', imagePath, ...imageMarker.map(String)], { encoding: 'utf8' }));
-  assert.ok(pixels.nonBlackSamples > 100, 'Authorized target must appear in actual captured pixels'); 
+  assert.ok(pixels.nonBlackSamples > 100, 'Authorized target must appear in actual captured pixels');
   assert.ok(isTargetMarker(pixels.sampleRGB), 'Actual fixture marker must appear at its Retina-mapped screenshot coordinate');
   const maskedRegion=inspectRegion(imagePath,visiblePair.unauthorized.contentRect,image,pixels);assert.equal(maskedRegion.allBlack,true,'The visible independent unauthorized application content must be entirely masked');
   check('unauthorized-visible-application-masked',{bundleId:shadowId,sourceRect:visiblePair.unauthorized.contentRect,region:maskedRegion,visible:visiblePair.unauthorized.visible});
@@ -449,7 +594,7 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   const active = requestAction({ action: 'computer_batch', actions: [{ action: 'left_click', coordinate: before.button }, { action: 'wait', duration: 4 }, { action: 'left_click', coordinate: before.button }] }, 'active batch revocation', null, true);
   await waitFor(() => fixtureState().clicks === before.clicks + 1, 'first batch effect'); await mutate('setEnabled', { enabled: false });
   const revoked = await active; assert.ok(revoked.result?.is_error || revoked.events.some(event => event.type === 'turn_ended' && event.outcome?.type !== 'end_turn'));
-  await delay(4500); assert.equal(fixtureState().clicks, before.clicks + 1); check('active-batch-revocation-stops-next-effect');
+  await delay(4500);effectTrace('after-revocation-settle',null,'computer_batch','active batch revocation');receipt.diagnostics=diagnosticSnapshot();save(); assert.equal(fixtureState().clicks, before.clicks + 1); check('active-batch-revocation-stops-next-effect');
   await mutate('setEnabled', { enabled: true });
   requireBlocked(await requestAction({ action: 'left_click', coordinate: before.button }, 're-enable cannot restore old grants'), 're-enable'); check('re-enable-no-old-grants');
   if (options.tccRoundtrip) {
@@ -502,20 +647,21 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
   }
   receipt.status = 'passed'; phase('passed', { checks: receipt.checks.length });
 } catch (error) {
+  receipt.diagnostics=diagnosticSnapshot();
   receipt.status = 'failed'; receipt.error = String(error.stack ?? error); phase('failed', { error: String(error.message ?? error) }); process.exitCode = 1;
 } finally {
   if (page && providerId) { try { await invoke('clearProviderCredential', providerId); receipt.syntheticCredentialRemoved = true; } catch (error) { receipt.syntheticCredentialRemoved = false; receipt.credentialCleanupError = String(error.message ?? error); } }
   if (page) { try { await page.send('Browser.close', {}, 3000); } catch {} page.close(); }
-  if (appChild && appChild.exitCode === null) { appChild.kill('SIGTERM'); await delay(2000); if (appChild.exitCode === null) appChild.kill('SIGKILL'); }
+  try { await terminateOwnedApp(); } catch(error) { receipt.realAppProcessExited=false;receipt.applicationCleanupError=String(error.message ?? error); }
   if (fixtureChild && fixtureChild.exitCode === null) fixtureChild.kill('SIGTERM');
   if (shadowChild && shadowChild.exitCode === null) shadowChild.kill('SIGTERM');
-  receipt.ownedProcessesExited=true;
-  for(const child of [appChild,fixtureChild,shadowChild])if(child){try{await waitFor(()=>child.exitCode!==null || child.signalCode!==null,'owned test process teardown',3000)}catch{receipt.ownedProcessesExited=false}}
+  receipt.ownedProcessesExited=receipt.realAppProcessExited===true && (!appChild || receipt.launcherExited===true);
+  for(const child of [fixtureChild,shadowChild])if(child){try{await waitFor(()=>child.exitCode!==null || child.signalCode!==null,'owned test process teardown',3000)}catch{receipt.ownedProcessesExited=false}}
   if (shadowRegistered) {try{execFileSync(launchServicesRegister,['-u',shadowBundle],{env:fixtureEnvironment,stdio:'pipe'});receipt.shadowUnregistered=true}catch{receipt.shadowUnregistered=false}}
   if (fixtureRegistered) { try { execFileSync(launchServicesRegister, ['-u', fixtureBundle], { env:fixtureEnvironment, stdio: 'pipe' }); receipt.fixtureUnregistered = true; } catch { receipt.fixtureUnregistered = false; } }
   if (provider) { provider.closeAllConnections(); await new Promise(resolvePromise => provider.close(resolvePromise)); }
   receipt.acceptancePassed=receipt.status==='passed';
   receipt.cleanupPassed=receipt.syntheticCredentialRemoved!==false && receipt.fixtureUnregistered!==false && receipt.shadowUnregistered!==false && receipt.ownedProcessesExited===true;
   if(!receipt.cleanupPassed){if(receipt.acceptancePassed)receipt.status='passed_with_cleanup_error';process.exitCode=1;phase('cleanup-failed',{syntheticCredentialRemoved:receipt.syntheticCredentialRemoved,fixtureUnregistered:receipt.fixtureUnregistered,shadowUnregistered:receipt.shadowUnregistered})}
-  receipt.finishedAtUtc = new Date().toISOString(); save();
+  receipt.diagnostics=diagnosticSnapshot();receipt.finishedAtUtc = new Date().toISOString(); save();
 }

@@ -18,9 +18,14 @@ is **not complete**.
   must be in the explicit public package allowlist. Packages cannot serialize
   local grants.
 - Product Cargo dependencies resolve to Harness
-  `384881fb0ec9b03c3780f85c85717a342f7cbeab` and Mobile Linux Runtime
-  `ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3`. The Harness merge retains the
-  existing main Accessibility diagnostics alongside the Local App changes.
+  `9c2de9653d00306e92eebb67e8732737b42e59ea` and Mobile Linux Runtime
+  `bfd17e346f7ebbb2bcd5206f3c05f56b83a1858b`. The Harness merge retains the
+  existing main Accessibility diagnostics alongside the Local App changes. The
+  SDK merge includes both branded Project mounts and the previously validated
+  Android host-death / iOS root-directory, process-exit, truncate and covered-path
+  preservation fixes. Native patch files match the original validated revision;
+  combined Swift mount planning and transition behavior has separate regression
+  coverage. These simulator/unit results do not replace physical service tests.
 
 ## Validation for this source merge
 
@@ -28,7 +33,9 @@ is **not complete**.
 | --- | --- |
 | Harness `local-app`, no default features, library tests | 83 passed |
 | Product Agent SDK, source-chat navigation, AG-UI fixture and package-smoke tests | 47 passed, no skips |
-| SDK guest-user/rootfs script tests | 8 passed |
+| SDK merged Android/API/core/iOS Rust suites | 129 passed |
+| SDK merged NativeSupport Swift simulator unit tests | 40 passed |
+| SDK merged guest-user/rootfs and native patch script tests | 9 + 7 passed |
 | Market complete unit/domain suite | 56 passed; 4 Firebase emulator tests not run |
 | Market TypeScript and production build | Passed |
 | Final product Cargo locked dependency metadata | Verified: 80 Harness packages and 5 SDK packages |

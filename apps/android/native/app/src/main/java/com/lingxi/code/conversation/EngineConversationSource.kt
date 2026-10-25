@@ -12,7 +12,6 @@ import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.client.PromptModeDto
 import com.lingxi.code.bindings.runtime.ProviderConnectionTestDto
 import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
-import com.lingxi.code.bindings.runtime.LocalAppHost
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.client.PermissionResponseDto

@@ -1,0 +1,142 @@
+{
+  "version": "1.0.0",
+  "status": "design-proposal",
+  "name": "灵犀结 / Resonance Link",
+  "brand": {
+    "en": "LingXi",
+    "zh-Hans": "灵犀",
+    "zh-Hant": "靈犀",
+    "bilingual": "灵犀 LingXi"
+  },
+  "colors": {
+    "primary": "#4167ED",
+    "ink": "#202632",
+    "paper": "#F6F5F0",
+    "white": "#FFFFFF"
+  },
+  "geometry": {
+    "viewBox": [
+      0,
+      0,
+      128,
+      128
+    ],
+    "path": "M24 64C24 38 43 31 64 64C85 97 104 90 104 64C104 38 85 31 64 64C43 97 24 90 24 64Z",
+    "rotation": -35,
+    "stroke": 14
+  },
+  "products": [
+    {
+      "id": "code",
+      "en": "LingXi Code",
+      "zh": "灵犀 Code",
+      "launcher_en": "LingXi",
+      "launcher_zh": "灵犀",
+      "descriptor": "Code",
+      "color": "#4167ED",
+      "role": "product",
+      "purpose": "把想法变成作品",
+      "source": "lingxi-app"
+    },
+    {
+      "id": "chat",
+      "en": "LingXi Chat",
+      "zh": "灵犀聊天",
+      "launcher_en": "LingXi Chat",
+      "launcher_zh": "灵犀聊天",
+      "descriptor": "Chat",
+      "color": "#137C70",
+      "role": "product",
+      "purpose": "让交流自然发生",
+      "source": "chat"
+    },
+    {
+      "id": "computer-use",
+      "en": "LingXi Control",
+      "zh": "灵犀操控",
+      "launcher_en": "LingXi Control",
+      "launcher_zh": "灵犀操控",
+      "descriptor": "Control",
+      "color": "#6653B9",
+      "role": "product",
+      "purpose": "让意图化为行动",
+      "source": "computer-use"
+    },
+    {
+      "id": "apps",
+      "en": "LingXi Apps",
+      "zh": "灵犀应用",
+      "launcher_en": "LingXi Apps",
+      "launcher_zh": "灵犀应用",
+      "descriptor": "Apps",
+      "color": "#AF5B2F",
+      "role": "product",
+      "purpose": "发现触手可及的工具",
+      "source": "local-app-market"
+    },
+    {
+      "id": "remote",
+      "en": "LingXi Remote",
+      "zh": "灵犀远控",
+      "launcher_en": null,
+      "launcher_zh": null,
+      "descriptor": "Remote",
+      "color": "#1F728F",
+      "role": "feature",
+      "purpose": "随时连接你的设备",
+      "source": "lingxi-app / Remote Control"
+    },
+    {
+      "id": "harness",
+      "en": "LingXi Harness",
+      "zh": "灵犀 Harness",
+      "launcher_en": null,
+      "launcher_zh": null,
+      "descriptor": "Harness",
+      "color": "#4F5B69",
+      "role": "developer",
+      "purpose": "代理运行时",
+      "source": "harness-runtime"
+    },
+    {
+      "id": "sdk",
+      "en": "LingXi SDK",
+      "zh": "灵犀 SDK",
+      "launcher_en": null,
+      "launcher_zh": null,
+      "descriptor": "SDK",
+      "color": "#5B6553",
+      "role": "developer",
+      "purpose": "构建与接入",
+      "source": "SDK family"
+    }
+  ],
+  "developer_labels": [
+    {
+      "en": "LingXi WebRTC",
+      "zh": "灵犀 WebRTC",
+      "family": "sdk",
+      "icon": "sdk"
+    },
+    {
+      "en": "LingXi Mobile Linux",
+      "zh": "灵犀 Mobile Linux",
+      "family": "sdk",
+      "icon": "sdk"
+    },
+    {
+      "en": "LingXi LLM Client",
+      "zh": "灵犀 LLM Client",
+      "family": "sdk",
+      "icon": "sdk"
+    }
+  ],
+  "rules": {
+    "wordmark_min_width": 96,
+    "mark_min_size": 16,
+    "clear_space_mark_units": 20,
+    "product_glyph_min_size": 48,
+    "small_icon_requires_visible_product_label": true,
+    "application_identifiers_changed": false
+  }
+}

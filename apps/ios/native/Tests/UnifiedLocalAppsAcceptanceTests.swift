@@ -1,6 +1,14 @@
 import Foundation
 import XCTest
+import Darwin
 @testable import LingxiCode
+
+@_silgen_name("mlr_ish_boot_json")
+private func acceptanceNativeBoot(_ config: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("mlr_ish_configure_mounts_json")
+private func acceptanceNativeMounts(_ config: UnsafePointer<CChar>?, _ mounts: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("mlr_ish_free_string")
+private func acceptanceNativeFree(_ value: UnsafeMutablePointer<CChar>?)
 
 /// Requires a signed product on a physical iPhone. Simulator success is not Linux proof.
 @MainActor
@@ -18,8 +26,9 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
         let marker = "overlay-acceptance-" + UUID().uuidString
         let projectSentinel = projects.appendingPathComponent(marker)
         try Data("keep-workspace-source".utf8).write(to: projectSentinel)
-        let guest = storage.guestHome + "/" + marker
-        let hidden = try UnifiedLocalApps.hostSourceDirectory(guest)
+        let homeGuest = storage.guestHome + "/" + marker
+        let guest = "/tmp/" + marker
+        let hidden = try UnifiedLocalApps.hostSourceDirectory(homeGuest)
         let external = URL(fileURLWithPath: ConversationSourceFactory.appSandboxRoot())
             .appendingPathComponent(marker, isDirectory: true)
         for directory in [hidden, external, external.appendingPathComponent("ro"), external.appendingPathComponent("writable")] {
@@ -44,8 +53,22 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             XCTAssertEqual(result.exitCode, 0, result.stderr)
             XCTAssertFalse(result.timedOut)
         }
+        var phase = "boot"
         do {
             _ = try await runtime.boot()
+            phase = "managed-home-rejection"
+            do {
+                _ = try await runtime.configureMounts(mounts: [MobileLinuxMountSpecFfi(
+                    hostPath: external.path, guestPath: homeGuest, readOnly: false, purpose: .external)])
+                XCTFail("External overlays must not replace runtime-managed HOME paths")
+            } catch MobileLinuxOperationFfiError.InvalidRequest(let message) {
+                XCTAssertTrue(message.contains("persistent guest home"), message)
+            }
+            // Public app requests reserve HOME for the managed user/workspace.
+            // Exercise external overlays at an allowed temporary guest location,
+            // while checking both the hidden guest file and persistent HOME.
+            phase = "external-overlay-command"
+            try await run("import os; os.makedirs('\(guest)', exist_ok=True); os.chmod('\(guest)', 0o700); open('\(guest)/same.txt', 'w').write('hidden-guest-value')")
             let mounts = [
                 MobileLinuxMountSpecFfi(hostPath: external.path, guestPath: guest, readOnly: false, purpose: .external),
                 MobileLinuxMountSpecFfi(hostPath: external.appendingPathComponent("ro").path, guestPath: guest + "/ro", readOnly: true, purpose: .external),
@@ -83,6 +106,7 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             XCTAssertEqual(try String(contentsOf: external.appendingPathComponent("ro/locked.txt"), encoding: .utf8), "read-only")
             XCTAssertFalse(FileManager.default.fileExists(atPath: hidden.appendingPathComponent("soft.txt").path))
             XCTAssertFalse(FileManager.default.fileExists(atPath: hidden.appendingPathComponent("pipe").path))
+            phase = "workspace-read-only"
             _ = try await runtime.configureMounts(mounts: [MobileLinuxMountSpecFfi(
                 hostPath: projects.path, guestPath: storage.projectsGuestPath, readOnly: true, purpose: .workspace)])
             try await run("""
@@ -96,7 +120,8 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
 
             // Adding and removing an ancestor rebuilds the child's physical /
             // table-only representation, without stranding its mount owner.
-            let parentGuest = "/var/lingxi/" + marker
+            let parentGuest = "/tmp/ancestor-" + marker
+            phase = "ancestor-transitions"
             let child = MobileLinuxMountSpecFfi(hostPath: external.path, guestPath: parentGuest + "/job", readOnly: false, purpose: .external)
             _ = try await runtime.configureMounts(mounts: [child])
             try await run("assert open('same.txt').read() == 'ext'", cwd: child.guestPath)
@@ -106,10 +131,55 @@ final class UnifiedLocalAppsAcceptanceTests: XCTestCase {
             _ = try await runtime.configureMounts(mounts: [child])
             try await run("assert open('same.txt').read() == 'ext'", cwd: child.guestPath)
             _ = try await runtime.configureMounts(mounts: [])
+            try await run("import os, shutil; assert os.stat('\(guest)').st_mode & 0o777 == 0o700; assert open('\(guest)/same.txt').read() == 'hidden-guest-value'; shutil.rmtree('\(guest)')")
+            XCTAssertEqual(try Data(contentsOf: hidden.appendingPathComponent("same.txt")), original)
             XCTAssertEqual(try Data(contentsOf: projectSentinel), Data("keep-workspace-source".utf8))
             XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: projects.path)[.type] as? FileAttributeType, .typeDirectory)
             print("IOS_LOCAL_APP_OVERLAY PASS cold-stat truncate hardlink fake-symlink readlink fifo readonly nearest-RW ancestor-transition HOME-and-workspace-preserved")
         } catch {
+            print("IOS_LOCAL_APP_OVERLAY_FAILURE phase=\(phase) type=\(String(reflecting: type(of: error))) error=\(error) cancelled=\(Task.isCancelled)")
+            // Preserve the native error envelope even if the async FFI caller
+            // only surfaces cancellation. This runs only after the test failed.
+            var nativeConfig = ["brand_id": storage.brandId,
+                                "linux_user": storage.linuxUser,
+                                "config_dir_name": storage.configDirName,
+                                "managed_root": LXISHDefaultWorkspace.managedRootPath(),
+                                "workspace_host_path": projects.path,
+                                "stable_workspace_id": LXISHDefaultWorkspace.stableID(),
+                                "abi": "arm64", "rootfs_version": metadata.rootfsVersion]
+            projects.path.withCString { path in
+                if let resolved = realpath(path, nil) {
+                    nativeConfig["workspace_host_path"] = String(cString: resolved)
+                    free(resolved)
+                }
+            }
+            nativeConfig["archive_sha256"] = metadata.archiveSha256
+            nativeConfig["authorization_file"] = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
+            for (key, environmentKey) in [("rootfs_archive_path", "LINGXI_IOS_ISH_ROOTFS_ZIP"),
+                                           ("default_mount_path", "LINGXI_IOS_ISH_DEFAULT_MOUNT_DIR"),
+                                           ("rootfs_patch_path", "LINGXI_IOS_ISH_ROOTFS_PATCH_DIR")] {
+                if let value = getenv(environmentKey) { nativeConfig[key] = String(cString: value) }
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: nativeConfig),
+               let config = String(data: data, encoding: .utf8) {
+                let diagnostics = await Task.detached {
+                    config.withCString { pointer -> [String] in
+                        var values: [String] = []
+                        if let response = acceptanceNativeBoot(pointer) {
+                            values.append("IOS_LOCAL_APP_NATIVE_BOOT_DIAGNOSTIC " + String(cString: response))
+                            acceptanceNativeFree(response)
+                        }
+                        #"{"mounts":[]}"#.withCString { mounts in
+                            if let response = acceptanceNativeMounts(pointer, mounts) {
+                                values.append("IOS_LOCAL_APP_NATIVE_MOUNT_DIAGNOSTIC " + String(cString: response))
+                                acceptanceNativeFree(response)
+                            }
+                        }
+                        return values
+                    }
+                }.value
+                for diagnostic in diagnostics { print(diagnostic) }
+            }
             _ = try? await runtime.configureMounts(mounts: [])
             throw error
         }

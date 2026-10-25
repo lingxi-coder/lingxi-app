@@ -125,6 +125,8 @@
     <string name="chat_error_engine_submit_failed">引擎错误：%1$s</string>
     <string name="chat_error_finish_background_turn_first">请先处理后台对话（继续或丢弃），再进行此操作。</string>
     <string name="chat_error_generic_headline">出错了</string>
+    <string name="chat_error_view_details">查看详情</string>
+    <string name="chat_error_details_title">错误详情</string>
     <string name="chat_error_host">引擎错误</string>
     <string name="chat_error_internal">内部错误</string>
     <string name="chat_error_max_turns">已达最大轮数</string>

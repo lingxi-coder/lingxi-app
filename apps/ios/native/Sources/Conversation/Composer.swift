@@ -12,6 +12,8 @@ enum VoiceHoldGesturePolicy {
 struct Composer: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
     @Binding var inputFocused: Bool
     @Binding var model: ModelOption
     // The picker is driven exclusively by the engine's curated, provider-qualified
@@ -261,7 +263,7 @@ struct Composer: View {
                 .layoutPriority(1)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 // Captured-photo attachment chip (the device-vision analog of how
                 // a transcript lands in the draft): a thumbnail + a remove button,
                 // shown only once a camera capture has surfaced an image.
@@ -287,7 +289,7 @@ struct Composer: View {
                     onSubmit: send,
                     onAcceptSuggestion: visibleSuggestion == nil ? nil : acceptSuggestion
                 )
-                    .padding(.horizontal, 4).padding(.vertical, 2)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
                     .onChange(of: Array(draft.utf16)) { _, newDisplayCodeUnits in
                         updateDraftSourceCodeUnits(forDisplayCodeUnits: newDisplayCodeUnits)
                         if dismissedSlashDraft != draft {
@@ -317,7 +319,7 @@ struct Composer: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .buttonStyle(.plain)
-                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
                             .accessibilityLabel(String(localized: "composer_use_suggestion \(visibleSuggestion)"))
                             .accessibilityIdentifier("composer.prompt-suggestion")
                             .onAppear {
@@ -345,21 +347,25 @@ struct Composer: View {
                         .foregroundStyle(t.danger)
                         .accessibilityIdentifier("composer.fast-mode.error")
                 }
-                ViewThatFits(in: .horizontal) {
-                    toolbar(showsModelText: true)
-                    toolbar(showsModelText: false)
-                }
+                toolbar
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("composer.toolbar")
             }
-            .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 6)
-            .background(t.composerBg)
-            .clipShape(.rect(cornerRadius: 24))
-            .overlay {
-                RoundedRectangle(cornerRadius: 24)
-                    .stroke(inputFocused ? t.accent.opacity(0.45) : t.border.opacity(0.45),
-                            lineWidth: inputFocused ? 1 : 0.5)
+            .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 6)
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
+                if reduceTransparency || contrast == .increased {
+                    shape.fill(t.composerBg)
+                } else {
+                    shape.fill(.regularMaterial)
+                }
             }
+            .overlay {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(t.border.opacity(contrast == .increased ? 1 : inputFocused ? 0.7 : 0.4),
+                                  lineWidth: contrast == .increased ? 1 : 0.5)
+            }
+            .shadow(color: .black.opacity(t.isDark ? 0.12 : 0.04), radius: 12, y: 4)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: inputFocused)
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
@@ -493,14 +499,11 @@ struct Composer: View {
                     .tint(t.text2)
                     .frame(width: 44, height: 44)
             } else {
-                LXIcon(
-                    name: cancellingHold || isDictationListening ? .stop : .mic,
-                    size: 18,
-                    color: cancellingHold ? t.danger
-                        : (holding || isDictationListening ? t.accent : t.text2),
-                    stroke: 1.8
-                )
-                .frame(width: 44, height: 44)
+                Image(systemName: cancellingHold || isDictationListening ? "stop.fill" : "mic")
+                .font(.system(size: 19, weight: .regular))
+                .foregroundStyle(cancellingHold ? t.danger
+                    : (holding || isDictationListening ? t.accent : t.text2))
+                .frame(width: 36, height: 36)
                 .background(
                     isDictationListening || holding
                         ? t.accent.tint(0.15)
@@ -525,17 +528,14 @@ struct Composer: View {
 
     private var flowModeButton: some View {
         Button(action: onFlowModeTap) {
-            LXIcon(
-                name: .audioWave,
-                size: 18,
-                color: voiceInteractionMode == .flow ? t.accent : t.text2,
-                stroke: 1.8
-            )
-            .frame(width: 44, height: 44)
+            Image(systemName: "waveform")
+            .font(.system(size: 18, weight: .medium))
+            .foregroundStyle(voiceInteractionMode == .flow ? t.accent : t.text)
+            .frame(width: 36, height: 36)
             .background(
                 voiceInteractionMode == .flow
                     ? t.accent.tint(0.15)
-                    : .clear,
+                    : t.surfaceHover,
                 in: Circle()
             )
         }
@@ -576,8 +576,11 @@ struct Composer: View {
 
     private var attachmentButton: some View {
         Button(action: onCameraClick) {
-            LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
-                .frame(width: 44, height: 44)
+            Image(systemName: "plus")
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(t.text2)
+                .frame(width: 36, height: 36)
+                .background(t.surfaceHover, in: Circle())
         }
         .buttonStyle(ComposerActionButtonStyle())
         .accessibilityLabel("composer_add_attachment")
@@ -629,44 +632,35 @@ struct Composer: View {
         .opacity(sendEnabled ? 1 : 0.45)
     }
 
-    private func modelChip(showsText: Bool) -> some View {
+    private var modelChip: some View {
         Button {
             inputFocused = false
             modelOpen = true
         } label: {
             Group {
-                if showsText {
-                    HStack(spacing: 5) {
-                        if fastModePending {
-                            ProgressView().controlSize(.mini)
-                        } else if fastModeEnabled && supportsFastMode {
-                            Image(systemName: "bolt.fill")
-                                .accessibilityIdentifier("composer.fast-mode")
-                        }
-                        Text(chipLabel)
-                            .foregroundStyle(t.text)
-                        Text(reasoningLabel)
-                            .foregroundStyle(t.text3)
-                        LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
-                    }
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 6)
-                    .frame(minHeight: 44)
+                if fastModePending {
+                    ProgressView().controlSize(.small)
                 } else {
-                    Group {
-                        if fastModePending {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: fastModeEnabled && supportsFastMode ? "bolt.fill" : "cpu")
-                                .font(.system(size: 17, weight: .medium))
-                                .foregroundStyle(t.text2)
+                    Image("CodexBrain")
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 20, height: 20)
+                        .foregroundStyle(t.text2)
+                        .overlay(alignment: .topTrailing) {
+                            if fastModeEnabled && supportsFastMode {
+                                Image(systemName: "bolt.fill")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(t.accent)
+                                    .frame(width: 12, height: 12)
+                                    .background(t.composerBg, in: Circle())
+                                    .offset(x: 4, y: -4)
+                                    .accessibilityIdentifier("composer.fast-mode")
+                            }
                         }
-                    }
-                    .frame(width: 44, height: 44)
                 }
             }
+            .frame(width: 44, height: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .accessibilityLabel(String(localized: "composer_model_and_effort"))
@@ -686,7 +680,7 @@ struct Composer: View {
             Label(permissionLabel, systemImage: effectivePermissionMode == "bypassPermissions"
                   ? "exclamationmark.shield" : "checkmark.shield")
                 .labelStyle(.iconOnly)
-                .font(.system(size: 17, weight: .medium))
+                .font(.system(size: 18, weight: .regular))
                 .foregroundStyle(effectivePermissionMode == "bypassPermissions" ? .orange : t.text2)
                 .frame(width: 44, height: 44)
         }
@@ -697,15 +691,14 @@ struct Composer: View {
         .accessibilityIdentifier("composer.controls")
     }
 
-    /// Measure the complete row at its natural width before falling back to
-    /// icons. Truncating text would let the first candidate claim it fits.
-    private func toolbar(showsModelText: Bool) -> some View {
+    /// Model and voice actions share one trailing group, with 44pt hit areas.
+    private var toolbar: some View {
         HStack(spacing: 0) {
             attachmentButton
             if showsPermissionChip { permissionChip }
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
             contextWindow
-            modelChip(showsText: showsModelText)
+            modelChip
             turnActions
         }
     }
@@ -886,7 +879,7 @@ private struct ComposerActionButtonStyle: ButtonStyle {
             .contentShape(.rect)
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
             .opacity(configuration.isPressed ? 0.86 : 1)
-            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 1), value: configuration.isPressed)
+            .animation(configuration.isPressed || reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 1), value: configuration.isPressed)
     }
 }
 
@@ -899,7 +892,7 @@ private struct ComposerTurnActionIcon: View {
         Image(systemName: systemName)
             .font(.system(size: symbolSize, weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 44, height: 44)
+            .frame(width: 36, height: 36)
             .background(background, in: Circle())
             .overlay {
                 Circle().stroke(.white.opacity(0.14), lineWidth: 0.5)

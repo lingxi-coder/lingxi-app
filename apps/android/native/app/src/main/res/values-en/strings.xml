@@ -125,6 +125,8 @@
     <string name="chat_error_engine_submit_failed">Engine error: %1$s</string>
     <string name="chat_error_finish_background_turn_first">Resume or discard the background conversation before doing this.</string>
     <string name="chat_error_generic_headline">Something went wrong</string>
+    <string name="chat_error_view_details">View details</string>
+    <string name="chat_error_details_title">Error details</string>
     <string name="chat_error_host">Engine error</string>
     <string name="chat_error_internal">Internal error</string>
     <string name="chat_error_max_turns">Reached maximum turns</string>

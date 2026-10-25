@@ -147,6 +147,8 @@
   "chat_error_engine_submit_failed": "エンジンエラー：%1$s",
   "chat_error_finish_background_turn_first": "先にバックグラウンドの会話を再開するか破棄してください。",
   "chat_error_generic_headline": "エラーが発生しました",
+  "chat_error_view_details": "詳細を表示",
+  "chat_error_details_title": "エラーの詳細",
   "chat_error_host": "エンジンエラー",
   "chat_error_internal": "内部エラー",
   "chat_error_max_turns": "最大ターン数に到達",

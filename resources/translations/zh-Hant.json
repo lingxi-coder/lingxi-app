@@ -147,6 +147,8 @@
   "chat_error_engine_submit_failed": "引擎錯誤：%1$s",
   "chat_error_finish_background_turn_first": "請先處理背景對話（繼續或捨棄），再進行此操作。",
   "chat_error_generic_headline": "出錯了",
+  "chat_error_view_details": "檢視詳細資訊",
+  "chat_error_details_title": "錯誤詳細資訊",
   "chat_error_host": "引擎錯誤",
   "chat_error_internal": "內部錯誤",
   "chat_error_max_turns": "已達最大輪數",

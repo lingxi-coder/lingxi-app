@@ -176,20 +176,20 @@ cargo check --locked -p android-aar --features uniffi
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app/tree/main/apps)
 
-- [lingxi-app/apps/ios/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/ios/ffi/src/host.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/android/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/android/ffi/src/host.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/ios/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/ios/ffi/src/callbacks.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/android/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/android/ffi/src/callbacks.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/ios/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/ios/ffi/src/configuration.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/android/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/android/ffi/src/configuration.rs) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/ios/native/scripts/build-xcframework.sh) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/android/native/scripts/build-jni.sh) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/ios/native/Sources/Conversation/EngineConversationSource.swift](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/ios/native/Sources/Conversation/EngineConversationSource.swift) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt) — 已提交源码 (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/apps/ios/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/ios/ffi/src/host.rs) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/android/ffi/src/host.rs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/android/ffi/src/host.rs) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/ios/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/ios/ffi/src/callbacks.rs) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/android/ffi/src/callbacks.rs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/android/ffi/src/callbacks.rs) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/ios/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/ios/ffi/src/configuration.rs) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/android/ffi/src/configuration.rs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/android/ffi/src/configuration.rs) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/ios/native/scripts/build-xcframework.sh) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/android/native/scripts/build-jni.sh](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/android/native/scripts/build-jni.sh) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/ios/native/Sources/Conversation/EngineConversationSource.swift](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/ios/native/Sources/Conversation/EngineConversationSource.swift) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/android/native/app/src/main/java/com/lingxi/code/conversation/EngineConversationSource.kt) — 已提交源码 (caf679253971034bc202c566a81c10d4c5af31c4)
 - [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
 - [harness-runtime/crates/client/src/protocol/audio.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/client/src/protocol/audio.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
 
-- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; 所据文件指纹 sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
-- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; 所据文件指纹 sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; 产品固定版本 0e28910fd624638e6c5d1f92eca4899a7938d188
+- lingxi-app: HEAD caf679253971034bc202c566a81c10d4c5af31c4; 所据文件指纹 sha256:5172e409e969106eb5149a400160fbc916294195f79f186ce9f63e32444c54b5
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; 所据文件指纹 sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; 产品固定版本 e04c1837508014d68ea042d5c9fe3c8c15af5aa0
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

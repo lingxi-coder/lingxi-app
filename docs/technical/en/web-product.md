@@ -62,17 +62,17 @@ A future live console needs a separately specified account/session/credential ba
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/web/src/app/App.tsx)
 
-- [lingxi-app/apps/web/src/app/App.tsx](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/app/App.tsx) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/app/router.ts](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/app/router.ts) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/app/usePersistentState.ts](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/app/usePersistentState.ts) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/pages/DocsPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/pages/DocsPage.tsx) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/pages/LoginPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/pages/LoginPage.tsx) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/pages/ConsolePages.tsx](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/pages/ConsolePages.tsx) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/data/mockData.ts) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/src/utils/apiKeys.ts](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/src/utils/apiKeys.ts) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/package.json](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/package.json) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/firebase.json](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/firebase.json) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/apps/web/src/app/App.tsx](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/app/App.tsx) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/app/router.ts](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/app/router.ts) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/app/usePersistentState.ts](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/app/usePersistentState.ts) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/pages/DocsPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/pages/DocsPage.tsx) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/pages/LoginPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/pages/LoginPage.tsx) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/pages/ConsolePages.tsx](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/pages/ConsolePages.tsx) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/data/mockData.ts) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/src/utils/apiKeys.ts](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/src/utils/apiKeys.ts) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/package.json](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/package.json) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/firebase.json](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/firebase.json) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
 
-- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; Referenced input fingerprint sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
+- lingxi-app: HEAD caf679253971034bc202c566a81c10d4c5af31c4; Referenced input fingerprint sha256:5172e409e969106eb5149a400160fbc916294195f79f186ce9f63e32444c54b5
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

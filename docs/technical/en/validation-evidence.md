@@ -58,20 +58,20 @@ Native compatibility reports belong to specific versions, distributions, setting
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/.github/workflows/ci.yml](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/.github/workflows/ci.yml) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/scripts/check-all.sh](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/scripts/check-all.sh) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/.github/workflows/documentation.yml](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/.github/workflows/documentation.yml) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/scripts/sync-docs.mjs](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/scripts/sync-docs.mjs) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/scripts/generate-handbook.ts](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/scripts/generate-handbook.ts) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/scripts/generate-doc-baseline.py](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/scripts/generate-doc-baseline.py) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/scripts/check-doc-examples.py](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/scripts/check-doc-examples.py) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
-- [lingxi-app/apps/web/examples/sdk_tools.py](https://github.com/lingxi-coder/lingxi-app/blob/8409379b84c6616332e51978cfbc31c5ba712d78/apps/web/examples/sdk_tools.py) — Committed source (8409379b84c6616332e51978cfbc31c5ba712d78)
+- [lingxi-app/.github/workflows/ci.yml](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/.github/workflows/ci.yml) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/scripts/check-all.sh](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/scripts/check-all.sh) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/.github/workflows/documentation.yml](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/.github/workflows/documentation.yml) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/scripts/sync-docs.mjs](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/scripts/sync-docs.mjs) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/scripts/generate-handbook.ts](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/scripts/generate-handbook.ts) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/scripts/generate-doc-baseline.py](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/scripts/generate-doc-baseline.py) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/scripts/check-doc-examples.py](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/scripts/check-doc-examples.py) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
+- [lingxi-app/apps/web/examples/sdk_tools.py](https://github.com/lingxi-coder/lingxi-app/blob/caf679253971034bc202c566a81c10d4c5af31c4/apps/web/examples/sdk_tools.py) — Committed source (caf679253971034bc202c566a81c10d4c5af31c4)
 - [harness-runtime/crates/runtime/tests/sdk_surface.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/tests/sdk_surface.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
 - [llm-client/tests/downstream-docs/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/downstream-docs/src/lib.rs) — Committed source (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 - [mobile-linux-runtime/scripts/check-all.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/check-all.sh) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- lingxi-app: HEAD 8409379b84c6616332e51978cfbc31c5ba712d78; Referenced input fingerprint sha256:40c003672f89d603760e13d5912a3db44dce330055f42839b55ed26f18dc28e5
-- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin 0e28910fd624638e6c5d1f92eca4899a7938d188
+- lingxi-app: HEAD caf679253971034bc202c566a81c10d4c5af31c4; Referenced input fingerprint sha256:5172e409e969106eb5149a400160fbc916294195f79f186ce9f63e32444c54b5
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin e04c1837508014d68ea042d5c9fe3c8c15af5aa0
 - llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; Referenced input fingerprint sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; Product pin ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 - mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 

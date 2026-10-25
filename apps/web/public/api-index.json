@@ -8,7 +8,7 @@
       "sourceUrl": "https://github.com/lingxi-coder/harness-runtime",
       "dirty": false,
       "treeFingerprint": "sha256:19db183faacec52c726f1241eec9e4bccbfd4e6a9f26cbbe99e6915968514ddb",
-      "productPinnedRevision": "0e28910fd624638e6c5d1f92eca4899a7938d188"
+      "productPinnedRevision": "e04c1837508014d68ea042d5c9fe3c8c15af5aa0"
     },
     {
       "sdk": "llm",

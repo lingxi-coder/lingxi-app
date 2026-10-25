@@ -335,7 +335,8 @@ class Dialog {
 
   /** The six digits the dialog tells the user to compare. */
   code(index = this.shown.length - 1): string {
-    const match = /配对码：(\d{3}) (\d{3})/u.exec(this.shown[index]!.detail);
+    // Native copy follows the UI locale; the six comparison digits do not.
+    const match = /\b(\d{3}) (\d{3})\b/u.exec(this.shown[index]!.detail);
     assert.ok(match, 'the dialog shows a pairing code');
     return `${match[1]}${match[2]}`;
   }

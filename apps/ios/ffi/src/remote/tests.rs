@@ -1144,6 +1144,11 @@ async fn invalid_arguments_are_refused_before_anything_is_sent() {
         rig.client.connect(String::new()).await,
         Err(RemoteFfiError::InvalidArgument { .. })
     ));
+    assert!(matches!(
+        rig.client.repair_host(String::new()).await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert_eq!(rig.store.state.lock().unwrap().identity_deletes, 0);
     assert_eq!(
         rig.client.list_models().await,
         Err(RemoteFfiError::NotConnected)
@@ -1177,4 +1182,112 @@ async fn delivery_drops_previous_connections_and_detached_session_callbacks() {
     let seen = recorder.all();
     assert_eq!(seen.len(), 1);
     assert!(matches!(seen[0], Seen::Session(_)));
+}
+
+// Block connection construction at its push-id read. On the broken code the
+// generation is already advanced, but active has not yet been installed; a
+// disconnect can finish and the old constructor then resurrects the link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_cannot_be_undone_by_an_inflight_connection_install() {
+    let rig = rig();
+    let client = Arc::new(rig.client);
+    let gated = Arc::clone(&client);
+    let (ready, waiting) = std::sync::mpsc::channel();
+    let gate = std::thread::spawn(move || {
+        let push_id = gated.core.push_installation_id.lock().unwrap();
+        ready.send(()).unwrap();
+        while gated.core.current.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        // The atomic implementation holds active for construction: let that
+        // transaction finish so disconnect can follow. The old one leaves it
+        // unlocked, allowing disconnect to advance the generation first.
+        while gated.core.current.load(Ordering::SeqCst) == 1 {
+            match gated.core.active.try_lock() {
+                Ok(active) => drop(active),
+                Err(std::sync::TryLockError::WouldBlock) => break,
+                Err(error) => panic!("active mutex poisoned: {error}"),
+            }
+            std::thread::yield_now();
+        }
+        drop(push_id);
+    });
+    waiting.recv().unwrap();
+    let starting = Arc::clone(&client);
+    let runtime = tokio::runtime::Handle::current();
+    let connect = std::thread::spawn(move || {
+        let _runtime = runtime.enter();
+        starting.start_connection("second-host").unwrap();
+    });
+    while client.core.current.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    client.disconnect().await;
+    connect.join().unwrap();
+    gate.join().unwrap();
+    assert!(
+        client.connection_state().is_none(),
+        "disconnect must end an already-started connection transaction"
+    );
+}
+
+struct PausedResetKeys {
+    inner: Arc<dyn ViewerKeys>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ViewerKeys for PausedResetKeys {
+    async fn identity(&self) -> Result<DeviceIdentity, KeysError> {
+        self.inner.identity().await
+    }
+    async fn reset_identity(&self) -> Result<(), KeysError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.reset_identity().await
+    }
+    async fn pinned_host(&self, id: &str) -> Option<PinnedHost> {
+        self.inner.pinned_host(id).await
+    }
+    async fn pin(&self, host: PinnedHost) {
+        self.inner.pin(host).await;
+    }
+    async fn unpair(&self, id: &str) {
+        self.inner.unpair(id).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn disconnect_during_repair_without_an_active_host_prevents_a_late_connect() {
+    let rig = rig();
+    let parts = &rig.client.core.parts;
+    let keys = Arc::new(PausedResetKeys {
+        inner: parts.keys.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client = Arc::new(IosRemoteControlClient::from_parts(
+        Parts {
+            uid: parts.uid.clone(),
+            rtdb: parts.rtdb.clone(),
+            keys: keys.clone(),
+            clock: parts.clock.clone(),
+            random: parts.random.clone(),
+            peers: parts.peers.clone(),
+            device_name: parts.device_name.clone(),
+            app_version: parts.app_version.clone(),
+        },
+        rig.recorder.clone(),
+    ));
+    let repairing = client.clone();
+    let repair = tokio::spawn(async move { repairing.repair_host("second-host".into()).await });
+    keys.entered.notified().await;
+    client.disconnect().await;
+    keys.release.notify_one();
+    repair.await.unwrap().unwrap();
+    assert!(
+        client.connection_state().is_none(),
+        "a cancelled repair cannot reconnect a closed client"
+    );
 }

@@ -12,26 +12,26 @@ internal class WorkspaceDirectoryException(val messageResource: Int) : Exception
 
 /** Native backing files of the SDK's Linux home. No shell or rootfs access. Call on IO. */
 internal class WorkspaceDirectoryRepository(
-    private val home: File,
+    internal val home: File,
     val guestHome: String,
     val workspace: String,
     private val projects: String,
-    private val config: File,
+    internal val config: File,
 ) {
     private val store get() = File(config, "workspace-locations.properties")
     private fun fail(resource: Int): Nothing = throw WorkspaceDirectoryException(resource)
     private fun within(file: File, root: File) = file == root || file.toPath().startsWith(root.toPath())
-    fun resolve(path: String): File {
+    fun resolve(path: String, directoryOnly: Boolean = true): File {
         val expanded = when { path == "~" -> guestHome; path.startsWith("~/") -> guestHome + path.drop(1); else -> path }
         if ((expanded != guestHome && !expanded.startsWith("$guestHome/")) ||
             expanded.contains('\u0000') || expanded.split('/').any { it == "." || it == ".." } || Files.isSymbolicLink(home.toPath()))
             fail(R.string.workspace_browser_outside_home)
         val file = File(home, expanded.removePrefix(guestHome).trimStart('/')).canonicalFile
         if (!within(file, home.canonicalFile)) fail(R.string.workspace_browser_outside_home)
-        if (!file.isDirectory) fail(R.string.workspace_browser_not_directory)
+        if (!file.exists() || (directoryOnly && !file.isDirectory)) fail(R.string.workspace_browser_not_directory)
         return file
     }
-    fun guest(file: File): String = guestHome + file.canonicalPath.removePrefix(home.canonicalPath)
+    fun guest(file: File): String = guestHome + file.absolutePath.removePrefix(home.canonicalPath)
     fun canonical(path: String) = guest(resolve(path))
     fun display(path: String) = if (path == guestHome) "~" else if (path.startsWith("$guestHome/")) "~" + path.removePrefix(guestHome) else path
     fun entries(path: String, hidden: Boolean): List<File> = (resolve(path).listFiles()
@@ -49,7 +49,7 @@ internal class WorkspaceDirectoryRepository(
         if (!within(config.canonicalFile, home.canonicalFile) || Files.isSymbolicLink(config.toPath()) || Files.isSymbolicLink(store.toPath()))
             fail(R.string.workspace_browser_outside_home)
     }
-    private fun write(rows: List<WorkspaceLocation>) {
+    internal fun write(rows: List<WorkspaceLocation>) {
         checkStore()
         check(config.isDirectory || config.mkdirs())
         val props = Properties().apply {
@@ -80,7 +80,7 @@ internal class WorkspaceDirectoryRepository(
     private fun name(value: String): String = value.trim().also {
         if (it.isEmpty() || it == "." || it == ".." || it.contains('/') || it.any(Char::isISOControl)) fail(R.string.workspace_browser_invalid_name)
     }
-    private fun writable(path: String): File = resolve(path).also {
+    internal fun writable(path: String): File = resolve(path, false).also {
         if (within(it, config.canonicalFile)) fail(R.string.workspace_browser_in_use)
     }
     fun create(parent: String, name: String): String {
@@ -89,7 +89,7 @@ internal class WorkspaceDirectoryRepository(
         check(target.mkdir())
         return guest(target)
     }
-    private fun mutable(path: String, protected: List<String>): File {
+    internal fun mutable(path: String, protected: List<String>): File {
         val target = writable(path)
         val original = File(home, path.removePrefix(guestHome).trimStart('/'))
         if (Files.isSymbolicLink(original.toPath())) fail(R.string.workspace_browser_in_use)

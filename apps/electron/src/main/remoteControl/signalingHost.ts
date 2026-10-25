@@ -52,6 +52,8 @@ export type SignalingState = 'stopped' | 'starting' | 'online' | 'error';
 
 export interface HostSignalingOptions {
   rtdb: Rtdb;
+  /** Shared backend identity across client wrappers; defaults to the `rtdb` object. */
+  publicationDomain?: object | string;
   uid: string;
   identity: HostIdentity;
   info: HostInfo;
@@ -72,10 +74,16 @@ const STOP_BUDGET_MS = 2_000;
 // `conn_id`s remembered for the once-only rule.
 const MAX_REMEMBERED_OFFERS = 4096;
 
+// A run may stop on its two-second budget while a prior write is still in
+// flight. Serialize publication and its final cleanup across runs of the same
+// host and database, including separate client wrappers after a restart.
+const hostMutations = new Map<object | string, Map<string, Promise<void>>>();
+
 export class HostSignaling {
   private readonly rtdb: Rtdb;
   private readonly clock: Clock;
   private readonly diagnostics: RemoteDiagnostics;
+  private readonly publicationDomain: object | string;
   private readonly hostRecord: string;
   private readonly inbox: string;
   private readonly outbox: string;
@@ -89,7 +97,7 @@ export class HostSignaling {
   // Whether the inbox stream has been opened by `start()`.
   private listening = false;
   private generation = 0;
-  private beating = false;
+  private beating: number | undefined;
   private beatFailures = 0;
   private listenError: string | undefined;
   private beatError: string | undefined;
@@ -100,6 +108,7 @@ export class HostSignaling {
     this.rtdb = options.rtdb;
     this.clock = options.clock ?? systemClock;
     this.diagnostics = options.diagnostics ?? noDiagnostics;
+    this.publicationDomain = options.publicationDomain ?? options.rtdb;
     this.hostRecord = hostPath(options.uid, options.identity.hostId);
     this.inbox = toHostPath(options.uid, options.identity.hostId);
     this.outbox = toViewerPath(options.uid, options.identity.hostId);
@@ -120,8 +129,14 @@ export class HostSignaling {
     this.beatError = undefined;
     this.setState('starting');
     try {
-      await Promise.all([this.rtdb.remove(this.inbox), this.rtdb.remove(this.outbox)]);
-      await this.rtdb.put(this.hostRecord, this.record());
+      await this.mutate(async () => {
+        // A failed deletion must not release the lane while its sibling can
+        // still arrive and erase the next run's connections.
+        const cleared = await Promise.allSettled([this.rtdb.remove(this.inbox), this.rtdb.remove(this.outbox)]);
+        for (const result of cleared) if (result.status === 'rejected') throw result.reason;
+        if (!this.running || generation !== this.generation) return;
+        await this.rtdb.put(this.hostRecord, this.record());
+      });
     } catch (error) {
       if (generation === this.generation) {
         this.running = false;
@@ -130,8 +145,7 @@ export class HostSignaling {
       throw error;
     }
     if (generation !== this.generation) {
-      // Stopped while starting: the record written above must not be left saying online.
-      this.rtdb.patch(this.hostRecord, { online: false, last_seen: SERVER_TIMESTAMP }).catch(() => undefined);
+      // stop() queued final cleanup behind any publication already in flight.
       return;
     }
     this.listening = true;
@@ -152,11 +166,9 @@ export class HostSignaling {
     this.setState('stopped');
     if (!this.published) return;
     this.published = false;
-    const goodbye = Promise.allSettled([
-      this.rtdb.patch(this.hostRecord, { online: false, last_seen: SERVER_TIMESTAMP }),
-      this.rtdb.remove(this.inbox),
-      this.rtdb.remove(this.outbox),
-    ]);
+    // Cleanup wins over an older online PUT; a new publication waits for this
+    // goodbye even if stop() itself returns on its bounded waiting budget.
+    const goodbye = this.mutate(() => this.goodbye());
     let timer: unknown;
     const budget = new Promise<void>((resolve) => { timer = this.clock.setTimeout(resolve, STOP_BUDGET_MS); });
     try {
@@ -164,6 +176,32 @@ export class HostSignaling {
     } finally {
       this.clock.clearTimeout(timer);
     }
+  }
+
+  private mutate(operation: () => Promise<void>): Promise<void> {
+    let hosts = hostMutations.get(this.publicationDomain);
+    if (hosts === undefined) {
+      hosts = new Map();
+      hostMutations.set(this.publicationDomain, hosts);
+    }
+    const domain = hosts;
+    const result = (domain.get(this.hostRecord) ?? Promise.resolve()).then(operation);
+    const settled = result.then(() => undefined, () => undefined);
+    domain.set(this.hostRecord, settled);
+    void settled.then(() => {
+      if (domain.get(this.hostRecord) !== settled) return;
+      domain.delete(this.hostRecord);
+      if (domain.size === 0) hostMutations.delete(this.publicationDomain);
+    });
+    return result;
+  }
+
+  private async goodbye(): Promise<void> {
+    await Promise.allSettled([
+      this.rtdb.patch(this.hostRecord, { online: false, last_seen: SERVER_TIMESTAMP }),
+      this.rtdb.remove(this.inbox),
+      this.rtdb.remove(this.outbox),
+    ]);
   }
 
   /**
@@ -225,25 +263,33 @@ export class HostSignaling {
    * that case the full record is written again, once.
    */
   private async beat(): Promise<void> {
-    if (!this.running || this.beating) return;
-    this.beating = true;
+    if (!this.running || this.beating === this.generation) return;
     const generation = this.generation;
+    this.beating = generation;
     try {
-      try {
-        await this.rtdb.patch(this.hostRecord, { last_seen: SERVER_TIMESTAMP });
-      } catch (error) {
-        if (!(error instanceof RtdbError) || error.status !== 401) throw error;
-        await this.rtdb.put(this.hostRecord, this.record());
-        this.diagnostics('info', 'the host record was written again after a refused heartbeat');
-      }
+      await this.mutate(async () => {
+        if (!this.running || generation !== this.generation) return;
+        try {
+          await this.rtdb.patch(this.hostRecord, { last_seen: SERVER_TIMESTAMP });
+        } catch (error) {
+          // A refused request can finish after stop/sign-out. It must not
+          // initiate a recovery write for a run that already ended.
+          if (!this.running || generation !== this.generation) return;
+          if (!(error instanceof RtdbError) || error.status !== 401) throw error;
+          await this.rtdb.put(this.hostRecord, this.record());
+          this.diagnostics('info', 'the host record was written again after a refused heartbeat');
+        }
+      });
+      if (!this.running || generation !== this.generation) return;
       this.beatFailures = 0;
       this.beatError = undefined;
     } catch (error) {
+      if (!this.running || generation !== this.generation) return;
       this.beatFailures++;
       this.diagnostics('warn', `heartbeat failed (${describeError(error)})`);
       if (this.beatFailures >= BEAT_FAILURES_BEFORE_ERROR) this.beatError = `heartbeat failed: ${describeError(error)}`;
     } finally {
-      this.beating = false;
+      if (this.beating === generation) this.beating = undefined;
       if (generation === this.generation) {
         this.refreshState();
         this.scheduleBeat();

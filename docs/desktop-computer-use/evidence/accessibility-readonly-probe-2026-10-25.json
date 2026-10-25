@@ -1,0 +1,113 @@
+{
+  "status": "read-only-child-probe-roundtrip-passed",
+  "notSidecarEndToEndAcceptance": true,
+  "launchMethod": "LaunchServices open -n -W -a exact signed bundle",
+  "applicationBundleId": "com.lingxi.code.development",
+  "signedSidecarSha256": "b8b83f459bdc6198e907f86be1e4e807e57ece1a23fc0c1c0290b1969f6f668d",
+  "sameProbeProcessAllSamples": true,
+  "responsibleApplicationVerified": true,
+  "attributionEventCount": 12,
+  "samples": [
+    {
+      "label": "initial-on",
+      "nominalTrust": true,
+      "screenRecording": true,
+      "hitTest": {
+        "hasValue": true,
+        "status": 0
+      },
+      "focusedApplicationQueries": [
+        {
+          "elapsedMs": 0,
+          "hasValue": false,
+          "status": -25204,
+          "timeout": 0.25,
+          "timeoutStatus": 0
+        },
+        {
+          "elapsedMs": 0,
+          "hasValue": false,
+          "status": -25204,
+          "timeout": 1,
+          "timeoutStatus": 0
+        },
+        {
+          "elapsedMs": 0,
+          "hasValue": false,
+          "status": -25204,
+          "timeout": 2,
+          "timeoutStatus": 0
+        }
+      ]
+    },
+    {
+      "label": "off",
+      "nominalTrust": true,
+      "screenRecording": true,
+      "hitTest": {
+        "hasValue": false,
+        "status": -25211
+      },
+      "focusedApplicationQueries": [
+        {
+          "elapsedMs": 14,
+          "hasValue": false,
+          "status": -25204,
+          "timeout": 0.25,
+          "timeoutStatus": 0
+        },
+        {
+          "elapsedMs": 0,
+          "hasValue": false,
+          "status": -25204,
+          "timeout": 1,
+          "timeoutStatus": 0
+        },
+        {
+          "elapsedMs": 0,
+          "hasValue": false,
+          "status": -25204,
+          "timeout": 2,
+          "timeoutStatus": 0
+        }
+      ]
+    },
+    {
+      "label": "restored-on",
+      "nominalTrust": true,
+      "screenRecording": true,
+      "hitTest": {
+        "hasValue": true,
+        "status": 0
+      },
+      "focusedApplicationQueries": [
+        {
+          "elapsedMs": 6,
+          "hasValue": true,
+          "status": 0,
+          "timeout": 0.25,
+          "timeoutStatus": 0
+        },
+        {
+          "elapsedMs": 1,
+          "hasValue": true,
+          "status": 0,
+          "timeout": 1,
+          "timeoutStatus": 0
+        },
+        {
+          "elapsedMs": 1,
+          "hasValue": true,
+          "status": 0,
+          "timeout": 2,
+          "timeoutStatus": 0
+        }
+      ]
+    }
+  ],
+  "cleanupPassed": true,
+  "limitations": [
+    "Read-only Bash child of signed Desktop and sidecar; not a direct sidecar probe result.",
+    "Final signed package still requires actual execution/revocation/restoration acceptance."
+  ]
+}

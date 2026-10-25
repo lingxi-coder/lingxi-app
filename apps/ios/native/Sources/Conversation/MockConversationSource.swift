@@ -42,6 +42,38 @@ final class MockConversationSource: ConversationSource {
             askQuestion: Bool = false
         ) -> MockConversationSource {
             let source = MockConversationSource(sessionMode: sessionMode)
+            if let fixture = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_FILES"],
+               fixture.hasPrefix("ui-files-"), fixture.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) {
+                let paths = WorkspaceDirectoryPaths.current()
+                let directory = paths.home.appendingPathComponent(fixture, isDirectory: true)
+                do {
+                    try FileManager.default.createDirectory(at: directory.appendingPathComponent("target"), withIntermediateDirectories: true)
+                    try Data("Read-only file preview ✓".utf8).write(to: directory.appendingPathComponent("note2.txt"))
+                    try Data("Another file".utf8).write(to: directory.appendingPathComponent("note10.txt"))
+                    try Data(repeating: 65, count: 2 * 1024 * 1024 + 1).write(to: directory.appendingPathComponent("large.txt"))
+                    try Data([0, 1, 2]).write(to: directory.appendingPathComponent("unknown.bin"))
+                    let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).pngData { context in
+                        UIColor.systemBlue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+                    }
+                    try image.write(to: directory.appendingPathComponent("image.png"))
+                    let pdf = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 200, height: 200)).pdfData { context in
+                        context.beginPage(); ("PDF preview" as NSString).draw(at: CGPoint(x: 20, y: 30), withAttributes: nil)
+                    }
+                    try pdf.write(to: directory.appendingPathComponent("document.pdf"))
+                    // Short PCM audio verifies Quick Look's native media surface without network access.
+                    var wave = Data("RIFF".utf8)
+                    func appendLE<T: FixedWidthInteger>(_ value: T) { var little = value.littleEndian; withUnsafeBytes(of: &little) { wave.append(contentsOf: $0) } }
+                    appendLE(UInt32(8036)); wave.append(Data("WAVEfmt ".utf8)); appendLE(UInt32(16))
+                    appendLE(UInt16(1)); appendLE(UInt16(1)); appendLE(UInt32(8000)); appendLE(UInt32(16000))
+                    appendLE(UInt16(2)); appendLE(UInt16(16)); wave.append(Data("data".utf8)); appendLE(UInt32(8000))
+                    wave.append(Data(repeating: 0, count: 8000)); try wave.write(to: directory.appendingPathComponent("sound.wav"))
+                    source.model.messages = []; source.model.items = []; source.model.activeSessionId = "ui-files-session"
+                    source.model.isNew = true
+                    source.model.workspaceState = SessionWorkspaceState(sessionId: "ui-files-session", cwd: paths.guestHome + "/" + fixture,
+                        projectRoot: paths.guestHome + "/" + fixture, additionalDirectories: [], transcriptPath: "")
+                } catch { source.model.error = ConversationError(kind: .host, message: error.localizedDescription) }
+                return source
+            }
             if let title = ProcessInfo.processInfo.environment["LINGXI_UI_TEST_SESSION_TITLE"] {
                 source.model.messages = []
                 source.model.items = []

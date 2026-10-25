@@ -1,7 +1,7 @@
 /**
  * The Electron half of `PeerHost`: the hidden, locked-down window that runs
  * the WebRTC page, and the MessagePort main talks to it over. It loads only
- * the bundled page, grants it nothing, and lets it navigate nowhere.
+ * the bundled page, denies capture/device requests, and lets it navigate nowhere.
  *
  * Handing the page its port is the documented context-isolation pattern: main
  * posts one end to the preload (`CH_REMOTE_RTC_PORT`), which re-posts it into
@@ -12,6 +12,7 @@ import { BrowserWindow, MessageChannelMain, app } from 'electron';
 
 import { CH_REMOTE_RTC_PORT } from '../../shared/remoteRtcPort.js';
 import type { RtcPort, RtcWindow } from './peerHost.js';
+import { canEnumerateRtcInterfaces } from './rtcPermissionCheck.js';
 
 export interface RtcWindowOptions {
   /** The built `out/preload/remoteRtc.cjs`. */
@@ -25,8 +26,8 @@ export interface RtcWindowOptions {
 /** The session partition of the page; no `persist:` prefix, so nothing it stores outlives the window. */
 export const RTC_PARTITION = 'remote-rtc';
 
-/** Deny navigation, new windows, webviews and every permission the page could ask for. */
-function lockDown(window: BrowserWindow): void {
+/** Deny navigation, new windows, webviews and all actual permission requests. */
+function lockDown(window: BrowserWindow, pageUrl: () => string | undefined): void {
   const { webContents } = window;
   webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   webContents.on('will-navigate', (event) => event.preventDefault());
@@ -34,7 +35,17 @@ function lockDown(window: BrowserWindow): void {
   webContents.on('will-attach-webview', (event) => event.preventDefault());
   const { session } = webContents;
   session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  session.setPermissionCheckHandler(() => false);
+  // Data-only WebRTC still checks media status before enumerating interfaces.
+  // Denying this check restricts ICE to the default route, which may be a VPN
+  // without local discovery or NAT hairpinning. Only our loaded main page may
+  // enumerate; capture requests and device permissions remain denied below.
+  session.setPermissionCheckHandler((contents, permission, _origin, details) => canEnumerateRtcInterfaces({
+    permission,
+    sameContents: contents === webContents,
+    pageUrl: pageUrl(),
+    requestingUrl: details.requestingUrl,
+    isMainFrame: details.isMainFrame,
+  }));
   session.setDevicePermissionHandler(() => false);
   session.on('will-download', (event) => event.preventDefault());
 }
@@ -68,11 +79,13 @@ class ElectronRtcWindow implements RtcWindow {
     });
     this.window = window;
     this.options.created?.(window);
-    lockDown(window);
+    let pageUrl: string | undefined;
+    lockDown(window, () => pageUrl);
     window.once('closed', () => this.gone('closed'));
     window.webContents.on('render-process-gone', (_event, details) => this.gone(`renderer ${details.reason}`));
     await this.options.load(window);
     if (window.isDestroyed()) throw new Error('the WebRTC window closed while loading');
+    pageUrl = window.webContents.getURL();
     // The page registered its listener while its scripts ran, which is before `did-finish-load`.
     const { port1, port2 } = new MessageChannelMain();
     window.webContents.postMessage(CH_REMOTE_RTC_PORT, null, [port2]);

@@ -134,6 +134,99 @@ fn attach_snapshot(
 }
 
 #[tokio::test(start_paused = true)]
+async fn overflowing_live_records_during_a_snapshot_requests_a_fresh_base() {
+    let io = FakeIo::new(attach_snapshot("e1"));
+    let controller = SessionController::new("s1", io.clone());
+    controller.activate();
+    settle().await;
+    let mut parts = full_snapshot("e1", 0, 2).into_iter();
+    controller.handle_snapshot(parts.next().unwrap());
+    for _ in 0..5000 {
+        controller.handle_event(prompt(3, 3));
+    }
+    controller.handle_event(prompt(4, 4));
+    feed(&controller, parts.collect());
+    settle().await;
+    assert_eq!(
+        controller.state().status,
+        SessionStatus::Loading,
+        "an incomplete event range cannot be live"
+    );
+    assert_eq!(
+        io.calls("session.attach"),
+        vec![json!({ "session_id": "s1" }), json!({ "session_id": "s1" })]
+    );
+    // The new full snapshot covers every record we could not retain.
+    feed(&controller, full_snapshot("e1", 0, 4));
+    controller.handle_event(prompt(10, 10)); // Sequence numbers can legitimately be sparse.
+    assert_eq!(controller.state().status, SessionStatus::Live);
+    assert_eq!(controller.state().records.last().unwrap().seq, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_covering_overflowed_records_does_not_attach_again() {
+    let io = FakeIo::new(attach_snapshot("e1"));
+    let controller = SessionController::new("s1", io.clone());
+    controller.activate();
+    settle().await;
+    let mut parts = full_snapshot("e1", 0, 4).into_iter();
+    controller.handle_snapshot(parts.next().unwrap());
+    for _ in 0..5000 {
+        controller.handle_event(prompt(3, 3));
+    }
+    controller.handle_event(prompt(4, 4));
+    feed(&controller, parts.collect());
+    settle().await;
+    assert_eq!(controller.state().status, SessionStatus::Live);
+    assert_eq!(io.calls("session.attach").len(), 1);
+    controller.handle_event(prompt(10, 10));
+    assert_eq!(controller.state().records.last().unwrap().seq, 10);
+}
+
+#[tokio::test(start_paused = true)]
+async fn overflowing_live_records_during_a_delta_attach_retries_without_a_cursor() {
+    let controller_slot = Arc::new(Mutex::new(None::<SessionController>));
+    let slot = controller_slot.clone();
+    let mut attaches = 0;
+    let io = FakeIo::new(move |method, _| {
+        assert_eq!(method, "session.attach");
+        attaches += 1;
+        if attaches == 2 {
+            let controller = slot.lock().unwrap().clone().unwrap();
+            for _ in 0..5000 {
+                controller.handle_event(prompt(3, 3));
+            }
+            controller.handle_event(prompt(4, 4));
+            Ok(
+                json!({ "mode": "delta", "epoch": "e1", "pending": { "permissions": [], "questions": [], "computer_access": [] } }),
+            )
+        } else {
+            Ok(json!({ "mode": "snapshot", "epoch": "e1" }))
+        }
+    });
+    let controller = SessionController::new("s1", io.clone());
+    *controller_slot.lock().unwrap() = Some(controller.clone());
+    controller.activate();
+    settle().await;
+    feed(&controller, full_snapshot("e1", 0, 2));
+    controller.connection_lost();
+    controller.connection_ready();
+    settle().await;
+    assert_eq!(
+        io.calls("session.attach"),
+        vec![
+            json!({ "session_id": "s1" }),
+            json!({ "session_id": "s1", "resume": { "epoch": "e1", "after_seq": 2 } }),
+            json!({ "session_id": "s1" }),
+        ]
+    );
+    assert_eq!(controller.state().status, SessionStatus::Loading);
+    feed(&controller, full_snapshot("e1", 0, 4));
+    assert_eq!(controller.state().status, SessionStatus::Live);
+    controller_slot.lock().unwrap().take();
+}
+
+#[tokio::test(start_paused = true)]
 async fn attach_assembles_a_snapshot_and_holds_live_events() {
     let io = FakeIo::new(attach_snapshot("e1"));
     let controller = SessionController::new("s1", io.clone());

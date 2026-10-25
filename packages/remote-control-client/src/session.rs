@@ -221,6 +221,7 @@ struct Core {
     cursor: Option<Cursor>,
     assembly: Option<Assembly>,
     held: Vec<RemoteSeqRecord>,
+    held_dropped_through: Option<u64>,
     awaiting_attach: bool,
     foreground: bool,
     seen_turns: Vec<u64>,
@@ -269,6 +270,7 @@ impl SessionController {
                 cursor: None,
                 assembly: None,
                 held: Vec::new(),
+                held_dropped_through: None,
                 awaiting_attach: false,
                 foreground: true,
                 seen_turns: Vec::new(),
@@ -449,6 +451,14 @@ impl SessionController {
                 controls,
                 ..
             } => {
+                if core
+                    .held_dropped_through
+                    .is_some_and(|seq| seq > cursor.seq)
+                {
+                    self.inner.resnapshot(&mut core);
+                    return;
+                }
+                core.held_dropped_through = None;
                 let Some(assembly) = core.assembly.take() else {
                     return;
                 };
@@ -503,6 +513,14 @@ impl SessionController {
         {
             if core.held.len() < MAX_BUFFERED_EVENTS {
                 core.held.push(item);
+            } else {
+                // A later event may have a sparse sequence, so no gap check can
+                // repair this loss after we advance the cursor. Start from a new
+                // base once the current snapshot/attach has finished instead.
+                core.held_dropped_through = Some(
+                    core.held_dropped_through
+                        .map_or(item.seq, |seq| seq.max(item.seq)),
+                );
             }
             return;
         }
@@ -524,6 +542,7 @@ impl SessionController {
         core.cursor = None;
         self.inner.images.lock().expect("images").clear();
         core.held.clear();
+        core.held_dropped_through = None;
         core.assembly = None;
         core.seen_turns.clear();
         if let Some(timer) = core.reset_timer.take() {
@@ -893,6 +912,7 @@ impl SessionInner {
             }
             core.assembly = None;
             core.held.clear();
+            core.held_dropped_through = None;
             core.awaiting_attach = true;
             self.commit(&mut core, |s| {
                 s.status = SessionStatus::Loading;
@@ -920,6 +940,15 @@ impl SessionInner {
         core.awaiting_attach = false;
         match result {
             Ok(SessionAttachResult::Delta { epoch, pending }) => {
+                if core
+                    .held_dropped_through
+                    .is_some_and(|seq| core.cursor.as_ref().is_none_or(|cursor| seq > cursor.0.seq))
+                {
+                    core.cursor = None;
+                    core.held.clear();
+                    core.held_dropped_through = None;
+                    return true;
+                }
                 if core.cursor.as_ref().is_none_or(|c| c.0.epoch != epoch) {
                     // A delta for a base we do not have cannot be applied: start over without resuming.
                     core.cursor = None;
@@ -962,6 +991,23 @@ impl SessionInner {
         held.sort_by_key(|r| r.seq);
         for item in held {
             self.apply_live(core, item);
+        }
+    }
+
+    fn resnapshot(self: &Arc<Self>, core: &mut Core) {
+        core.attach_id += 1;
+        core.awaiting_attach = false;
+        core.cursor = None;
+        core.assembly = None;
+        core.held.clear();
+        core.held_dropped_through = None;
+        self.commit(core, |s| {
+            s.status = SessionStatus::Loading;
+            s.error = None;
+        });
+        if core.active && self.io.connected() {
+            let inner = Arc::clone(self);
+            tokio::spawn(async move { inner.attach().await });
         }
     }
 

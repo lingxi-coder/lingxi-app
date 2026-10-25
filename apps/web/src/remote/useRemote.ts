@@ -18,6 +18,7 @@ import { RemoteClient } from './remoteClient';
 import { displayText } from './text';
 import { TunnelMemory } from './tunnelMemory';
 import { ViewerConnection, type ConnectionState } from './viewerConnection';
+import { subscribeWhileVisible } from './visibleSubscription';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Process-wide pieces: one identity store and one tunnel memory per page load
@@ -123,7 +124,7 @@ export function useHosts(uid: string, rtdb: Rtdb): HostsState {
       hosts.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
       setState((previous) => ({ ...previous, status: failed ? 'error' : 'ready', hosts }));
     };
-    const subscription = rtdb.listen(
+    const unsubscribe = subscribeWhileVisible(document, () => rtdb.listen(
       hostsPath(uid),
       (event) => {
         const changes = mirror.apply(event);
@@ -145,7 +146,7 @@ export function useHosts(uid: string, rtdb: Rtdb): HostsState {
         failed = true;
         publish();
       },
-    );
+    ));
     // A host that died produces no events, so re-judge on a timer.
     const timer = window.setInterval(publish, PRESENCE_TICK_MS);
     const keys = getDeviceKeys();
@@ -154,7 +155,7 @@ export function useHosts(uid: string, rtdb: Rtdb): HostsState {
     };
     refreshPins();
     return () => {
-      subscription.close();
+      unsubscribe();
       window.clearInterval(timer);
     };
   }, [uid, rtdb]);
@@ -198,7 +199,7 @@ export interface RemoteHost {
  * the rest of its wait.
  */
 export function useRemoteHost(uid: string, rtdb: Rtdb, hostId: string | null): RemoteHost | null {
-  const [host, setHost] = useState<RemoteHost | null>(null);
+  const [host, setHost] = useState<{ uid: string; rtdb: Rtdb; hostId: string; remote: RemoteHost } | null>(null);
   useEffect(() => {
     if (hostId === null) {
       setHost(null);
@@ -220,7 +221,7 @@ export function useRemoteHost(uid: string, rtdb: Rtdb, hostId: string | null): R
     document.addEventListener('visibilitychange', nudge);
     window.addEventListener('online', nudge);
     connection.start();
-    setHost({ connection, client });
+    setHost({ uid, rtdb, hostId, remote: { connection, client } });
     return () => {
       document.removeEventListener('visibilitychange', nudge);
       window.removeEventListener('online', nudge);
@@ -229,7 +230,9 @@ export function useRemoteHost(uid: string, rtdb: Rtdb, hostId: string | null): R
       setHost(null);
     };
   }, [uid, rtdb, hostId]);
-  return host;
+  // Effects replace the connection after rendering. Never mount a new route's
+  // session against the previous account or computer in the intervening render.
+  return host?.uid === uid && host.rtdb === rtdb && host.hostId === hostId ? host.remote : null;
 }
 
 export function useConnectionState(connection: ViewerConnection | null): ConnectionState | null {

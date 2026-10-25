@@ -85,7 +85,7 @@ export default function RemotePage(props: RemotePageProps) {
             </div>
           </section>
         ) : (
-          <SignedIn uid={auth.uid} locale={locale} route={props.route} />
+          <SignedIn key={auth.uid} uid={auth.uid} locale={locale} route={props.route} />
         )}
       </main>
     </div>
@@ -137,6 +137,7 @@ function SignedIn({ uid, locale, route }: { uid: string; locale: Locale; route: 
   if (target !== null) {
     return (
       <SessionView
+        key={`${uid}:${hostId}:${target.sessionId}`}
         locale={locale}
         client={remote.client}
         sessionId={target.sessionId}

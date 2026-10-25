@@ -120,7 +120,7 @@ real OS or Chrome acceptance test.
 Cross-repository validation uses an isolated product snapshot with only the
 feature's source overlays. The canonical checkout's unrelated staged/unstaged
 files are preserved. The App pins Harness commit
-`366a23e6146d347be7190ce3a18c5767088198b9`.
+`db5469ce6e4b210e69d9ae09acde0bd712c52944`.
 
 Final focused validation includes 151 Rust Computer Use library tests, 43
 Electron policy/Browser/extension/interaction tests, two forced-sidecar-stop
@@ -205,3 +205,24 @@ the first dedicated access request failed with Accessibility verification
 unavailable while the system switches were on. No OS toggles were performed
 and all owned test processes and synthetic credentials were cleaned up. This
 candidate has not passed native/TCC acceptance; the live probe needs diagnosis.
+
+A subsequent same-process read-only child probe, attributed by TCC to the exact
+signed development App, returned AX hit-test status `0 → -25211 → 0` across
+Accessibility on/off/on while nominal trust stayed true. Focused-application
+queries failed even during the initial on sample. Harness `db5469ce` therefore
+uses the same bounded, read-only cursor hit test as native target checking.
+Unknown/NoValue responses still reject the current operation. A cursor over an
+unavailable AX target may require moving to a normal window and retrying. Both
+actual-module helper tests and independent SDK/ownership review pass. The
+[probe evidence](desktop-computer-use/evidence/accessibility-readonly-probe-2026-10-25.json)
+is supporting child-process evidence, not final sidecar acceptance. The system
+switch was restored on and all owned probe processes were cleaned up.
+
+The final hit-test package completed source-byte verification, release
+compilation, Flare development signing and ZIP/static verification. Its
+[signed package receipt](desktop-computer-use/evidence/hit-test-signed-package-2026-10-25.json)
+binds App `d65b8d6f2` and Harness `db5469ce`. Full runtime smoke is pending
+because another Remote Control test instance was running and was left untouched.
+The final sidecar Accessibility/Screen Recording roundtrip remains unrun.
+The driver additionally requires real keyboard text to change after Accessibility
+restoration, alongside its independent restored-click counter check.

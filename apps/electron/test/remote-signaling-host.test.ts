@@ -76,6 +76,37 @@ async function setup() {
   return { clock, rtdb, identity, log, offers, frames, states, signaling, record: () => rtdb.read(hostPath(UID, identity.hostId)) as Record<string, unknown> | null };
 }
 
+/** A new service run creates a new client object, against the same database. */
+function nextRun(t: Awaited<ReturnType<typeof setup>>): HostSignaling {
+  const rtdb = {
+    get: t.rtdb.get.bind(t.rtdb), put: t.rtdb.put.bind(t.rtdb),
+    patch: t.rtdb.patch.bind(t.rtdb), remove: t.rtdb.remove.bind(t.rtdb),
+    listen: t.rtdb.listen.bind(t.rtdb),
+  };
+  return new HostSignaling({ rtdb, publicationDomain: t.rtdb, uid: UID, identity: t.identity, info: { ...INFO, name: 'Restarted Mac' }, clock: t.clock, onOffer() {}, onFrame() {} });
+}
+
+async function blockedRecoveryPut(t: Awaited<ReturnType<typeof setup>>): Promise<() => void> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const put = t.rtdb.put.bind(t.rtdb);
+  let started = false;
+  let block = true;
+  t.rtdb.put = async (path, value) => {
+    if (block && (value as { online?: boolean } | null)?.online === true) {
+      block = false;
+      started = true;
+      await gate;
+    }
+    return put(path, value);
+  };
+  await t.rtdb.remove(hostPath(UID, t.identity.hostId));
+  t.clock.advance(HEARTBEAT_INTERVAL_MS);
+  await settle();
+  assert.equal(started, true, 'the refused heartbeat has started its recovery PUT');
+  return release;
+}
+
 test('start clears the leftovers of an earlier run and publishes the full host record', async () => {
   const t = await setup();
   await t.rtdb.put(`${toHostConnPath(UID, t.identity.hostId, CONN)}/offer`, { stale: true });
@@ -171,10 +202,171 @@ test('stop marks the host offline, empties its inbox and outbox and ends the hea
   assert.equal(t.rtdb.patches.length, 1, 'only the goodbye was written');
 });
 
+test('a late refused heartbeat cannot republish a stopped host as online', async () => {
+  const t = await setup();
+  await t.signaling.start();
+  const patch = t.rtdb.patch.bind(t.rtdb);
+  let refuse!: (error: Error) => void;
+  t.rtdb.patch = async (path, value) => {
+    if (Object.keys(value).length === 1 && 'last_seen' in value) {
+      await new Promise<void>((_resolve, reject) => { refuse = reject; });
+      return;
+    }
+    return patch(path, value);
+  };
+  t.clock.advance(HEARTBEAT_INTERVAL_MS);
+  await settle();
+  const stopped = t.signaling.stop();
+  refuse(new RtdbError(401, 'Permission denied'));
+  await stopped;
+  await settle();
+  assert.equal(t.record()?.['online'], false);
+  assert.equal(t.states.at(-1)![0], 'stopped');
+  assert.equal(t.clock.pending, 0);
+});
+
+test('stop cleanup wins over a recovery online PUT that was already in flight', async () => {
+  const t = await setup();
+  await t.signaling.start();
+  const release = await blockedRecoveryPut(t);
+  try {
+    const stopped = t.signaling.stop();
+    t.clock.advance(2000);
+    await stopped;
+    release();
+    await settle();
+    assert.equal(t.record()?.['online'], false);
+    assert.equal(t.clock.pending, 0);
+  } finally {
+    release();
+    await settle();
+  }
+});
+
+test('a restarted run publishes after the old recovery PUT and its final goodbye', async () => {
+  const t = await setup();
+  await t.signaling.start();
+  const release = await blockedRecoveryPut(t);
+  const restarted = nextRun(t);
+  try {
+    const stopped = t.signaling.stop();
+    t.clock.advance(2000);
+    await stopped;
+    const starting = restarted.start();
+    await settle();
+    release();
+    await starting;
+    await settle();
+    assert.equal(t.record()?.['online'], true, 'no stale goodbye may overwrite the new online record');
+    assert.equal(t.record()?.['name'], 'Restarted Mac', 'a late old PUT must not overwrite new run metadata');
+  } finally {
+    release();
+    await settle();
+    await restarted.stop();
+  }
+});
+
+test('a blocked old goodbye finishes before a restarted run advertises online', async () => {
+  const t = await setup();
+  await t.signaling.start();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const patch = t.rtdb.patch.bind(t.rtdb);
+  let block = true;
+  t.rtdb.patch = async (path, value) => {
+    if (block && value['online'] === false) { block = false; await gate; }
+    return patch(path, value);
+  };
+  const restarted = nextRun(t);
+  try {
+    const stopped = t.signaling.stop();
+    await settle();
+    t.clock.advance(2000);
+    await stopped;
+    const starting = restarted.start();
+    await settle();
+    release();
+    await starting;
+    await settle();
+    assert.equal(t.record()?.['online'], true);
+  } finally {
+    release();
+    await settle();
+    await restarted.stop();
+  }
+});
+
+test('a blocked goodbye does not delay the same host in an independent database', async () => {
+  const first = await setup();
+  const other = await setup();
+  await first.signaling.start();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const patch = first.rtdb.patch.bind(first.rtdb);
+  first.rtdb.patch = async (path, value) => { await gate; return patch(path, value); };
+  const stopped = first.signaling.stop();
+  first.clock.advance(2000);
+  await stopped;
+  const starting = other.signaling.start();
+  try {
+    await settle();
+    assert.equal(other.record()?.['online'], true, 'independent backend publication must not join the blocked lane');
+    assert.equal(other.states.at(-1)?.[0], 'online');
+  } finally {
+    release();
+    await starting;
+    await settle();
+    await other.signaling.stop();
+  }
+});
+
+test('a failed startup waits for its sibling deletion before a replacement publishes', async () => {
+  const t = await setup();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const failure = new RtdbError(503, 'inbox cleanup failed');
+  const remove = t.rtdb.remove.bind(t.rtdb);
+  let failInbox = true;
+  let holdOutbox = true;
+  t.rtdb.remove = async (path) => {
+    if (path === toHostPath(UID, t.identity.hostId) && failInbox) {
+      failInbox = false;
+      throw failure;
+    }
+    if (path === toViewerPath(UID, t.identity.hostId) && holdOutbox) {
+      holdOutbox = false;
+      await gate;
+    }
+    return remove(path);
+  };
+  const failed = assert.rejects(t.signaling.start(), (error) => error === failure);
+  await settle();
+  const restarted = nextRun(t);
+  const answerAt = `${toViewerConnPath(UID, t.identity.hostId, CONN)}/answer`;
+  const answer = { current: true };
+  const starting = restarted.start().then(() => t.rtdb.put(answerAt, answer));
+  try {
+    await settle();
+    release();
+    await Promise.all([failed, starting]);
+    await settle();
+    assert.equal(t.states.at(-1)?.[0], 'error', 'the startup failure is still reported');
+    assert.deepEqual(t.rtdb.read(answerAt), answer, 'a delayed old cleanup must not erase a replacement answer');
+    assert.equal(t.record()?.['name'], 'Restarted Mac');
+  } finally {
+    release();
+    await Promise.all([failed, starting]);
+    await restarted.stop();
+  }
+});
+
 test('stop does not wait longer than two seconds for a database that does not answer', async () => {
   const t = await setup();
   await t.signaling.start();
-  t.rtdb.patch = () => new Promise<void>(() => undefined);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const patch = t.rtdb.patch.bind(t.rtdb);
+  t.rtdb.patch = async (path, value) => { await blocked; return patch(path, value); };
   const stopped = t.signaling.stop();
   let done = false;
   void stopped.then(() => { done = true; });
@@ -183,6 +375,8 @@ test('stop does not wait longer than two seconds for a database that does not an
   t.clock.advance(2000);
   await stopped;
   assert.equal(done, true);
+  release();
+  await settle();
 });
 
 test('stopping a start that is still talking to the database leaves the record offline', async () => {
@@ -198,7 +392,7 @@ test('stopping a start that is still talking to the database leaves the record o
   await starting;
   await stopped;
   await settle();
-  assert.equal(t.record()!['online'], false);
+  assert.notEqual(t.record()?.['online'], true, 'an aborted publication may leave no record at all');
   assert.equal(t.clock.pending, 0);
 });
 

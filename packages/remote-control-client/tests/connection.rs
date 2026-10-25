@@ -10,7 +10,7 @@ use remote_control_client::connection::{
 use remote_control_client::device::{MemoryViewerKeys, PinnedHost, TunnelMemory, ViewerKeys};
 use remote_control_client::keys::IdentityKey;
 use remote_control_client::messages::methods;
-use remote_control_client::rtdb::{MemoryRtdb, RtdbError};
+use remote_control_client::rtdb::{MemoryRtdb, Rtdb, RtdbError};
 use remote_control_client::signaling::{
     to_host_path, to_viewer_path, AnswerRejectReason, DevicePlatform, TransportKind,
 };
@@ -718,4 +718,143 @@ async fn stop_while_connecting_cleans_up() {
         ConnectionPhase::Idle,
         "no late failure after stop"
     );
+}
+
+struct DelayedResetKeys {
+    inner: Arc<MemoryViewerKeys>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    resets: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl ViewerKeys for DelayedResetKeys {
+    async fn identity(
+        &self,
+    ) -> Result<
+        remote_control_client::device::DeviceIdentity,
+        remote_control_client::device::KeysError,
+    > {
+        self.inner.identity().await
+    }
+    async fn reset_identity(&self) -> Result<(), remote_control_client::device::KeysError> {
+        self.resets.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.reset_identity().await
+    }
+    async fn pinned_host(&self, id: &str) -> Option<PinnedHost> {
+        self.inner.pinned_host(id).await
+    }
+    async fn pin(&self, host: PinnedHost) {
+        self.inner.pin(host).await;
+    }
+    async fn unpair(&self, id: &str) {
+        self.inner.unpair(id).await;
+    }
+}
+
+async fn revoked_with_delayed_reset() -> (Rig, Arc<DelayedResetKeys>) {
+    let mut rig = make_rig(false);
+    let keys = Arc::new(DelayedResetKeys {
+        inner: rig.keys.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        resets: AtomicU32::new(0),
+    });
+    let mut deps = deps_for(
+        (&rig.rtdb, &rig.clock, &rig.keys, &rig.memory),
+        &rig.host.host_id,
+    );
+    deps.keys = keys.clone();
+    rig.conn = ViewerConnection::new(deps);
+    rig.pair_beforehand().await;
+    rig.host
+        .configure(|c| c.reject = Some(AnswerRejectReason::Revoked));
+    rig.conn.start();
+    rig.phase(ConnectionPhase::Failed).await;
+    (rig, keys)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stopped_connection_does_not_restart_after_a_delayed_identity_repair() {
+    let (rig, keys) = revoked_with_delayed_reset().await;
+    let connection = rig.conn.clone();
+    let repairing = tokio::spawn(async move {
+        connection.repair().await;
+    });
+    keys.entered.notified().await;
+    rig.conn.stop();
+    keys.release.notify_one();
+    repairing.await.unwrap();
+    settle().await;
+    assert_eq!(rig.conn.state().phase, ConnectionPhase::Idle);
+    assert_eq!(keys.resets.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_identity_repairs_are_single_flight_and_only_apply_to_revocation() {
+    let (rig, keys) = revoked_with_delayed_reset().await;
+    let connection = rig.conn.clone();
+    let first = tokio::spawn(async move {
+        connection.repair().await;
+    });
+    keys.entered.notified().await;
+    let connection = rig.conn.clone();
+    let second = tokio::spawn(async move {
+        connection.repair().await;
+    });
+    settle().await;
+    assert_eq!(
+        keys.resets.load(Ordering::SeqCst),
+        1,
+        "the device identity must rotate only once"
+    );
+    rig.conn.stop();
+    keys.release.notify_one();
+    first.await.unwrap();
+    second.await.unwrap();
+    rig.conn.repair().await; // Idle is not revocation and must not touch persistent identity.
+    assert_eq!(keys.resets.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_before_the_dial_task_runs_does_not_create_an_offer() {
+    let rig = make_rig(false);
+    rig.host.publish_presence().await;
+    rig.conn.start();
+    rig.conn.stop();
+    settle().await;
+    assert_eq!(rig.conn.state().phase, ConnectionPhase::Idle);
+    assert!(
+        rig.host.conns().is_empty(),
+        "a queued stale dial must not contact the desktop"
+    );
+    assert_eq!(
+        rig.rtdb
+            .get(&to_host_path(UID, &rig.host.host_id).unwrap())
+            .await
+            .unwrap(),
+        Value::Null
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn approval_before_the_initialize_reply_does_not_mute_live_notifications() {
+    let rig = make_rig(false);
+    rig.host
+        .configure(|config| config.approve_before_initialize_reply = true);
+    rig.host.publish_presence().await;
+    rig.conn.start();
+    rig.phase(ConnectionPhase::Ready).await;
+    let conn = rig.host.conns()[0].conn_id.clone();
+    rig.host
+        .notify(&conn, "test.after-approval", json!({ "ready": true }))
+        .await;
+    advance(Duration::from_millis(100)).await;
+    assert_eq!(
+        *rig.recorder.notifications.lock().unwrap(),
+        vec![("test.after-approval".into(), json!({ "ready": true }))]
+    );
+    rig.conn.stop();
 }

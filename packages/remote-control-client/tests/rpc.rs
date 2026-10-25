@@ -7,10 +7,109 @@ use remote_control_client::framing::encode_message;
 use remote_control_client::rpc::{
     KeepaliveKind, RemoteErrorCode, RequestHandler, RpcError, RpcOptions, RpcPeer,
 };
+use remote_control_client::transport::{FragmentLink, Link, LinkClosed};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::{advance, link_pair, link_pair_logged, settle};
+
+struct BackpressuredSend {
+    inner: Arc<dyn FragmentLink>,
+    count: AtomicUsize,
+    blocked: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl FragmentLink for BackpressuredSend {
+    fn max_fragment_bytes(&self) -> usize {
+        self.inner.max_fragment_bytes()
+    }
+    async fn send_fragment(&self, fragment: Vec<u8>) -> Result<(), LinkClosed> {
+        if self.count.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.blocked.notify_one();
+            std::future::pending::<()>().await;
+        }
+        self.inner.send_fragment(fragment).await
+    }
+    fn close(&self, reason: &str) {
+        self.inner.close(reason);
+    }
+}
+
+fn backpressured_pair() -> (RpcPeer, RpcPeer, Arc<BackpressuredSend>) {
+    let (a, b) = link_pair(64);
+    let blocked = Arc::new(BackpressuredSend {
+        inner: a.link,
+        count: AtomicUsize::new(0),
+        blocked: tokio::sync::Notify::new(),
+    });
+    let a = RpcPeer::start(
+        Link {
+            link: blocked.clone(),
+            events: a.events,
+        },
+        RpcOptions::default(),
+    );
+    let b = RpcPeer::start(
+        b,
+        RpcOptions {
+            requests: Some(Arc::new(Echo)),
+            ..Default::default()
+        },
+    );
+    (a, b, blocked)
+}
+
+#[tokio::test(start_paused = true)]
+async fn timing_out_a_partial_message_closes_the_link_before_another_message_can_interleave() {
+    let (a, b, _) = backpressured_pair();
+    let error = a
+        .request(
+            "echo",
+            Some(json!("x".repeat(512))),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, RemoteErrorCode::Timeout);
+    assert_eq!(a.closed_reason().as_deref(), Some("send_incomplete"));
+    settle().await;
+    assert!(b.is_closed());
+    assert_eq!(
+        a.request("echo", Some(json!(1)), None)
+            .await
+            .unwrap_err()
+            .code,
+        RemoteErrorCode::Closed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn aborting_a_partial_message_closes_the_link_but_a_queued_timeout_does_not() {
+    let (a, b, blocked) = backpressured_pair();
+    let sending = {
+        let a = a.clone();
+        tokio::spawn(async move { a.request("echo", Some(json!("x".repeat(512))), None).await })
+    };
+    blocked.blocked.notified().await;
+    assert_eq!(
+        a.request("echo", None, Some(Duration::from_secs(1)))
+            .await
+            .unwrap_err()
+            .code,
+        RemoteErrorCode::Timeout
+    );
+    assert!(
+        !a.is_closed(),
+        "nothing from the queued request reached the wire"
+    );
+    sending.abort();
+    let _ = sending.await;
+    settle().await;
+    assert_eq!(a.closed_reason().as_deref(), Some("send_incomplete"));
+    assert!(b.is_closed());
+}
 
 struct Echo;
 

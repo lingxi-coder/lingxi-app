@@ -1,0 +1,29 @@
+{
+  "status": "signed-static-passed-smoke-blocked-by-other-lane-app",
+  "verifiedAtUtc": "2026-10-25T11:57:00.685760+00:00",
+  "appSourceCommit": "d65b8d6f2e99aacfc7bbff0866877fc5ada1ba6e",
+  "harnessRevision": "db5469ce6e4b210e69d9ae09acde0bd712c52944",
+  "buildEnvironment": {
+    "CARGO_PROFILE_RELEASE_LTO": "false",
+    "CARGO_BUILD_JOBS": "2"
+  },
+  "freshNewPinRustCompilationPassed": true,
+  "oldBinaryOverrideRemoved": true,
+  "portableBinarySha256": "2b7f9699ef4bc6f7f0bdf3b74a7373313384c8e19fd91609ec3730703e1ef645",
+  "signedSidecarSha256": "612485618f1f3c42b1bcecf35d9d0a488c8aa1c1c03ebf172ef0d6c9cde6783d",
+  "machUuid": "84DD1DB9-2760-355C-ADA8-4733E498BCF8",
+  "zipSha256": "494cbc4372e78d0ec38c0db42acf8624ea0917b06e6f43a8646bd2e04aaee7b6",
+  "zipBytes": 275632156,
+  "bundleId": "com.lingxi.code.development",
+  "signingTeam": "AZ4AX7J833",
+  "codesignDeepStrictPassed": true,
+  "packageStaticPassed": true,
+  "fullRuntimeSmokePassed": false,
+  "systemTccAcceptancePassed": false,
+  "runtimeSmokeBlocker": "Preexisting remote-control lane LingXi instance PID81385; left untouched",
+  "buildLog": "lingxi-computer-use-hit-test-build.log",
+  "limitations": [
+    "Release acceptance build uses LTO=false/jobs2",
+    "Await full packaged smoke and final LaunchServices native permission roundtrip"
+  ]
+}

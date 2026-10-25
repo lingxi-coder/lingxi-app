@@ -274,6 +274,10 @@ dependencies {
     implementation(libs.androidx.webkit)
 
     // Activity + Compose
+    implementation(libs.coil3.compose)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.documentfile)
     implementation(libs.androidx.activity.compose)
 
     // Compose UI

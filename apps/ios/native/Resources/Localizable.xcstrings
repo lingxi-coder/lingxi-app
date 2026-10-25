@@ -35957,31 +35957,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "花一分钟，让它认识你——之后你只需开口，它就会回应。"
+            "value": "写代码、理思路、做项目，让灵犀陪你把想法变成现实。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "花一分鐘，讓它認識你——之後你只需開口，它就會回應。"
+            "value": "寫程式、理思路、做專案，讓靈犀陪你把想法變成現實。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Spend a minute getting acquainted — after that, just speak, and it'll respond."
+            "value": "Write code, explore ideas, and build projects with LingXi."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 分だけ時間をかけて、灵犀にあなたのことを知ってもらいましょう。あとは話しかけるだけで応えてくれます。"
+            "value": "コードを書き、アイデアを整理し、プロジェクトを進めましょう。灵犀があなたのアイデアを形にします。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "1분만 시간을 내어 灵犀가 당신을 알게 해주세요 — 그다음부터는 말만 하면 응답합니다."
+            "value": "灵犀와 함께 코드를 작성하고, 아이디어를 정리하고, 프로젝트를 만들어 보세요."
           }
         }
       }

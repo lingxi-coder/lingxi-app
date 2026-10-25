@@ -40,14 +40,15 @@ class RemoteControlManagerTest {
         var closed = false
         var pushId: String? = "unset"
         var state: RemoteConnectionStateFfi? = null
+        var stopWatchingGate: CompletableDeferred<Unit>? = null
         override fun setPushInstallationId(id: String?) { pushId = id }
         override suspend fun watchHosts() { calls += "watchHosts" }
-        override suspend fun stopWatchingHosts() { calls += "stopWatchingHosts" }
+        override suspend fun stopWatchingHosts() { calls += "stopWatchingHosts"; stopWatchingGate?.await() }
         override suspend fun connect(hostId: String) {
             calls += "connect:$hostId"
             state = RemoteConnectionStateFfi(hostId, RemoteConnectionPhaseFfi.READY, null, null, null, 0u, null, null, false)
         }
-        override suspend fun disconnect() { calls += "disconnect" }
+        override suspend fun disconnect() { calls += "disconnect"; state = null }
         override suspend fun retry() { calls += "retry" }
         override suspend fun nudge() { calls += "nudge" }
         override fun connectionState(): RemoteConnectionStateFfi? = state
@@ -168,6 +169,24 @@ class RemoteControlManagerTest {
         harness.manager.closeConnection()
         runCurrent()
         assertEquals(listOf("stopWatchingHosts", "disconnect"), harness.clients.single().calls)
+    }
+
+    @Test fun aLateScreenCleanupCannotDisconnectAReopenedComputer() = runTest(UnconfinedTestDispatcher()) {
+        val harness = Harness(this, "u1")
+        runCurrent()
+        val client = harness.clients.single()
+        harness.manager.connect("old")
+        val stopped = CompletableDeferred<Unit>()
+        client.stopWatchingGate = stopped
+        harness.manager.closeConnection()
+        runCurrent()
+        val reopened = launch { harness.manager.connect("new") }
+        runCurrent()
+        stopped.complete(Unit)
+        reopened.join()
+        runCurrent()
+        assertEquals("new", client.connectionState()?.hostId)
+        assertEquals("connect:new", client.calls.last())
     }
 
     @Test fun followingDialsAttachesDeliversEveryUpdateAndDetaches() = runTest(UnconfinedTestDispatcher()) {

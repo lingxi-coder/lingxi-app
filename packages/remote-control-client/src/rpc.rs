@@ -402,8 +402,16 @@ async fn send_text(shared: &Shared, text: &str) -> Result<(), SendError> {
     let fragments = encode_message(text, shared.link.max_fragment_bytes())?;
     // Concurrent sends are serialized, so messages never interleave.
     let _turn = shared.send_lock.lock().await;
+    // A timed-out request or an aborted caller may drop this future while the
+    // link is backpressured. Once a split message may be on the wire, the next
+    // sender cannot safely reuse the peer's half-filled reassembler.
+    let mut partial = IncompleteSend {
+        shared,
+        armed: fragments.len() > 1,
+    };
     for fragment in fragments {
-        if let Some(reason) = shared.closed.borrow().clone() {
+        let closed = shared.closed.borrow().clone();
+        if let Some(reason) = closed {
             return Err(SendError::Closed(reason));
         }
         shared
@@ -412,7 +420,22 @@ async fn send_text(shared: &Shared, text: &str) -> Result<(), SendError> {
             .await
             .map_err(|e| SendError::Closed(e.0))?;
     }
+    partial.armed = false;
     Ok(())
+}
+
+struct IncompleteSend<'a> {
+    shared: &'a Shared,
+    armed: bool,
+}
+
+impl Drop for IncompleteSend<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared.link.close("send_incomplete");
+            end(self.shared, "send_incomplete");
+        }
+    }
 }
 
 fn end(shared: &Shared, reason: &str) {

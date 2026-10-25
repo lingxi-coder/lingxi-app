@@ -26,7 +26,8 @@ export interface DeviceStore {
   loadIdentity(): Promise<StoredIdentity | undefined>;
   /** Store `identity` unless one is already there (another tab won the race); returns what is stored afterwards. */
   saveIdentityIfAbsent(identity: StoredIdentity): Promise<StoredIdentity>;
-  deleteIdentity(): Promise<void>;
+  /** Atomically delete only this public key, preserving a replacement another tab already stored. */
+  deleteIdentity(expectedPublicKey?: Uint8Array): Promise<void>;
   listHosts(): Promise<PinnedHost[]>;
   putHost(host: PinnedHost): Promise<void>;
   deleteHost(hostId: string): Promise<void>;
@@ -51,7 +52,8 @@ export class MemoryDeviceStore implements DeviceStore {
     return this.identity;
   }
 
-  async deleteIdentity(): Promise<void> {
+  async deleteIdentity(expectedPublicKey?: Uint8Array): Promise<void> {
+    if (expectedPublicKey !== undefined && this.identity !== undefined && !samePublicKey(this.identity.publicKey, expectedPublicKey)) return;
     this.identity = undefined;
   }
 
@@ -112,6 +114,10 @@ function isStoredIdentity(value: unknown): value is StoredIdentity {
   return record !== undefined && record !== null && record.publicKey instanceof Uint8Array && record.publicKey.length === 32 && record.privateKey !== undefined;
 }
 
+function samePublicKey(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 function isPinnedHost(value: unknown): value is PinnedHost {
   const record = value as Partial<PinnedHost> | undefined;
   return (
@@ -159,10 +165,14 @@ export class IndexedDbDeviceStore implements DeviceStore {
     return identity;
   }
 
-  async deleteIdentity(): Promise<void> {
+  async deleteIdentity(expectedPublicKey?: Uint8Array): Promise<void> {
     const db = await this.database();
     const transaction = db.transaction(IDENTITY_STORE, 'readwrite');
-    transaction.objectStore(IDENTITY_STORE).delete(IDENTITY_KEY);
+    const store = transaction.objectStore(IDENTITY_STORE);
+    const existing: unknown = await settled(store.get(IDENTITY_KEY));
+    if (expectedPublicKey === undefined || !isStoredIdentity(existing) || samePublicKey(existing.publicKey, expectedPublicKey)) {
+      store.delete(IDENTITY_KEY);
+    }
     await finished(transaction);
   }
 
@@ -215,6 +225,7 @@ export class DeviceKeys {
   private store: DeviceStore;
   private degraded: boolean;
   private identityPromise: Promise<DeviceIdentity> | undefined;
+  private resetPending: Promise<void> | undefined;
   private readonly listeners = new Set<() => void>();
   private readonly generate: () => Promise<StoredIdentity>;
 
@@ -260,6 +271,7 @@ export class DeviceKeys {
 
   /** The device identity, created on first use. Concurrent callers share one creation. */
   identity(): Promise<DeviceIdentity> {
+    if (this.resetPending !== undefined) return this.resetPending.then(() => this.identity());
     this.identityPromise ??= this.loadOrCreate().catch((error: unknown) => {
       this.identityPromise = undefined;
       throw error;
@@ -281,9 +293,21 @@ export class DeviceKeys {
    * is what "pair again" after a revocation does: the desktop remembers the
    * revoked id and would refuse the old key forever.
    */
-  async resetIdentity(): Promise<void> {
-    this.identityPromise = undefined;
-    await this.guarded((store) => store.deleteIdentity());
+  resetIdentity(): Promise<void> {
+    if (this.resetPending !== undefined) return this.resetPending;
+    const previous = this.identityPromise;
+    const operation = (async () => {
+      // A creation already in progress may still persist its key. Finish it
+      // before deleting, and prevent any reader from caching the old key while
+      // that deletion is pending. All subsequent readers share one new key.
+      const identity = await previous?.catch(() => undefined);
+      await this.guarded((store) => store.deleteIdentity(identity?.publicKey));
+      this.identityPromise = undefined;
+    })().finally(() => {
+      if (this.resetPending === operation) this.resetPending = undefined;
+    });
+    this.resetPending = operation;
+    return operation;
   }
 
   async pinnedHosts(): Promise<PinnedHost[]> {

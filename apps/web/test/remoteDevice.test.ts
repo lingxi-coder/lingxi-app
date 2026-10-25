@@ -97,3 +97,77 @@ test('a listener that throws does not stop the others', async () => {
   await keys.identity();
   assert.equal(heard, true);
 });
+
+test('identity requests during an unfinished reset wait for the new key', async () => {
+  const store = new MemoryDeviceStore();
+  const keys = new DeviceKeys({ store });
+  const old = await keys.identity();
+  const remove = store.deleteIdentity.bind(store);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let deletes = 0;
+  store.deleteIdentity = async (expectedPublicKey) => { deletes++; await blocked; await remove(expectedPublicKey); };
+  const reset = keys.resetIdentity();
+  const duplicate = keys.resetIdentity();
+  const during = keys.identity();
+  release();
+  await Promise.all([reset, duplicate]);
+  const [a, b] = await Promise.all([during, keys.identity()]);
+  assert.notEqual(a.id, old.id);
+  assert.equal(a, b, 'all connections waiting on this reset share the replacement');
+  assert.equal(deletes, 1);
+  assert.equal((await new DeviceKeys({ store }).identity()).id, a.id);
+});
+
+test('a key creation finishing after reset cannot repopulate the old identity', async () => {
+  const store = new MemoryDeviceStore();
+  const save = store.saveIdentityIfAbsent.bind(store);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const saving = new Promise<void>((resolve) => { started = resolve; });
+  let saves = 0;
+  store.saveIdentityIfAbsent = async (identity) => {
+    saves++;
+    if (saves === 1) { started(); await blocked; }
+    return save(identity);
+  };
+  const keys = new DeviceKeys({ store });
+  const old = keys.identity();
+  await saving;
+  const reset = keys.resetIdentity();
+  const next = keys.identity();
+  release();
+  const [before, , after] = await Promise.all([old, reset, next]);
+  assert.notEqual(after.id, before.id);
+  assert.equal((await keys.identity()).id, after.id);
+  assert.equal((await new DeviceKeys({ store }).identity()).id, after.id);
+});
+
+test('a second tab repairing the revoked key adopts the first tab replacement', async () => {
+  const store = new MemoryDeviceStore();
+  const first = new DeviceKeys({ store });
+  const second = new DeviceKeys({ store });
+  const old = await first.identity();
+  assert.equal((await second.identity()).id, old.id);
+  await first.resetIdentity();
+  const replacement = await first.identity();
+  assert.notEqual(replacement.id, old.id);
+  await second.resetIdentity();
+  assert.equal((await second.identity()).id, replacement.id, 'the second repair must preserve the newer stored key');
+  assert.equal((await first.identity()).id, replacement.id);
+  assert.equal((await new DeviceKeys({ store }).identity()).id, replacement.id);
+});
+
+test('simultaneous revoked-key repairs in two tabs converge on one replacement', async () => {
+  const store = new MemoryDeviceStore();
+  const first = new DeviceKeys({ store });
+  const second = new DeviceKeys({ store });
+  const [a, b] = await Promise.all([first.identity(), second.identity()]);
+  assert.equal(a.id, b.id);
+  await Promise.all([first.resetIdentity(), second.resetIdentity()]);
+  const [nextA, nextB] = await Promise.all([first.identity(), second.identity()]);
+  assert.notEqual(nextA.id, a.id);
+  assert.equal(nextA.id, nextB.id);
+  assert.equal((await new DeviceKeys({ store }).identity()).id, nextA.id);
+});

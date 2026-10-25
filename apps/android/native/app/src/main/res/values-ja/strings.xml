@@ -662,7 +662,7 @@
     <string name="onboarding_voiceprint_subtitle">灵犀があなたの声を覚え、あなたの声にのみ反応してあなた専用の記憶を呼び起こします。後で設定から完了することもできます。</string>
     <string name="onboarding_voiceprint_title">声紋を登録</string>
     <string name="onboarding_wake_word_preview">ねえ、%1$s</string>
-    <string name="onboarding_welcome_subtitle">1 分だけ時間をかけて、灵犀にあなたのことを知ってもらいましょう。あとは話しかけるだけで応えてくれます。</string>
+    <string name="onboarding_welcome_subtitle">コードを書き、アイデアを整理し、プロジェクトを進めましょう。灵犀があなたのアイデアを形にします。</string>
     <string name="onboarding_welcome_title">灵犀へようこそ</string>
     <string name="oss_android_bundle_body">この Android 統合製品は GNU GPLv3 の下で配布されます。元の MIT、Apache、LGPL、および Alpine パッケージは、それぞれの表示を引き続き保持します。ビルド成果物には NOTICE、SPDX SBOM、固定ダイジェスト、対応ソースコード情報が含まれます。</string>
     <string name="oss_android_bundle_title">Android 統合配布物</string>

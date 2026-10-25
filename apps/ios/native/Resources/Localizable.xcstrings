@@ -19,19 +19,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi"
+            "value": "LingXi"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀"
+            "value": "LingXi"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀"
+            "value": "LingXi"
           }
         }
       }
@@ -53,7 +53,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi uses the camera to take photos for model analysis."
+            "value": "LingXi uses the camera to take photos for model analysis."
           }
         },
         "ja": {
@@ -87,7 +87,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi uses the microphone for voice input in Flow Mode."
+            "value": "LingXi uses the microphone for voice input in Flow Mode."
           }
         },
         "ja": {
@@ -121,7 +121,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi accesses your photo library to select images for model analysis."
+            "value": "LingXi accesses your photo library to select images for model analysis."
           }
         },
         "ja": {
@@ -155,7 +155,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi uses speech recognition to transcribe your voice into text."
+            "value": "LingXi uses speech recognition to transcribe your voice into text."
           }
         },
         "ja": {
@@ -1345,7 +1345,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ask Lingxi"
+            "value": "Ask LingXi"
           }
         },
         "ja": {
@@ -1413,7 +1413,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Start a new Lingxi conversation in the current project."
+            "value": "Start a new LingXi conversation in the current project."
           }
         },
         "ja": {
@@ -1447,7 +1447,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "New Lingxi Conversation"
+            "value": "New LingXi Conversation"
           }
         },
         "ja": {
@@ -1481,7 +1481,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Lingxi and return to the current conversation."
+            "value": "Open LingXi and return to the current conversation."
           }
         },
         "ja": {
@@ -1549,7 +1549,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Lingxi Terminal"
+            "value": "Open LingXi Terminal"
           }
         },
         "ja": {
@@ -1583,7 +1583,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Lingxi"
+            "value": "Open LingXi"
           }
         },
         "ja": {
@@ -1651,19 +1651,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi"
+            "value": "LingXi"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀"
+            "value": "LingXi"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "灵犀"
+            "value": "LingXi"
           }
         }
       }
@@ -6627,7 +6627,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi finished"
+            "value": "LingXi finished"
           }
         },
         "ja": {
@@ -6797,7 +6797,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi needs your permission to use %@"
+            "value": "LingXi needs your permission to use %@"
           }
         },
         "ja": {
@@ -6831,7 +6831,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi needs your permission to use %1$s"
+            "value": "LingXi needs your permission to use %1$s"
           }
         },
         "ja": {
@@ -6865,7 +6865,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi needs your permission"
+            "value": "LingXi needs your permission"
           }
         },
         "ja": {
@@ -7069,7 +7069,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi is working"
+            "value": "LingXi is working"
           }
         },
         "ja": {
@@ -7137,7 +7137,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi is waiting for you"
+            "value": "LingXi is waiting for you"
           }
         },
         "ja": {
@@ -18629,7 +18629,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ask Lingxi…"
+            "value": "Ask LingXi…"
           }
         },
         "ja": {
@@ -26415,7 +26415,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sign in to Lingxi"
+            "value": "Sign in to LingXi"
           }
         },
         "ja": {
@@ -29543,7 +29543,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "While your device is idle, Lingxi works in the background\norganizing, planning, and polishing — see the results when you wake up"
+            "value": "While your device is idle, LingXi works in the background\norganizing, planning, and polishing — see the results when you wake up"
           }
         },
         "ja": {
@@ -31787,7 +31787,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi only calls the tools you allow. You'll be asked to confirm the first time each one is used."
+            "value": "LingXi only calls the tools you allow. You'll be asked to confirm the first time each one is used."
           }
         },
         "ja": {
@@ -34405,7 +34405,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Give Your Lingxi a Name"
+            "value": "Give Your LingXi a Name"
           }
         },
         "ja": {
@@ -34541,7 +34541,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter Lingxi"
+            "value": "Enter LingXi"
           }
         },
         "ja": {
@@ -34881,7 +34881,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi will use this name to address you, making conversations feel more natural."
+            "value": "LingXi will use this name to address you, making conversations feel more natural."
           }
         },
         "ja": {
@@ -35697,7 +35697,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "“Hello Lingxi, I'm %1$s.”"
+            "value": "“Hello LingXi, I'm %1$s.”"
           }
         },
         "ja": {
@@ -35867,7 +35867,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Let Lingxi recognize you by voice, responding only to your voice and recalling memories that belong to you. You can finish this later in Settings."
+            "value": "Let LingXi recognize you by voice, responding only to your voice and recalling memories that belong to you. You can finish this later in Settings."
           }
         },
         "ja": {
@@ -36003,7 +36003,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Welcome to Lingxi"
+            "value": "Welcome to LingXi"
           }
         },
         "ja": {
@@ -40389,7 +40389,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi doesn't call any cloud LLM on its own — inference is handled by the providers you add. Keys are encrypted locally only."
+            "value": "LingXi doesn't call any cloud LLM on its own — inference is handled by the providers you add. Keys are encrypted locally only."
           }
         },
         "ja": {
@@ -41347,13 +41347,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "パソコンから応答がありません。オンラインで Lingxi が起動していることを確認してください。"
+            "value": "パソコンから応答がありません。オンラインで LingXi が起動していることを確認してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "컴퓨터가 응답하지 않습니다. 온라인이고 Lingxi가 실행 중인지 확인하세요."
+            "value": "컴퓨터가 응답하지 않습니다. 온라인이고 LingXi가 실행 중인지 확인하세요."
           }
         }
       }
@@ -41585,13 +41585,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "バージョンに互換性がありません。パソコンの Lingxi またはこのアプリを更新してください。"
+            "value": "バージョンに互換性がありません。パソコンの LingXi またはこのアプリを更新してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "버전이 호환되지 않습니다. 컴퓨터의 Lingxi 또는 이 앱을 업데이트하세요."
+            "value": "버전이 호환되지 않습니다. 컴퓨터의 LingXi 또는 이 앱을 업데이트하세요."
           }
         }
       }
@@ -41687,13 +41687,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このスマートフォンのペアリングだけを削除します。パソコン側のデバイス一覧は Lingxi の設定から削除してください。"
+            "value": "このスマートフォンのペアリングだけを削除します。パソコン側のデバイス一覧は LingXi の設定から削除してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이 휴대폰의 페어링만 제거됩니다. 컴퓨터의 기기 목록은 Lingxi 설정에서 제거하세요."
+            "value": "이 휴대폰의 페어링만 제거됩니다. 컴퓨터의 기기 목록은 LingXi 설정에서 제거하세요."
           }
         }
       }
@@ -42061,13 +42061,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "パソコンで Lingxi を開き、同じアカウントでサインインして、設定で「リモート操作」をオンにします。オンにするとここに表示されます。"
+            "value": "パソコンで LingXi を開き、同じアカウントでサインインして、設定で「リモート操作」をオンにします。オンにするとここに表示されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "컴퓨터에서 Lingxi를 열고 같은 계정으로 로그인한 뒤 설정에서 '원격 제어'를 켜세요. 켜면 여기에 표시됩니다."
+            "value": "컴퓨터에서 LingXi를 열고 같은 계정으로 로그인한 뒤 설정에서 '원격 제어'를 켜세요. 켜면 여기에 표시됩니다."
           }
         }
       }
@@ -42129,13 +42129,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "パソコンの Lingxi でセッションを開き、リモートアクセスを許可すると、ここに表示されます。"
+            "value": "パソコンの LingXi でセッションを開き、リモートアクセスを許可すると、ここに表示されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "컴퓨터의 Lingxi에서 세션을 열고 원격 접근을 허용하면 여기에 표시됩니다."
+            "value": "컴퓨터의 LingXi에서 세션을 열고 원격 접근을 허용하면 여기에 표시됩니다."
           }
         }
       }
@@ -42231,13 +42231,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このパソコンはオフラインです。電源が入りネットワークに接続されていること、Lingxi が起動しリモート操作がオンになっていることを確認してください。"
+            "value": "このパソコンはオフラインです。電源が入りネットワークに接続されていること、LingXi が起動しリモート操作がオンになっていることを確認してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이 컴퓨터는 현재 오프라인입니다. 전원이 켜져 있고 네트워크에 연결되어 있으며 Lingxi가 실행 중이고 '원격 제어'가 켜져 있는지 확인하세요."
+            "value": "이 컴퓨터는 현재 오프라인입니다. 전원이 켜져 있고 네트워크에 연결되어 있으며 LingXi가 실행 중이고 '원격 제어'가 켜져 있는지 확인하세요."
           }
         }
       }
@@ -42979,13 +42979,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "パソコンの Lingxi と同じアカウントでサインインすると、ここにパソコンが表示されます。"
+            "value": "パソコンの LingXi と同じアカウントでサインインすると、ここにパソコンが表示されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "컴퓨터의 Lingxi와 같은 계정으로 로그인하면 여기에 컴퓨터가 표시됩니다."
+            "value": "컴퓨터의 LingXi와 같은 계정으로 로그인하면 여기에 컴퓨터가 표시됩니다."
           }
         }
       }
@@ -44877,7 +44877,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ask Lingxi"
+            "value": "Ask LingXi"
           }
         },
         "ja": {
@@ -45149,7 +45149,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open Lingxi"
+            "value": "Open LingXi"
           }
         },
         "ja": {
@@ -46033,7 +46033,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "© 2026 Lingxi AI · Your preferences stay on this device"
+            "value": "© 2026 LingXi AI · Your preferences stay on this device"
           }
         },
         "ja": {
@@ -48753,7 +48753,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi detects it automatically from your input language"
+            "value": "LingXi detects it automatically from your input language"
           }
         },
         "ja": {
@@ -48855,7 +48855,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "\"Lingxi, summarize today's meeting notes and highlight the parts with action items.\""
+            "value": "\"LingXi, summarize today's meeting notes and highlight the parts with action items.\""
           }
         },
         "ja": {
@@ -48889,7 +48889,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "“Lingxi, summarize today's meeting notes and highlight the parts with action items.”"
+            "value": "“LingXi, summarize today's meeting notes and highlight the parts with action items.”"
           }
         },
         "ja": {
@@ -56267,7 +56267,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Lingxi automatically picks up on your preferences, habits, and relationships from your conversations. You can edit or delete any of it anytime."
+            "value": "LingXi automatically picks up on your preferences, habits, and relationships from your conversations. You can edit or delete any of it anytime."
           }
         },
         "ja": {
@@ -56403,7 +56403,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Currently working on the AxieLix Lingxi project"
+            "value": "Currently working on the AxieLix LingXi project"
           }
         },
         "ja": {
@@ -56539,7 +56539,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Facts Lingxi remembers about you"
+            "value": "Facts LingXi remembers about you"
           }
         },
         "ja": {
@@ -56879,7 +56879,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "When off, Lingxi sends no system notifications at all"
+            "value": "When off, LingXi sends no system notifications at all"
           }
         },
         "ja": {
@@ -57185,7 +57185,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "All notifications go through the system notification center — Lingxi won't interrupt you separately."
+            "value": "All notifications go through the system notification center — LingXi won't interrupt you separately."
           }
         },
         "ja": {
@@ -67623,7 +67623,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choose a preset — Lingxi will pre-fill the API URL, key prefix, and available models."
+            "value": "Choose a preset — LingXi will pre-fill the API URL, key prefix, and available models."
           }
         },
         "ja": {
@@ -71363,7 +71363,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Skills are reusable AI behavior packs; MCP is a standard protocol for connecting external tools; Dream lets Lingxi organize and plan proactively while you rest."
+            "value": "Skills are reusable AI behavior packs; MCP is a standard protocol for connecting external tools; Dream lets LingXi organize and plan proactively while you rest."
           }
         },
         "ja": {
@@ -72111,7 +72111,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Combine share sheets, clipboard, files, or output from other apps in system Shortcuts, then hand it off to Lingxi."
+            "value": "Combine share sheets, clipboard, files, or output from other apps in system Shortcuts, then hand it off to LingXi."
           }
         },
         "ja": {
@@ -72145,7 +72145,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "View the actions Lingxi provides"
+            "value": "View the actions LingXi provides"
           }
         },
         "ja": {
@@ -85167,7 +85167,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hello, I'm Lingxi. Voice settings are now active."
+            "value": "Hello, I'm LingXi. Voice settings are now active."
           }
         },
         "ja": {

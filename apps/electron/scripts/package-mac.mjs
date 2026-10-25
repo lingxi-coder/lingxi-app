@@ -290,6 +290,7 @@ async function main() {
   ensureAudioHelperResourceLayout(resources);
 
   copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.icns'), join(resources, 'icon.icns'));
+  copyFileSync(join(packageRoot, 'assets', 'icons', 'icon.png'), join(resources, 'icon.png'));
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));
   const mainExecutable = renameElectronExecutable(paths.appPath);
   rewriteInfoPlist(join(contents, 'Info.plist'), metadata.version, identifiers.desktopBundleId);

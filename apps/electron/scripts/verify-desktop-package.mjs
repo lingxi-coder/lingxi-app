@@ -52,6 +52,8 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(asar, 'application asar');
   requirePath(sidecar, 'bridge-server sidecar');
   requirePath(executable, 'Electron executable');
+  requirePath(join(resources, 'icon.png'), 'LingXi application icon');
+  if (sha256File(join(resources, 'icon.png')) !== sha256File(join(packageRoot, 'assets', 'icons', 'icon.png'))) throw new Error('Packaged brand icon is stale');
   verifyModBun(resources, platform, arch);
   if (platform !== 'darwin') verifyProtocolRegistration(paths.payloadRoot, platform);
   if (platform === 'darwin') {

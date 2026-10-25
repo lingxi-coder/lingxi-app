@@ -34,7 +34,7 @@ export function App() {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
     if (isRemoteRoute(route) || route === '/login/remote') {
-      document.title = locale === 'zh' ? '远程控制 — 灵犀 LingXi' : 'Remote Control — LingXi';
+      document.title = locale === 'zh' ? '灵犀远控 — LingXi Remote' : 'LingXi Remote';
     } else if (!route.startsWith('/docs')) {
       document.title = route === '/privacy' ? (locale === 'zh' ? '隐私政策 — 灵犀 LingXi' : 'Privacy policy — LingXi')
         : route === '/data-deletion' ? (locale === 'zh' ? '数据与账号删除 — 灵犀 LingXi' : 'Data and account deletion — LingXi')

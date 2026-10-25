@@ -198,6 +198,7 @@ function isHttpsUrl(raw: string): boolean {
 function createWindow(): BrowserWindow {
   const target = rendererTarget();
   const mainWindow = new BrowserWindow({
+    icon: join(app.isPackaged ? process.resourcesPath : join(moduleDirectory, '../../assets/icons'), 'icon.png'),
     width: 1320,
     height: 860,
     minWidth: 900,

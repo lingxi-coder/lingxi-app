@@ -153,6 +153,8 @@ export interface SessionRef {
   sessionId: string;
 }
 
+export type RuntimeSessionMode = 'code' | 'chat';
+
 export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;

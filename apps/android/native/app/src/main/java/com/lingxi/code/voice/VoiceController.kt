@@ -204,6 +204,7 @@ fun buildVoiceEngine(
     providerProfilesJson: String = "{}",
     routingJson: String? = null,
     visionDelegationEnabled: Boolean = true,
+    appAgentHost: Boolean = false,
     projectWorkspace: ProjectWorkspace? = null,
     sessionMode: SessionMode = SessionMode.Code,
     linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
@@ -274,6 +275,7 @@ fun buildVoiceEngine(
         buildAndroidEngine(
             config = AndroidEngineLaunchConfigFfi(
                 appVersion = com.lingxi.code.BuildConfig.VERSION_NAME,
+                appAgentHost = appAgentHost,
                 apiBase = apiBase,
                 apiKey = apiKey,
                 model = model,

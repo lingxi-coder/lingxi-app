@@ -53,10 +53,22 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         guard valid || (parts.count == 3 && parts[0] == "remote") else { return nil }
         var params: [String: String] = [:]
         for item in components.queryItems ?? [] {
-            guard ["workspace", "message", "mode", "scope"].contains(item.name), params[item.name] == nil,
+            guard ["workspace", "message", "mode", "scope", "review", "runId", "revision"].contains(item.name), params[item.name] == nil,
                   let value = item.value, !value.isEmpty, value.count <= 512,
                   !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return nil }
             params[item.name] = value
+        }
+        if let review = params["review"] {
+            guard parts[0] == "apps", review == "agent" else { return nil }
+        }
+        if let runID = params["runId"] {
+            guard parts[0] == "apps", params["review"] == "agent",
+                  !runID.isEmpty, runID.utf8.count <= 128,
+                  !runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                  let revision = params["revision"], let value = UInt64(revision), value > 0,
+                  String(value) == revision else { return nil }
+        } else if params["revision"] != nil {
+            return nil
         }
         guard params["mode"].map({ ["chat", "code"].contains($0) }) ?? true else { return nil }
         if let message = params["message"] {

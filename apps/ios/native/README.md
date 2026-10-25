@@ -10,7 +10,7 @@ mock data (later milestones).
 
 ## Requirements
 
-- macOS with Xcode 16+ (iOS 18.0 SDK or newer)
+- macOS with Xcode 27+ (iOS 27 SDK or newer; the app deployment target is iOS 26.0)
 - Python 3.11+ for staging test fixtures. The test build selects an installed
   interpreter with `tomllib`; set `LINGXI_PYTHON3` to override its path.
 - [XcodeGen](https://github.com/yonyz/XcodeGen): `brew install xcodegen`

@@ -76,6 +76,26 @@ final class ProjectStore {
         }
     }
 
+    /// Creates a dedicated Mobile Project whose active Code cwd is the
+    /// immutable app source copy. The project ID remains the native workspace
+    /// identity; the source folder is an authorized home directory.
+    @discardableResult
+    func createLocalAppAuthoringProject(name: String, sourceDirectory: String) async throws -> ProjectSnapshot {
+        let project = try await createInternal(name: name)
+        var record = project.record
+        record.activeDirectory = sourceDirectory
+        var seenDirectories = Set<String>()
+        record.additionalDirectories = (record.additionalDirectories + [sourceDirectory]).filter {
+            seenDirectories.insert($0).inserted
+        }
+        let repository = repository
+        let executionDomain = executionDomain
+        let updated = try await executionDomain.async { try repository.updateProject(record) }
+        let state = try await executionDomain.async { repository.load() }
+        publish(state, preservingConflicts: true)
+        return updated
+    }
+
     @discardableResult
     func importExternal(name: String, directoryURL: URL) async throws -> ProjectSnapshot {
         try await runThrowingOperation(.import, message: String(localized: "project_importing_message")) {

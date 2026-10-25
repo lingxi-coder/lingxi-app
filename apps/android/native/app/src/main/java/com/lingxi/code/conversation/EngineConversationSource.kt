@@ -91,12 +91,13 @@ class EngineConversationSource private constructor(
     @Volatile private var resumeOnUiAttach: Boolean,
     private val initialRecoverySpec: ConversationRecoverySpec,
     private val userHomePath: String,
+    private val userHomeGuestPath: String,
 ) : ConversationSource, SlashCommandConversationSource, BackgroundRetainableConversationSource {
 
     override val recoverySpec: ConversationRecoverySpec
         get() {
             val directory = workspace.value?.cwd ?: return initialRecoverySpec
-            val home = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
+            val home = userHomeGuestPath
             if (directory != home && !directory.startsWith("$home/")) return initialRecoverySpec
             val relative = directory.removePrefix(home).removePrefix("/")
             return initialRecoverySpec.copy(hostPath = java.io.File(userHomePath, relative).absolutePath, guestPath = directory, additionalDirectories = workspace.value?.additionalDirectories.orEmpty())
@@ -336,6 +337,11 @@ class EngineConversationSource private constructor(
         handle.submit(ClientCommand.NewSession(cwd = null, model = null))
     }
 
+    override suspend fun newSession(cwd: String) {
+        durableTurns.clear()
+        handle.submit(ClientCommand.NewSession(cwd = cwd, model = null))
+    }
+
     override suspend fun setModel(id: String) {
         if (id.isBlank()) return
         // Let the caller surface delivery/rejection errors; only ModelChanged
@@ -396,10 +402,6 @@ class EngineConversationSource private constructor(
 
     override val visualizationHost: VisualizationHost? by lazy {
         runCatching { handle.visualizationHost(VISUALIZATION_ORIGIN) }.getOrNull()
-    }
-
-    override val localAppHost: LocalAppHost? by lazy {
-        runCatching { handle.localAppHost() }.getOrNull()
     }
 
     override fun submit(
@@ -529,6 +531,41 @@ class EngineConversationSource private constructor(
         )
 
         private fun nextFallbackTurnId(): Long = fallbackTurnIds.incrementAndGet()
+
+        /** Claim reusable sources on the UI lane; only a new native engine is
+         * constructed in IO. Cancellation owns and closes only that new handle.
+         */
+        internal suspend fun createInBackground(
+            context: Context,
+            projectWorkspace: ProjectWorkspace? = null,
+            workspaceKey: String? = null,
+            sessionMode: SessionMode = SessionMode.Code,
+            linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
+            reuseProcessSource: Boolean = true,
+            currentSource: ConversationSource? = null,
+        ): ConversationSource {
+            val spec = ConversationRecoverySpec(
+                projectId = if (workspaceKey == "global" || workspaceKey == "scheduled") null else projectWorkspace?.projectId,
+                hostPath = projectWorkspace?.hostPath,
+                sessionMode = sessionMode,
+                linuxRuntimeMode = linuxRuntimeMode,
+                workspaceKey = workspaceKey ?: projectWorkspace?.projectId?.let { "project.$it" } ?: "global",
+                guestPath = projectWorkspace?.guestPath,
+                additionalDirectories = projectWorkspace?.additionalDirectories.orEmpty(),
+            )
+            if (reuseProcessSource) {
+                if (currentSource?.recoverySpec == spec) return currentSource
+                when (val claim = ConversationHeadlessRecovery.acquireForUi(spec, conversationStrings(context))) {
+                    is ConversationHeadlessRecovery.UiSourceClaim.Existing -> return claim.source
+                    is ConversationHeadlessRecovery.UiSourceClaim.Pending -> return claim.source
+                    ConversationHeadlessRecovery.UiSourceClaim.Build -> Unit
+                }
+            }
+            return prepareConversationSource {
+                create(context, projectWorkspace, workspaceKey, sessionMode, linuxRuntimeMode,
+                    reuseProcessSource = reuseProcessSource, replaceProcessSource = true)
+            }
+        }
 
         /**
          * Build the engine + register the event-bridging listener, or return an
@@ -712,8 +749,9 @@ class EngineConversationSource private constructor(
             }
             val workspaceRestore = runCatching { kotlinx.coroutines.runBlocking {
                 val owner = handle.workspaceState().sessionId
-                val home = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
-                val userHome = com.lingxi.code.project.MobileUserStorage.directories(context).home
+                val userDirectories = com.lingxi.code.project.MobileUserStorage.directories(context)
+                val home = userDirectories.guestHome
+                val userHome = userDirectories.home
                 projectWorkspace?.additionalDirectories.orEmpty().forEach { directory ->
                     if ((directory == home || directory.startsWith("$home/")) && java.io.File(userHome, directory.removePrefix(home).removePrefix("/")).isDirectory) {
                         handle.addWorkspaceDirectory(directory, owner)
@@ -795,6 +833,7 @@ class EngineConversationSource private constructor(
                 resumeOnUiAttach = reuseProcessSource,
                 initialRecoverySpec = recoverySpec,
                 userHomePath = com.lingxi.code.project.MobileUserStorage.directories(context).home,
+                userHomeGuestPath = com.lingxi.code.project.MobileUserStorage.directories(context).guestHome,
             )
             ConversationHeadlessRecovery.register(recoverySpec.scopeKey, source)
             return source

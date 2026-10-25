@@ -1,11 +1,11 @@
 package com.lingxi.code.cron
 
-import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import android.content.Context
 import org.json.JSONObject
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
+import com.lingxi.code.project.MobileUserStorage
 
 /**
  * Discovers managed Project workspaces without parsing or exposing project.json.
@@ -13,7 +13,8 @@ import java.util.UUID
  */
 internal class CronScopeScanner(context: Context) {
     private val appContext = context.applicationContext
-    private val projectsRoot = File(appContext.filesDir, "projects")
+    private val directories = MobileUserStorage.directories(appContext)
+    private val projectsRoot = File(directories.projects)
 
     fun scan(): List<CronScope> {
         val scopes = mutableListOf(CronScope.global(appContext))
@@ -43,7 +44,7 @@ internal class CronScopeScanner(context: Context) {
                     projectId = directory.name,
                     projectName = projectName,
                     workspacePath = canonicalWorkspace.path,
-                    guestPath = MobileLinuxGuestPaths.workspace(directory.name),
+                    guestPath = "${directories.projectsGuestPath}/${directory.name}/workspace",
                 )
             }.getOrNull()
             if (scope != null) scopes += scope

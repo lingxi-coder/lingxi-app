@@ -215,6 +215,12 @@ struct RootView: View {
         let activeProject = projects.activeProject
         let initialScope = ConversationScope(projectID: activeProject?.record.id)
         let initialMode: SessionMode = .code
+        let initialProjectMountGrants: [String]
+        if let activeProject {
+            initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
+        } else {
+            initialProjectMountGrants = []
+        }
         settings.mcpServers = MCPConfigurationRepository.shared.loadServers(
             projectCwd: activeProject?.workspace.hostURL.path
         )
@@ -232,7 +238,8 @@ struct RootView: View {
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            mobileLinux: runtime
+            mobileLinux: runtime,
+            projectMountGrants: initialProjectMountGrants
         )
 
         #if canImport(harness_runtimeFFI)
@@ -713,16 +720,15 @@ struct RootView: View {
                     set: { navigation.runningAppID = $0?.id }
                 )
             ) { running in
-                if let market = LocalApps.market {
+                Group {
                     AppRuntimeView(
-                        market: market,
-                        chat: LocalApps.chat,
+                        library: LocalApps.library,
                         info: LocalApps.info,
                         appId: running.id,
                         onClose: { navigation.runningAppID = nil },
                         onShowDetails: { appID in
                             navigation.runningAppID = nil
-                            navigation.openMarketApp(appID)
+                            navigation.openLocalApp(appID)
                         }
                     )
                     .environment(\.theme, theme)
@@ -828,8 +834,7 @@ struct RootView: View {
             onOpenSession: openRecentSession,
             onToggleSessionPinned: toggleSessionPinned,
             onContinueInMode: requestContinueInMode,
-            appMarket: LocalApps.market,
-            chatApps: LocalApps.chat,
+            appLibrary: LocalApps.library,
             appInfo: LocalApps.info,
             openApps: { navigation.openApps() },
             openApp: { navigation.runApp($0) }
@@ -887,8 +892,8 @@ struct RootView: View {
                 }
             )
             .environment(\.openLocalApp, { id in
-                navigation.runApp(AppsModel.chatAppKey(id))
-                Task { await LocalApps.chat.refresh() }
+                navigation.runApp(id)
+                Task { await LocalApps.library.refresh() }
             })
             .id(sourceGeneration)
             ConversationProjectBridge(
@@ -1111,22 +1116,15 @@ struct RootView: View {
             }
             .onChange(of: cronRepository.state.generatedSessions) { _, _ in configureCronEditor() }
         case .apps:
-            AppsPage(
-                market: LocalApps.market,
-                chat: LocalApps.chat,
-                info: LocalApps.info,
-                onOpenApp: { navigation.runApp($0) },
-                onShowDetails: { navigation.openMarketApp($0) }
-            )
+            AppsPage(library: LocalApps.library, market: LocalApps.market,
+                onOpenApp: { navigation.runApp($0) }, onShowDetails: { navigation.openLocalApp($0) }, onShowMarketDetails: { navigation.openMarketApp($0) },
+                onDevelop: beginLocalAppDevelopment)
+        case .localApp(let appID):
+            LocalAppDetailPage(library: LocalApps.library, market: LocalApps.market, appId: appID,
+                onOpenApp: { navigation.runApp($0) }, onDevelop: continueLocalAppDevelopment)
         case .marketApp(let appID):
-            if let market = LocalApps.market {
-                MarketAppPage(
-                    market: market,
-                    info: LocalApps.info,
-                    appId: appID,
-                    onOpenApp: { navigation.runApp($0) }
-                )
-            }
+            MarketAppDetailPage(market: LocalApps.market, appId: appID,
+                onOpenApp: { navigation.runApp($0) }, onDevelop: beginLocalAppDevelopment)
         case .projects:
             ProjectsPage(
                 projectStore: projectStore,
@@ -1324,7 +1322,7 @@ struct RootView: View {
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
         mode: SessionMode
-    ) -> any ConversationSource {
+    ) throws -> any ConversationSource {
         let projectCwd: String?
         let project: ProjectSnapshot?
         switch scope {
@@ -1349,6 +1347,9 @@ struct RootView: View {
             project: project,
             linuxRuntime: settingsStore.linuxRuntime
         ).config
+        let projectMountGrants = try project.map {
+            try MobileUserStorage.projectMountGrantPaths(for: $0)
+        } ?? []
         return ConversationSourceFactory.make(
             projectCwd: projectCwd,
             additionalWorkspaceDirectories: project?.record.additionalDirectories ?? [],
@@ -1358,7 +1359,8 @@ struct RootView: View {
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            mobileLinux: runtime
+            mobileLinux: runtime,
+            projectMountGrants: projectMountGrants
         )
     }
 
@@ -1369,7 +1371,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
-        let replacement = makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
+        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
@@ -1579,7 +1581,7 @@ struct RootView: View {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                let replacement = makeSource(
+                let replacement = try makeSource(
                     scope: scope,
                     snapshot: providerRepository.makeLaunchSnapshot(),
                     mode: targetMode
@@ -2184,15 +2186,35 @@ struct RootView: View {
             let requestID = externalAsyncRouteID
             Task { @MainActor in
                 await LocalApps.initializeOnce()
+                await LocalApps.library.refresh()
                 let chatID = AppsModel.chatAppID(of: id) ?? id
                 let chatExists = await LocalApps.chat.exists(chatID) == true
                 guard requestID == externalAsyncRouteID else { return }
                 let marketExists = LocalApps.market?.installed.contains(where: { $0.appId == id && !$0.removing }) == true
-                if AppsModel.chatAppID(of: id) != nil, chatExists { navigation.runApp(id) }
-                else if chatExists && marketExists { externalLinkError = String(localized: "deep_link_app_ambiguous") }
-                else if chatExists { navigation.runApp(AppsModel.chatAppKey(chatID)) }
-                else if marketExists { navigation.runApp(id) }
-                else { _ = missingLinkedResource("installed app") }
+                if LocalApps.library.record(id) != nil {
+                    if target.params["review"] == "agent" {
+                        LocalApps.library.browserReviewAppID = id
+                        if let runID = target.params["runId"],
+                           let revision = target.params["revision"].flatMap(UInt64.init) {
+                            LocalApps.library.queueBrowserAgentWake(
+                                appID: id,
+                                revision: revision,
+                                runID: runID
+                            )
+                        }
+                    }
+                    navigation.runApp(id)
+                } else if AppsModel.chatAppID(of: id) != nil, chatExists {
+                    navigation.runApp(id)
+                } else if chatExists && marketExists {
+                    externalLinkError = String(localized: "deep_link_app_ambiguous")
+                } else if chatExists {
+                    navigation.runApp(AppsModel.chatAppKey(chatID))
+                } else if marketExists {
+                    navigation.runApp(id)
+                } else {
+                    _ = missingLinkedResource("installed app")
+                }
             }
         case "market": navigation.openMarketApp(id)
         case "import":
@@ -2279,6 +2301,119 @@ struct RootView: View {
         draft = draftText
         source.startNewConversation()
         return true
+    }
+
+    private func continueLocalAppDevelopment(_ app: UnifiedAppRecord) {
+        Task { @MainActor in
+            do {
+                var sessions: [String: LocalAppAuthoringSessionBinding] = [:]
+                for project in projectStore.projects {
+                    for row in project.sessions {
+                        sessions[canonicalSessionID(row.sessionId)] = .init(
+                            workspaceId: project.record.id,
+                            sourceDirectory: row.workspaceDirectory ?? project.record.activeDirectory,
+                            projectRef: .mobileProject(project.record.id),
+                            mode: row.mode.rawValue
+                        )
+                    }
+                }
+                let result = try await LocalApps.library.prepareAuthoring(app.appId, sessions: sessions)
+                guard result.action != "sourceMissing" else { throw LocalAppServiceFailure("SOURCE_MISSING", "Source folder is missing. Import an editable copy before continuing development.") }
+                var authoring = result.authoring
+                if let sessionID = result.authoringSessionId {
+                    authoring?.authoringSessionId = sessionID
+                }
+                beginLocalAppDevelopment(.init(appId: app.appId, name: app.name, sourceDirectory: result.sourceDirectory,
+                    authoring: authoring, prompt: "继续开发这个应用。"))
+            } catch { externalLinkError = error.localizedDescription }
+        }
+    }
+
+    private func beginLocalAppDevelopment(_ request: LocalAppDevelopmentRequest) {
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia,
+              !projectSwitching, !source.model.streaming, !source.model.sessionTransitionPending else {
+            externalLinkError = "Finish or save the current conversation draft before opening app development."; return
+        }
+        Task { @MainActor in
+            do {
+                let existingBinding = request.authoring
+                let boundProject: ProjectSnapshot? = {
+                    guard let existingBinding,
+                          existingBinding.sourceDirectory == request.sourceDirectory,
+                          let workspaceID = existingBinding.workspaceId,
+                          case .mobileProject(let projectID)? = existingBinding.projectRef,
+                          workspaceID == projectID else { return nil }
+                    return projectStore.projects.first {
+                        $0.record.id == projectID && $0.record.activeDirectory == request.sourceDirectory
+                    }
+                }()
+                let project: ProjectSnapshot
+                if let boundProject { project = boundProject }
+                else {
+                    project = try await projectStore.createLocalAppAuthoringProject(
+                        name: request.name,
+                        sourceDirectory: request.sourceDirectory
+                    )
+                }
+                let existingSession = existingBinding?.authoringSessionId.flatMap { id in
+                    project.sessions.first {
+                        canonicalSessionID($0.sessionId) == canonicalSessionID(id)
+                            && $0.mode == .code
+                            && $0.workspaceDirectory == request.sourceDirectory
+                    }?.sessionId
+                }
+                let scope = ConversationScope.project(project.record.id)
+                guard switchScope(to: scope, mode: .code, resumeSessionID: existingSession) else {
+                    throw LocalAppServiceFailure("CONVERSATION_BUSY", "The conversation cannot switch to the app source project right now.")
+                }
+                for _ in 0..<400 {
+                    if !projectSwitching, activeScope == scope, !source.model.sessionTransitionPending { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                guard !projectSwitching, activeScope == scope else { throw LocalAppServiceFailure("ROUTE_TIMEOUT", "The authoring workspace did not open.") }
+                guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasUnsavedConversationMedia else { throw LocalAppServiceFailure("DRAFT_EXISTS", "Save the destination workspace draft before starting app development.") }
+                #if canImport(harness_runtimeFFI)
+                guard let engine = source as? EngineConversationSource else { throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.") }
+                let sessionID: String
+                if let existing = existingSession {
+                    guard engine.model.activeSessionId == existing, engine.model.workspaceState?.cwd == request.sourceDirectory else { throw LocalAppServiceFailure("AUTHORING_MOVED", "The source session moved. Refresh the app details before continuing.") }
+                    sessionID = existing
+                } else { sessionID = try await engine.startLocalAppAuthoringSession(cwd: request.sourceDirectory) }
+                guard source === engine, engine.model.activeSessionId == sessionID,
+                      engine.model.workspaceState?.cwd == request.sourceDirectory,
+                      activeMode == .code, activeScope == scope else { throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.") }
+                let authoring = LocalAppAuthoring(
+                    sourceDirectory: request.sourceDirectory,
+                    workspaceId: project.record.id,
+                    projectRef: .mobileProject(project.record.id),
+                    authoringSessionId: sessionID,
+                    appId: request.appId
+                )
+                if let workspace = engine.model.workspaceState, workspace.sessionId == sessionID {
+                    try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
+                } else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring workspace could not be recorded. No draft was inserted.")
+                }
+                if let appId = request.appId {
+                    try await LocalApps.library.bindAuthoring(appId, authoring: authoring)
+                } else {
+                    try await LocalApps.library.registerPendingAuthoring(authoring)
+                }
+                guard source === engine, engine.model.activeSessionId == sessionID,
+                      engine.model.workspaceState?.cwd == request.sourceDirectory,
+                      !engine.model.sessionTransitionPending, activeMode == .code, activeScope == scope,
+                      !projectSwitching,
+                      draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !hasUnsavedConversationMedia else {
+                    throw LocalAppServiceFailure("AUTHORING_CHANGED", "The authoring destination changed. No draft was inserted.")
+                }
+                draft = "Use the local-app skill to develop \(request.name) in \(request.sourceDirectory). Use the schema 2 standalone LocalApp service. This ordinary authoring session is \(sessionID). Existing app ID: \(request.appId ?? "new app"). Publish locally only; publishing to the market is a separate user action.\n\n\(request.prompt)"
+                navigation.path.removeAll(); navigation.focusDetail()
+                #else
+                throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "App development requires the local conversation engine.")
+                #endif
+            } catch { externalLinkError = error.localizedDescription }
+        }
     }
 
     private func syncConversationBackgroundSurfaces() {

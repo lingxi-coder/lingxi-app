@@ -3,31 +3,20 @@ package com.lingxi.code.market
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
-import java.net.URLEncoder
 import java.security.MessageDigest
 import kotlin.coroutines.coroutineContext
 
-data class MarketVersion(val id: String, val appId: String, val sequence: Long, val format: String, val filename: String, val sizeBytes: Long?, val sha256: String?, val notes: String, val publishedAt: String?)
-data class MarketApp(val id: String, val name: String, val summary: String, val category: String, val platforms: List<String>, val coverUrl: String?, val currentVersion: MarketVersion?, val updatedAt: String)
-data class MarketPage<T>(val items: List<T>, val nextCursor: String?)
 data class MarketDistribution(val appId: String, val versionId: String, val sequence: Long, val format: String, val sizeBytes: Long, val sha256: String, val downloadUrl: String)
-enum class UpdateStatus { UP_TO_DATE, UPDATE_AVAILABLE, UNKNOWN_VERSION, UNAVAILABLE }
-data class MarketUpdate(val appId: String, val status: UpdateStatus, val currentVersionId: String?, val currentSequence: Long?)
 class MarketException(val code: String, message: String = code) : Exception(message)
-internal fun JSONObject.nullString(key: String) = if (isNull(key)) null else getString(key)
-internal fun JSONObject.version() = MarketVersion(getString("id"), getString("appId"), getLong("sequence"), getString("format"), getString("filename"), if(isNull("sizeBytes")) null else getLong("sizeBytes"), nullString("sha256"), optString("notes"), nullString("publishedAt"))
-internal fun JSONObject.app() = MarketApp(getString("id"), getString("name"), getString("summary"), getString("category"), getJSONArray("platforms").let { a -> (0 until a.length()).map(a::getString) }, nullString("coverUrl"), optJSONObject("currentVersion")?.version(), getString("updatedAt"))
 
-/** Anonymous transport. Supply an HTTPS API root including /api/v1. */
+/** Anonymous transport. Supply an HTTPS API root including /api/v2. */
 open class MarketClient(val apiRoot: String) {
     init { require(URI(apiRoot).scheme == "https" && URI(apiRoot).host != null && URI(apiRoot).userInfo == null && URI(apiRoot).fragment == null) }
-    private fun encode(s: String) = URLEncoder.encode(s, "UTF-8")
     internal open fun connection(address: String): HttpURLConnection {
         var url = URL(address)
         repeat(6) {
@@ -57,26 +46,6 @@ open class MarketClient(val apiRoot: String) {
             if(!ok) throw MarketException(json.optJSONObject("error")?.optString("code")?.takeIf { it.isNotEmpty() } ?: "HTTP_${c.responseCode}")
             json
         } finally { c.disconnect() }
-    }
-    open suspend fun catalog(query: String = "", cursor: String? = null): MarketPage<MarketApp> {
-        val q=query.trim(); val params=mutableListOf("platform=android", "limit=24", "sort=" + if(q.isEmpty()) "updated" else "name")
-        if(q.isNotEmpty()) params += "q=${encode(q)}"; cursor?.let { params += "cursor=${encode(it)}" }
-        val r=request("/apps?"+params.joinToString("&")); val a=r.getJSONArray("data")
-        return MarketPage((0 until a.length()).map { a.getJSONObject(it).app() }.distinctBy { it.id }, r.optJSONObject("pagination")?.nullString("nextCursor"))
-    }
-    open suspend fun detail(appId: String) = request("/apps/${encode(appId)}").getJSONObject("data").app()
-    suspend fun versions(appId: String, cursor: String? = null): MarketPage<MarketVersion> {
-        val r=request("/apps/${encode(appId)}/versions?limit=24"+(cursor?.let { "&cursor=${encode(it)}" } ?: "")); val a=r.getJSONArray("data")
-        return MarketPage((0 until a.length()).map { a.getJSONObject(it).version() },r.optJSONObject("pagination")?.nullString("nextCursor"))
-    }
-    suspend fun distribution(appId: String, versionId: String): MarketDistribution {
-        val r=request("/apps/${encode(appId)}/versions/${encode(versionId)}/distribution").getJSONObject("data"); val a=r.getJSONObject("artifact")
-        if(r.getString("appId")!=appId || r.getString("versionId")!=versionId) throw MarketException("IDENTITY_MISMATCH")
-        return MarketDistribution(appId,versionId,r.getLong("sequence"),a.getString("format"),a.getLong("sizeBytes"),a.getString("sha256"),a.getString("downloadUrl"))
-    }
-    suspend fun updates(installed: List<InstalledApp>): List<MarketUpdate> = installed.chunked(100).flatMap { chunk ->
-        val a=request("/updates/check",JSONObject().put("apps",JSONArray(chunk.map { JSONObject().put("appId",it.appId).put("installedVersionId",it.versionId) }))).getJSONArray("data")
-        (0 until a.length()).map { a.getJSONObject(it).let { r -> MarketUpdate(r.getString("appId"),UpdateStatus.valueOf(r.getString("status").uppercase()),r.nullString("currentVersionId"),if(r.isNull("currentSequence")) null else r.getLong("currentSequence")) } }
     }
     open suspend fun download(d: MarketDistribution, target: File, progress: (Long,Long)->Unit) = withContext(Dispatchers.IO) {
         if(d.sizeBytes !in 1..25L*1024*1024 || !d.sha256.matches(Regex("[a-fA-F0-9]{64}"))) throw MarketException("INVALID_ARTIFACT")

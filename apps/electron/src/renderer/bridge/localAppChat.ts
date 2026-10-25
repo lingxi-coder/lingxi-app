@@ -1,7 +1,8 @@
-import type { DesktopLocalApp, LocalAppEditRequest } from '../../shared/localApps';
+import type { DesktopAuthoringRef, LocalAppEditRequest } from '../../shared/localApps';
+import { isDesktopAuthoringRef } from '../../shared/localApps';
+import type { SessionRef } from '../../shared/settings';
 import type { ProjectCreationPurpose } from '../../shared/projectCreation';
 
-type SessionRef = NonNullable<DesktopLocalApp['sourceSession']>;
 export interface LocalAppDraft {
   id: string;
   name: string;
@@ -13,33 +14,53 @@ export interface LocalAppChatNavigation {
   openSession(projectPath: string, sessionId: string): Promise<SessionRef | false | undefined>;
   addProject(purpose?: ProjectCreationPurpose): Promise<{ path?: string } | null | undefined | void>;
   newSession(projectPath: string): Promise<SessionRef | undefined | void>;
+  bindAuthoring(appId: string, session: SessionRef): Promise<DesktopAuthoringRef>;
+  prepareAuthoring(session: SessionRef): Promise<DesktopAuthoringRef>;
 }
 
-/** Navigate through the renderer bridge so its selected session and draft agree. */
+function assertAuthoringSession(binding: DesktopAuthoringRef, session: SessionRef): void {
+  if (binding.sourceDirectory !== session.projectPath || binding.projectRef.kind !== 'desktopPath'
+    || binding.projectRef.path !== session.projectPath || binding.authoringSessionId !== session.sessionId) {
+    throw new Error('Desktop did not verify the requested Local App source Code session');
+  }
+}
+
+/** Navigate to the host-verified Code workspace before creating the draft. */
 export async function localAppChatTarget(
   app: LocalAppEditRequest | undefined,
   navigation: LocalAppChatNavigation,
   isCurrent: () => boolean,
 ): Promise<SessionRef | undefined> {
   if (!isCurrent()) return;
-  const source = app?.sourceSession;
-  let project: string | undefined;
-  if (source && navigation.hasProject(source.projectPath)) {
-    const opened = await navigation.openSession(source.projectPath, source.sessionId);
-    // A failed or superseded navigation must never draft into an unrelated chat.
-    if (!isCurrent()) return;
-    if (opened) return opened;
-    // The application survives deletion of its authoring chat. Keep its project
-    // but establish a new explicit target before adding any text.
-    project = source.projectPath;
-  }
-  // New and imported apps, or a removed source project, need an explicit
-  // authoring workspace. Never reuse an unrelated active repository.
-  if (!project) {
+  const sourceDirectory = app?.authoring?.sourceDirectory;
+  const authoring = isDesktopAuthoringRef(app?.authoring) ? app.authoring : undefined;
+  let project = authoring?.projectRef.path ?? sourceDirectory;
+  if (app?.authoringSourceMissing) {
+    // The old source is gone. Let the user locate a replacement or explicitly
+    // restore it, then bind the new Code session before creating a draft.
+    const restored = await navigation.addProject('local-app');
+    if (!restored?.path || !isCurrent()) return;
+    project = restored.path;
+  } else if (project && !navigation.hasProject(project)) {
+    const restored = await navigation.addProject('local-app');
+    if (!restored?.path || !isCurrent()) return;
+    if (restored.path !== project) throw new Error(`Add the saved app workspace at ${project} before editing this application.`);
+    project = restored.path;
+  } else if (!project) {
     const selected = await navigation.addProject('local-app');
     if (!selected?.path || !isCurrent()) return;
     project = selected.path;
   }
+
+  if (authoring && !app?.authoringSourceMissing && app?.authoringAction === 'resumeSession' && navigation.hasProject(project)) {
+    const opened = await navigation.openSession(project, authoring.authoringSessionId);
+    if (!isCurrent()) return;
+    if (opened && opened.projectPath === project) return opened;
+    throw new Error(`Could not resume the saved app authoring session ${authoring.authoringSessionId} in ${project}. Refresh the Apps library and try again.`);
+  }
+
+  // An unavailable legacy/recovery session is replaced inside its saved source
+  // project. A chat session or an unrelated active repository is never used.
   const failure = `Could not open the app authoring chat. The project is saved at ${project}. Choose that source folder to retry.`;
   let target: SessionRef | undefined | void;
   try { target = await navigation.newSession(project); }
@@ -49,6 +70,15 @@ export async function localAppChatTarget(
   }
   if (!isCurrent()) return;
   if (!target) throw new Error(failure);
+  if (app?.id) {
+    assertAuthoringSession(await navigation.bindAuthoring(app.id, target), target);
+    if (!isCurrent()) return;
+  } else {
+    // The native Create flow must durably register this exact Code session
+    // before the composer exposes its first Local App draft.
+    assertAuthoringSession(await navigation.prepareAuthoring(target), target);
+    if (!isCurrent()) return;
+  }
   return target;
 }
 

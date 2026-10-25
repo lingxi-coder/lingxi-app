@@ -102,6 +102,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Register process-owned app visibility before this Activity starts;
+        // the first Compose composition can occur after onStart/onResume.
+        com.lingxi.code.apps.UnifiedLocalApps.get(applicationContext)
         // Register the camera/picker launchers before the Activity is STARTED and
         // hand them to the process-global CameraController, which the UniFFI
         // AndroidCamera adapter drives across the FFI seam (the device-vision

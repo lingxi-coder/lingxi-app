@@ -3,6 +3,37 @@ import XCTest
 @testable import LingxiCode
 
 final class AppIntegrationTests: XCTestCase {
+    func testBrowserAgentReturnIsLimitedToAppReview() {
+        XCTAssertEqual(CanonicalDeepLink.parse("lingxi://apps/a123?review=agent")?.params["review"], "agent")
+        XCTAssertEqual(CanonicalDeepLink.parse("https://lingxios.net/open/apps/a123?review=agent")?.route, "apps/a123")
+        for raw in ["lingxi://new?review=agent", "lingxi://session/a123?review=agent",
+                    "lingxi://apps/a123?review=approve", "lingxi://apps/a123?review=agent&review=agent"] {
+            XCTAssertNil(CanonicalDeepLink.parse(raw), raw)
+        }
+    }
+
+    func testBrowserAgentWakePreservesRunIDExactly() throws {
+        let runID = "opaque run +/&-灵犀"
+        var parts = URLComponents(string: "lingxi://apps/a123")!
+        parts.queryItems = [
+            URLQueryItem(name: "review", value: "agent"),
+            URLQueryItem(name: "runId", value: runID),
+            URLQueryItem(name: "revision", value: "7")
+        ]
+        let route = try XCTUnwrap(parts.url.flatMap(CanonicalDeepLink.parse))
+        XCTAssertEqual(route.params["runId"], runID)
+        XCTAssertEqual(route.params["revision"], "7")
+        for query in [
+            "review=agent&runId=run&revision=0",
+            "review=agent&runId=run&revision=07",
+            "review=agent&runId=run",
+            "review=agent&revision=1",
+            "review=agent&runId=\(String(repeating: "a", count: 129))&revision=1"
+        ] {
+            XCTAssertNil(CanonicalDeepLink.parse("lingxi://apps/a123?\(query)"), query)
+        }
+    }
+
     func testRuntimeContextRebindHonorsModeAndWorkspaceWithoutRepeatingSameContext() throws {
         let modeOnly = try XCTUnwrap(CanonicalDeepLink.parse("lingxi://runtime/agent/Agent-A?mode=chat"))
         XCTAssertTrue(modeOnly.needsContextRebind(workspace: "global", mode: "code"))

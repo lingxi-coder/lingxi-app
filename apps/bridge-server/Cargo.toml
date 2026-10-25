@@ -82,6 +82,8 @@ telemetry = { workspace = true }
 core = { workspace = true }
 provider-config = { workspace = true }
 llm-runtime = { workspace = true }
+local-app = { workspace = true }
+cost = { workspace = true }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"
@@ -91,7 +93,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tokio-util = { workspace = true }
 async-trait.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 futures-util.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

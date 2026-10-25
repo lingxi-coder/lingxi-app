@@ -1,6 +1,5 @@
 package com.lingxi.code.settings
 
-import io.lingxi.mobilelinux.MobileLinuxGuestPaths
 import androidx.annotation.StringRes
 import com.lingxi.code.R
 import com.lingxi.code.bindings.android.AndroidMobileLinuxConfigFfi
@@ -130,6 +129,9 @@ fun linuxRuntimeStateLabel(state: MobileLinuxRootfsStateFfi): Int =
     }
 
 fun mobileLinuxConfig(
+    brandId: String,
+    linuxUser: String,
+    configDirName: String,
     managedRoot: String,
     appSandboxRoot: String,
     workspaceHostPath: String,
@@ -141,6 +143,9 @@ fun mobileLinuxConfig(
     check(rootfsIdentity.abi == abi) { "Bundled rootfs identity ABI mismatch" }
     return AndroidMobileLinuxConfigFfi(
         mode = mode.toFfi(),
+        brandId = brandId,
+        linuxUser = linuxUser,
+        configDirName = configDirName,
         managedRoot = managedRoot,
         appSandboxRoot = appSandboxRoot,
         workspaceHostPath = workspaceHostPath,
@@ -155,6 +160,7 @@ fun linuxRuntimeUiStateFrom(
     mode: LinuxRuntimeMode,
     capability: MobileLinuxCapabilityFfi,
     status: MobileLinuxStatusFfi,
+    workspaceGuestPath: String,
     lastAction: LinuxRuntimeAction? = null,
     tasks: List<com.lingxi.code.bindings.android.MobileLinuxTaskSnapshotFfi> = emptyList(),
 ): LinuxRuntimeUiState {
@@ -193,7 +199,7 @@ fun linuxRuntimeUiStateFrom(
             LinuxRuntimeMountUiState(
                 id = "managed-$index",
                 guestPath = guestPath,
-                summaryRes = if (guestPath == MobileLinuxGuestPaths.WORKSPACE_ROOT) {
+                summaryRes = if (guestPath == workspaceGuestPath) {
                     R.string.settings_linux_mount_workspace_summary
                 } else {
                     R.string.settings_linux_mount_managed_summary

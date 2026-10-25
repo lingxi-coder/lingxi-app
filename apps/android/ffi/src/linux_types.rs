@@ -261,3 +261,11 @@ pub struct MobileLinuxTaskSnapshotFfi {
     pub exit_code: Option<i32>,
     pub detail: Option<String>,
 }
+
+/// Host-owned immutable archive staging, called under shared Linux maintenance.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidMobileLinuxRootfsStager: Send + Sync {
+    async fn stage(&self) -> Result<(), MobileLinuxApiErrorFfi>;
+}

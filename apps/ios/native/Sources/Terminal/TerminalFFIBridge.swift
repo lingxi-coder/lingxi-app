@@ -81,8 +81,12 @@ private struct LiveTerminalRuntimeFFIBridge: TerminalRuntimeFFIBridge {
 
     private func map(_ config: TerminalRuntimeConfig) -> IosMobileLinuxConfigFfi {
         LXISHRuntimeResourceBootstrap.prepare()
+        let directories = MobileUserStorage.directories()
         return IosMobileLinuxConfigFfi(
             mode: map(config.mode),
+            brandId: directories.brandId,
+            linuxUser: directories.linuxUser,
+            configDirName: directories.configDirName,
             managedRoot: config.managedRoot,
             workspaceHostPath: config.workspaceHostPath,
             stableWorkspaceId: config.stableWorkspaceId,

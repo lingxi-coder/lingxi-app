@@ -355,6 +355,30 @@ final class EngineConversationSource: ConversationSource {
         )
     }
 
+    /// Creates an ordinary authoring session with an explicit guest cwd. The
+    /// local app service owns the application; this session only owns its work.
+    func startLocalAppAuthoringSession(cwd: String) async throws -> String {
+        guard !isSideChat, unresolvedRecoveryTurnID == nil, pauseAcknowledgements.isEmpty,
+              !model.streaming, !model.sessionTransitionPending else {
+            throw LocalAppServiceFailure("CONVERSATION_BUSY", "Finish the active conversation before opening app development.")
+        }
+        _ = try await ensureHandle()
+        let prior = model.activeSessionId
+        model.sessionRestoreRecovery = nil; model.sessionTransitionFailure = nil
+        let operation = beginSessionTransition(.new)
+        prepareSessionTransition(cancelling: nil, isNew: true)
+        submitSessionTransition(cancelling: nil, submission: .command(.newSession(cwd: cwd, model: nil)),
+            failurePrefix: String(localized: "chat_new_session_failed"), transitionOperationID: operation, isNew: true)
+        for _ in 0..<400 {
+            try Task.checkCancellation()
+            if let failure = model.sessionTransitionFailure { throw LocalAppServiceFailure("SESSION_CREATION_FAILED", String(describing: failure)) }
+            if !model.sessionTransitionPending, !model.activeSessionId.isEmpty, model.activeSessionId != prior,
+               model.workspaceState?.sessionId == model.activeSessionId, model.workspaceState?.cwd == cwd { return model.activeSessionId }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw LocalAppServiceFailure("SESSION_CREATION_TIMEOUT", "The authoring session did not confirm its workspace. No draft was inserted.")
+    }
+
     /// Capture the old turn before a session transition. Its correlator stays
     /// live until Cancel succeeds so a delivery failure can restore the same
     /// retryable Stop state instead of discarding the old transcript.
@@ -1922,8 +1946,14 @@ final class EngineConversationSource: ConversationSource {
                 routingJson: config.providerRoutingJson
             )
         }
+        let userDirectories = MobileUserStorage.directories()
         let launchConfig = IosEngineLaunchConfigFfi(
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            appAgentHost: false,
+            brandId: userDirectories.brandId,
+            linuxUser: userDirectories.linuxUser,
+            configDirName: userDirectories.configDirName,
+            nativeConfigHome: userDirectories.configHome,
             apiBase: config.apiBase,
             apiKey: config.apiKey,
             model: config.model,
@@ -1931,6 +1961,8 @@ final class EngineConversationSource: ConversationSource {
             visionDelegationEnabled: config.visionDelegationEnabled,
             appSandboxRoot: config.appSandboxRoot,
             projectCwd: config.projectCwd,
+            projectAdditionalDirectories: config.additionalWorkspaceDirectories,
+            projectMountGrants: config.projectMountGrants,
             providerConfig: providerConfig,
             mobileLinux: config.mobileLinux.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
@@ -1939,7 +1971,7 @@ final class EngineConversationSource: ConversationSource {
             hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
         )
         let additionalDirectories = config.additionalWorkspaceDirectories
-        let userHome = MobileUserStorage.directories().home
+        let userHome = userDirectories.home
         let handleBuilder = self.handleBuilder
         handleBuildAttemptID &+= 1
         let attemptID = handleBuildAttemptID
@@ -2010,7 +2042,6 @@ final class EngineConversationSource: ConversationSource {
                     projectRoot: workspace.projectRoot, additionalDirectories: workspace.additionalDirectories, transcriptPath: workspace.transcriptPath)
                 refreshAudioSessionContext()
                 VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
-                LocalApps.chat.attach(builtHandle.localAppHost())
                 self.listener = listener
                 self.permissionSink = permissionSink
                 handleBuildTask = nil

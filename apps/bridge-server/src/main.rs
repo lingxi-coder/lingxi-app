@@ -32,6 +32,12 @@ use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--local-app-service-json") {
+        return bridge_server::local_app_service::run().await;
+    }
+    if std::env::args().nth(1).as_deref() == Some("--app-agent") {
+        return bridge_server::app_agent::run().await;
+    }
     if std::env::args().nth(1).as_deref() == Some("--browser-native-host") {
         let path = std::env::args_os().nth(2).ok_or_else(|| anyhow::anyhow!("browser descriptor path is required"))?;
         return bridge_server::browser_native_host::run(std::path::Path::new(&path)).await;

@@ -1,8 +1,9 @@
 import CryptoKit
 import SwiftUI
 
-private struct LinuxRuntimeCommandFailure: Error {
+private struct LinuxRuntimeCommandFailure: Error, LocalizedError {
     let message: String
+    var errorDescription: String? { message }
 }
 
 private enum LinuxRuntimeBridge {
@@ -67,9 +68,13 @@ private enum LinuxRuntimeBridge {
         let workspaceID = LXISHDefaultWorkspace.stableID()
         let workspaceHostPath = LXISHDefaultWorkspace.hostPath()
         let managedRoot = LXISHDefaultWorkspace.managedRootPath()
+        let directories = MobileUserStorage.directories()
         let authorizationFile = LXISHRuntimeBundleResources.authorizationManifestURL()?.path
         return IosMobileLinuxConfigFfi(
             mode: .mobileLinux,
+            brandId: directories.brandId,
+            linuxUser: directories.linuxUser,
+            configDirName: directories.configDirName,
             managedRoot: managedRoot,
             workspaceHostPath: workspaceHostPath,
             stableWorkspaceId: workspaceID,
@@ -130,47 +135,34 @@ private enum LinuxRuntimeBridge {
         #endif
     }
 
-    static func repair(mode: LinuxRuntimeMode) async -> LinuxRuntimeState {
-        #if targetEnvironment(simulator)
-            return simulatorState(mode: mode, action: .repair)
-        #else
-        let cfg = config(for: mode)
-        let handle = try? await cache.handle(for: cfg)
-        let capability: MobileLinuxCapabilityFfi
-        let status: MobileLinuxStatusFfi
-        let tasks: [MobileLinuxTaskFfi]
-        if let handle {
-            capability = await handle.capability()
-            status = (try? await handle.repairRootfs()) ?? repairIosMobileLinux(config: cfg)
-            tasks = (try? await handle.listTasks()) ?? []
-        } else {
-            capability = probeIosMobileLinux(config: cfg)
-            status = repairIosMobileLinux(config: cfg)
-            tasks = []
-        }
-        return map(mode: mode, capability: capability, status: status, action: .repair, tasks: tasks)
-        #endif
+    static func repair(mode: LinuxRuntimeMode) async throws -> LinuxRuntimeState {
+        try await maintain(mode: mode, action: .repair)
     }
 
-    static func reset(mode: LinuxRuntimeMode) async -> LinuxRuntimeState {
+    static func reset(mode: LinuxRuntimeMode) async throws -> LinuxRuntimeState {
+        try await maintain(mode: mode, action: .reset)
+    }
+
+    private static func maintain(mode: LinuxRuntimeMode, action: LinuxRuntimeAction) async throws -> LinuxRuntimeState {
         #if targetEnvironment(simulator)
-            return simulatorState(mode: mode, action: .reset)
+        throw LinuxRuntimeCommandFailure(message: String(localized: "settings_linux_simulator_unavailable"))
         #else
         let cfg = config(for: mode)
-        let handle = try? await cache.handle(for: cfg)
-        let capability: MobileLinuxCapabilityFfi
-        let status: MobileLinuxStatusFfi
-        let tasks: [MobileLinuxTaskFfi]
-        if let handle {
-            capability = await handle.capability()
-            status = (try? await handle.resetRootfs()) ?? resetIosMobileLinux(config: cfg)
-            tasks = (try? await handle.listTasks()) ?? []
-        } else {
-            capability = probeIosMobileLinux(config: cfg)
-            status = resetIosMobileLinux(config: cfg)
-            tasks = []
+        let handle = try await cache.handle(for: cfg)
+        let capability = await handle.capability()
+        let tasks = try await handle.listTasks()
+        let running = tasks.filter { $0.state == .running }
+        guard running.isEmpty else {
+            let names = running.map { "\($0.title) [\($0.id)]" }.joined(separator: ", ")
+            throw LinuxRuntimeCommandFailure(message: "Stop these shared Linux tasks before maintenance: \(names). Application and workspace data is preserved.")
         }
-        return map(mode: mode, capability: capability, status: status, action: .reset, tasks: tasks)
+        // The runtime's global maintenance lease is authoritative. A refused
+        // mutation must never fall back to a status-only synchronous probe.
+        let status: MobileLinuxStatusFfi
+        if action == .repair { status = try await handle.repairRootfs() }
+        else { status = try await handle.resetRootfs() }
+        let remaining = try await handle.listTasks()
+        return map(mode: mode, capability: capability, status: status, action: action, tasks: remaining)
         #endif
     }
 
@@ -365,6 +357,7 @@ private struct LinuxRuntimeBridgeTaskOperator: LinuxRuntimeTaskOperating {
 struct LinuxRuntimePage: View {
     @Environment(\.theme) private var t
     @Bindable var store: SettingsStore
+    @State private var maintenanceError: String?
     @State private var taskOperations = LinuxRuntimeTaskOperationsModel(adapter: LinuxRuntimeBridgeTaskOperator())
     var onOpenTerminal: () -> Void = {}
 
@@ -381,6 +374,7 @@ struct LinuxRuntimePage: View {
             safetySection
         }
         .task(id: store.linuxRuntime.selectedMode) {
+            await LocalApps.library.refresh()
             await run(.refresh, mode: store.linuxRuntime.selectedMode)
         }
         .onChange(of: taskOperations.errorMessage) { _, message in
@@ -440,6 +434,11 @@ struct LinuxRuntimePage: View {
             label: String(localized: "settings_linux_section_maintenance"),
             footer: String(localized: "settings_linux_maintenance_footer")
         ) {
+            if let maintenanceError { Text(maintenanceError).font(.footnote).foregroundStyle(.red).padding(.horizontal, 16).textSelection(.enabled) }
+            Text("修复和重置使用共享 Linux 用户空间。请先停止正在使用它的应用、会话任务和终端；不会自动替你停止它们。").font(.footnote).foregroundStyle(t.text3).padding(.horizontal, 16)
+            ForEach(LocalApps.library.runs.values.filter(\.isLive).sorted { $0.appId < $1.appId }) { run in
+                Text("\(LocalApps.library.record(run.appId)?.name ?? run.appId) · \(run.runId)").font(.caption.monospaced()).foregroundStyle(t.text3).padding(.horizontal, 16)
+            }
             actionRow(String(localized: "settings_linux_action_refresh"), action: .refresh,
                       enabled: store.linuxRuntime.busyAction == nil)
             actionRow(String(localized: "settings_linux_action_verify"), action: .verify,
@@ -680,12 +679,23 @@ struct LinuxRuntimePage: View {
               store.linuxRuntime.busyAction == nil,
               !taskOperations.isBusy else { return }
         store.linuxRuntime.busyAction = action
+        maintenanceError = nil
         let next: LinuxRuntimeState
-        switch action {
-        case .refresh: next = await LinuxRuntimeBridge.load(mode: mode)
-        case .verify: next = await LinuxRuntimeBridge.verify(mode: mode)
-        case .repair: next = await LinuxRuntimeBridge.repair(mode: mode)
-        case .reset: next = await LinuxRuntimeBridge.reset(mode: mode)
+        do {
+            switch action {
+            case .refresh: next = await LinuxRuntimeBridge.load(mode: mode)
+            case .verify: next = await LinuxRuntimeBridge.verify(mode: mode)
+            case .repair: next = try await LinuxRuntimeBridge.repair(mode: mode)
+            case .reset: next = try await LinuxRuntimeBridge.reset(mode: mode)
+            }
+        } catch {
+            guard store.linuxRuntime.selectedMode == mode, store.linuxRuntime.busyAction == action else { return }
+            store.linuxRuntime.busyAction = nil
+            store.linuxRuntime.lastAction = action
+            store.linuxRuntime.lastActionMessage = error.localizedDescription
+            maintenanceError = error.localizedDescription
+            await LocalApps.library.refresh()
+            return
         }
         if Task.isCancelled {
             if store.linuxRuntime.selectedMode == mode,

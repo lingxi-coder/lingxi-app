@@ -31,10 +31,16 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
     private func exercise(root: URL, workspace: URL) async throws {
         let listener = AdminRoundtripListener()
         let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
+        let directories = MobileUserStorage.directories(managedRoot: root.appendingPathComponent("runtime", isDirectory: true).path)
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
             appVersion: nil,
+            appAgentHost: false,
+            brandId: directories.brandId, linuxUser: directories.linuxUser,
+            configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
             apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
+            projectAdditionalDirectories: [],
+            projectMountGrants: [],
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),

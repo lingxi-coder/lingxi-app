@@ -404,6 +404,8 @@ esac
 # Generated Rust sources live under target, which may be outside the checkout.
 remap_flags="--remap-path-prefix=${REPO_ROOT}=. --remap-path-prefix=${repo_cargo_home}=/cargo-home --remap-path-prefix=${HOME}/.rustup=/rustup --remap-path-prefix=${repo_cargo_target}=/cargo-target"
 export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }${remap_flags}"
+source "${SCRIPT_DIR}/native-path-remapping.sh"
+configure_native_path_remapping "$REPO_ROOT" "$repo_cargo_home" "${HOME}/.rustup" "$repo_cargo_target"
 
 if [[ -n "${LINGXI_BRIDGE_SERVER_BIN:-}" ]]; then
   [[ "$LINGXI_BRIDGE_SERVER_BIN" == /* && -f "$LINGXI_BRIDGE_SERVER_BIN" && -x "$LINGXI_BRIDGE_SERVER_BIN" ]] ||

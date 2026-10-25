@@ -25,6 +25,19 @@ use super::mobile_linux_sdk;
 use mobile_linux_api::MAX_MOBILE_LINUX_EVENT_BATCH;
 use std::sync::Arc;
 
+#[cfg(feature = "uniffi")]
+fn writable_guest_paths_for_config(config: &IosMobileLinuxConfigFfi) -> Vec<String> {
+    let profile = mobile_linux_api::BrandRuntimeProfile::new(
+        config.brand_id.clone(),
+        config.linux_user.clone(),
+        config.config_dir_name.clone(),
+    );
+    if profile.validate().is_err() {
+        return Vec::new();
+    }
+    mobile_linux_api::guest_paths::writable_roots_for_profile(&profile)
+}
+
 /// Preserve the raw journal watermark when lifecycle events have no stream
 /// representation. The payload-free reserved `runtime` event only advances a
 /// reader's cursor; terminal consumers ignore that stream and render no text.
@@ -104,9 +117,7 @@ pub(super) fn ios_mobile_linux_status_from_config(
                 staged_root: None,
                 archive_sha256: cfg.archive_sha256.clone(),
                 installed_size_bytes: None,
-                writable_guest_paths: mobile_linux_api::guest_paths::writable_roots()
-                    .map(str::to_string)
-                    .to_vec(),
+                writable_guest_paths: writable_guest_paths_for_config(cfg),
                 last_error: Some("legacy unavailable backend selected".to_string()),
             }
         }
@@ -155,9 +166,7 @@ pub(super) fn fallback_ios_mobile_linux_status(
         staged_root: None,
         archive_sha256: cfg.archive_sha256.clone(),
         installed_size_bytes: None,
-        writable_guest_paths: mobile_linux_api::guest_paths::writable_roots()
-            .map(str::to_string)
-            .to_vec(),
+        writable_guest_paths: writable_guest_paths_for_config(cfg),
         last_error: Some(override_error.unwrap_or_else(|| message.to_string())),
     }
 }
@@ -166,11 +175,19 @@ pub(super) fn fallback_ios_mobile_linux_status(
 pub(super) fn ios_mobile_linux_runtime(
     config: Option<&IosMobileLinuxConfigFfi>,
 ) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
+    ios_mobile_linux_runtime_with_project_mounts(config, Vec::new())
+}
+
+#[cfg(feature = "uniffi")]
+pub(super) fn ios_mobile_linux_runtime_with_project_mounts(
+    config: Option<&IosMobileLinuxConfigFfi>,
+    project_mount_grants: Vec<mobile_linux_api::MountSpec>,
+) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
     let cfg = config?;
     if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
         return None;
     }
-    if let Some(runtime) = linked_ios_mobile_linux_runtime(cfg) {
+    if let Some(runtime) = linked_ios_mobile_linux_runtime(cfg, project_mount_grants) {
         return Some(runtime);
     }
     let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
@@ -197,6 +214,7 @@ pub(super) fn ios_mobile_linux_runtime(
 #[cfg(feature = "uniffi")]
 pub(super) fn linked_ios_mobile_linux_runtime(
     cfg: &IosMobileLinuxConfigFfi,
+    project_mount_grants: Vec<mobile_linux_api::MountSpec>,
 ) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
     let app_sandbox_root = resolve_mobile_linux_app_sandbox_root(cfg).ok()?;
     let (workspace_host_path, stable_workspace_id) =
@@ -204,25 +222,34 @@ pub(super) fn linked_ios_mobile_linux_runtime(
             .ok()?;
     let runtime = mobile_linux_sdk::linked_runtime(mobile_linux_sdk::IosIshRuntimeConfig {
         managed_root: std::path::PathBuf::from(&cfg.managed_root),
+        brand_id: cfg.brand_id.clone(),
+        linux_user: cfg.linux_user.clone(),
+        config_dir_name: cfg.config_dir_name.clone(),
         app_sandbox_root,
         workspace_host_path,
         stable_workspace_id,
+        project_mount_grants,
         abi: cfg.abi.clone(),
         rootfs_version: cfg.rootfs_version.clone(),
         archive_sha256: cfg.archive_sha256.clone(),
         authorization_file: cfg.authorization_file.clone(),
     });
-    Some(runtime.unwrap_or_else(|error| {
-        Arc::new(
-            mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
-                mobile_linux_api::SandboxBackend::IosIsh,
-                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
-                "ios",
-                cfg.abi.clone(),
-                error.to_string(),
-            ),
-        )
-    }))
+    Some(
+        harness_runtime::mobile::linux_maintenance::coordinate_runtime(
+            std::path::Path::new(&cfg.managed_root),
+            runtime.unwrap_or_else(|error| {
+                Arc::new(
+                    mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                        mobile_linux_api::SandboxBackend::IosIsh,
+                        mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
+                        "ios",
+                        cfg.abi.clone(),
+                        error.to_string(),
+                    ),
+                )
+            }),
+        ),
+    )
 }
 
 #[cfg(feature = "uniffi")]

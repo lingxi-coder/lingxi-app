@@ -23,6 +23,7 @@ class MobileLinuxProductAcceptanceTest {
     fun defaultUserProjectTerminalAndPersistentHome() = runBlocking<Unit> {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        val directories = com.lingxi.code.project.MobileUserStorage.directories(context)
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             instrumentation.waitForIdleSync()
             scenario.onActivity { assertFalse(it.isFinishing) }
@@ -33,7 +34,12 @@ class MobileLinuxProductAcceptanceTest {
                 else -> Unit
             }
             val fixture = File(context.filesDir, "runtime-acceptance-${UUID.randomUUID()}")
-            val project = ProjectRepository(File(fixture, "projects")).createInternal("Runtime acceptance")
+            val project = ProjectRepository(
+                projectsRoot = File(fixture, "projects"),
+                userHome = File(fixture, "home"),
+                projectsGuestRoot = directories.projectsGuestPath,
+                userHomeGuestPath = directories.guestHome,
+            ).createInternal("Runtime acceptance")
             val config = LinuxRuntimeBridge.configForWorkspace(context, mode, project.workspace)
             val runtime = buildAndroidMobileLinuxRuntimeHandle(config)
             val marker = "product-acceptance-${UUID.randomUUID()}"
@@ -53,7 +59,7 @@ class MobileLinuxProductAcceptanceTest {
                 val boot = runtime.boot()
                 assertEquals(boot.lastError, MobileLinuxRootfsStateFfi.READY, boot.state)
                 val identity = command("id -un; id -u; id -g; printf '%s\\n' \"\$HOME\" \"\$USER\"; pwd; sudo -n id -u; sudo -ni sh -c 'printf %s \"\$HOME\"'")
-                assertEquals("lingxi\n1000\n1000\n/home/lingxi\nlingxi\n/home/lingxi/lingxi\n0\n/root", identity)
+                assertEquals("${directories.linuxUser}\n1000\n1000\n${directories.guestHome}\n${directories.linuxUser}\n${directories.defaultGuestCwd}\n0\n/root", identity)
                 command("printf '$marker' > \"\$HOME/$marker\"; printf project-ok > product-proof", project.workspace.guestPath)
                 assertEquals("project-ok", File(project.workspace.hostPath, "product-proof").readText())
                 runtime.spawnBackground(MobileLinuxCommandRequestFfi(
@@ -69,7 +75,7 @@ class MobileLinuxProductAcceptanceTest {
                     env = emptyList(), size = MobileLinuxPtySizeFfi(cols = 80u, rows = 24u), mounts = emptyList(),
                 ))
                 runtime.writePty(pty, "printf 'PRODUCT_PTY:%s:%s:%s\\n' \"\$(id -u)\" \"\$HOME\" \"\$PWD\"\n".toByteArray())
-                val expected = "PRODUCT_PTY:1000:/home/lingxi:${project.workspace.guestPath}"
+                val expected = "PRODUCT_PTY:1000:${directories.guestHome}:${project.workspace.guestPath}"
                 var output = ""
                 var cursor: ULong? = null
                 val deadline = System.currentTimeMillis() + 20_000
@@ -85,7 +91,7 @@ class MobileLinuxProductAcceptanceTest {
                 runtime.shutdown()
                 runtime.boot()
                 assertEquals(marker, command("cat \"\$HOME/$marker\"; cp \"\$HOME/$marker\" \"\$HOME/.lingxi-product-acceptance-cold-$marker\"; rm \"\$HOME/$marker\""))
-                android.util.Log.i("ProductAcceptance", "PRODUCT_MOBILE_LINUX_ACCEPTANCE PASS android uid=1000 home=/home/lingxi workspace=~/lingxi project=${project.record.id}")
+                android.util.Log.i("ProductAcceptance", "PRODUCT_MOBILE_LINUX_ACCEPTANCE PASS android uid=1000 home=${directories.guestHome} workspace=${directories.defaultGuestCwd} project=${project.record.id}")
             } finally {
                 runtime.shutdown()
                 fixture.deleteRecursively()

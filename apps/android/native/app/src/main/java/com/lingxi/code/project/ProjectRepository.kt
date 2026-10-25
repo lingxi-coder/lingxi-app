@@ -84,7 +84,9 @@ internal class ProjectRepository(
     private val newId: () -> String = { UUID.randomUUID().toString().lowercase() },
     private val writer: ProjectAtomicWriter = DefaultProjectAtomicWriter(),
     private val strings: ProjectStrings = DefaultProjectStrings,
-    private val userHome: File? = null,
+    private val userHome: File?,
+    private val projectsGuestRoot: String,
+    private val userHomeGuestPath: String,
 ) {
     init {
         projectsRoot.mkdirs()
@@ -127,6 +129,14 @@ internal class ProjectRepository(
     fun createInternal(name: String): ProjectSnapshot =
         createProject(name, ProjectStorageKind.Internal, null, null)
 
+    /** Register an existing owned source directory without copying or relocating it. */
+    fun registerAuthoringWorkspace(name: String, guestDirectory: String): ProjectSnapshot {
+        val workspace = workspaceForDirectory("authoring", guestDirectory)
+        load().projects.firstOrNull { it.record.directory == guestDirectory }?.let { return it }
+        val created = createInternal(name)
+        return updateProject(created.record.copy(directory = guestDirectory, activeDirectory = guestDirectory))
+    }
+
     fun createSafMirror(
         name: String,
         sourceTreeUri: String,
@@ -152,6 +162,7 @@ internal class ProjectRepository(
         val workspace = File(dir, PROJECT_WORKSPACE_DIR)
         require(workspace.mkdirs()) { "cannot create project workspace" }
         val timestamp = now()
+        val guestWorkspace = "$projectsGuestRoot/$id/workspace"
         val record = ProjectRecord(
             id = id,
             name = cleanName,
@@ -160,6 +171,8 @@ internal class ProjectRepository(
             updatedAtEpochMillis = timestamp,
             sourceTreeUri = sourceTreeUri,
             sourceDisplayName = sourceDisplayName,
+            directory = guestWorkspace,
+            activeDirectory = guestWorkspace,
         )
         try {
             writeProject(record)
@@ -359,8 +372,8 @@ internal class ProjectRepository(
     }
 
     private fun workspaceForDirectory(projectId: String, guestPath: String, requireExisting: Boolean = true): ProjectWorkspace {
-        val projectsGuest = io.lingxi.mobilelinux.MobileLinuxGuestPaths.workspace("projects")
-        val homeGuest = io.lingxi.mobilelinux.MobileLinuxGuestPaths.HOME
+        val projectsGuest = projectsGuestRoot
+        val homeGuest = userHomeGuestPath
         require((guestPath == homeGuest || guestPath.startsWith("$homeGuest/")) && guestPath.split('/').none { it == ".." || it == "." }) { "workspace must be a normalized Linux user directory" }
         val (root, relative) = if (guestPath == projectsGuest || guestPath.startsWith("$projectsGuest/")) {
             projectsRoot to guestPath.removePrefix(projectsGuest).removePrefix("/")

@@ -1,4 +1,10 @@
+import { promises as fs } from 'node:fs';
+import { LocalAppCoreClient } from './local-apps/coreClient.js';
 import { LocalAppHost } from './local-apps/host.js';
+import { resolveDesktopAuthoringBinding } from './local-apps/authoring.js';
+import { LocalAppAgentBroker } from './local-apps/agentBroker.js';
+import { LocalAppAgentExecutor } from './local-apps/agentExecutor.js';
+import { LocalAppAgentError } from './local-apps/agentPolicy.js';
 import { configureNativeLocale, nativeTr, onNativeLocaleChange } from '../shared/nativeLocale.js';
 import { persistInterfaceLocale, restoreInterfaceLocale } from './localePreferences.js';
 import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
@@ -21,10 +27,12 @@ import type { SessionRef } from './bridgeTypes.js';
 import { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import {
   createMacCredentialBrokerClient,
+  readProviderEnvironmentCredential,
   resolveProviderCredential,
   SessionLaunchCache,
 } from './credential-broker.js';
-import { CodexTokenManager } from './codex-tokens.js';
+import { CodexTokenManager, codexAccessToken } from './codex-tokens.js';
+import { CODEX_PROVIDER_ID } from './codex-auth.js';
 import { createRemoteControl } from './remoteControl/electronBindings.js';
 import { RemotePolicy, managedSettingsDirectory } from './remoteControl/policy.js';
 import { RemoteCommands } from './remoteControl/remoteCommands.js';
@@ -682,20 +690,66 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     return undefined;
   });
   if (productPaths) {
+    const agentRoot = join(productPaths.configHome, 'local-apps', 'v2');
+    const agentExecutor = new LocalAppAgentExecutor({
+      configHome: productPaths.configHome,
+      root: agentRoot,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      credentials: async (providerId, refresh) => {
+        if (providerId === CODEX_PROVIDER_ID) {
+          const session = await (refresh ? codexTokens.renew() : codexTokens.current());
+          if (!session) throw new LocalAppAgentError('model_unavailable', 'Sign in to the selected Agent model in LingXi settings.');
+          return { openaiOAuth: codexAccessToken(session) };
+        }
+        const key = await resolveProviderCredential(providerId, { credentialBroker });
+        if (!key) throw new LocalAppAgentError('model_unavailable', 'Configure the selected Agent model in LingXi settings.');
+        return { providerCredentials: { [providerId]: key } };
+      },
+      credentialStatus: async providerIds => {
+        const rows = await credentialBroker?.listStatus(providerIds) ?? [];
+        const configured = new Set(rows.filter(row => row.configured).map(row => row.providerId));
+        for (const id of providerIds) if (readProviderEnvironmentCredential(id)) configured.add(id);
+        return configured;
+      },
+      permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
+      question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
+    });
     localApps = new LocalAppHost({
       configHome: productPaths.configHome,
+      accountToken: () => account.getIdToken(),
+      accountId: () => account.snapshot().user?.uid ?? undefined,
+      core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.configHome, message => diagnostics.add('warn', 'host', message)),
+      resolveAuthoringBinding: async (_appId, session) => {
+        const activeSession = settings.getPublic().activeSession ?? undefined;
+        const liveDraft = bridge?.getActiveDraftSession(session, activeSession);
+        return resolveDesktopAuthoringBinding(sessionCatalog, session, liveDraft);
+      },
       preload: join(moduleDirectory, '../preload/localApp.cjs'),
       nodeExecutable: process.execPath,
       bunExecutable: resolveModBunExecutable({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE }),
-      mainWindow: getMainWindow,
-      edit: async row => {
+      mainWindow: () => getMainWindow() ?? createWindow(),
+      agentCatalog: () => agentExecutor.catalog(),
+      edit: async request => {
         const window = getMainWindow() ?? createWindow();
         window.show(); window.focus();
         // The renderer owns navigation and must apply the selected chat's bootstrap
         // before placing an edit request in its session-bound composer draft.
-        window.webContents.send('lingxi:local-app:edit', { id: row.id, name: row.name, sourcePath: row.sourcePath, sourceSession: row.sourceSession });
+        window.webContents.send('lingxi:local-app:edit', request);
       },
     });
+    const agentBroker = new LocalAppAgentBroker({
+      root: agentRoot,
+      authorize: owner => localApps!.authorizeAgent(owner),
+      revalidate: (owner, authorization) => localApps!.revalidateAgent(owner, authorization),
+      execute: execution => agentExecutor.execute(execution),
+    });
+    try {
+      await agentBroker.initialize();
+      localApps.setAgentBroker(agentBroker);
+    } catch {
+      diagnostics.add('error', 'host', 'Application Agent task storage is unavailable. Existing task records were preserved.');
+    }
     await localApps.initialize();
   }
   try {

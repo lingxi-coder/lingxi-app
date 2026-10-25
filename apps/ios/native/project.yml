@@ -2,7 +2,7 @@ name: LingxiCode
 options:
   bundleIdPrefix: com.lingxi
   deploymentTarget:
-    iOS: "18.0"
+    iOS: "26.0"
   createIntermediateGroups: true
   developmentLanguage: "zh-Hans"
 
@@ -50,7 +50,7 @@ targets:
   LingxiCode:
     type: application
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Sources
         excludes:
@@ -63,6 +63,10 @@ targets:
       - path: Resources
         excludes:
           - Firebase/**
+      - path: ../../../config/product-config.json
+        buildPhase: resources
+      - path: ../../../docs/mobile-linux/mobile-linux-native-pins.json
+        buildPhase: resources
     dependencies:
       - package: ZIPFoundation
       - package: Firebase
@@ -243,7 +247,7 @@ targets:
   LingxiCodeTests:
     type: bundle.unit-test
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Tests
       - path: ../../../packages/deep-links/fixtures.json
@@ -268,6 +272,7 @@ targets:
             exit 1
           fi
           "${FIXTURE_PYTHON}" "${SRCROOT}/scripts/stage-protocol-fixtures.py" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessProtocolFixtures"
+          "${FIXTURE_PYTHON}" "${SRCROOT}/scripts/stage-local-app-fixtures.py" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/UnifiedAppFixtures"
     dependencies:
       - target: LingxiCode
       - framework: Frameworks/LingxiCodeFFI.xcframework
@@ -285,7 +290,7 @@ targets:
   ConversationWidget:
     type: app-extension
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: Sources/ConversationWidget
       - path: Sources/ConversationWidgetShared
@@ -314,7 +319,7 @@ targets:
   LingxiCodeUITests:
     type: bundle.ui-testing
     platform: iOS
-    deploymentTarget: "18.0"
+    deploymentTarget: "26.0"
     sources:
       - path: UITests
     dependencies:

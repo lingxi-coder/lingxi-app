@@ -11,11 +11,12 @@ use super::linux_conversion::{
 };
 #[cfg(feature = "uniffi")]
 use super::linux_types::{
-    AndroidMobileLinuxEventSink, MobileLinuxApiErrorFfi, MobileLinuxCapabilityFfi,
-    MobileLinuxCommandRequestFfi, MobileLinuxCommandResultFfi, MobileLinuxEventFfi,
-    MobileLinuxEventKindFfi, MobileLinuxMountSpecFfi, MobileLinuxProcessHandleFfi,
-    MobileLinuxPtyOpenRequestFfi, MobileLinuxPtySessionHandleFfi, MobileLinuxPtySizeFfi,
-    MobileLinuxStatusFfi, MobileLinuxTaskSnapshotFfi, MobileLinuxTaskStateFfi,
+    AndroidMobileLinuxEventSink, AndroidMobileLinuxRootfsStager, MobileLinuxApiErrorFfi,
+    MobileLinuxCapabilityFfi, MobileLinuxCommandRequestFfi, MobileLinuxCommandResultFfi,
+    MobileLinuxEventFfi, MobileLinuxEventKindFfi, MobileLinuxMountSpecFfi,
+    MobileLinuxProcessHandleFfi, MobileLinuxPtyOpenRequestFfi, MobileLinuxPtySessionHandleFfi,
+    MobileLinuxPtySizeFfi, MobileLinuxStatusFfi, MobileLinuxTaskSnapshotFfi,
+    MobileLinuxTaskStateFfi,
 };
 #[cfg(feature = "uniffi")]
 use mobile_linux_api::MAX_MOBILE_LINUX_EVENT_BATCH;
@@ -145,6 +146,25 @@ impl AndroidMobileLinuxRuntimeHandle {
             .await
             .map(status_to_ffi)
             .map_err(mobile_linux_error_to_ffi)
+    }
+
+    /// The independent maintenance owner outlives cancellation of the host UI.
+    pub async fn stage_and_repair_rootfs(
+        &self,
+        stager: Box<dyn AndroidMobileLinuxRootfsStager>,
+    ) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
+        harness_runtime::mobile::linux_maintenance::repair_rootfs_with_preparation(
+            self.runtime.clone(),
+            move || async move {
+                stager
+                    .stage()
+                    .await
+                    .map_err(|error| mobile_linux_api::MobileLinuxError::Io(error.to_string()))
+            },
+        )
+        .await
+        .map(status_to_ffi)
+        .map_err(mobile_linux_error_to_ffi)
     }
 
     pub async fn reset_rootfs(&self) -> Result<MobileLinuxStatusFfi, MobileLinuxApiErrorFfi> {
@@ -350,9 +370,12 @@ pub(super) fn android_mobile_linux_runtime(
             Mutex<HashMap<String, Arc<dyn mobile_linux_api::MobileLinuxRuntime>>>,
         > = LazyLock::new(|| Mutex::new(HashMap::new()));
         let key = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             cfg.managed_root,
             cfg.app_sandbox_root,
+            cfg.brand_id,
+            cfg.linux_user,
+            cfg.config_dir_name,
             cfg.abi,
             cfg.rootfs_version,
             cfg.archive_sha256.as_deref().unwrap_or_default(),
@@ -370,13 +393,21 @@ pub(super) fn android_mobile_linux_runtime(
         let runtime = platform_android::AndroidProotRuntime::new(
             platform_android::AndroidProotRuntimeConfig {
                 managed_root: std::path::PathBuf::from(&cfg.managed_root),
+                brand_profile: mobile_linux_api::BrandRuntimeProfile::new(
+                    cfg.brand_id.clone(),
+                    cfg.linux_user.clone(),
+                    cfg.config_dir_name.clone(),
+                ),
                 app_sandbox_root: std::path::PathBuf::from(&cfg.app_sandbox_root),
                 abi: cfg.abi.clone(),
                 rootfs_version: cfg.rootfs_version.clone(),
                 archive_sha256: cfg.archive_sha256.clone(),
             },
         );
-        let runtime = Arc::new(runtime) as Arc<dyn mobile_linux_api::MobileLinuxRuntime>;
+        let runtime = harness_runtime::mobile::linux_maintenance::coordinate_runtime(
+            std::path::Path::new(&cfg.managed_root),
+            Arc::new(runtime),
+        );
         RUNTIMES
             .lock()
             .expect("Android MobileLinux runtime registry")
@@ -400,6 +431,13 @@ pub(super) fn android_mobile_linux_runtime(
 pub(super) fn prepared_android_mobile_linux_runtime(
     config: &AndroidMobileLinuxConfigFfi,
 ) -> Result<Arc<dyn mobile_linux_api::MobileLinuxRuntime>, String> {
+    mobile_linux_api::BrandRuntimeProfile::new(
+        config.brand_id.clone(),
+        config.linux_user.clone(),
+        config.config_dir_name.clone(),
+    )
+    .validate()
+    .map_err(str::to_string)?;
     let runtime = android_mobile_linux_runtime(config);
     let host_path = config
         .workspace_host_path

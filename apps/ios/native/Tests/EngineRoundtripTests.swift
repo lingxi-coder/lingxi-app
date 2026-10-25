@@ -183,9 +183,17 @@ import XCTest
             let deepSeek = repository.addProfile(presetID: "deepseek")
             repository.setDefaultProfile(deepSeek)
             let snapshot = repository.makeLaunchSnapshot()
+            let directories = MobileUserStorage.directories(
+                managedRoot: sandbox.appendingPathComponent("runtime", isDirectory: true).path
+            )
 
             let config = IosEngineLaunchConfigFfi(
                 appVersion: nil,
+                appAgentHost: false,
+                brandId: directories.brandId,
+                linuxUser: directories.linuxUser,
+                configDirName: directories.configDirName,
+                nativeConfigHome: directories.configHome,
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: snapshot.defaultModelID ?? "",
@@ -193,6 +201,8 @@ import XCTest
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,
+                projectAdditionalDirectories: [],
+                projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(
                     providerProfilesJson: snapshot.providerProfilesJSON,
                     routingJson: snapshot.routingJSON

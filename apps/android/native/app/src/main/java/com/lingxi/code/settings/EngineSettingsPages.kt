@@ -9,6 +9,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.BuildConfig
 import com.lingxi.code.R
+import com.lingxi.code.project.MobileUserStorage
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -41,16 +42,16 @@ internal data class SettingsProjectSwitching(
 // 点，而真正能执行切换的 switchEngineScope 离这里隔着 SettingsHost 和 MainActivity。
 internal val LocalSettingsProjectSwitching = staticCompositionLocalOf { SettingsProjectSwitching() }
 
-// 引擎放项目级配置的目录名（Rust 侧的 branding::DOT_DIR）。
-private const val SETTINGS_DOT_DIR = ".lingxi"
-
 // 引擎解析 project / local 两层时实际用的那个项目目录，或 null。
 //
 // 唯一可信的来源是引擎自己在 files_json 里回传的路径：project_dir 由引擎进程启动时
 // 的 cwd 定死，客户端这边任何「当前项目」状态都可能和答题的那个引擎不是同一个。
-// 反推只做一件事：去掉末尾的 <DOT_DIR>/settings.json；对不上就返回 null —— 宁可不
+// 反推只做一件事：去掉末尾的 <configDirName>/settings.json；对不上就返回 null —— 宁可不
 // 显示项目，也不猜一个可能是错的。
-internal fun projectDirectoryFromFiles(filesJson: String?): String? {
+internal fun projectDirectoryFromFiles(filesJson: String?, configDirName: String): String? {
+    if (configDirName.isBlank() || configDirName == "." || configDirName == ".." ||
+        configDirName.contains('/') || configDirName.contains('\\')
+    ) return null
     val files = runCatching { JSONArray(filesJson ?: "[]") }.getOrNull() ?: return null
     for (index in 0 until files.length()) {
         val entry = files.optJSONObject(index) ?: continue
@@ -59,7 +60,7 @@ internal fun projectDirectoryFromFiles(filesJson: String?): String? {
         val segments = path.split("/")
         if (segments.size < 3) return null
         if (segments[segments.size - 1] != "settings.json") return null
-        if (segments[segments.size - 2] != SETTINGS_DOT_DIR) return null
+        if (segments[segments.size - 2] != configDirName) return null
         val directory = segments.subList(0, segments.size - 2).joinToString("/")
         return directory.ifEmpty { "/" }
     }
@@ -76,6 +77,10 @@ private fun isProjectScopedLayer(layer: String): Boolean = layer == "project" ||
 
 @Composable
 internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onReconnect: (() -> Unit)? = null) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val configDirName = remember(context) {
+        MobileUserStorage.directories(context.applicationContext).configDirName
+    }
     val state by bridge.state.collectAsState()
     var layer by remember(route) { mutableStateOf("user") }
     val scope = rememberCoroutineScope()
@@ -106,7 +111,7 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
         SingleChoiceRow(listOf("user", "project", "local", "managed"), layer, { layer = it })
         Text(settingsLabel("${layer}_layer_desc"), color = LingXiTheme.palette.text4)
         if (isProjectScopedLayer(layer)) {
-            val projectDirectory = projectDirectoryFromFiles(snapshot.filesJson)
+            val projectDirectory = projectDirectoryFromFiles(snapshot.filesJson, configDirName)
             if (projectDirectory == null) {
                 Text(settingsLabel("Checking with the engine which project this layer writes to…"), color = LingXiTheme.palette.text4)
             } else {

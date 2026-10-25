@@ -38,6 +38,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -121,6 +124,7 @@ class ChatViewModel(
 
     /** Provider reconnect token is independent from workspace-source swaps. */
     private var reconnectGeneration: Int = sourceGeneration
+    private var requestedSourceGeneration: Int? = null
 
     private val _state = MutableStateFlow(
         run {
@@ -1501,6 +1505,50 @@ class ChatViewModel(
      * state to the replacement, and re-establishes the visible session before
      * sending is enabled.
      */
+    internal fun ensureSourceInBackground(
+        generation: Int,
+        dispatcher: CoroutineDispatcher = Dispatchers.IO,
+        createSource: () -> ConversationSource,
+    ) {
+        if (generation <= reconnectGeneration || generation <= (requestedSourceGeneration ?: Int.MIN_VALUE)) return
+        if (sideChats.hasLiveChats) {
+            reportHostError(strings.resolve(R.string.side_chat_end_before_reconnect, "请先结束旁聊，再重新连接引擎。"))
+            sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, createSource) }
+            return
+        }
+        requestedSourceGeneration = generation
+        val expectedSource = source
+        viewModelScope.launch {
+            workspaceSwitchMutex.withLock {
+                var prepared: ConversationSource? = null
+                try {
+                    // UniFFI construction is synchronous and cannot be interrupted.
+                    // Retain the returned handle even after cancellation so it can
+                    // be closed rather than lost at withContext's dispatch boundary.
+                    withContext(dispatcher + NonCancellable) { prepared = createSource() }
+                    coroutineContext.ensureActive()
+                    if (requestedSourceGeneration != generation || generation <= reconnectGeneration || source !== expectedSource) return@launch
+                    if (sideChats.hasLiveChats) {
+                        sideChats.whenVacant = { ensureSourceInBackground(generation, dispatcher, createSource) }
+                        return@launch
+                    }
+                    val replacement = checkNotNull(prepared)
+                    ensureSource(generation) { replacement }
+                    prepared = null
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) {
+                    if (requestedSourceGeneration == generation && source === expectedSource) ensureSource(generation) {
+                        UnavailableConversationSource(failure.message ?: "Engine initialization failed", strings)
+                    }
+                } finally {
+                    val abandoned = prepared
+                    if (abandoned != null && abandoned !== source) withContext(dispatcher + NonCancellable) { abandoned.close() }
+                    if (requestedSourceGeneration == generation) requestedSourceGeneration = null
+                }
+            }
+        }
+    }
+
     internal fun ensureSource(
         generation: Int,
         createSource: () -> ConversationSource,
@@ -1598,6 +1646,7 @@ class ChatViewModel(
             title = strings.resolve(R.string.chat_new_conversation, "新对话"),
         ),
         newSession: Boolean = target.id == "new",
+        newSessionDirectory: String? = null,
         resumeEmpty: Boolean = false,
         replacePendingTransition: Boolean = false,
         allowInactiveWaitingRecovery: Boolean = false,
@@ -1608,7 +1657,7 @@ class ChatViewModel(
          */
         scope: ConversationScope = projectId?.let { ConversationScope.Project(it) }
             ?: ConversationScope.Global,
-        createSource: () -> ConversationSource,
+        createSource: suspend () -> ConversationSource,
         persistSelection: suspend () -> Unit = {},
         rollbackSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
@@ -1641,7 +1690,8 @@ class ChatViewModel(
             reportBlockedReplacement()
             return@withLock false
         }
-        val replacement = runCatching(createSource).getOrElse { error ->
+        val replacement = runCatching { createSource() }.getOrElse { error ->
+            if (error is CancellationException) throw error
             _state.update {
                 it.copy(
                     error = ChatError(
@@ -1754,6 +1804,7 @@ class ChatViewModel(
         beginSessionTransition(
             target = target,
             newSession = newSession,
+            newSessionDirectory = newSessionDirectory,
             resumeEmpty = resumeEmpty,
             status = if (newSession) {
                 strings.resolve(R.string.chat_status_new_project_session, "正在新建项目会话…")
@@ -1921,6 +1972,32 @@ class ChatViewModel(
         reportBackgroundTurnState()
     }
 
+    /** Confirm the ordinary engine's UUID and actual cwd before associating
+     * an application with it. Acceptance of Resume/New alone is insufficient. */
+    internal suspend fun awaitAppAuthoringSession(
+        directory: String,
+        expectedSessionId: String? = null,
+    ): com.lingxi.code.project.SessionWorkspaceState {
+        val owner = source
+        return kotlinx.coroutines.withTimeout(20_000) {
+            while (true) {
+                check(source === owner) { "开发会话已切换，请重新打开应用源码。" }
+                val current = _state.value
+                val workspace = owner.workspaceState.value
+                if (current.sessionReady && !current.sessionTransitioning && current.session.id != "new" &&
+                    workspace != null && canonicalSessionId(workspace.sessionId) == canonicalSessionId(current.session.id)) {
+                    check(expectedSessionId == null || canonicalSessionId(workspace.sessionId) == canonicalSessionId(expectedSessionId)) { "引擎打开了其他会话，请重新打开应用源码。" }
+                    check(workspace.cwd == directory) { "来源会话已切换目录，请刷新应用详情。" }
+                    return@withTimeout workspace
+                }
+                check(current.error == null || current.sessionTransitioning) { current.error?.message ?: "无法打开开发会话。" }
+                delay(50)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        }
+    }
+
     /** Switch to another session through the real engine. */
     fun openSession(ref: SessionRef, empty: Boolean = false) {
         if (refuseWhileDurableTurnParked()) return
@@ -2082,6 +2159,7 @@ class ChatViewModel(
     private fun beginSessionTransition(
         target: SessionRef,
         newSession: Boolean,
+        newSessionDirectory: String? = null,
         resumeEmpty: Boolean = false,
         status: String,
         allowInactiveWaitingRecovery: Boolean = false,
@@ -2129,6 +2207,7 @@ class ChatViewModel(
                 _state.update { it.copy(cancellationInFlight = false) }
                 cancelEngineTurn(detachedTurn)
                 when {
+                    newSession && newSessionDirectory != null -> source.newSession(newSessionDirectory)
                     newSession -> source.newSession()
                     resumeEmpty -> source.resumeEmptySession(target.id, target.title)
                     else -> source.resumeSession(target.id)

@@ -57,7 +57,12 @@ pub(super) fn configured_workspace_guest_path(cfg: &AndroidMobileLinuxConfigFfi)
     } else {
         workspace_id
     };
-    mobile_linux_api::guest_paths::workspace(&workspace_id)
+    let profile = mobile_linux_api::BrandRuntimeProfile::new(
+        cfg.brand_id.clone(),
+        cfg.linux_user.clone(),
+        cfg.config_dir_name.clone(),
+    );
+    mobile_linux_api::guest_paths::workspace_for_profile(&profile, &workspace_id)
 }
 
 #[cfg(feature = "uniffi")]

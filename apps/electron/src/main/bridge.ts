@@ -90,6 +90,7 @@ import type {
   RemoteRuntimeView,
   SequencedRuntimeEventEnvelope,
   SessionRef,
+  RuntimeSessionMode,
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
 import {
@@ -527,7 +528,7 @@ export class SessionRuntime {
   private readonly audioCleanupGenerations = new Map<number, Promise<void>>();
   private readonly closedAudioGenerations = new Set<number>();
 
-  constructor(private readonly opts: BridgeManagerOptions) {
+  constructor(private readonly opts: BridgeManagerOptions, readonly sessionMode?: RuntimeSessionMode) {
     this.sessionId = opts.sessionId ?? randomUUID();
     this.ownedTranscriptPath = opts.resumeTranscriptPath;
     this.remountControls = opts.remountControls;
@@ -790,6 +791,11 @@ export class SessionRuntime {
 
   get runtimeVersions(): BridgeRuntimeVersions | undefined {
     return this.lastRuntimeVersions ? { ...this.lastRuntimeVersions } : undefined;
+  }
+
+  /** The workspace passed to the running bridge as its current process cwd. */
+  get engineWorkspacePath(): string | undefined {
+    return this.activeWorkspace;
   }
 
   get pendingAskUserQuestions(): readonly AskUserQuestionRequestDto[] {

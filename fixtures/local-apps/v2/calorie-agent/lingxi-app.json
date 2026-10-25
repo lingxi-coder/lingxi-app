@@ -1,0 +1,57 @@
+{
+  "schema": 2,
+  "name": "餐盘笔记",
+  "summary": "拍照估算餐食热量，确认食物和份量后保存。",
+  "entry": {
+    "type": "static",
+    "path": "index.html"
+  },
+  "capabilities": [
+    "agent",
+    "camera",
+    "photos"
+  ],
+  "agent": {
+    "tools": []
+  },
+  "targets": [
+    {
+      "platform": "android",
+      "environment": "web"
+    },
+    {
+      "platform": "ios",
+      "environment": "web"
+    },
+    {
+      "platform": "macos",
+      "environment": "web"
+    },
+    {
+      "platform": "windows",
+      "environment": "web"
+    },
+    {
+      "platform": "linux",
+      "environment": "web"
+    },
+    {
+      "platform": "web",
+      "environment": "web"
+    }
+  ],
+  "package": {
+    "files": [
+      "index.html",
+      "styles.css",
+      "app.mjs",
+      "nutrition.mjs",
+      "agui-task.mjs"
+    ],
+    "dependencyLocks": []
+  },
+  "dataSchema": {
+    "version": 1,
+    "compatibleFrom": 1
+  }
+}

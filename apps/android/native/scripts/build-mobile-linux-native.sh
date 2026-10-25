@@ -3,17 +3,42 @@
 set -euo pipefail
 VARIANT=""
 SKIP_JNI=false
+ABIS="arm64-v8a,x86_64"
+ABIS_SPECIFIED=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --variant) VARIANT="${2:?missing variant}"; shift 2 ;;
     --skip-jni) SKIP_JNI=true; shift ;;
+    --abis)
+      [[ "${ABIS_SPECIFIED}" == false ]] || { echo "--abis may only be specified once" >&2; exit 2; }
+      ABIS="${2:?missing ABI list}"
+      ABIS_SPECIFIED=true
+      shift 2
+      ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 case "${VARIANT}" in
   play|direct) ;;
-  *) echo "usage: $0 --variant <play|direct> [--skip-jni]" >&2; exit 2 ;;
+  *) echo "usage: $0 --variant <play|direct> [--skip-jni] [--abis <arm64-v8a[,x86_64]>]" >&2; exit 2 ;;
 esac
+if [[ -z "${ABIS}" || "${ABIS}" == ,* || "${ABIS}" == *, || "${ABIS}" == *,,* ]]; then
+  echo "invalid ABI list: ${ABIS}" >&2
+  exit 2
+fi
+IFS=',' read -r -a ABI_LIST <<< "${ABIS}"
+VALIDATED_ABIS=""
+for abi in "${ABI_LIST[@]}"; do
+  case "${abi}" in
+    arm64-v8a|x86_64) ;;
+    *) echo "unsupported ABI: ${abi}" >&2; exit 2 ;;
+  esac
+  if [[ ",${VALIDATED_ABIS}," == *",${abi},"* ]]; then
+    echo "duplicate ABI: ${abi}" >&2
+    exit 2
+  fi
+  VALIDATED_ABIS="${VALIDATED_ABIS:+${VALIDATED_ABIS},}${abi}"
+done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../../.." && pwd)"
@@ -59,4 +84,6 @@ for abi in arm64-v8a x86_64; do
   done
 done
 python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${BUILD_ROOT}/sdk-source.json"
-"${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --jni-root "${JNI_ROOT}"
+# --abis narrows only the final JNI validation; SDK helpers and build-jni still
+# build and publish both architectures.
+"${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --jni-root "${JNI_ROOT}" --abis "${ABIS}"

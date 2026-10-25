@@ -51,6 +51,10 @@ struct EngineConfig {
     var visionDelegationEnabled: Bool
     var mobileLinux: TerminalRuntimeConfig?
     var additionalWorkspaceDirectories: [String] = []
+    /// Exact guest paths authorized by the native Project store for Mobile
+    /// Linux bind mounts. This is separate from the file-tool trust catalog in
+    /// `additionalWorkspaceDirectories`.
+    var projectMountGrants: [String] = []
 
     /// Persisted API keys are resolved per request from native secure storage.
     /// An explicit environment override remains available for development/CI.
@@ -62,6 +66,7 @@ struct EngineConfig {
                                 providerRoutingJson: String? = nil,
                                 visionDelegationEnabled: Bool = true,
                                 mobileLinux: TerminalRuntimeConfig? = nil,
+                                projectMountGrants: [String] = [],
                                 environment env: [String: String] = ProcessInfo.processInfo.environment) -> EngineConfig {
         let key = nonEmpty(env["ANTHROPIC_API_KEY"]) ?? ""
         // Base URL: env override (dev) > Keychain (shipped) > Anthropic default.
@@ -82,7 +87,8 @@ struct EngineConfig {
             providerProfilesJson: providerProfilesJson,
             providerRoutingJson: providerRoutingJson,
             visionDelegationEnabled: visionDelegationEnabled,
-            mobileLinux: mobileLinux
+            mobileLinux: mobileLinux,
+            projectMountGrants: projectMountGrants
         )
     }
 

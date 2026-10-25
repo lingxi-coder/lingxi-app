@@ -188,15 +188,23 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             providerProfilesJson: snapshot.providerProfilesJSON,
             routingJson: snapshot.routingJSON
         )
+        let directories = MobileUserStorage.directories()
         let config = IosEngineLaunchConfigFfi(
             appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            appAgentHost: false,
+            brandId: directories.brandId,
+            linuxUser: directories.linuxUser,
+            configDirName: directories.configDirName,
+            nativeConfigHome: directories.configHome,
             apiBase: Keychain.get(.apiBase) ?? "https://api.anthropic.com",
             apiKey: "",
             model: task?.configuration.model ?? snapshot.defaultModelID ?? Keychain.get(.model) ?? "",
             sessionMode: .code,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             appSandboxRoot: appSandboxRoot,
-            projectCwd: scope.projectCwd ?? (task == nil ? nil : MobileUserStorage.directories().scheduledCwd),
+            projectCwd: scope.projectCwd ?? (task == nil ? nil : directories.scheduledCwd),
+            projectAdditionalDirectories: [],
+            projectMountGrants: [],
             providerConfig: provider,
             mobileLinux: cronRuntime.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
@@ -309,8 +317,12 @@ func makeIosMobileLinuxConfig(
     appSandboxRoot: String
 ) -> IosMobileLinuxConfigFfi {
     LXISHRuntimeResourceBootstrap.prepare()
+    let directories = MobileUserStorage.directories()
     return IosMobileLinuxConfigFfi(
         mode: config.mode == .legacy ? .legacy : .mobileLinux,
+        brandId: directories.brandId,
+        linuxUser: directories.linuxUser,
+        configDirName: directories.configDirName,
         managedRoot: config.managedRoot,
         workspaceHostPath: config.workspaceHostPath,
         stableWorkspaceId: config.stableWorkspaceId,

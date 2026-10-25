@@ -1,5 +1,5 @@
 import { isAbsolute, posix } from 'node:path';
-import type { DesktopAppManifest, LocalAppCapability, LocalAppProcess, LocalAppStep } from '../../shared/localApps.js';
+import type { DesktopAppManifest, LocalAppTarget, LocalAppCapability, LocalAppProcess, LocalAppStep } from '../../shared/localApps.js';
 
 export function relativePath(value: unknown, label = 'path'): string {
   if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\') || isAbsolute(value)
@@ -34,13 +34,14 @@ function steps(value: unknown): LocalAppStep[] {
 }
 export function parseManifest(value: unknown): DesktopAppManifest {
   const v = object(value);
-  if (v.schema !== 1) throw new Error('Application manifest schema must be 1');
+  if (v.schema !== 2) throw new Error('Application manifest schema must be 2; explicitly import legacy apps first');
   const e = object(v.entry);
   const entry: DesktopAppManifest['entry'] = e.type === 'static'
     ? { type: 'static', path: relativePath(e.path, 'entry') }
     : e.type === 'server'
-      ? { type: 'server', process: text(e.process, 'entry process', 80), ...(e.path ? { path: relativePath(e.path) } : {}) }
+      ? { type: 'server', process: text(e.process, 'entry process', 80), ...(e.path ? { path: text(e.path, 'server entry path', 2048) } : {}) }
       : (() => { throw new Error('Application entry must be static or server'); })();
+  if (entry.type === 'server' && entry.path && (!entry.path.startsWith('/') || entry.path.startsWith('//') || /[\\\r\n\0]/.test(entry.path))) throw new Error('Server entry must be a local URL path');
   const processes: LocalAppProcess[] = [];
   if (v.processes !== undefined) {
     if (!Array.isArray(v.processes)) throw new Error('Application processes must be an array');
@@ -80,7 +81,7 @@ export function parseManifest(value: unknown): DesktopAppManifest {
   }
   if (entry.type === 'server' && !processes.some(p => p.name === entry.process)) throw new Error('Entry process does not exist');
   const capabilities = new Set<LocalAppCapability>();
-  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone'];
+  const supported: LocalAppCapability[] = ['process', 'files', 'clipboard', 'notifications', 'camera', 'microphone', 'photos', 'share', 'agent', 'background'];
   if (v.capabilities !== undefined) {
     if (!Array.isArray(v.capabilities)) throw new Error('capabilities must be an array');
     for (const cap of v.capabilities) {
@@ -89,7 +90,39 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     }
   }
   const install = steps(v.install), build = steps(v.build);
+  let agent: DesktopAppManifest['agent'];
+  if (v.agent !== undefined) {
+    const a = object(v.agent);
+    if (Object.keys(a).some(key => key !== 'tools' && key !== 'skills')) throw new Error('Application agent declarations only accept requested tools and Skills');
+    if (a.tools !== undefined && (!Array.isArray(a.tools) || a.tools.length > 128)) throw new Error('Application agent tools must be an array of at most 128 catalog IDs');
+    const tools = (a.tools as unknown[] | undefined ?? []).map(value => text(value, 'agent tool catalog ID', 512));
+    if (tools.some(id => !/^(builtin:|mcp:)[A-Za-z0-9_.:/-]+$/.test(id))) throw new Error('Invalid agent tool catalog ID');
+    if (new Set(tools).size !== tools.length) throw new Error('Duplicate agent tool catalog ID');
+    const rawSkills = a.skills === undefined ? [] : a.skills;
+    if (!Array.isArray(rawSkills) || rawSkills.length > 128) throw new Error('Application agent Skills must be an array of at most 128 entries');
+    const skills = rawSkills.map(raw => {
+      const skill = object(raw);
+      if (Object.keys(skill).some(key => key !== 'id' && key !== 'path')) throw new Error('Agent Skill declarations only accept an ID and release path');
+      const id = text(skill.id, 'agent Skill ID', 128), path = relativePath(skill.path, 'agent Skill path');
+      if (!/^[A-Za-z0-9_.-]+$/.test(id) || path !== `skills/${id}/SKILL.md`) throw new Error('Agent Skills must use a matching skills/<id>/SKILL.md release path');
+      return { id, path };
+    });
+    if (new Set(skills.map(skill => skill.id)).size !== skills.length) throw new Error('Duplicate agent Skill ID');
+    agent = { tools: tools.sort(), skills: skills.sort((left, right) => left.id.localeCompare(right.id)) };
+    capabilities.add('agent');
+  }
+  if (capabilities.has('agent') && !agent) agent = { tools: [], skills: [] };
   if (install.length || build.length || processes.length) capabilities.add('process');
-  return { schema: 1, name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',
+  if (!Array.isArray(v.targets) || !v.targets.length) throw new Error('Application targets must be a nonempty array');
+  const targets = v.targets.map(raw => {
+    const t = object(raw);
+    if (!['android', 'ios', 'macos', 'windows', 'linux', 'web'].includes(String(t.platform)) || !['web', 'native', 'mobile-linux'].includes(String(t.environment))) throw new Error('Invalid application target');
+    if (t.capabilities !== undefined && (!Array.isArray(t.capabilities) || t.capabilities.some(c => !supported.includes(c as LocalAppCapability)))) throw new Error('Unsupported target capability');
+    return t as unknown as LocalAppTarget;
+  });
+  return { schema: 2, targets, ...(agent ? { agent } : {}),
+    ...(v.dataSchema ? { dataSchema: v.dataSchema as DesktopAppManifest['dataSchema'] } : {}),
+    ...(v.remix ? { remix: v.remix as DesktopAppManifest['remix'] } : {}),
+    ...(v.package ? { package: v.package as DesktopAppManifest['package'] } : {}), name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',
     entry, install, build, processes: sorted, capabilities: [...capabilities].sort() };
 }

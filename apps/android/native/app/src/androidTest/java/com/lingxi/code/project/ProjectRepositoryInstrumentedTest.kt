@@ -15,9 +15,23 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ProjectRepositoryInstrumentedTest {
+    private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private val runtimeDirectories get() = MobileUserStorage.directories(context)
     private val testRoot = File(
-        InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+        context.cacheDir,
         "project-store-${UUID.randomUUID()}",
+    )
+
+    private fun repository(
+        newId: () -> String = { UUID.randomUUID().toString().lowercase() },
+        writer: ProjectAtomicWriter = DefaultProjectAtomicWriter(),
+    ) = ProjectRepository(
+        projectsRoot = testRoot,
+        newId = newId,
+        writer = writer,
+        userHome = File(testRoot, "linux-home"),
+        projectsGuestRoot = runtimeDirectories.projectsGuestPath,
+        userHomeGuestPath = runtimeDirectories.guestHome,
     )
 
     @After
@@ -27,7 +41,7 @@ class ProjectRepositoryInstrumentedTest {
 
     @Test
     fun createAndReloadUsesStableUuidWorkspaceLayout() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val created = repository.createInternal("代码项目")
         val projectDir = File(testRoot, created.record.id)
 
@@ -36,13 +50,14 @@ class ProjectRepositoryInstrumentedTest {
             File(projectDir, PROJECT_WORKSPACE_DIR).canonicalPath,
             created.workspace.hostPath,
         )
-        assertEquals("/home/lingxi/lingxi/${created.record.id}", created.workspace.guestPath)
+        val projectsGuestPath = runtimeDirectories.projectsGuestPath
+        assertEquals("$projectsGuestPath/${created.record.id}/workspace", created.workspace.guestPath)
         assertTrue(File(projectDir, PROJECT_MANIFEST_FILE).isFile)
         assertTrue(File(projectDir, PROJECT_SESSION_INDEX_FILE).isFile)
         assertTrue(File(projectDir, PROJECT_SYNC_BASELINE_FILE).isFile)
         assertFalse(File(created.workspace.hostDirectory, PROJECT_MANIFEST_FILE).exists())
 
-        val restored = ProjectRepository(testRoot).load()
+        val restored = repository().load()
         assertEquals(listOf(created.record.id), restored.projects.map { it.record.id })
     }
 
@@ -53,7 +68,7 @@ class ProjectRepositoryInstrumentedTest {
             "10000000-0000-4000-8000-000000000001",
             "10000000-0000-4000-8000-000000000002",
         )
-        val repository = ProjectRepository(testRoot, newId = { ids[counter++] })
+        val repository = repository(newId = { ids[counter++] })
         val first = repository.createInternal("损坏项目")
         val second = repository.createInternal("正常项目")
         File(testRoot, "${first.record.id}/$PROJECT_MANIFEST_FILE").writeText("{broken")
@@ -64,7 +79,7 @@ class ProjectRepositoryInstrumentedTest {
 
     @Test
     fun projectAndGlobalSessionIndexesStayIsolated() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val first = repository.createInternal("一")
         val second = repository.createInternal("二")
         val firstRows = listOf(session("session-a"), session("session-b"))
@@ -92,7 +107,7 @@ class ProjectRepositoryInstrumentedTest {
 
     @Test
     fun sessionStartedIsIndexedBeforeEngineCatalogContainsIt() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val project = repository.createInternal("Started")
 
         val state = repository.recordStartedSession(
@@ -109,7 +124,7 @@ class ProjectRepositoryInstrumentedTest {
 
     @Test
     fun globalSessionStartedIsIndexedBeforeEngineCatalogContainsIt() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
 
         val state = repository.recordStartedSession(
@@ -122,13 +137,13 @@ class ProjectRepositoryInstrumentedTest {
         assertEquals(0, state.globalSessions.single().messageCount)
         assertEquals(
             uuid,
-            ProjectRepository(testRoot).load().globalSessions.single().sessionId,
+            repository().load().globalSessions.single().sessionId,
         )
     }
 
     @Test
     fun multipleEmptySessionsRemainIndexedAndKeepTheirStableIds() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val project = repository.createInternal("空会话清理")
         val first = "19587a33-0725-48db-abca-8a2aed345f6b"
         val second = "29587a33-0725-48db-abca-8a2aed345f6b"
@@ -144,7 +159,7 @@ class ProjectRepositoryInstrumentedTest {
 
     @Test
     fun legacyPrefixedSessionIndexLoadsAsBareUuid() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val project = repository.createInternal("旧版索引")
         val uuid = "19587a33-0725-48db-abca-8a2aed345f6b"
 
@@ -154,7 +169,7 @@ class ProjectRepositoryInstrumentedTest {
             title = "旧版会话",
         )
 
-        val restored = ProjectRepository(testRoot).load().projects.single()
+        val restored = repository().load().projects.single()
         assertEquals(uuid, restored.sessions.single().sessionId)
         assertEquals(uuid, restored.record.lastActiveSessionId)
     }
@@ -165,7 +180,7 @@ class ProjectRepositoryInstrumentedTest {
         val writer = ProjectAtomicWriter { target, _, _ ->
             if (target.name == PROJECT_MANIFEST_FILE) error("injected write failure")
         }
-        val repository = ProjectRepository(testRoot, newId = { id }, writer = writer)
+        val repository = repository(newId = { id }, writer = writer)
 
         val failed = runCatching { repository.createInternal("失败") }
 
@@ -182,7 +197,7 @@ class ProjectRepositoryInstrumentedTest {
 
     @Test
     fun workspaceSymlinkIsQuarantinedAndNestedLinksAreUnsafe() {
-        val repository = ProjectRepository(testRoot)
+        val repository = repository()
         val project = repository.createInternal("链接安全")
         val workspace = project.workspace.hostDirectory
         val outside = File(testRoot, "outside-workspace").also { assertTrue(it.mkdirs()) }

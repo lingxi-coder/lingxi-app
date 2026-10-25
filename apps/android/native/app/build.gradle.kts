@@ -5,8 +5,16 @@ import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
 val voiceManifest = rootProject.file("../../../resources/voice/models.json")
 val voiceRuntime = JsonSlurper().parse(voiceManifest) as Map<*, *>
 val sherpaRuntimeVersion = (voiceRuntime["runtime"] as Map<*, *>)["version"] as String
-val mobileLinuxContract = JsonSlurper().parse(rootProject.file("../../../docs/mobile-linux/mobile-linux-native-pins.json")) as Map<*, *>
+val mobileLinuxContractText = providers.fileContents(
+    rootProject.layout.projectDirectory.file("../../../docs/mobile-linux/mobile-linux-native-pins.json")
+).asText
+val mobileLinuxContract = JsonSlurper().parseText(mobileLinuxContractText.get()) as Map<*, *>
 val mobileLinuxSdkVersion = mobileLinuxContract["sdk_version"] as String
+val productConfigText = providers.fileContents(
+    rootProject.layout.projectDirectory.file("../../../config/product-config.json")
+).asText
+val productConfig = JsonSlurper().parseText(productConfigText.get()) as Map<*, *>
+val localAppMarketApiRoot = productConfig["localAppMarketApiRoot"] as String
 
 plugins {
     alias(libs.plugins.google.services)
@@ -51,6 +59,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "MOBILE_LINUX_SDK_VERSION", "\"$mobileLinuxSdkVersion\"")
+        buildConfigField("String", "LOCAL_APP_MARKET_API_ROOT", groovy.json.JsonOutput.toJson(localAppMarketApiRoot))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -193,6 +203,8 @@ listOf("play", "direct").forEach { distribution ->
             rootProject.file("scripts/verify-mobile-linux-native.sh").absolutePath,
             "--variant",
             distribution,
+            "--abis",
+            targetAbis.joinToString(","),
         )
     }
     listOf("debug", "release").forEach { buildType ->

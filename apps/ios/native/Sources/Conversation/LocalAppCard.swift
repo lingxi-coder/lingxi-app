@@ -17,7 +17,7 @@ struct LocalAppCard: View {
     let app: PublishedLocalApp
 
     var body: some View {
-        LocalAppCardContent(app: app, chat: LocalApps.chat)
+        LocalAppCardContent(app: app, library: LocalApps.library)
     }
 }
 
@@ -25,7 +25,7 @@ private struct LocalAppCardContent: View {
     @Environment(\.theme) private var t
     @Environment(\.openLocalApp) private var openLocalApp
     let app: PublishedLocalApp
-    let chat: ChatApps
+    let library: UnifiedLocalApps
 
     @State private var exists: Bool?
 
@@ -67,7 +67,7 @@ private struct LocalAppCardContent: View {
         .buttonStyle(.plain)
         .disabled(!openable)
         // Asks again whenever the library changes.
-        .task(id: chat.apps) { exists = await chat.exists(app.id) }
+        .task(id: library.records) { await library.refresh(); exists = library.record(app.id) != nil }
         .accessibilityIdentifier("conversation.local-app.\(app.id)")
     }
 }

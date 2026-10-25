@@ -33,24 +33,25 @@ final class MCPConfigurationRepositoryTests: XCTestCase {
         let original = Data("{ this is not JSON".utf8)
         try original.write(to: settingsURL)
 
-        let repository = MCPConfigurationRepository(appSandboxRoot: temporaryDirectory)
+        let repository = MCPConfigurationRepository(
+            configHome: temporaryDirectory.appendingPathComponent(".lingxi", isDirectory: true)
+        )
 
         XCTAssertThrowsError(try repository.save(server()))
         XCTAssertEqual(try Data(contentsOf: settingsURL), original)
     }
 
     func testWebSocketTransportUsesCanonicalConfigType() throws {
-        let settingsURL = temporaryDirectory
-            .appendingPathComponent(".lingxi", isDirectory: true)
-            .appendingPathComponent("settings.json")
+        let configHome = temporaryDirectory.appendingPathComponent(".atlas-config", isDirectory: true)
+        let settingsURL = configHome.appendingPathComponent("settings.json")
         try FileManager.default.createDirectory(
-            at: settingsURL.deletingLastPathComponent(),
+            at: configHome,
             withIntermediateDirectories: true
         )
         let initial = #"{"mcpServers":{"socket":{"type":"websocket","url":"ws://example.test"}}}"#
         try Data(initial.utf8).write(to: settingsURL)
 
-        let repository = MCPConfigurationRepository(appSandboxRoot: temporaryDirectory)
+        let repository = MCPConfigurationRepository(configHome: configHome)
         let loaded = try XCTUnwrap(repository.loadServers().first)
         XCTAssertEqual(loaded.transport, "ws")
 

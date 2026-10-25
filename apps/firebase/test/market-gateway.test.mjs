@@ -28,3 +28,23 @@ test('Hosting gateway has a fixed upstream, rejects non-API paths, and returns a
   assert.equal(res.code, 503); assert.equal(res.body.error.code, 'SERVICE_UNAVAILABLE');
   assert.equal(JSON.stringify(res.body).includes('private details'), false);
 });
+
+test('Hosting gateway forwards v2 source release distribution and capabilities without accepting arbitrary namespaces', async () => {
+  const calls = [];
+  const gateway = createMarketGateway({ origin: 'https://market.example.run.app', secret: () => 'server-only', fetcher: async (...args) => { calls.push(args); return new Response('{"data":{}}'); } });
+  const body = Buffer.from('{"target":{"platform":"ios","environment":"web"}}');
+  let res = result();
+  await gateway({ originalUrl: '/api/v2/apps/example/distribution', method: 'POST', rawBody: body, headers: { 'content-type': 'application/json' } }, res);
+  assert.equal(calls[0][0].href, 'https://market.example.run.app/api/v2/apps/example/distribution');
+  assert.equal(calls[0][1].body, body);
+  assert.equal(res.code, 200);
+  res = result();
+  await gateway({ originalUrl: '/api/v2/capabilities', method: 'GET', headers: {} }, res);
+  assert.equal(calls[1][0].href, 'https://market.example.run.app/api/v2/capabilities');
+  for (const path of ['/api/v20/apps', '/api/v3/apps', '/api/v2', '/internal/v2/apps']) {
+    res = result();
+    await gateway({ originalUrl: path, method: 'GET', headers: {} }, res);
+    assert.equal(res.code, 404);
+  }
+  assert.equal(calls.length, 2);
+});

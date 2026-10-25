@@ -8,6 +8,8 @@ SIMULATOR_ONLY=0
 CLEAN=0
 CONFIGURATION=Release
 ALPINE_VERSION=""
+ROOTFS_PROFILE=toolchain
+ROOTFS_ARCHIVE="${LINGXI_IOS_ROOTFS_ARCHIVE:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) CLEAN=1; shift ;;
@@ -15,12 +17,15 @@ while [[ $# -gt 0 ]]; do
     --release) CONFIGURATION=Release; shift ;;
     --simulator-only) SIMULATOR_ONLY=1; shift ;;
     --alpine-version) ALPINE_VERSION="${2:?missing Alpine version}"; shift 2 ;;
+    --rootfs-archive) ROOTFS_ARCHIVE="${2:?missing rootfs archive}"; shift 2 ;;
+    --rootfs-profile) ROOTFS_PROFILE="${2:?missing rootfs profile}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 [--debug|--release] [--simulator-only] [--clean]"
+      echo "usage: $0 [--debug|--release] [--simulator-only] [--clean] [--rootfs-archive path] [--rootfs-profile toolchain|base]"
       exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+case "${ROOTFS_PROFILE}" in toolchain|base) ;; *) echo "invalid rootfs profile" >&2; exit 2 ;; esac
 SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
 CACHE="${IOS_DIR}/build/mobile-linux-cache"
@@ -51,9 +56,30 @@ if [[ "${SIMULATOR_ONLY}" == 1 ]]; then
   echo "Staged simulator-only native-support stubs; no device runtime claimed."
   exit 0
 fi
-ROOTFS_PROFILE=base
 # Downloading is a host build policy. The SDK receives a verified local file.
 mkdir -p "${CACHE}"
+if [[ "${ROOTFS_PROFILE}" == toolchain ]]; then
+  # Mobile service apps need guest Python/Node, not host binaries. Reuse the
+  # architecture-checked immutable SDK release used by Android. Dependency
+  # installs still go into each application's own prepared workspace.
+  ARCHIVE="${ROOTFS_ARCHIVE:-${REPO_ROOT}/apps/android/native/app/build/mobileLinuxRootfs/arm64-v8a/rootfs.tar.gz}"
+  ROOTFS_METADATA="$(python3 - "${SDK_ROOT}" "${ARCHIVE}" <<'TOOLCHAIN'
+import hashlib, json, pathlib, sys
+sdk, archive = map(pathlib.Path, sys.argv[1:])
+pins = json.loads((sdk / "docs/toolchains/runtime-pins.json").read_text())
+manifest = json.loads((sdk / "docs/mobile-linux/releases" / pins["rootfs_version"] / "arm64-v8a/rootfs-manifest.json").read_text())
+record = manifest["archive"]
+if not archive.is_file() or archive.is_symlink():
+    raise SystemExit("Pinned ARM64 toolchain rootfs missing. Produce the SDK release archive and pass --rootfs-archive; host tools cannot substitute for guest Python/Node.")
+with archive.open("rb") as stream:
+    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+if archive.stat().st_size != record["size_bytes"] or digest != record["sha256"]:
+    raise SystemExit("iOS toolchain rootfs differs from the Cargo-locked SDK release")
+print(pins["alpine"]["version"] + "\t" + digest)
+TOOLCHAIN
+)"
+  IFS=$'\t' read -r VERSION EXPECTED_ARCHIVE_SHA <<<"${ROOTFS_METADATA}"
+else
 ARCHIVE="${CACHE}/base-rootfs-aarch64.tar.gz"
 VERSION="$(python3 - "${SDK_ROOT}/docs/toolchains/runtime-pins.json" "${ARCHIVE}" <<'FETCH'
 import hashlib, json, pathlib, sys, urllib.request
@@ -72,6 +98,7 @@ print(pins["version"])
 FETCH
 )"
 EXPECTED_ARCHIVE_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["alpine"]["minirootfs"]["aarch64"]["sha256"])' "${SDK_ROOT}/docs/toolchains/runtime-pins.json")"
+fi
 if [[ -n "${ALPINE_VERSION}" && "${ALPINE_VERSION}" != "${VERSION}" ]]; then
   echo "--alpine-version must match the SDK's pinned version ${VERSION}" >&2; exit 1
 fi

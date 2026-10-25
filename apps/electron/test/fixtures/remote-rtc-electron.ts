@@ -21,9 +21,8 @@ const trace = (message: string): void => { process.stderr.write(`remote-rtc fixt
 process.on('uncaughtException', (error) => { process.stderr.write(`Uncaught: ${error.stack}\n`); app.exit(1); });
 process.on('unhandledRejection', (error) => { process.stderr.write(`Unhandled: ${String(error)}\n`); app.exit(1); });
 app.setPath('userData', join(root, 'profile'));
-// Both ends of the test are on this machine: let their host candidates meet without mDNS names.
-app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
-app.commandLine.appendSwitch('allow-loopback-in-peer-connection');
+// Keep production privacy defaults: the host must enumerate usable interfaces
+// without relying on global mDNS or loopback flags.
 app.on('window-all-closed', () => undefined);
 
 const SIZE = Number(process.env['LINGXI_TEST_BYTES'] ?? 2 * 1024 * 1024);
@@ -136,14 +135,16 @@ async function main(): Promise<void> {
     csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content ?? null,
     fetch: await fetch('http://127.0.0.1:${database.port}/probe').then(() => 'allowed', () => 'blocked'),
     media: !navigator.mediaDevices ? 'unavailable' : await Promise.race([navigator.mediaDevices.getUserMedia({ audio: true }).then(() => 'allowed', (error) => error.name), new Promise((resolve) => setTimeout(() => resolve('never granted'), 3000))]),
+    camera: !navigator.mediaDevices ? 'unavailable' : await Promise.race([navigator.mediaDevices.getUserMedia({ video: true }).then(() => 'allowed', (error) => error.name), new Promise((resolve) => setTimeout(() => resolve('never granted'), 3000))]),
     popup: window.open('about:blank') === null,
-  }))()`) as { require: string; process: string; exposed: string[]; csp: string; fetch: string; media: string; popup: boolean };
+  }))()`) as { require: string; process: string; exposed: string[]; csp: string; fetch: string; media: string; camera: string; popup: boolean };
   assert.equal(lockdown.require, 'undefined');
   assert.equal(lockdown.process, 'undefined');
   assert.deepEqual(lockdown.exposed, []);
   assert.equal(lockdown.csp, "default-src 'none'; script-src 'self'");
   assert.equal(lockdown.fetch, 'blocked');
-  assert.notEqual(lockdown.media, 'allowed');
+  assert.equal(lockdown.media, 'NotAllowedError');
+  assert.equal(lockdown.camera, 'NotAllowedError');
   assert.equal(lockdown.popup, true);
   assert.ok(!database.calls.some((call) => call.includes('probe')), 'the page reached the network');
   await rtcWindow.webContents.executeJavaScript(`location.href = 'data:text/html,hijacked'`).catch(() => undefined);

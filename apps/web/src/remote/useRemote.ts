@@ -18,6 +18,7 @@ import { RemoteClient } from './remoteClient';
 import { displayText } from './text';
 import { TunnelMemory } from './tunnelMemory';
 import { ViewerConnection, type ConnectionState } from './viewerConnection';
+import { subscribeWhileVisible } from './visibleSubscription';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Process-wide pieces: one identity store and one tunnel memory per page load
@@ -123,7 +124,7 @@ export function useHosts(uid: string, rtdb: Rtdb): HostsState {
       hosts.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
       setState((previous) => ({ ...previous, status: failed ? 'error' : 'ready', hosts }));
     };
-    const subscription = rtdb.listen(
+    const unsubscribe = subscribeWhileVisible(document, () => rtdb.listen(
       hostsPath(uid),
       (event) => {
         const changes = mirror.apply(event);
@@ -145,7 +146,7 @@ export function useHosts(uid: string, rtdb: Rtdb): HostsState {
         failed = true;
         publish();
       },
-    );
+    ));
     // A host that died produces no events, so re-judge on a timer.
     const timer = window.setInterval(publish, PRESENCE_TICK_MS);
     const keys = getDeviceKeys();
@@ -154,7 +155,7 @@ export function useHosts(uid: string, rtdb: Rtdb): HostsState {
     };
     refreshPins();
     return () => {
-      subscription.close();
+      unsubscribe();
       window.clearInterval(timer);
     };
   }, [uid, rtdb]);

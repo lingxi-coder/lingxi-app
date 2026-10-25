@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import LingxiCode
 
@@ -49,6 +50,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         var projectID: String?
         var stage = "create-source"
         var engine: EngineConversationSource?
+        var pathCandidates: [(String, String)] = []
         do {
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -96,7 +98,31 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             guard let activeEngine = engine else {
                 throw LocalAppServiceFailure("ENGINE_UNAVAILABLE", "The production conversation factory did not create the engine.")
             }
-            let sessionID = try await activeEngine.startLocalAppAuthoringSession(cwd: guest)
+            let grantPathCandidates = try projectMountGrants.enumerated().map { index, guestPath in
+                ("project-grant-\(index)", try UnifiedLocalApps.hostSourceDirectory(guestPath).path)
+            }
+            pathCandidates = [
+                ("application-support-root", ConversationSourceFactory.appSandboxRoot()),
+                ("managed-root", mobileLinux.managedRoot),
+                ("default-home", paths.home),
+                ("config-home", paths.configHome),
+                ("default-workspace", paths.defaultCwd),
+                ("projects-workspace", paths.projects),
+                ("apps-root", paths.apps),
+                ("project-source", source.path),
+                ("project-workspace", project.workspace.hostURL.path),
+                ("descriptor-workspace", runtime.workspace.hostPath ?? ""),
+            ].filter { !$0.1.isEmpty } + grantPathCandidates
+            print("IOS_PROJECT_PATH_GUESTS guestHome=\(paths.guestHome) defaultGuestCwd=\(paths.defaultGuestCwd) projectSource=\(guest)")
+            logPathComponentMetadata("before-native-session", candidates: pathCandidates)
+            let sessionID: String
+            do {
+                sessionID = try await activeEngine.startLocalAppAuthoringSession(cwd: guest)
+            } catch {
+                logPathComponentMetadata("after-native-session-error", candidates: pathCandidates)
+                throw error
+            }
+            logPathComponentMetadata("after-native-session", candidates: pathCandidates)
             stage = "verify-code-session"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             guard let workspace = activeEngine.model.workspaceState,
@@ -144,12 +170,74 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             return PublishedAgentApp(result: result, source: source, projectID: project.record.id, sessionID: sessionID)
         } catch {
             print("IOS_AGENT_PUBLISH_FAILURE stage=\(stage) type=\(String(reflecting: type(of: error))) error=\(String(describing: error))")
+            if !pathCandidates.isEmpty {
+                logPathComponentMetadata("after-publish-failure-stage-\(stage)", candidates: pathCandidates)
+            }
             engine = nil
             if let projectID { _ = try? projectRepository.deleteProject(projectId: projectID) }
             try? FileManager.default.removeItem(at: source)
             try? FileManager.default.removeItem(at: engineRoot)
             throw error
         }
+    }
+
+    /// Logs only lstat/readlink/realpath metadata for the isolated acceptance
+    /// Project and its known runtime roots. This avoids reading user files while
+    /// identifying which exact host mount becomes unsafe during native boot.
+    private func logPathComponentMetadata(_ phase: String, candidates: [(String, String)]) {
+        for (name, path) in candidates {
+            print("IOS_PROJECT_PATH_DIAGNOSTIC phase=\(phase) name=\(name) path=\(path) components=\(pathComponentMetadata(path))")
+        }
+    }
+
+    private func pathComponentMetadata(_ path: String) -> String {
+        guard path.hasPrefix("/") else { return "not-absolute" }
+        var current = ""
+        var rows: [String] = []
+        for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+            current += "/" + String(component)
+            var details = stat()
+            let status = current.withCString { lstat($0, &details) }
+            guard status == 0 else {
+                rows.append("\(current){lstat-errno=\(errno)}")
+                continue
+            }
+
+            let fileType = details.st_mode & mode_t(S_IFMT)
+            let kind: String
+            switch fileType {
+            case mode_t(S_IFDIR): kind = "directory"
+            case mode_t(S_IFREG): kind = "file"
+            case mode_t(S_IFLNK): kind = "symlink"
+            default: kind = "other"
+            }
+
+            var target = ""
+            if fileType == mode_t(S_IFLNK) {
+                var buffer = [CChar](repeating: 0, count: 4096)
+                let count = current.withCString { pathPointer in
+                    buffer.withUnsafeMutableBufferPointer { bufferPointer in
+                        readlink(pathPointer, bufferPointer.baseAddress!, bufferPointer.count)
+                    }
+                }
+                if count >= 0 {
+                    target = String(decoding: buffer.prefix(count).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                } else {
+                    target = "readlink-errno=\(errno)"
+                }
+            }
+
+            var resolved = [CChar](repeating: 0, count: 4096)
+            let canonical = resolved.withUnsafeMutableBufferPointer { buffer -> String? in
+                guard let baseAddress = buffer.baseAddress else { return nil }
+                let result = current.withCString { realpath($0, baseAddress) }
+                guard result != nil else { return nil }
+                return String(cString: baseAddress)
+            }
+            let canonicalValue = canonical ?? "errno=\(errno)"
+            rows.append("\(current){type=\(kind),target=\(target),realpath=\(canonicalValue)}")
+        }
+        return rows.joined(separator: ";")
     }
 
     /// Exercises the native Code session's normal model/tool path. The one-time

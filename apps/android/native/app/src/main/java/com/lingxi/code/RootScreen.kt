@@ -84,6 +84,7 @@ import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.conversation.SessionPanel
 import com.lingxi.code.conversation.SessionPanelModel
 import com.lingxi.code.conversation.WorkspaceDirectorySheet
+import com.lingxi.code.conversation.WorkspaceFilesDialog
 import com.lingxi.code.conversation.permissionModeLabel
 import com.lingxi.code.project.ProjectPage
 import com.lingxi.code.project.ProjectsPage
@@ -1571,6 +1572,7 @@ fun RootScreen(
         myApps(installedApps, installedAppInfo, updates = emptyList(), operations = emptyMap(), chatApps = chatApps)
     }
     var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
+    var filesBrowserOpen by rememberSaveable { mutableStateOf(false) }
     var sessionPanelOpen by rememberSaveable { mutableStateOf(false) }
     var linkedDetailKey by rememberSaveable { mutableStateOf<String?>(null) }
     var linkedMessageUuid by rememberSaveable { mutableStateOf<String?>(null) }
@@ -2042,6 +2044,7 @@ fun RootScreen(
                 val requestedMessageUuid = linkedMessageUuid.takeIf { linkedSessionId == state.session.id.removePrefix("sess:") }
                 val messageRequest = linkedMessageRequest
                 ChatScreen(
+                    onOpenFiles = { filesBrowserOpen = true },
                     linkedDetailKey = linkedDetailKey,
                     onLinkedDetailHandled = { linkedDetailKey = null },
                     linkedMessageUuid = requestedMessageUuid,
@@ -2442,6 +2445,23 @@ fun RootScreen(
                     }
                 },
             )
+        }
+        if (filesBrowserOpen) {
+            val filePaths = remember { com.lingxi.code.project.MobileUserStorage.directories(context) }
+            val filesRepository = remember { com.lingxi.code.project.WorkspaceDirectoryRepository(java.io.File(filePaths.home),
+                filePaths.guestHome, filePaths.defaultGuestCwd, filePaths.projectsGuestPath, java.io.File(filePaths.configHome)) }
+            val browserSource = remember { currentEngineSource }
+            val browserSession = remember { liveWorkspace?.sessionId }
+            WorkspaceFilesDialog(filesRepository, liveWorkspace?.cwd ?: filePaths.defaultGuestCwd,
+                protectedPaths = {
+                    projectState.projects.flatMap { project -> listOf(project.record.directory, project.record.activeDirectory,
+                        project.record.directory.substringBeforeLast('/')) + project.record.additionalDirectories + project.sessions.mapNotNull { it.workspaceDirectory } } +
+                        listOfNotNull(currentEngineSource.workspaceState.value?.cwd, currentEngineSource.workspaceState.value?.projectRoot) +
+                        currentEngineSource.workspaceState.value?.additionalDirectories.orEmpty() + sessionState.rows.mapNotNull { it.workspaceDirectory }
+                }, canMutate = { !chatViewModel.state.value.requiresBackgroundExecution && !chatViewModel.state.value.sessionTransitioning &&
+                    !chatViewModel.state.value.cancellationInFlight && chatViewModel.engineSource.value === browserSource &&
+                    browserSource.workspaceState.value?.sessionId == browserSession },
+                onDismiss = { filesBrowserOpen = false })
         }
         if (workspacePickerOpen) {
             val pickerSource = remember { currentEngineSource }

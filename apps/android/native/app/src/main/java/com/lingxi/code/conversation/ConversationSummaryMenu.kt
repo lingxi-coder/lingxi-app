@@ -40,6 +40,7 @@ internal fun ConversationSummaryMenu(
     state: ChatState,
     onResumeWorkflow: (String) -> Unit = {},
     onToggleToolCall: (String) -> Unit = {},
+    onOpenFiles: (() -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var selected by rememberSaveable(state.session.id) { mutableStateOf<ConversationSummaryCategory?>(null) }
@@ -50,6 +51,9 @@ internal fun ConversationSummaryMenu(
                 modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            onOpenFiles?.let { open -> DropdownMenuItem(text = { Text(stringResource(R.string.files_files)) },
+                leadingIcon = { LXIcon(LXIconName.Folder) }, modifier = Modifier.testTag("conversation.files"),
+                onClick = { expanded = false; open() }) }
             ConversationSummaryCategory.entries.forEach { category ->
                 DropdownMenuItem(text = { Text(stringResource(category.title)) },
                     leadingIcon = { LXIcon(category.icon) },

@@ -127,6 +127,7 @@ fun ChatScreen(
     sessionMode: SessionMode = SessionMode.Code,
     workspaceName: String = "",
     onOpenSessionPanel: (() -> Unit)? = null,
+    onOpenFiles: (() -> Unit)? = null,
     onOpenSideChats: (() -> Unit)? = null,
     showTopBar: Boolean = true,
     showNewChatControls: Boolean = true,
@@ -388,6 +389,7 @@ fun ChatScreen(
                     onTitleClick = onOpenSessionPanel?.takeIf { !isNewChat && state.session.id != "new" },
                     onNewChat = onNewChat,
                     onOpenSideChats = onOpenSideChats,
+                    onOpenFiles = onOpenFiles,
                     state = state,
                     onResumeWorkflow = onResumeWorkflow,
                     onToggleToolCall = onToggleToolCall,
@@ -599,6 +601,7 @@ private fun TopBar(
     title: String, subtitle: String, subtitleColor: Color,
     onOpenDrawer: () -> Unit, onTitleClick: (() -> Unit)?, onNewChat: () -> Unit,
     onOpenSideChats: (() -> Unit)?,
+    onOpenFiles: (() -> Unit)?,
     state: ChatState,
     onResumeWorkflow: (String) -> Unit,
     onToggleToolCall: (String) -> Unit,
@@ -628,7 +631,7 @@ private fun TopBar(
                     stringResource(R.string.side_chats_title), Modifier.testTag("conversation.side-chats"))
             }
             IconButton(LXIconName.Edit, t.text, 22.dp, onNewChat, stringResource(R.string.chat_new_chat))
-            ConversationSummaryMenu(state, onResumeWorkflow, onToggleToolCall)
+            ConversationSummaryMenu(state, onResumeWorkflow, onToggleToolCall, onOpenFiles)
         },
         colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
             containerColor = t.windowBg, scrolledContainerColor = t.windowBg,

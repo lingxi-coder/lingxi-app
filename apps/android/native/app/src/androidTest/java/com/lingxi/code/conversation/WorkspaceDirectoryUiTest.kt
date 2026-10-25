@@ -94,12 +94,12 @@ class WorkspaceDirectoryUiTest {
         capture("android-workspace-picker")
         rule.onNodeWithTag("workspace.browse").performClick()
         capture("android-workspace-browser")
-        rule.onNodeWithTag("workspace.actions").performClick()
+        rule.onNodeWithTag("files.actions").performClick()
         rule.onNodeWithText(text(R.string.workspace_browser_new_folder)).performClick()
-        rule.onNodeWithTag("workspace.edit.name").performTextInput("Example")
-        rule.onNodeWithTag("workspace.edit.save").performClick()
+        rule.onNodeWithTag("files.name").performTextInput("Example")
+        rule.onNodeWithText(text(R.string.files_save)).performClick()
         rule.waitUntil(5000) { File(root, "workspace/Example").isDirectory }
-        rule.onNodeWithTag("workspace.folder.Example").performClick()
+        rule.onNodeWithTag("files.entry.Example").performClick()
         rule.onNodeWithTag("workspace.choose").performClick()
         rule.waitUntil(5000) { !open.value }
         assertEquals("/home/test/workspace/Example", current.value)

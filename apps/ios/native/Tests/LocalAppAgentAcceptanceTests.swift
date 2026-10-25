@@ -10,6 +10,11 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
     @MainActor
     private func publishAgentApp(_ client: LocalAppServiceClient) async throws -> (LocalAppPublishResult, URL, String) {
         let paths = MobileUserStorage.directories()
+        let providerSnapshot = ProviderRepository.shared.makeLaunchSnapshot()
+        guard let codeModelID = providerSnapshot.defaultModelID,
+              !providerSnapshot.enabledProfileIDs.isEmpty else {
+            throw XCTSkip("Configure a tool-capable native model before exercising the iOS Project source mount.")
+        }
         let guest = paths.appsGuestPath + "/agent-wake-acceptance-" + UUID().uuidString.lowercased()
         let source = try UnifiedLocalApps.hostSourceDirectory(guest)
         let fixtures = try XCTUnwrap(Bundle(for: Self.self).resourceURL).appendingPathComponent("UnifiedAppFixtures/agent")
@@ -57,10 +62,11 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
                 projectCwd: project.workspace.hostURL.path,
                 additionalWorkspaceDirectories: project.record.additionalDirectories,
                 sessionMode: .code,
-                providerConfigured: false,
-                providerProfilesJson: nil,
-                providerRoutingJson: nil,
-                visionDelegationEnabled: false,
+                providerConfigured: true,
+                providerProfilesJson: providerSnapshot.providerProfilesJSON,
+                providerRoutingJson: providerSnapshot.routingJSON,
+                defaultModelID: codeModelID,
+                visionDelegationEnabled: providerSnapshot.visionDelegationEnabled,
                 mobileLinux: mobileLinux,
                 projectMountGrants: projectMountGrants
             )
@@ -87,6 +93,13 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             stage = "record-workspace"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
+            stage = "verify-project-shell-cwd"
+            print("IOS_AGENT_WAKE_CHECKPOINT \(stage) model=\(codeModelID)")
+            try await verifyProjectMountWithConfiguredShell(
+                activeEngine,
+                guestSource: guest,
+                hostSource: source
+            )
             let authoring = LocalAppAuthoring(
                 sourceDirectory: guest,
                 workspaceId: project.record.id,
@@ -115,6 +128,68 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             }
             throw error
         }
+    }
+
+    /// Exercises the native Code session's normal model/tool path. The one-time
+    /// approval below is narrowly bound to the exact read-only probe command;
+    /// no permission mode or sandbox policy is changed for the session.
+    @MainActor
+    private func verifyProjectMountWithConfiguredShell(
+        _ engine: EngineConversationSource,
+        guestSource: String,
+        hostSource: URL
+    ) async throws {
+        let markerName = ".ios-project-mount-\(UUID().uuidString.lowercased()).txt"
+        let marker = "IOS_PROJECT_SOURCE_MARKER_\(UUID().uuidString)"
+        let markerURL = hostSource.appendingPathComponent(markerName)
+        try Data(marker.utf8).write(to: markerURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: markerURL) }
+
+        let command = "pwd && cat ./\(markerName)"
+        let prompt = "Use the Bash tool once with this exact command: `\(command)`. Do not infer the output."
+        guard let token = engine.send(prompt) else {
+            throw LocalAppServiceFailure("PROJECT_SHELL_NOT_SUBMITTED", "The Code session did not accept the Project mount probe.")
+        }
+
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline {
+            try Task.checkCancellation()
+            if let pending = engine.model.pendingPermissions.first {
+                guard case let .toolUseConfirm(toolName, toolInputJson, _) = pending.kind,
+                      ["bash", "shell"].contains(toolName.lowercased()),
+                      let json = toolInputJson.data(using: .utf8),
+                      let input = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+                      input["command"] as? String == command,
+                      (input["dangerouslyDisableSandbox"] as? Bool ?? false) == false else {
+                    engine.denyPermission(pending.requestId)
+                    try? await engine.cancelAndWait()
+                    throw LocalAppServiceFailure("PROJECT_SHELL_PERMISSION_MISMATCH", "The model requested a command outside the exact read-only Project mount probe.")
+                }
+                engine.approvePermission(pending.requestId, .allowOnce)
+            }
+
+            if let completion = engine.model.turnCompletion, completion.token == token {
+                guard completion.outcome == .completed else {
+                    throw LocalAppServiceFailure("PROJECT_SHELL_TURN_FAILED", "The Code session's Project mount probe did not complete.")
+                }
+                let shell = engine.model.items.reversed().compactMap { item -> ConversationShellCard? in
+                    guard case let .run(run) = item, run.turnId == token.clientTurnId else { return nil }
+                    return run.shellCards.first { $0.command == command }
+                }.first
+                guard let shell else {
+                    throw LocalAppServiceFailure("PROJECT_SHELL_RESULT_MISSING", "The completed Code turn did not report its Bash tool result.")
+                }
+                guard shell.status == .completed, shell.exitCode == 0,
+                      shell.stdout.contains(guestSource), shell.stdout.contains(marker) else {
+                    throw LocalAppServiceFailure("PROJECT_SHELL_RESULT_MISMATCH", "Bash output did not confirm the authorized guest source cwd and marker file.")
+                }
+                print("IOS_AGENT_WAKE_PROJECT_MOUNT PASS guest=\(guestSource) shell=\(command) exit=\(shell.exitCode ?? -1) stdout=\(shell.stdout.debugDescription)")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try? await engine.cancelAndWait()
+        throw LocalAppServiceFailure("PROJECT_SHELL_TIMEOUT", "The Code session did not finish the Project mount probe within 120 seconds.")
     }
 
     private func configureAgentForWakeGate(_ client: LocalAppServiceClient, appId: String) async throws {

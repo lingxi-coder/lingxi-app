@@ -206,17 +206,20 @@ class LocalAppAgentAcceptanceTest {
         val threadId = "external-thread-" + UUID.randomUUID()
         val quotedImage = JSONObject.quote(imageBase64)
         val page = """
-            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><script src="/__local_app_sdk.js"></script><title>External browser Agent acceptance</title>
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Agent acceptance</title>
             <style>#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
             <h1>External browser Agent acceptance</h1><pre id="result">Waiting for LingXi SDK</pre>
-            <script>
+            <script type="module">
             (async()=>{
               const output=document.getElementById('result');
               const bootstrap={
-                globals:{localApp:typeof window.localApp,bridge:typeof window.__lingxiLocalAppBridge,agui:typeof window.LingxiLocalAppAGUI,configuration:typeof window.__LINGXI_APP_CONFIGURATION__},
-                scripts:Array.from(document.scripts).map(script=>script.src?new URL(script.src).pathname:'inline')
+                importMode:'dynamic-esm',sdkImport:'/__local_app_sdk.js',
+                scriptOrder:['inline type=module','dynamic import /__local_app_sdk.js'],
+                scriptTypes:Array.from(document.scripts).map(script=>script.type||'classic')
               };
               try {
+                await import('/__local_app_sdk.js');
+                bootstrap.globals={localApp:typeof window.localApp,bridge:typeof window.__lingxiLocalAppBridge,agui:typeof window.LingxiLocalAppAGUI,configuration:typeof window.__LINGXI_APP_CONFIGURATION__};
                 const bytes=Uint8Array.from(atob($quotedImage),c=>c.charCodeAt(0));
                 const file=new File([bytes],'acceptance-photo.jpg',{type:'image/jpeg'});
                 const part=await localApp.agent.file(file);
@@ -391,6 +394,11 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals("data", summaryParts.getJSONObject(1).getString("sourceType"))
                 assertEquals("image/jpeg", summaryParts.getJSONObject(1).getString("mimeType"))
                 assertEquals("acceptance-photo.jpg", summaryParts.getJSONObject(1).getString("filename"))
+                val browserBootstrap = checkNotNull(browserResult).getJSONObject("bootstrap")
+                assertEquals("dynamic-esm", browserBootstrap.getString("importMode"))
+                assertEquals("/__local_app_sdk.js", browserBootstrap.getString("sdkImport"))
+                assertEquals("object", browserBootstrap.getJSONObject("globals").getString("localApp"))
+                assertEquals("module", browserBootstrap.getJSONArray("scriptTypes").getString(0))
                 File(context.filesDir, "external-browser-agent-acceptance.json").writeText(
                     JSONObject().put("browserPackage", browserPackage).put("appId", app.id).put("task", task)
                         .put("page", checkNotNull(browserResult)).toString(2))
@@ -399,6 +407,173 @@ class LocalAppAgentAcceptanceTest {
                     bitmap.recycle()
                 }
                 android.util.Log.i("LocalAppAgentAcceptance", "EXTERNAL_BROWSER_FILE_TASK PASS browser=$browserPackage AG-UI-RunAgentInput agent.file standard-events actual-model/schema/system-handler")
+            }
+        } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }
+    }
+
+    @Test fun externalBrowserPersistentChatStoresHistoryAndIsolatesThreads() = runBlocking<Unit> {
+        val apps = UnifiedLocalApps.get(context)
+        val sources = mutableListOf<File>(); val ids = mutableListOf<String>()
+        val runId = "external-chat-" + UUID.randomUUID()
+        val page = """
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Chat acceptance</title>
+            <style>#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+            <h1>External browser Chat acceptance</h1><pre id="result">Waiting for LingXi SDK</pre>
+            <script type="module">
+            (async()=>{
+              const output=document.getElementById('result');
+              const bootstrap={importMode:'dynamic-esm',sdkImport:'/__local_app_sdk.js'};
+              try {
+                await import('/__local_app_sdk.js');
+                bootstrap.localAppType=typeof window.localApp;
+                const chat=await localApp.agent.chats.create({title:'AG-UI Chat acceptance'});
+                const isolated=await localApp.agent.chats.create({title:'AG-UI Chat isolation'});
+                const input={
+                  threadId:chat.id,runId:'$runId',messages:[{
+                    id:'message-$runId',role:'user',content:[{type:'text',text:'Return the exact uppercase word ORBIT using the result tool.'}]
+                  }],
+                  forwardedProps:{'com.lingxi.localApp':{
+                    version:1,outputSchema:{type:'object',properties:{answer:{type:'string'}},required:['answer'],additionalProperties:false},
+                    tools:[],skills:[],maxTurns:8,timeoutMs:180000
+                  }}
+                };
+                const result=await chat.send(input);
+                if(!result.result||result.result.answer!=='ORBIT'||!Array.isArray(result.newMessages)){
+                  throw new Error('Persistent Chat did not return the structured AG-UI result.');
+                }
+                const task=await localApp.agent.tasks.get('$runId');
+                const history=await chat.history({limit:50});
+                const reopened=await localApp.agent.chats.open(chat.id);
+                const reopenedHistory=await reopened.history({limit:50});
+                const isolatedHistory=await isolated.history({limit:50});
+                const listed=await localApp.agent.chats.list({limit:50});
+                const eventPage=await localApp.agent.tasks.events({runId:'$runId'});
+                const summary={
+                  chatId:chat.id,runId:'$runId',threadId:input.threadId,taskThreadId:task.threadId,taskState:task.state,
+                  result:result.result,historyRoles:history.messages.map(message=>message.role),
+                  historyIds:history.messages.map(message=>message.id),reopenedIds:reopenedHistory.messages.map(message=>message.id),
+                  isolatedMessageCount:isolatedHistory.messages.length,
+                  chatListed:Array.isArray(listed)&&listed.some(item=>item.chatId===chat.id),
+                  eventTypes:eventPage.events.map(event=>event.type)
+                };
+                if(task.threadId!==chat.id||task.state!=='succeeded'||history.messages.length<2||
+                   reopenedHistory.messages.length!==history.messages.length||isolatedHistory.messages.length!==0||
+                   !summary.chatListed||!eventPage.events.some(event=>event.type==='RUN_FINISHED')){
+                  throw new Error('Persistent Chat history, isolation, or task correlation failed: '+JSON.stringify(summary));
+                }
+                output.textContent=JSON.stringify({acceptance:'CHAT_FLOW_PASS',bootstrap,summary});
+              } catch(error) {
+                output.textContent='CHAT_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,error:String(error),code:error.code||null});
+              }
+            })();
+            </script>
+        """.trimIndent()
+        try {
+            val app = publish(apps, sources, pageHtml = page); ids.add(app.id)
+            configure(apps, app.id, photo = false)
+            val browserPackages = LocalAppBrowser.installedHandlerPackages(context, "http://127.0.0.1/")
+            assertTrue("Install or enable an HTTP browser before this Chat acceptance", browserPackages.isNotEmpty())
+            val intent = Intent().setClassName(context.packageName, "com.lingxi.code.apps.LocalAppAcceptanceActivity")
+                .putExtra("appId", app.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            NativeAppActivityHost(intent).use { native ->
+                var browserPackage = ""
+                var consentButtonFound = false
+                var consentClickAttempted = false
+                val browserOpened = withTimeoutOrNull(60_000) {
+                    while (true) {
+                        val root = instrumentation.uiAutomation.rootInActiveWindow
+                        browserPackage = root?.packageName?.toString().orEmpty()
+                        if (!consentClickAttempted && root != null) {
+                            var action = root.findAccessibilityNodeInfosByText("允许并打开浏览器")
+                                ?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                            consentButtonFound = action != null
+                            while (action != null && !action.isClickable) action = action.parent
+                            if (action != null) {
+                                consentClickAttempted = true
+                                action.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                            }
+                        }
+                        if (browserPackage in browserPackages) return@withTimeoutOrNull true
+                        delay(250)
+                    }
+                    false
+                }
+                assertTrue("OS-selected browser was not foregrounded; lastWindowPackage=$browserPackage handlers=$browserPackages consentButtonFound=$consentButtonFound consentClickAttempted=$consentClickAttempted", browserOpened == true)
+                assertFalse("Application must leave the native host", native.isResumed())
+                delay(1500)
+                assertTrue(LocalAppProcessService.owns(app.id))
+                assertTrue(LocalAppProcessService.notificationReady(app.id))
+                val launch = apps.start(app.id)
+                var listedTask: JSONObject? = null
+                withTimeout(180_000) {
+                    while (true) {
+                        var cursor: String? = null
+                        var match: JSONObject? = null
+                        do {
+                            val options = JSONObject().put("limit", 50)
+                            cursor?.let { options.put("cursor", it) }
+                            val taskPage = agentCall(launch, "agent.tasks.list", options) as JSONObject
+                            val tasks = taskPage.getJSONArray("tasks")
+                            match = (0 until tasks.length()).map { tasks.getJSONObject(it) }
+                                .firstOrNull { it.optString("runId") == runId }
+                            cursor = taskPage.opt("nextCursor")?.takeUnless { it === JSONObject.NULL }?.toString()
+                                ?.takeIf { it.isNotEmpty() && it != cursor }
+                        } while (match == null && cursor != null)
+                        if (match != null) { listedTask = match; break }
+                        val pageText = visibleUiText(instrumentation.uiAutomation.rootInActiveWindow)
+                        assertFalse("Browser Chat failed before submitting an AG-UI run: $pageText",
+                            pageText.contains("CHAT_PAGE_DIAGNOSTIC"))
+                        delay(500)
+                    }
+                }
+                val task = awaitTerminal(launch, listedTask!!.getString("runId"))
+                assertEquals(task.toString(), "succeeded", task.getString("state"))
+                val eventBatch = agentCall(launch, "agent.tasks.events", JSONObject().put("runId", runId)) as JSONObject
+                val events = eventBatch.getJSONArray("events")
+                assertTrue("Persistent Chat has standard event history", events.length() >= 2)
+                val firstEvent = events.getJSONObject(0); val lastEvent = events.getJSONObject(events.length() - 1)
+                assertEquals("RUN_STARTED", firstEvent.getString("type"))
+                assertEquals("1.0", firstEvent.getString("protocolVersion"))
+                assertEquals(runId, firstEvent.getString("runId"))
+                assertEquals(task.getString("threadId"), firstEvent.getString("threadId"))
+                assertEquals("RUN_FINISHED", lastEvent.getString("type"))
+                assertEquals(runId, lastEvent.getString("runId"))
+                assertEquals(task.getString("threadId"), lastEvent.getString("threadId"))
+                assertEquals("ORBIT", lastEvent.getJSONObject("result").getString("answer"))
+                assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
+
+                var browserResult: JSONObject? = null
+                withTimeout(30_000) {
+                    while (true) {
+                        val root = instrumentation.uiAutomation.rootInActiveWindow
+                        val callback = root?.findAccessibilityNodeInfosByText("CHAT_FLOW_PASS")
+                            ?.firstOrNull { it.text?.toString()?.contains("CHAT_FLOW_PASS") == true }
+                        if (callback != null) {
+                            val parsed = runCatching { JSONObject(callback.text.toString()) }.getOrNull()
+                            checkNotNull(parsed) { "Browser Chat success output is not JSON: ${callback.text}" }
+                            browserResult = parsed
+                            break
+                        }
+                        delay(250)
+                    }
+                }
+                val chatSummary = checkNotNull(browserResult).getJSONObject("summary")
+                assertEquals(runId, chatSummary.getString("runId"))
+                assertEquals(task.getString("threadId"), chatSummary.getString("chatId"))
+                assertEquals(task.getString("threadId"), chatSummary.getString("taskThreadId"))
+                assertEquals("succeeded", chatSummary.getString("taskState"))
+                assertEquals("ORBIT", chatSummary.getJSONObject("result").getString("answer"))
+                assertTrue(chatSummary.getInt("isolatedMessageCount") == 0)
+                assertTrue(chatSummary.getBoolean("chatListed"))
+                val historyRoles = chatSummary.getJSONArray("historyRoles")
+                assertTrue((0 until historyRoles.length()).any { historyRoles.getString(it) == "user" })
+                assertTrue((0 until historyRoles.length()).any { historyRoles.getString(it) == "assistant" })
+                assertEquals(chatSummary.getJSONArray("historyIds").toString(), chatSummary.getJSONArray("reopenedIds").toString())
+                assertEquals("dynamic-esm", checkNotNull(browserResult).getJSONObject("bootstrap").getString("importMode"))
+                File(context.filesDir, "external-browser-chat-acceptance.json").writeText(
+                    JSONObject().put("browserPackage", browserPackage).put("appId", app.id)
+                        .put("task", task).put("page", checkNotNull(browserResult)).toString(2))
+                android.util.Log.i("LocalAppAgentAcceptance", "EXTERNAL_BROWSER_CHAT PASS persistent-thread history-isolation structured-result standard-events")
             }
         } finally { ids.forEach { runCatching { apps.remove(it) } }; sources.forEach { it.deleteRecursively() } }
     }

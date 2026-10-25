@@ -29,6 +29,10 @@ pub struct IosIshRuntimeConfig {
     pub workspace_host_path: PathBuf,
     /// Stable guest workspace identifier appended under the selected brand workspace root.
     pub stable_workspace_id: String,
+    /// Exact additional Project grants validated by the native Project store.
+    /// These are compared as full host/guest/purpose records; no prefix grants
+    /// are accepted by this runtime policy layer.
+    pub project_mount_grants: Vec<MountSpec>,
     /// Guest ABI label surfaced in status responses.
     pub abi: String,
     /// Expected rootfs version label.
@@ -83,6 +87,16 @@ impl ProductIosRuntime {
         }
         Ok(())
     }
+
+    fn mounts_with_project_grants(&self, mounts: &[MountSpec]) -> Vec<MountSpec> {
+        let mut merged = mounts.to_vec();
+        for grant in &self.config.project_mount_grants {
+            if !merged.iter().any(|mount| same_mount(mount, grant)) {
+                merged.push(grant.clone());
+            }
+        }
+        merged
+    }
 }
 
 fn existing_host_resource(override_path: Option<PathBuf>, fallback: PathBuf) -> Option<PathBuf> {
@@ -101,18 +115,20 @@ fn existing_host_resource(override_path: Option<PathBuf>, fallback: PathBuf) -> 
 }
 
 pub fn linked_runtime(
-    config: IosIshRuntimeConfig,
+    mut config: IosIshRuntimeConfig,
 ) -> Result<Arc<dyn MobileLinuxRuntime>, MobileLinuxError> {
     let brand_profile = config.brand_profile();
     brand_profile
         .validate()
         .map_err(|error| MobileLinuxError::InvalidRequest(error.to_string()))?;
+    config.project_mount_grants = validate_project_mount_grants(&config)?;
     let inner = mobile_linux_ios::linked_runtime(mobile_linux_ios::IosIshRuntimeConfig {
         managed_root: config.managed_root.clone(),
         brand_profile,
         app_sandbox_root: config.app_sandbox_root.clone(),
         workspace_host_path: config.workspace_host_path.clone(),
         stable_workspace_id: config.stable_workspace_id.clone(),
+        authorized_project_mounts: config.project_mount_grants.clone(),
         abi: config.abi.clone(),
         rootfs_version: config.rootfs_version.clone(),
         archive_sha256: config.archive_sha256.clone(),
@@ -133,6 +149,40 @@ pub fn linked_runtime(
         allowed_guest_roots: vec!["/".into()],
     })?;
     Ok(Arc::new(ProductIosRuntime { inner, config }))
+}
+
+fn validate_project_mount_grants(
+    config: &IosIshRuntimeConfig,
+) -> Result<Vec<MountSpec>, MobileLinuxError> {
+    if config.project_mount_grants.len() > 64 {
+        return Err(MobileLinuxError::InvalidRequest(
+            "too many Project mount grants".into(),
+        ));
+    }
+    let mut validated = Vec::<MountSpec>::with_capacity(config.project_mount_grants.len());
+    for grant in &config.project_mount_grants {
+        if !matches!(grant.purpose, MountPurpose::External) || grant.read_only {
+            return Err(MobileLinuxError::InvalidRequest(
+                "Project mount grants must be writable External mounts".into(),
+            ));
+        }
+        let normalized = validate_mount(grant, config)?;
+        if !same_mount(&normalized, grant) {
+            return Err(MobileLinuxError::InvalidRequest(
+                "Project mount grants must use canonical host paths".into(),
+            ));
+        }
+        if validated.iter().any(|existing| {
+            paths_overlap(&existing.host_path, &normalized.host_path)
+                || guest_paths_overlap(&existing.guest_path, &normalized.guest_path)
+        }) {
+            return Err(MobileLinuxError::InvalidRequest(
+                "Project mount grants may not duplicate or overlap".into(),
+            ));
+        }
+        validated.push(normalized);
+    }
+    Ok(validated)
 }
 
 #[async_trait]
@@ -262,6 +312,7 @@ impl MobileLinuxRuntime for ProductIosRuntime {
     }
 
     async fn configure_mounts(&self, mounts: Vec<MountSpec>) -> Result<(), MobileLinuxError> {
+        let mounts = self.mounts_with_project_grants(&mounts);
         self.validate_mounts(&mounts)?;
         self.inner.configure_mounts(mounts).await
     }
@@ -290,22 +341,98 @@ impl MobileLinuxRuntime for ProductIosRuntime {
     }
 }
 
+fn same_mount(left: &MountSpec, right: &MountSpec) -> bool {
+    left.host_path == right.host_path
+        && left.guest_path == right.guest_path
+        && left.read_only == right.read_only
+        && left.purpose == right.purpose
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn guest_paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn validate_mount(
     mount: &MountSpec,
     config: &IosIshRuntimeConfig,
 ) -> Result<MountSpec, MobileLinuxError> {
     let host_path = normalize_host_path(&mount.host_path, "host_path")?;
     validate_guest_path(&mount.guest_path, "guest_path", false)?;
+    if !is_normalized_absolute_guest_path(&mount.guest_path) {
+        return Err(MobileLinuxError::InvalidRequest(
+            "guest mount path must be normalized".into(),
+        ));
+    }
     let managed_root = normalize_host_path(&config.managed_root, "managed_root")?;
     let app_root = normalize_host_path(&config.app_sandbox_root, "app_sandbox_root")?;
     let brand_config_home = normalize_host_path(&config.brand_config_home(), "brand config home")?;
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
     let brand_profile = config.brand_profile();
     let guest_home = mobile_linux_api::guest_paths::home_for_profile(&brand_profile);
+    let apps_guest = brand_profile
+        .apps_guest_path()
+        .to_string_lossy()
+        .into_owned();
+    let apps_host = brand_config_home.join(".apps");
+    let mut authorized_project_mount = false;
+    for grant in &config.project_mount_grants {
+        let grant_host = normalize_host_path(&grant.host_path, "authorized project host")?;
+        if grant_host == host_path
+            && grant.host_path == mount.host_path
+            && grant.guest_path == mount.guest_path
+            && grant.read_only == mount.read_only
+            && grant.purpose == mount.purpose
+        {
+            authorized_project_mount = true;
+            break;
+        }
+    }
+    let user_home_host = normalize_host_path(
+        &brand_profile.persistent_home_host_path(&managed_root),
+        "persistent user home",
+    )?;
+    let guest_home_path = Path::new(&guest_home);
+    let guest_path = Path::new(&mount.guest_path);
+    let project_relative = guest_path.strip_prefix(guest_home_path).ok();
+    let exact_home_mapping = if authorized_project_mount {
+        if let Some(relative) = project_relative {
+            let expected_host = normalize_host_path(
+                &user_home_host.join(relative),
+                "project guest-to-host mapping",
+            )?;
+            expected_host == host_path && !relative.as_os_str().is_empty()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if authorized_project_mount && !exact_home_mapping {
+        return Err(MobileLinuxError::InvalidRequest(
+            "Project mount grants must map inside the selected persistent user home".into(),
+        ));
+    }
+    let authorized_app_source = exact_home_mapping
+        && matches!(mount.purpose, MountPurpose::External)
+        && mount.guest_path != apps_guest
+        && guest_path_has_prefix(&mount.guest_path, &apps_guest)
+        && host_path.starts_with(&apps_host)
+        && host_path != apps_host;
 
     if ["/", "/home"].contains(&mount.guest_path.as_str())
         || (guest_path_has_prefix(&mount.guest_path, &guest_home)
-            && !matches!(mount.purpose, MountPurpose::Workspace))
+            && !matches!(mount.purpose, MountPurpose::Workspace)
+            && !exact_home_mapping)
         || guest_path_has_prefix(&mount.guest_path, mobile_linux_api::guest_paths::ADMIN_HOME)
     {
         return Err(MobileLinuxError::InvalidRequest(
@@ -315,13 +442,18 @@ fn validate_mount(
 
     let persistent_workspace =
         mobile_linux_core::is_persistent_user_workspace(&managed_root, &brand_profile, mount);
+    let exact_persistent_project_mount =
+        exact_home_mapping && host_path.starts_with(&user_home_host) && host_path != user_home_host;
+    let overlaps_brand_config = host_path == brand_config_home
+        || host_path.starts_with(&brand_config_home)
+        || brand_config_home.starts_with(&host_path);
     if host_path == app_root
         || host_path == managed_root
-        || host_path == brand_config_home
-        || (host_path.starts_with(&managed_root) && !persistent_workspace)
+        || (host_path.starts_with(&managed_root)
+            && !persistent_workspace
+            && !exact_persistent_project_mount)
         || managed_root.starts_with(&host_path)
-        || host_path.starts_with(&brand_config_home)
-        || brand_config_home.starts_with(&host_path)
+        || (overlaps_brand_config && !authorized_app_source)
     {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target app root, managed_root, or brand config home"
@@ -329,7 +461,9 @@ fn validate_mount(
         ));
     }
 
-    if path_contains_protected_subtree(&host_path, &config.config_dir_name) {
+    if path_contains_protected_subtree(&host_path, &config.config_dir_name)
+        && !authorized_app_source
+    {
         return Err(MobileLinuxError::InvalidRequest(
             "mount host_path may not target provider/config subtrees".to_string(),
         ));
@@ -368,6 +502,20 @@ fn guest_path_has_prefix(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn is_normalized_absolute_guest_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.ends_with('/')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .skip(1)
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
 }
 
 fn validate_guest_path(value: &str, field: &str, allow_root: bool) -> Result<(), MobileLinuxError> {
@@ -473,10 +621,118 @@ mod tests {
             app_sandbox_root: root.to_path_buf(),
             workspace_host_path: root.join("workspaces/default"),
             stable_workspace_id: "default".to_string(),
+            project_mount_grants: Vec::new(),
             abi: "arm64".to_string(),
             rootfs_version: "v1".to_string(),
             archive_sha256: None,
             authorization_file: None,
+        }
+    }
+
+    struct MountTableRuntime {
+        inner: mobile_linux_api::UnavailableMobileLinuxRuntime,
+        mounts: std::sync::Mutex<Vec<MountSpec>>,
+        fail_next_configure: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl MobileLinuxRuntime for MountTableRuntime {
+        fn backend(&self) -> SandboxBackend {
+            self.inner.backend()
+        }
+
+        fn mode(&self) -> MobileLinuxRuntimeMode {
+            self.inner.mode()
+        }
+
+        async fn probe_capability(&self) -> MobileLinuxCapability {
+            self.inner.probe_capability().await
+        }
+
+        async fn boot(&self) -> Result<RootfsStatus, MobileLinuxError> {
+            self.inner.boot().await
+        }
+
+        async fn shutdown(&self) -> Result<(), MobileLinuxError> {
+            self.inner.shutdown().await
+        }
+
+        async fn run(
+            &self,
+            request: LinuxCommandRequest,
+        ) -> Result<LinuxCommandResult, MobileLinuxError> {
+            self.inner.run(request).await
+        }
+
+        async fn spawn_background(
+            &self,
+            request: LinuxCommandRequest,
+        ) -> Result<LinuxProcessHandle, MobileLinuxError> {
+            self.inner.spawn_background(request).await
+        }
+
+        async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
+            self.inner.kill(handle).await
+        }
+
+        async fn open_pty(
+            &self,
+            request: PtyOpenRequest,
+        ) -> Result<PtySessionHandle, MobileLinuxError> {
+            self.inner.open_pty(request).await
+        }
+
+        async fn write_pty(
+            &self,
+            handle: &PtySessionHandle,
+            input: Vec<u8>,
+        ) -> Result<(), MobileLinuxError> {
+            self.inner.write_pty(handle, input).await
+        }
+
+        async fn resize_pty(
+            &self,
+            handle: &PtySessionHandle,
+            size: PtySize,
+        ) -> Result<(), MobileLinuxError> {
+            self.inner.resize_pty(handle, size).await
+        }
+
+        async fn close_pty(&self, handle: &PtySessionHandle) -> Result<(), MobileLinuxError> {
+            self.inner.close_pty(handle).await
+        }
+
+        async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
+            self.inner.rootfs_status().await
+        }
+
+        async fn verify_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
+            self.inner.verify_rootfs().await
+        }
+
+        async fn repair_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
+            self.inner.repair_rootfs().await
+        }
+
+        async fn reset_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
+            self.inner.reset_rootfs().await
+        }
+
+        async fn configure_mounts(&self, mounts: Vec<MountSpec>) -> Result<(), MobileLinuxError> {
+            if self
+                .fail_next_configure
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                return Err(MobileLinuxError::Unavailable(
+                    "test mount application failure".into(),
+                ));
+            }
+            *self.mounts.lock().expect("mount table") = mounts;
+            Ok(())
+        }
+
+        fn current_mounts(&self) -> Vec<MountSpec> {
+            self.mounts.lock().expect("mount table").clone()
         }
     }
 
@@ -627,5 +883,203 @@ mod tests {
         )
         .expect_err("mount should fail");
         assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
+    }
+
+    /// Isolates the Project grant overlay with a fake runtime that has no
+    /// baseline home mount. The sibling assertion proves this Project grant
+    /// does not introduce another app source; it does not replace the iSH
+    /// runtime's separate persistent-home policy.
+    #[tokio::test]
+    async fn exact_project_app_grant_reaches_current_mounts_after_configure_and_translates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let mut config = test_config(&root);
+        let apps_guest = config.brand_profile().apps_guest_path();
+        let apps_host = config.brand_config_home().join(".apps");
+        let guest = apps_guest
+            .join("authorized-app")
+            .to_string_lossy()
+            .into_owned();
+        let host = apps_host.join("authorized-app");
+        fs::create_dir_all(&config.workspace_host_path).expect("create workspace");
+        fs::create_dir_all(config.brand_config_home()).expect("create brand config root");
+        fs::create_dir_all(&host).expect("create authorized app source");
+
+        let grant = MountSpec {
+            host_path: host.canonicalize().expect("canonical app source"),
+            guest_path: guest.clone(),
+            read_only: false,
+            purpose: MountPurpose::External,
+        };
+        let workspace = config.default_workspace_mount();
+        config.project_mount_grants.push(grant.clone());
+        let inner: Arc<dyn MobileLinuxRuntime> = Arc::new(MountTableRuntime {
+            inner: mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                mobile_linux_api::SandboxBackend::IosIsh,
+                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test stub",
+            ),
+            mounts: std::sync::Mutex::new(Vec::new()),
+            fail_next_configure: std::sync::atomic::AtomicBool::new(false),
+        });
+        let product = ProductIosRuntime { inner, config };
+
+        product
+            .configure_mounts(vec![workspace.clone()])
+            .await
+            .expect("Product configuration applies exact project grant");
+        let mut overlapping_config = product.config.clone();
+        let nested_host = host.join("nested");
+        fs::create_dir_all(&nested_host).expect("create nested app source directory");
+        overlapping_config.project_mount_grants.push(MountSpec {
+            host_path: nested_host
+                .canonicalize()
+                .expect("canonical nested directory"),
+            guest_path: format!("{}/nested", grant.guest_path),
+            read_only: false,
+            purpose: MountPurpose::External,
+        });
+        assert!(validate_project_mount_grants(&overlapping_config).is_err());
+
+        let outside_host = root.join("outside-project");
+        fs::create_dir_all(&outside_host).expect("create outside project path");
+        let mut outside_config = product.config.clone();
+        outside_config.project_mount_grants.push(MountSpec {
+            host_path: outside_host.canonicalize().expect("canonical outside path"),
+            guest_path: "/tmp/outside-project".into(),
+            read_only: false,
+            purpose: MountPurpose::External,
+        });
+        assert!(validate_project_mount_grants(&outside_config).is_err());
+
+        let mut readonly_config = product.config.clone();
+        readonly_config.project_mount_grants[0].read_only = true;
+        assert!(validate_project_mount_grants(&readonly_config).is_err());
+
+        let mut changed_capability = grant.clone();
+        changed_capability.read_only = true;
+        assert!(product.validate_mounts(&[changed_capability]).is_err());
+        let mut changed_purpose = grant.clone();
+        changed_purpose.purpose = MountPurpose::Shared;
+        assert!(product.validate_mounts(&[changed_purpose]).is_err());
+        let mounts = product.current_mounts();
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.contains(&workspace));
+        assert!(mounts.contains(&grant));
+        assert_eq!(
+            mounts
+                .iter()
+                .filter(|mount| matches!(mount.purpose, MountPurpose::Workspace))
+                .count(),
+            1
+        );
+        let translated = mobile_linux_core::resolve_guest_path(
+            &guest,
+            &mounts,
+            &mobile_linux_api::guest_paths::writable_roots(),
+            false,
+        )
+        .expect("approved guest source translates")
+        .expect("approved source is host-backed");
+        assert_eq!(translated, grant.host_path);
+
+        let sibling_guest = apps_guest.join("other-app").to_string_lossy().into_owned();
+        // This fake mount table contains only explicit request mounts, so the
+        // sibling is not introduced by the Project grant. The real iSH
+        // runtime's pre-existing persistent-home mapping is tested separately.
+        assert!(matches!(
+            mobile_linux_core::resolve_guest_path(
+                &sibling_guest,
+                &mounts,
+                &mobile_linux_api::guest_paths::writable_roots(),
+                false,
+            ),
+            Err(mobile_linux_core::GuestPathError::NotHostBacked)
+        ));
+
+        let sibling_host = apps_host.join("other-app");
+        fs::create_dir_all(&sibling_host).expect("create ungranted sibling");
+        let ungranted = MountSpec {
+            host_path: sibling_host,
+            guest_path: sibling_guest,
+            read_only: false,
+            purpose: MountPurpose::External,
+        };
+        assert!(product.validate_mounts(&[ungranted]).is_err());
+
+        #[cfg(unix)]
+        {
+            let alias = apps_host.join("source-alias");
+            std::os::unix::fs::symlink(&host, &alias).expect("create project source alias");
+            let aliased_grant = MountSpec {
+                host_path: alias,
+                guest_path: grant.guest_path.clone(),
+                read_only: false,
+                purpose: MountPurpose::External,
+            };
+            assert!(product.validate_mounts(&[aliased_grant]).is_err());
+        }
+
+        let private_host = product.config.brand_config_home().join("private");
+        fs::create_dir_all(&private_host).expect("create private config path");
+        let private = MountSpec {
+            host_path: private_host,
+            guest_path: product
+                .config
+                .brand_profile()
+                .config_guest_path()
+                .join("private")
+                .to_string_lossy()
+                .into_owned(),
+            read_only: false,
+            purpose: MountPurpose::External,
+        };
+        assert!(product.validate_mounts(&[private]).is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_project_grant_configuration_does_not_synthesize_current_mounts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let mut config = test_config(&root);
+        let apps_guest = config.brand_profile().apps_guest_path();
+        let apps_host = config.brand_config_home().join(".apps");
+        let guest = apps_guest
+            .join("authorized-app")
+            .to_string_lossy()
+            .into_owned();
+        let host = apps_host.join("authorized-app");
+        fs::create_dir_all(&config.workspace_host_path).expect("create workspace");
+        fs::create_dir_all(config.brand_config_home()).expect("create brand config root");
+        fs::create_dir_all(&host).expect("create authorized app source");
+        config.project_mount_grants.push(MountSpec {
+            host_path: host.canonicalize().expect("canonical app source"),
+            guest_path: guest,
+            read_only: false,
+            purpose: MountPurpose::External,
+        });
+
+        let inner: Arc<dyn MobileLinuxRuntime> = Arc::new(MountTableRuntime {
+            inner: mobile_linux_api::UnavailableMobileLinuxRuntime::unavailable(
+                mobile_linux_api::SandboxBackend::IosIsh,
+                mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test stub",
+            ),
+            mounts: std::sync::Mutex::new(Vec::new()),
+            fail_next_configure: std::sync::atomic::AtomicBool::new(true),
+        });
+        let product = ProductIosRuntime { inner, config };
+        let workspace = product.config.default_workspace_mount();
+
+        let error = product
+            .configure_mounts(vec![workspace])
+            .await
+            .expect_err("native mount application failure must propagate");
+        assert!(matches!(error, MobileLinuxError::Unavailable(_)));
+        assert!(product.current_mounts().is_empty());
     }
 }

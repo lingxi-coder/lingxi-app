@@ -17,7 +17,9 @@ use super::configuration::{
 #[cfg(feature = "uniffi")]
 use super::configuration::{ios_project_cwd, IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
-use super::linux_runtime::ios_mobile_linux_runtime;
+use super::linux_runtime::{
+    ios_mobile_linux_runtime, ios_mobile_linux_runtime_with_project_mounts,
+};
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::linux_types::MobileLinuxRuntimeModeFfi;
 #[cfg(feature = "uniffi")]
@@ -315,7 +317,10 @@ pub fn build_ios_engine_with_config(
                 Arc::new(IosLocationBridge { inner: l })
                     as Arc<dyn lingxi_core::host::LocationProvider>
             }),
-            mobile_linux: ios_mobile_linux_runtime(config.mobile_linux.as_ref()),
+            mobile_linux: ios_mobile_linux_runtime_with_project_mounts(
+                config.mobile_linux.as_ref(),
+                additional_workspace_mounts.clone(),
+            ),
             workspace_host_path,
             stable_workspace_id,
             additional_workspace_mounts,

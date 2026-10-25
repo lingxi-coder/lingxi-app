@@ -175,11 +175,19 @@ pub(super) fn fallback_ios_mobile_linux_status(
 pub(super) fn ios_mobile_linux_runtime(
     config: Option<&IosMobileLinuxConfigFfi>,
 ) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
+    ios_mobile_linux_runtime_with_project_mounts(config, Vec::new())
+}
+
+#[cfg(feature = "uniffi")]
+pub(super) fn ios_mobile_linux_runtime_with_project_mounts(
+    config: Option<&IosMobileLinuxConfigFfi>,
+    project_mount_grants: Vec<mobile_linux_api::MountSpec>,
+) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
     let cfg = config?;
     if matches!(cfg.mode, MobileLinuxRuntimeModeFfi::Legacy) {
         return None;
     }
-    if let Some(runtime) = linked_ios_mobile_linux_runtime(cfg) {
+    if let Some(runtime) = linked_ios_mobile_linux_runtime(cfg, project_mount_grants) {
         return Some(runtime);
     }
     let auth_present = mobile_linux_authorization_verified(cfg.authorization_file.as_ref());
@@ -206,6 +214,7 @@ pub(super) fn ios_mobile_linux_runtime(
 #[cfg(feature = "uniffi")]
 pub(super) fn linked_ios_mobile_linux_runtime(
     cfg: &IosMobileLinuxConfigFfi,
+    project_mount_grants: Vec<mobile_linux_api::MountSpec>,
 ) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
     let app_sandbox_root = resolve_mobile_linux_app_sandbox_root(cfg).ok()?;
     let (workspace_host_path, stable_workspace_id) =
@@ -219,6 +228,7 @@ pub(super) fn linked_ios_mobile_linux_runtime(
         app_sandbox_root,
         workspace_host_path,
         stable_workspace_id,
+        project_mount_grants,
         abi: cfg.abi.clone(),
         rootfs_version: cfg.rootfs_version.clone(),
         archive_sha256: cfg.archive_sha256.clone(),

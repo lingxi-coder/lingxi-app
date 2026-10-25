@@ -46,7 +46,7 @@
       "styles.css",
       "app.mjs",
       "nutrition.mjs",
-      "agent-client.mjs"
+      "agui-task.mjs"
     ],
     "dependencyLocks": []
   },

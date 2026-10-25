@@ -485,12 +485,26 @@ fn credentials(value: Value) -> Result<crate::boot::CredentialEnvelope, &'static
 }
 
 fn validate_agent_input(input: &local_app::v2::agent::Input) -> Result<(), &'static str> {
+    fn has_only_local_schema_references(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.iter().all(|(key, value)| {
+                if matches!(key.as_str(), "$ref" | "$dynamicRef" | "$recursiveRef") {
+                    value.as_str().is_some_and(|reference| reference.starts_with('#'))
+                } else {
+                    has_only_local_schema_references(value)
+                }
+            }),
+            Value::Array(values) => values.iter().all(has_only_local_schema_references),
+            _ => true,
+        }
+    }
     local_app::v2::agent::validate_input(input).map_err(|_| "invalid_input")?;
     if input.prompt.len() > MAX_PROMPT_BYTES {
         return Err("invalid_input");
     }
     if input.output_schema.as_ref().is_some_and(|schema| {
         serde_json::to_vec(schema).map_or(true, |bytes| bytes.len() > MAX_SCHEMA_BYTES)
+            || !has_only_local_schema_references(schema)
     }) {
         return Err("invalid_schema");
     }
@@ -1447,7 +1461,7 @@ mod tests {
         }
     }
     #[test]
-    fn shared_input_validation_rejects_paths_external_schemas_and_excessive_limits() {
+    fn private_input_validation_rejects_paths_and_external_schema_references() {
         let mut value = input();
         value.attachments.push(local_app::v2::agent::Attachment {
             name: "../private.png".into(),
@@ -1455,9 +1469,14 @@ mod tests {
             base64: "AAAA".into(),
         });
         assert!(validate_agent_input(&value).is_err());
+        for reference in ["$ref", "$dynamicRef", "$recursiveRef"] {
+            let mut value = input();
+            value.output_schema = Some(json!({"properties":{"item":{reference:"https://example.invalid/schema"}}}));
+            assert_eq!(validate_agent_input(&value), Err("invalid_schema"));
+        }
         let mut value = input();
-        value.output_schema = Some(json!({"$ref":"https://example.invalid/schema"}));
-        assert!(validate_agent_input(&value).is_err());
+        value.output_schema = Some(json!({"definitions":{"item":{"type":"string"}},"properties":{"item":{"$ref":"#/definitions/item"}}}));
+        assert!(validate_agent_input(&value).is_ok());
     }
     #[tokio::test]
     async fn output_sink_retains_the_actual_assistant_message_identity_for_the_private_terminal() {
@@ -1474,7 +1493,7 @@ mod tests {
             completed_model_turns: AtomicU32::new(0),
         };
         let message_id = MessageId::new();
-        output.emit_text(&Utf16JsonProjection::plain("committed answer")).await;
+        output.emit_text(&Utf16JsonProjection::plain(json!("committed answer"))).await;
         output.emit_assistant_message_identity(&message_id).await;
         let expected_id = message_id.to_string();
         assert_eq!(output.assistant_message_id.lock().await.as_deref(), Some(expected_id.as_str()));

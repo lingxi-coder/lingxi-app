@@ -4,6 +4,7 @@ import android.content.Intent
 import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lingxi.code.model.canonicalSessionId
 import com.lingxi.code.settings.ProviderSettingsRepository
 import kotlinx.coroutines.*
 import org.json.JSONArray
@@ -21,6 +22,15 @@ import java.util.UUID
 class LocalAppAgentAcceptanceTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
+
+    private fun visibleUiText(node: android.view.accessibility.AccessibilityNodeInfo?): String = buildString {
+        fun appendNode(current: android.view.accessibility.AccessibilityNodeInfo) {
+            current.text?.let { append(it).append('\n') }
+            current.contentDescription?.let { append(it).append('\n') }
+            repeat(current.childCount) { index -> current.getChild(index)?.let(::appendNode) }
+        }
+        node?.let(::appendNode)
+    }
 
     private suspend fun browserCall(
         launch: AppLaunch,
@@ -113,10 +123,30 @@ class LocalAppAgentAcceptanceTest {
         val requestedModel = args.getString("agentModel") ?: configured.defaultModel
         val requestedProvider = args.getString("agentProvider")
         val models = catalog.getJSONArray("models")
+        val candidates = JSONArray()
+        (0 until models.length()).map { models.getJSONObject(it) }
+            .filter { it.optBoolean("canSelect") && (it.optBoolean("supportsImages") || it.optBoolean("supportsStructuredOutput")) }
+            .forEach { candidate ->
+                val fields = JSONObject()
+                candidate.keys().forEach { key ->
+                    if (key in setOf("providerId", "modelId", "canSelect", "tools") ||
+                        key.contains("support", ignoreCase = true) || key.contains("capabilit", ignoreCase = true)
+                    ) fields.put(key, candidate.opt(key))
+                }
+                candidates.put(fields)
+            }
+        android.util.Log.i("LocalAppAgentAcceptance", "MODEL_CATALOG_CANDIDATES $candidates")
         val model = (0 until models.length()).map { models.getJSONObject(it) }.firstOrNull {
             it.getString("modelId") == requestedModel && (requestedProvider == null || it.getString("providerId") == requestedProvider) &&
                 it.optBoolean("canSelect") && (!photo || (it.optBoolean("supportsImages") && it.optBoolean("supportsStructuredOutput")))
         } ?: error("Configure a vision/tool-capable model or select it explicitly with agentProvider/agentModel")
+        val capabilityFields = JSONObject()
+        model.keys().forEach { key ->
+            if (key in setOf("providerId", "modelId", "canSelect", "tools") ||
+                key.contains("support", ignoreCase = true) || key.contains("capabilit", ignoreCase = true)
+            ) capabilityFields.put(key, model.opt(key))
+        }
+        android.util.Log.i("LocalAppAgentAcceptance", "MODEL_CATALOG_ROW $capabilityFields")
         val ref = JSONObject().put("providerId", model.getString("providerId")).put("modelId", model.getString("modelId"))
         val grants = JSONObject(); tools.forEach { grants.put(it, catalog.getJSONObject("tools").getJSONObject(it)) }
         val settings = JSONObject().put("model", ref).put("tools", grants).put("skills", JSONArray())
@@ -133,10 +163,17 @@ class LocalAppAgentAcceptanceTest {
         tools: Set<String> = emptySet(),
         pageHtml: String? = null,
     ): AppRecord {
-        val guest = com.lingxi.code.project.MobileUserStorage.directories(context).appsGuestPath.trimEnd('/') + "/agent-acceptance-${UUID.randomUUID()}"
-        val source = apps.hostFile(guest)
+        val sourceDirectory = apps.createAuthoring("Agent acceptance ${UUID.randomUUID()}")
+        val source = apps.hostFile(sourceDirectory)
+        source.deleteRecursively()
         check(File(context.filesDir, "local-app-acceptance-fixtures/calorie-agent").copyRecursively(source))
         sources.add(source)
+        val projectRef = AppProjectRef("mobileProject", projectId = UUID.randomUUID().toString())
+        apps.registerAuthoring(JSONObject()
+            .put("workspaceId", UUID.randomUUID().toString())
+            .put("sourceDirectory", sourceDirectory)
+            .put("projectRef", projectRef.toJson())
+            .put("authoringSessionId", canonicalSessionId(UUID.randomUUID().toString())))
         if (pageHtml != null) File(source, "index.html").writeText(pageHtml)
         if (tools.isNotEmpty()) {
             val manifest = File(source, "lingxi-app.json")
@@ -169,11 +206,16 @@ class LocalAppAgentAcceptanceTest {
         val threadId = "external-thread-" + UUID.randomUUID()
         val quotedImage = JSONObject.quote(imageBase64)
         val page = """
-            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>External browser Agent acceptance</title>
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><script src="/__local_app_sdk.js"></script><title>External browser Agent acceptance</title>
+            <style>#result{white-space:pre-wrap;overflow-wrap:anywhere}</style>
             <h1>External browser Agent acceptance</h1><pre id="result">Waiting for LingXi SDK</pre>
             <script>
             (async()=>{
               const output=document.getElementById('result');
+              const bootstrap={
+                globals:{localApp:typeof window.localApp,bridge:typeof window.__lingxiLocalAppBridge,agui:typeof window.LingxiLocalAppAGUI,configuration:typeof window.__LINGXI_APP_CONFIGURATION__},
+                scripts:Array.from(document.scripts).map(script=>script.src?new URL(script.src).pathname:'inline')
+              };
               try {
                 const bytes=Uint8Array.from(atob($quotedImage),c=>c.charCodeAt(0));
                 const file=new File([bytes],'acceptance-photo.jpg',{type:'image/jpeg'});
@@ -206,8 +248,10 @@ class LocalAppAgentAcceptanceTest {
                 if(!replay.result||!Array.isArray(replay.newMessages)||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'){
                   throw new Error('AG-UI reconnect did not replay the recorded terminal event.');
                 }
-                output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',runId:'$runId',run,callbacks,replay,replayCallbacks});
-              } catch(error) { output.textContent=JSON.stringify({error:String(error),code:error.code||null}); }
+                output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',bootstrap,runId:'$runId',run,callbacks,replay,replayCallbacks});
+              } catch(error) {
+                output.textContent='AGUI_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,error:String(error),code:error.code||null});
+              }
             })();
             </script>
         """.trimIndent()
@@ -220,20 +264,28 @@ class LocalAppAgentAcceptanceTest {
                 .putExtra("appId", app.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             NativeAppActivityHost(intent).use { native ->
                 var browserPackage = ""
-                withTimeout(60_000) {
+                var consentButtonFound = false
+                var consentClickAttempted = false
+                val browserOpened = withTimeoutOrNull(60_000) {
                     while (true) {
                         val root = instrumentation.uiAutomation.rootInActiveWindow
                         browserPackage = root?.packageName?.toString().orEmpty()
-                        if (browserPackage == context.packageName) {
-                            var action = root?.findAccessibilityNodeInfosByText("允许并打开浏览器")
+                        if (!consentClickAttempted && root != null) {
+                            var action = root.findAccessibilityNodeInfosByText("允许并打开浏览器")
                                 ?.firstOrNull { it.text?.toString() == "允许并打开浏览器" }
+                            consentButtonFound = action != null
                             while (action != null && !action.isClickable) action = action.parent
-                            action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                            if (action != null) {
+                                consentClickAttempted = true
+                                action.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+                            }
                         }
-                        if (browserPackage in browserPackages) break
+                        if (browserPackage in browserPackages) return@withTimeoutOrNull true
                         delay(250)
                     }
+                    false
                 }
+                assertTrue("OS-selected browser was not foregrounded; lastWindowPackage=$browserPackage handlers=$browserPackages consentButtonFound=$consentButtonFound consentClickAttempted=$consentClickAttempted", browserOpened == true)
                 assertFalse("Application must leave the native host", native.isResumed())
                 delay(1500)
                 assertTrue(LocalAppProcessService.owns(app.id))
@@ -257,12 +309,15 @@ class LocalAppAgentAcceptanceTest {
                             cursor = next?.takeIf { it.isNotEmpty() && it != cursor }
                         } while (match == null && cursor != null)
                         if (match != null) { listed = match; break }
+                        val pageText = visibleUiText(instrumentation.uiAutomation.rootInActiveWindow)
+                        assertFalse("Browser page failed before submitting an AG-UI run: $pageText",
+                            pageText.contains("AGUI_PAGE_DIAGNOSTIC"))
                         delay(500)
                     }
                 }
                 val task = awaitTerminal(launch, listed!!.getString("runId"))
                 assertEquals(task.toString(), "succeeded", task.getString("state"))
-                val trustedTask = apps.agentTasks(app.id, launch.run.revision).first { it.runId == runId }
+                val trustedTask = apps.agentTasks(app.id, launch.run.revision).first { it.requestId == runId }
                 val usage = trustedTask.usage ?: error("Trusted native task usage is missing.")
                 assertTrue(usage.getLong("outputTokens") > 0)
                 assertTrue(usage.getLong("turns") > 0)
@@ -357,24 +412,37 @@ class LocalAppAgentAcceptanceTest {
                 tools = tools,
             )
             val cancelId = taskStart(launch, cancelInput).getString("runId")
-            val waitingTask = withTimeout(30_000) {
+            var lastCancelState = "not queried"
+            val waitingTask = withTimeoutOrNull(30_000) {
                 while (true) {
-                    val match = apps.agentTasks(app.id, launch.run.revision).firstOrNull { it.runId == cancelId }
-                    if (match?.phase == "waiting_for_answer") return@withTimeout match
-                    check(taskGet(launch, cancelId).getString("state") !in setOf("failed", "cancelled", "interrupted", "succeeded"))
+                    val match = apps.agentTasks(app.id, launch.run.revision).firstOrNull { it.requestId == cancelId }
+                    val task = taskGet(launch, cancelId)
+                    lastCancelState = JSONObject()
+                        .put("state", task.optString("state"))
+                        .put("nativeTaskFound", match != null)
+                        .put("phase", match?.phase)
+                        .put("errorCode", task.optJSONObject("error")?.optString("code"))
+                        .toString()
+                    if (match?.phase == "waiting_for_answer") return@withTimeoutOrNull match
+                    check(task.getString("state") !in setOf("failed", "cancelled", "interrupted", "succeeded")) {
+                        "Cancellation task became terminal before asking its question: $lastCancelState"
+                    }
                     delay(200)
                 }
-                error("unreachable")
+                null
             }
-            assertEquals("running", waitingTask.state)
+            val observedWaitingTask = checkNotNull(waitingTask) {
+                "Cancellation task did not reach waiting_for_answer within 30s: $lastCancelState"
+            }
+            assertEquals("running", observedWaitingTask.state)
             val nativeTasks = apps.agentTasks(app.id, launch.run.revision)
-            assertTrue("Trusted native task inventory includes this app's run", nativeTasks.any { it.runId == cancelId })
+            val trustedCancelTask = nativeTasks.firstOrNull { it.requestId == cancelId }
+                ?: error("Trusted native task inventory omitted the public runId's requestId")
             val otherTasks = apps.agentTasks(other.id, otherLaunch.run.revision)
-            assertFalse("Trusted task inventory is app-scoped", otherTasks.any { it.runId == cancelId })
-            assertTrue("A different app cannot cancel this run", runCatching {
-                apps.cancelAgentTask(other.id, otherLaunch.run.revision, cancelId)
-            }.isFailure)
-            apps.cancelAgentTask(app.id, launch.run.revision, cancelId)
+            assertFalse("Trusted task inventory is app-scoped", otherTasks.any { it.requestId == cancelId })
+            apps.cancelAgentTask(other.id, otherLaunch.run.revision, trustedCancelTask.runId)
+            assertEquals("A different app cannot cancel this run", "running", taskGet(launch, cancelId).getString("state"))
+            apps.cancelAgentTask(app.id, launch.run.revision, trustedCancelTask.runId)
             assertEquals("cancelled", awaitTerminal(launch, cancelId).getString("state"))
             val cancelledBatch = agentCall(launch, "agent.tasks.events", JSONObject().put("runId", cancelId)) as JSONObject
             val cancelledEvents = cancelledBatch.getJSONArray("events")
@@ -409,7 +477,30 @@ class LocalAppAgentAcceptanceTest {
                 runAgentInput("invalid").put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "missing id"))),
                 runAgentInput("invalid").put("tools", JSONArray().put(JSONObject().put("name", "page-tool").put("description", "untrusted page tool"))),
             )
-            invalid.forEach { input -> assertTrue("Invalid input must fail before task admission", runCatching { taskStart(launch, input) }.isFailure) }
+            val schemaInput = invalid.first()
+            val schemaRun = taskStart(launch, schemaInput)
+            val schemaRunId = schemaInput.getString("runId")
+            assertEquals(schemaRunId, schemaRun.getString("runId"))
+            val schemaTask = awaitTerminal(launch, schemaRunId, 20_000)
+            assertEquals(schemaTask.toString(), "failed", schemaTask.getString("state"))
+            assertEquals("invalid_output_schema", schemaTask.getJSONObject("error").getString("code"))
+            val schemaError = terminalEvent(launch, schemaRunId)
+            assertEquals("RUN_ERROR", schemaError.getString("type"))
+            assertEquals("invalid_output_schema", schemaError.optString("code"))
+            assertFalse("An invalid schema cannot yield a result", schemaError.has("result"))
+            val schemaUsage = schemaTask.opt("usage")
+            assertTrue("Schema compilation fails before model usage is recorded", schemaUsage == null || schemaUsage === JSONObject.NULL)
+
+            invalid.drop(1).forEachIndexed { offset, input ->
+                val index = offset + 1
+                val attempt = runCatching { taskStart(launch, input) }
+                if (attempt.isSuccess) {
+                    val publicRunId = attempt.getOrThrow().optString("runId")
+                    val nativeTask = apps.agentTasks(app.id, launch.run.revision).firstOrNull { it.requestId == publicRunId }
+                    nativeTask?.let { runCatching { apps.cancelAgentTask(app.id, launch.run.revision, it.runId) } }
+                }
+                assertTrue("Invalid RunAgentInput sample #$index was admitted: $input", attempt.isFailure)
+            }
             android.util.Log.i("LocalAppAgentAcceptance", "GATEWAY_POLICY PASS origin/caller/RunAgentInput-schema/unsupported-page-tools/invalid-host-options")
         } finally { apps.remove(app.id); sources.forEach { it.deleteRecursively() } }
     }

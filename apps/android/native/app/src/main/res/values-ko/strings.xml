@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_message_copy">복사</string>
+    <string name="chat_message_copied">복사됨</string>
     <string name="app_intent_ask_description">Siri, 단축어 또는 다른 앱에서 전달된 텍스트를 새 대화로 가져옵니다.</string>
     <string name="app_intent_ask_title">灵犀에게 질문하기</string>
     <string name="app_intent_initial_command_param_title">미리 입력할 명령</string>
@@ -1245,7 +1247,7 @@
     <string name="settings_provider_credential_saved_secure">자격 증명이 엔진 공용 보안 저장소에 저장되었습니다</string>
     <string name="settings_provider_credential_saved_unverified">자격 증명이 기기 내 보안 영역에 설정되었지만, 아직 네트워크 연결 확인은 수행하지 않았습니다</string>
     <string name="settings_provider_credential_will_clear">적용 후 삭제됩니다</string>
-    <string name="settings_provider_custom_model_hint">목록에 없는 모델 ID를 직접 입력할 수 있습니다. 위의 프리셋 선택기가 이 필드에 값을 다시 씁니다.</string>
+    <string name="settings_provider_custom_model_hint">목록에서 모델을 선택하거나 다른 모델 ID를 입력하세요.</string>
     <string name="settings_provider_custom_model_id">사용자 지정 모델 ID</string>
     <string name="settings_provider_custom_url_hint">공식 API와 호환되는 사용자 지정 엔드포인트를 입력하세요.</string>
     <string name="settings_provider_cx_hint">Google Programmable Search에서 검색 엔진 ID를 만들어 붙여넣으세요</string>
@@ -1777,7 +1779,6 @@
     <string name="visualization_loading">시각화 불러오는 중…</string>
     <string name="visualization_unavailable">이 시각화는 더 이상 사용할 수 없습니다.</string>
     <string name="visualization_label">시각화</string>
-    <string name="visualization_expand">시각화 확대</string>
     <string name="visualization_remove_context">시각화 컨텍스트 제거</string>
     <string name="common_submit">제출</string>
     <string name="cron_run_section_overview">개요</string>
@@ -1924,7 +1925,7 @@
     <string name="settings_provider_vision_delegation">비전 위임</string>
     <string name="settings_provider_vision_delegation_hint">이미지를 지원하지 않는 모델이 내부 위임을 통해 이미지를 일괄 분석하도록 허용합니다.</string>
     <string name="settings_group_models_hub">모델</string>
-    <string name="settings_group_models_hub_summary">공급자, 라우팅, 검색, 가져오기</string>
+    <string name="settings_group_models_hub_summary">제공업체 및 모델</string>
     <string name="settings_group_voice">음성</string>
     <string name="settings_group_voice_summary">인식, 읽기, 오프라인 모델</string>
     <string name="account_error_cancelled">로그인이 취소되었습니다.</string>
@@ -1997,8 +1998,6 @@
     <string name="account_sign_out">로그아웃</string>
     <string name="account_title">LingXi 계정</string>
     <string name="drawer_open_sidebar_a11y">사이드바 열기</string>
-    <string name="chat_message_copy">복사</string>
-    <string name="chat_message_copied">복사됨</string>
     <string name="remote_title">원격 제어</string>
     <string name="remote_computers">내 컴퓨터</string>
     <string name="remote_back">뒤로</string>
@@ -2083,5 +2082,18 @@
     <string name="remote_send_failed">메시지를 보내지 못했습니다. 다시 시도하세요.</string>
     <string name="remote_images_only_when_idle">실행 중에는 텍스트만 보낼 수 있습니다.</string>
     <string name="remote_image_unusable">이 이미지를 사용할 수 없습니다.</string>
+    <string name="composer_model_options">모델 설정</string>
+    <string name="composer_model_updating">모델 전환 중…</string>
+    <string name="composer_model_details">모델 세부 정보</string>
+    <string name="composer_fast_mode">빠른 모드</string>
+    <string name="settings_provider_visible_models">표시할 모델</string>
     <string name="permission_elevated_risk">높은 위험</string>
+    <string name="visualization_close">닫기</string>
+    <string name="visualization_expand">시각화 확대</string>
+    <string name="visualization_expanded">전체 화면에서 열림</string>
+    <string name="visualization_retry">다시 시도</string>
+    <string name="workspace_add_directory">添加工作目录</string>
+    <string name="workspace_confirm_add">添加</string>
+    <string name="workspace_linked_directories">项目的工作目录</string>
+    <string name="workspace_session_changed">会话已切换，请重新打开目录选择器</string>
 </resources>

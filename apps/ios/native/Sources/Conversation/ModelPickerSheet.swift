@@ -50,32 +50,27 @@ struct ModelPickerSheet: View {
             List {
                 if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Section {
-                        Text(ModelDisplay.shortName(for: activeModelId))
-                            .font(.headline)
-                        if modelSwitchPending {
-                            ProgressView("Updating model settings…")
+                        NavigationLink {
+                            Form { modelOptionsSection }
+                                .navigationTitle("composer_model_options")
+                                .navigationBarTitleDisplayMode(.inline)
+                                .toolbar { closeToolbar }
+                        } label: {
+                            LabeledContent("composer_model_options") {
+                                Text(ModelDisplay.shortName(for: activeModelId))
+                                    .foregroundStyle(Color.secondary)
+                                    .multilineTextAlignment(.trailing)
+                            }
                         }
-                        ConversationEffortControl(
-                            selection: reasoningSelection,
-                            options: reasoningOptions,
-                            budgetRange: reasoningBudgetRange,
-                            disabledReason: reasoningDisabledReason,
-                            pending: controlsPending || modelSwitchPending,
-                            onSelect: onSelectReasoning
-                        )
-                        .id(activeModelId)
-                        if showsFastMode && detailsByReference[activeModelId]?.supportsFastMode == true {
-                            Toggle("Fast Mode", isOn: Binding(get: { fastModeEnabled }, set: onSetFastMode))
-                                .disabled(fastModePending || modelSwitchPending)
-                                .accessibilityIdentifier("composer.model.fast-mode")
+                        .accessibilityIdentifier("composer.model.options")
+                        if modelSwitchPending {
+                            ProgressView("composer_model_updating")
                         }
                         if let error = controlsError ?? fastModeError {
                             Label(error, systemImage: "exclamationmark.triangle")
                                 .font(.footnote)
                                 .foregroundStyle(.red)
                         }
-                    } header: {
-                        Text("Model settings")
                     }
                 }
 
@@ -116,12 +111,7 @@ struct ModelPickerSheet: View {
                 prompt: "composer_search_models_placeholder")
             .navigationTitle("composer_select_model")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("common_close", action: onDismiss)
-                        .accessibilityIdentifier("composer.model.close")
-                }
-            }
+            .toolbar { closeToolbar }
             .accessibilityIdentifier("composer.model.menu")
         }
         .presentationDetents([.medium, .large], selection: $detent)
@@ -132,11 +122,43 @@ struct ModelPickerSheet: View {
             if error != nil { requestedModel = nil }
         }
         .presentationDragIndicator(.visible)
-        .fullScreenCover(item: $selectedDetails) { details in
+        .sheet(item: $selectedDetails) { details in
             ModelDetailsSheet(
                 details: details,
                 accent: ModelDisplay.color(for: details.reference)
             )
+        }
+    }
+
+    private var closeToolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button("common_close", action: onDismiss)
+                .accessibilityIdentifier("composer.model.close")
+        }
+    }
+
+    private var modelOptionsSection: some View {
+        Section {
+            ConversationEffortControl(
+                selection: reasoningSelection,
+                options: reasoningOptions,
+                budgetRange: reasoningBudgetRange,
+                disabledReason: reasoningDisabledReason,
+                pending: controlsPending || modelSwitchPending,
+                onSelect: onSelectReasoning
+            )
+            .id(activeModelId)
+            if showsFastMode && detailsByReference[activeModelId]?.supportsFastMode == true {
+                Toggle("composer_fast_mode", isOn: Binding(get: { fastModeEnabled }, set: onSetFastMode))
+                    .disabled(fastModePending || modelSwitchPending)
+                    .accessibilityIdentifier("composer.model.fast-mode")
+            }
+        } header: {
+            Text(ModelDisplay.shortName(for: activeModelId))
+        } footer: {
+            if let error = controlsError ?? fastModeError {
+                Text(error).foregroundStyle(.red)
+            }
         }
     }
 
@@ -203,30 +225,31 @@ struct ModelPickerSheet: View {
                 onSelect(reference)
             } label: {
                 HStack(spacing: 10) {
-                    Circle().fill(item.color).frame(width: 8, height: 8)
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(item.name)
-                            .font(.scaledSystem(15, weight: .medium, relativeTo: .body))
-                            .foregroundStyle(t.text)
-                        Text(item.details?.description ?? item.modelId)
-                            .font(.scaledSystem(12, relativeTo: .caption))
-                            .foregroundStyle(t.text3)
-                            .lineLimit(1)
-                        if let summary = item.details?.summaryItems, !summary.isEmpty {
-                            Text(summary.joined(separator: " · "))
-                                .font(.scaledSystem(11, relativeTo: .caption))
-                                .foregroundStyle(t.text3)
+                            .font(.body)
+                            .foregroundStyle(Color.primary)
+                        // The provider header supplies context; repeat only
+                        // a distinct wire ID so similar model names stay clear.
+                        if item.name != item.modelId {
+                            Text(item.modelId)
+                                .font(.subheadline)
+                                .foregroundStyle(Color.secondary)
                                 .lineLimit(2)
                         }
                     }
+                    .frame(minHeight: 44, alignment: .leading)
                     Spacer(minLength: 8)
                     if reference == activeModelId {
-                        LXIcon(name: .check, size: 13, color: t.accent, stroke: 2.5)
+                        Image(systemName: "checkmark")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(t.accent)
                     }
                 }
                 .contentShape(.rect)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
+            .accessibilityAddTraits(reference == activeModelId ? [.isSelected] : [])
             .disabled(modelSwitchPending || controlsPending)
             .accessibilityIdentifier("composer.model.\(slot).row.\(reference)")
 
@@ -235,12 +258,14 @@ struct ModelPickerSheet: View {
                     selectedDetails = item.details
                 } label: {
                     Image(systemName: "info.circle")
-                        .font(.scaledSystem(15, weight: .medium, relativeTo: .body))
-                        .foregroundStyle(t.text3)
+                        .font(.body)
+                        .foregroundStyle(t.accent)
                         .frame(width: 44, height: 44)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "composer_model_details"))
+                .accessibilityValue(item.name)
                 .accessibilityIdentifier("composer.model.\(slot).info.\(reference)")
             }
         }

@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_message_copy">Copy</string>
+    <string name="chat_message_copied">Copied</string>
     <string name="app_intent_ask_description">Bring text from Siri, Shortcuts, or another app into a new conversation.</string>
     <string name="app_intent_ask_title">Ask Lingxi</string>
     <string name="app_intent_initial_command_param_title">Pre-filled Command</string>
@@ -1245,7 +1247,7 @@
     <string name="settings_provider_credential_saved_secure">Credential saved to the engine\'s shared secure storage</string>
     <string name="settings_provider_credential_saved_unverified">Credential is configured in the local secure enclave; network connectivity hasn\'t been verified yet</string>
     <string name="settings_provider_credential_will_clear">Will be cleared after applying</string>
-    <string name="settings_provider_custom_model_hint">You can type a model ID that isn\'t listed; the preset picker above writes back into this field.</string>
+    <string name="settings_provider_custom_model_hint">Choose a model from the list, or enter another model ID.</string>
     <string name="settings_provider_custom_model_id">Custom Model ID</string>
     <string name="settings_provider_custom_url_hint">Enter a custom endpoint that is compatible with the official API.</string>
     <string name="settings_provider_cx_hint">Create a search engine ID in Google Programmable Search and paste it here</string>
@@ -1777,7 +1779,6 @@
     <string name="visualization_loading">Loading visualization…</string>
     <string name="visualization_unavailable">This visualization is no longer available.</string>
     <string name="visualization_label">Visualization</string>
-    <string name="visualization_expand">Expand visualization</string>
     <string name="visualization_remove_context">Remove visualization context</string>
     <string name="common_submit">Submit</string>
     <string name="cron_run_section_overview">Overview</string>
@@ -1924,7 +1925,7 @@
     <string name="settings_provider_vision_delegation">Vision Delegation</string>
     <string name="settings_provider_vision_delegation_hint">Allow non-vision models to batch-analyze images through an internal delegate.</string>
     <string name="settings_group_models_hub">Models</string>
-    <string name="settings_group_models_hub_summary">Providers, routing, search, fetch</string>
+    <string name="settings_group_models_hub_summary">Providers and models</string>
     <string name="settings_group_voice">Voice</string>
     <string name="settings_group_voice_summary">Recognition, speech, offline models</string>
     <string name="account_error_cancelled">Sign-in cancelled.</string>
@@ -1997,12 +1998,6 @@
     <string name="account_sign_out">Sign Out</string>
     <string name="account_title">LingXi Account</string>
     <string name="drawer_open_sidebar_a11y">Open sidebar</string>
-    <string name="chat_message_copy">Copy</string>
-    <string name="chat_message_copied">Copied</string>
-    <string name="workspace_add_directory">Add directory</string>
-    <string name="workspace_linked_directories">Project directories</string>
-    <string name="workspace_confirm_add">Add</string>
-    <string name="workspace_session_changed">The session changed. Reopen the directory picker.</string>
     <string name="remote_title">Remote control</string>
     <string name="remote_computers">My computers</string>
     <string name="remote_back">Back</string>
@@ -2087,5 +2082,18 @@
     <string name="remote_send_failed">The message was not sent. Try again.</string>
     <string name="remote_images_only_when_idle">Only text can be sent while a turn is running.</string>
     <string name="remote_image_unusable">That image could not be used.</string>
+    <string name="composer_model_options">Model Settings</string>
+    <string name="composer_model_updating">Switching model…</string>
+    <string name="composer_model_details">Model Details</string>
+    <string name="composer_fast_mode">Fast Mode</string>
+    <string name="settings_provider_visible_models">Visible Models</string>
     <string name="permission_elevated_risk">Elevated Risk</string>
+    <string name="visualization_close">Close</string>
+    <string name="visualization_expand">Expand visualization</string>
+    <string name="visualization_expanded">Open in full screen</string>
+    <string name="visualization_retry">Retry</string>
+    <string name="workspace_add_directory">Add directory</string>
+    <string name="workspace_confirm_add">Add</string>
+    <string name="workspace_linked_directories">Project directories</string>
+    <string name="workspace_session_changed">The session changed. Reopen the directory picker.</string>
 </resources>

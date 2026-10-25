@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_message_copy">コピー</string>
+    <string name="chat_message_copied">コピーしました</string>
     <string name="app_intent_ask_description">Siri、ショートカット、または他のアプリからのテキストを新しい会話に渡します。</string>
     <string name="app_intent_ask_title">灵犀に質問する</string>
     <string name="app_intent_initial_command_param_title">事前入力するコマンド</string>
@@ -1245,7 +1247,7 @@
     <string name="settings_provider_credential_saved_secure">認証情報はエンジン共有のセキュアストレージに保存されました</string>
     <string name="settings_provider_credential_saved_unverified">認証情報は端末のセキュアな領域に設定されていますが、ネットワーク接続の確認はまだ行われていません</string>
     <string name="settings_provider_credential_will_clear">適用後にクリアされます</string>
-    <string name="settings_provider_custom_model_hint">リストにないモデル ID を直接入力できます。上のプリセット選択欄はこのフィールドに反映されます。</string>
+    <string name="settings_provider_custom_model_hint">リストからモデルを選択するか、別のモデル ID を入力してください。</string>
     <string name="settings_provider_custom_model_id">カスタムモデル ID</string>
     <string name="settings_provider_custom_url_hint">公式 API と互換性のあるカスタムエンドポイントを入力してください。</string>
     <string name="settings_provider_cx_hint">Google Programmable Search で検索エンジン ID を作成して貼り付けてください</string>
@@ -1777,7 +1779,6 @@
     <string name="visualization_loading">ビジュアライゼーションを読み込み中…</string>
     <string name="visualization_unavailable">このビジュアライゼーションは利用できなくなりました。</string>
     <string name="visualization_label">ビジュアライゼーション</string>
-    <string name="visualization_expand">ビジュアライゼーションを拡大</string>
     <string name="visualization_remove_context">ビジュアライゼーションのコンテキストを削除</string>
     <string name="common_submit">送信</string>
     <string name="cron_run_section_overview">概要</string>
@@ -1924,7 +1925,7 @@
     <string name="settings_provider_vision_delegation">ビジョン委任</string>
     <string name="settings_provider_vision_delegation_hint">画像に対応していないモデルが、内部の委任先を通じて画像をまとめて分析できるようにします。</string>
     <string name="settings_group_models_hub">モデル</string>
-    <string name="settings_group_models_hub_summary">プロバイダ、ルーティング、検索、取得</string>
+    <string name="settings_group_models_hub_summary">プロバイダーとモデル</string>
     <string name="settings_group_voice">音声</string>
     <string name="settings_group_voice_summary">認識、読み上げ、オフラインモデル</string>
     <string name="account_error_cancelled">サインインをキャンセルしました。</string>
@@ -1997,8 +1998,6 @@
     <string name="account_sign_out">サインアウト</string>
     <string name="account_title">LingXi アカウント</string>
     <string name="drawer_open_sidebar_a11y">サイドバーを開く</string>
-    <string name="chat_message_copy">コピー</string>
-    <string name="chat_message_copied">コピーしました</string>
     <string name="remote_title">リモート操作</string>
     <string name="remote_computers">マイコンピューター</string>
     <string name="remote_back">戻る</string>
@@ -2083,5 +2082,18 @@
     <string name="remote_send_failed">メッセージを送信できませんでした。もう一度お試しください。</string>
     <string name="remote_images_only_when_idle">実行中はテキストのみ送信できます。</string>
     <string name="remote_image_unusable">この画像は使用できません。</string>
+    <string name="composer_model_options">モデル設定</string>
+    <string name="composer_model_updating">モデルを切り替え中…</string>
+    <string name="composer_model_details">モデルの詳細</string>
+    <string name="composer_fast_mode">高速モード</string>
+    <string name="settings_provider_visible_models">表示するモデル</string>
     <string name="permission_elevated_risk">リスクの高い操作</string>
+    <string name="visualization_close">閉じる</string>
+    <string name="visualization_expand">ビジュアライゼーションを拡大</string>
+    <string name="visualization_expanded">全画面で表示中</string>
+    <string name="visualization_retry">再試行</string>
+    <string name="workspace_add_directory">添加工作目录</string>
+    <string name="workspace_confirm_add">添加</string>
+    <string name="workspace_linked_directories">项目的工作目录</string>
+    <string name="workspace_session_changed">会话已切换，请重新打开目录选择器</string>
 </resources>

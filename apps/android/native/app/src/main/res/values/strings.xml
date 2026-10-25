@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="chat_message_copy">复制</string>
+    <string name="chat_message_copied">已复制</string>
     <string name="app_intent_ask_description">把来自 Siri、快捷指令或其他 App 的文本带入新对话。</string>
     <string name="app_intent_ask_title">向灵犀提问</string>
     <string name="app_intent_initial_command_param_title">预填命令</string>
@@ -1245,7 +1247,7 @@
     <string name="settings_provider_credential_saved_secure">凭据已保存到引擎共享安全存储</string>
     <string name="settings_provider_credential_saved_unverified">凭据已在本机安全区配置；尚未执行网络连通性验证</string>
     <string name="settings_provider_credential_will_clear">将于应用后清除</string>
-    <string name="settings_provider_custom_model_hint">可直接输入未列出的模型 ID；上方预设选择器会写回这个字段。</string>
+    <string name="settings_provider_custom_model_hint">从列表选择模型，或输入其他模型 ID。</string>
     <string name="settings_provider_custom_model_id">自定义模型 ID</string>
     <string name="settings_provider_custom_url_hint">填写与官方兼容的自定义接口地址。</string>
     <string name="settings_provider_cx_hint">在 Google Programmable Search 创建并粘贴搜索引擎 ID</string>
@@ -1777,7 +1779,6 @@
     <string name="visualization_loading">正在加载可视化…</string>
     <string name="visualization_unavailable">此可视化已不可用。</string>
     <string name="visualization_label">可视化</string>
-    <string name="visualization_expand">展开可视化</string>
     <string name="visualization_remove_context">移除可视化上下文</string>
     <string name="common_submit">提交</string>
     <string name="cron_run_section_overview">概览</string>
@@ -1924,7 +1925,7 @@
     <string name="settings_provider_vision_delegation">视觉委托</string>
     <string name="settings_provider_vision_delegation_hint">允许不支持图片的模型通过内部委托批量分析图片。</string>
     <string name="settings_group_models_hub">模型</string>
-    <string name="settings_group_models_hub_summary">提供商、路由、搜索与抓取</string>
+    <string name="settings_group_models_hub_summary">提供商与模型</string>
     <string name="settings_group_voice">语音</string>
     <string name="settings_group_voice_summary">识别、朗读、离线模型</string>
     <string name="account_error_cancelled">登录已取消。</string>
@@ -1997,12 +1998,6 @@
     <string name="account_sign_out">退出登录</string>
     <string name="account_title">LingXi 账户</string>
     <string name="drawer_open_sidebar_a11y">打开侧栏</string>
-    <string name="chat_message_copy">复制</string>
-    <string name="chat_message_copied">已复制</string>
-    <string name="workspace_add_directory">添加工作目录</string>
-    <string name="workspace_linked_directories">项目的工作目录</string>
-    <string name="workspace_confirm_add">添加</string>
-    <string name="workspace_session_changed">会话已切换，请重新打开目录选择器</string>
     <string name="remote_title">远程控制</string>
     <string name="remote_computers">我的电脑</string>
     <string name="remote_back">返回</string>
@@ -2087,5 +2082,18 @@
     <string name="remote_send_failed">消息未能发送，请重试。</string>
     <string name="remote_images_only_when_idle">运行中只能发送文字。</string>
     <string name="remote_image_unusable">无法使用这张图片。</string>
+    <string name="composer_model_options">模型设置</string>
+    <string name="composer_model_updating">正在切换模型…</string>
+    <string name="composer_model_details">模型详情</string>
+    <string name="composer_fast_mode">快速模式</string>
+    <string name="settings_provider_visible_models">显示的模型</string>
     <string name="permission_elevated_risk">较高风险</string>
+    <string name="visualization_close">关闭</string>
+    <string name="visualization_expand">展开可视化</string>
+    <string name="visualization_expanded">已在全屏中打开</string>
+    <string name="visualization_retry">重试</string>
+    <string name="workspace_add_directory">添加工作目录</string>
+    <string name="workspace_confirm_add">添加</string>
+    <string name="workspace_linked_directories">项目的工作目录</string>
+    <string name="workspace_session_changed">会话已切换，请重新打开目录选择器</string>
 </resources>

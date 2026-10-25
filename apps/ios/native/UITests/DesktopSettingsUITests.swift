@@ -96,7 +96,30 @@ final class DesktopSettingsUITests: XCTestCase {
             }
             model.tap()
             XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5))
+            let modelVisibility = app.buttons["provider.model.visibility"]
+            for _ in 0..<8 {
+                if modelVisibility.isHittable { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeUp()
+            }
+            XCTAssertTrue(modelVisibility.isHittable, app.debugDescription)
+            XCTAssertFalse(app.switches["provider.model.visible"].exists)
+            modelVisibility.tap()
+            let visible = app.switches["provider.model.visible"]
+            XCTAssertTrue(visible.waitForExistence(timeout: 5), app.debugDescription)
+            visible.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            XCTAssertEqual(visible.value as? String, "0")
+            app.navigationBars["显示的模型"].buttons.firstMatch.tap()
+            modelVisibility.tap()
+            XCTAssertEqual(visible.value as? String, "0", "Visibility edits must survive navigation")
+            visible.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            app.navigationBars["显示的模型"].buttons.firstMatch.tap()
+            let disclosure = app.buttons["自定义模型 ID"]
             let custom = app.textFields["provider.model.custom"]
+            for _ in 0..<8 {
+                if disclosure.isHittable || custom.isHittable { break }
+                app.collectionViews.allElementsBoundByIndex.last!.swipeDown()
+            }
+            if disclosure.isHittable { disclosure.tap() }
             for _ in 0..<8 {
                 if custom.exists { break }
                 app.collectionViews.allElementsBoundByIndex.last!.swipeUp()

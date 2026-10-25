@@ -333,6 +333,10 @@ final class LingxiCodeUITests: XCTestCase {
         let opus = providerRow("anthropic/claude-opus-4-8")
         XCTAssertTrue(opus.waitForExistence(timeout: 5), app.debugDescription)
         opus.tap()
+        let modelOptions = app.buttons["composer.model.options"]
+        XCTAssertTrue(modelOptions.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.switches["composer.model.fast-mode"].exists)
+        modelOptions.tap()
         let toggle = app.switches["composer.model.fast-mode"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5), app.debugDescription)
         let effort = app.descendants(matching: .any)["composer.reasoning.slider"].firstMatch
@@ -349,7 +353,11 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(String(describing: model.value).contains("High"), app.debugDescription)
         XCTAssertTrue(String(describing: model.value).contains("Fast Mode On"), app.debugDescription)
         openModelPicker()
+        app.buttons["composer.model.options"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), app.debugDescription)
         toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        app.buttons["composer.model.close"].tap()
+        openModelPicker()
         providerRow("anthropic/claude-sonnet-5").tap()
         XCTAssertFalse(app.switches["composer.model.fast-mode"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["composer.reasoning.slider"].exists)

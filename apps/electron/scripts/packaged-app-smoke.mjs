@@ -1199,7 +1199,12 @@ async function assertPackagedLocalApps(page, probe, creatorSessionId, cdpPort, c
   assert.notEqual(otherSession, sessionId, 'the pre-Modify chat must differ from the saved authoring session');
   await evaluate(page, `Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === 'Apps')?.click()`);
   await waitFor(() => evaluate(page, `Boolean(document.querySelector('.local-app-library .local-app-tile'))`), { label: 'packaged Apps library' });
-  await evaluate(page, `Array.from(document.querySelectorAll('.local-app-tile button')).find(button => button.textContent.trim() === 'Continue developing')?.click()`);
+  await evaluate(page, `(() => {
+    const tile = Array.from(document.querySelectorAll('.local-app-tile')).find(tile => tile.querySelector('h2')?.textContent === ${JSON.stringify(created.name)});
+    const modify = Array.from(tile?.querySelectorAll('button') ?? []).find(button => button.textContent.trim() === 'Modify');
+    if (!modify || modify.disabled) throw new Error('The published app must expose an enabled Modify action');
+    modify.click();
+  })()`);
   await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectPath === ${JSON.stringify(sourceSession.projectPath)} && state.activeSession?.sessionId === '${sessionId}' && document.querySelector('[aria-label="Prompt"]')?.innerText.includes('${created.id}') && Boolean(document.querySelector('.local-app-chat-card')))`), { label: 'Modify restores the dedicated authoring Code session, transcript and app draft' });
   // These fixture sessions are not persisted in the sidebar catalog. Navigate
   // through the real New chat action and verify the composer follows that chat.

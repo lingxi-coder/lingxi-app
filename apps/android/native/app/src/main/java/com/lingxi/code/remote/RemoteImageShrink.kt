@@ -5,11 +5,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.net.Uri
 import androidx.compose.ui.graphics.asImageBitmap
 import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.REMOTE_MAX_PROMPT_IMAGE_BYTES
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -40,18 +42,18 @@ internal fun nextShrinkAttempt(quality: Int, scale: Double): Pair<Int, Double> =
  */
 suspend fun shrinkPickedImage(context: Context, uri: Uri): ComposerAttachment = withContext(Dispatchers.IO) {
     val resolver = context.contentResolver
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    val boundsStream = resolver.openInputStream(uri)
-        ?: throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
-    boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
-    val (width, height) = fitWithin(bounds.outWidth, bounds.outHeight, REMOTE_MAX_IMAGE_EDGE)
-    // Let the decoder do the coarse part of the scaling so a 50 MP photo never sits in memory whole.
-    var sample = 1
-    while (bounds.outWidth / (sample * 2) >= width && bounds.outHeight / (sample * 2) >= height) sample *= 2
-    val decoded = resolver.openInputStream(uri)?.use {
-        BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
-    } ?: throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
+    // ImageDecoder applies camera EXIF rotation/mirroring while decoding to the
+    // bounded output size. Re-encoding BitmapFactory's raw pixels loses it.
+    val decoded = try {
+        RemoteImageDecoder.decode(ImageDecoder.createSource(resolver, uri), REMOTE_MAX_IMAGE_EDGE)
+    } catch (_: IOException) {
+        throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
+    } catch (_: SecurityException) {
+        throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
+    } catch (_: IllegalArgumentException) {
+        throw RemoteImageRejected(RemoteImageRejected.Reason.Decode)
+    }
+    val (width, height) = fitWithin(decoded.width, decoded.height, REMOTE_MAX_IMAGE_EDGE)
     try {
         var quality = 90
         var scale = 1.0

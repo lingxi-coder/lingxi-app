@@ -138,6 +138,7 @@ class RemoteControlManager(
     private val mutableClient = MutableStateFlow<ClientBinding?>(null)
     private val sinks = ConcurrentHashMap<SessionKey, CopyOnWriteArrayList<Channel<RemoteSessionUpdateFfi>>>()
     private val generation = AtomicInteger()
+    private val screenGeneration = AtomicInteger()
     private val sessionLifecycle = Mutex()
 
     val hosts: StateFlow<RemoteHostsState> = mutableHosts.asStateFlow()
@@ -198,14 +199,20 @@ class RemoteControlManager(
     }
 
     /** Keep the list of computers current while the host list is shown. */
-    suspend fun watchHosts() = client().watchHosts()
+    suspend fun watchHosts() {
+        screenGeneration.incrementAndGet()
+        sessionLifecycle.withLock { client().watchHosts() }
+    }
 
     suspend fun stopWatchingHosts() {
         mutableClient.value?.client?.stopWatchingHosts()
     }
 
     /** Dial [hostId]; dialling the one already connected only nudges it. */
-    suspend fun connect(hostId: String) = sessionLifecycle.withLock { client().connect(hostId) }
+    suspend fun connect(hostId: String) {
+        screenGeneration.incrementAndGet()
+        sessionLifecycle.withLock { client().connect(hostId) }
+    }
 
     /** Pair again after the computer removed this device. */
     suspend fun repair(hostId: String) = client().repairHost(hostId)
@@ -219,10 +226,16 @@ class RemoteControlManager(
 
     /** The screens went away: end the connection and stop watching. */
     fun closeConnection() {
+        val mine = screenGeneration.incrementAndGet()
+        val binding = mutableClient.value ?: return
         scope.launch {
-            val client = mutableClient.value?.client ?: return@launch
-            client.stopWatchingHosts()
-            client.disconnect()
+            sessionLifecycle.withLock {
+                if (mine != screenGeneration.get() || mutableClient.value !== binding) return@withLock
+                binding.client.stopWatchingHosts()
+                // A new screen may have requested this client while cleanup
+                // suspended. Its connect/watch runs after this lock is released.
+                if (mine == screenGeneration.get() && mutableClient.value === binding) binding.client.disconnect()
+            }
         }
     }
 
@@ -240,6 +253,7 @@ class RemoteControlManager(
         followSession(hostId, sessionId, account.uid.value)
 
     internal fun followSession(hostId: String, sessionId: String, ownerUid: String?): Flow<RemoteSessionUpdateFfi> = channelFlow {
+        screenGeneration.incrementAndGet()
         val key = SessionKey(checkNotNull(ownerUid) { "not signed in" }, hostId, sessionId)
         val sink = Channel<RemoteSessionUpdateFfi>(Channel.UNLIMITED)
         val channels = sinks.getOrPut(key) { CopyOnWriteArrayList() }

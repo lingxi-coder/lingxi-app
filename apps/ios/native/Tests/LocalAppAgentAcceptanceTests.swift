@@ -7,17 +7,36 @@ import XCTest
 @MainActor
 final class LocalAppAgentAcceptanceTests: XCTestCase {
 #if canImport(harness_runtimeFFI)
+    private struct PublishedAgentApp {
+        let result: LocalAppPublishResult
+        let source: URL
+        let projectID: String
+        let sessionID: String
+    }
+
     @MainActor
-    private func publishAgentApp(_ client: LocalAppServiceClient) async throws -> (LocalAppPublishResult, URL, String) {
+    private func publishAgentApp(
+        _ client: LocalAppServiceClient,
+        fixtureName: String = "agent",
+        projectName: String = "Agent wake acceptance",
+        verifyProjectShell: Bool = true
+    ) async throws -> PublishedAgentApp {
         let paths = MobileUserStorage.directories()
         let providerSnapshot = ProviderRepository.shared.makeLaunchSnapshot()
-        guard let codeModelID = providerSnapshot.defaultModelID,
-              !providerSnapshot.enabledProfileIDs.isEmpty else {
-            throw XCTSkip("Configure a tool-capable native model before exercising the iOS Project source mount.")
+        guard !providerSnapshot.enabledProfileIDs.isEmpty else {
+            throw XCTSkip("Configure a native model before exercising the iOS Project source mount.")
         }
+        let codeModel = try await configuredAgentModel(client, requireImages: false, requireTools: true, requireStructuredOutput: false)
+        guard let codeProfile = providerSnapshot.profiles.first(where: {
+            $0.enabled && $0.id == codeModel.providerId && $0.modelID == codeModel.modelId
+        }) else {
+            throw LocalAppServiceFailure("MODEL_PROFILE_MISMATCH", "The tool-capable Agent catalog model did not match an enabled native ProviderLaunchProfile.")
+        }
+        let codeModelID = codeProfile.qualifiedModelID
+        print("IOS_AGENT_CODE_MODEL providerId=\(codeModel.providerId) modelId=\(codeModel.modelId) qualifiedModelId=\(codeModelID) supportsTools=true selectedFrom=ProviderLaunchSnapshot")
         let guest = paths.appsGuestPath + "/agent-wake-acceptance-" + UUID().uuidString.lowercased()
         let source = try UnifiedLocalApps.hostSourceDirectory(guest)
-        let fixtures = try XCTUnwrap(Bundle(for: Self.self).resourceURL).appendingPathComponent("UnifiedAppFixtures/agent")
+        let fixtures = try XCTUnwrap(Bundle(for: Self.self).resourceURL).appendingPathComponent("UnifiedAppFixtures/\(fixtureName)")
         let projectRepository = ProjectRepository(
             projectsRoot: URL(fileURLWithPath: paths.projects, isDirectory: true),
             userHome: URL(fileURLWithPath: paths.home, isDirectory: true)
@@ -36,24 +55,27 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             try FileManager.default.copyItem(at: fixtures, to: source)
             stage = "create-project"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            let project = try await projectStore.createLocalAppAuthoringProject(name: "Agent wake acceptance", sourceDirectory: guest)
+            let project = try await projectStore.createLocalAppAuthoringProject(name: projectName, sourceDirectory: guest)
             projectID = project.record.id
+            let projectMountGrants = try MobileUserStorage.projectMountGrantPaths(for: project)
+            print("IOS_AGENT_PROJECT_SETUP projectId=\(project.record.id) guestSource=\(guest) activeDirectory=\(project.record.activeDirectory) additionalDirectories=\(project.record.additionalDirectories.sorted()) workspaceHost=\(project.workspace.hostURL.path) sourceHost=\(source.path) projectMountGrants=\(projectMountGrants.sorted())")
+            guard project.record.activeDirectory == guest,
+                  project.record.additionalDirectories.contains(guest),
+                  projectMountGrants.contains(guest) else {
+                throw LocalAppServiceFailure("PROJECT_SETUP_MISMATCH", "The native Project did not register the exact Local App source directory as its active, additional, and granted path.")
+            }
             stage = "create-engine-root"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             try FileManager.default.createDirectory(at: engineRoot, withIntermediateDirectories: true)
-            let runtimeMetadata = LXISHRuntimeBundleMetadata.current()
-            let workspaceHostPath = try MobileUserStorage.prepareProjectsDirectory().path
-            let mobileLinux = TerminalRuntimeConfig(
-                mode: .mobileLinux,
-                managedRoot: LXISHDefaultWorkspace.managedRootPath(),
-                workspaceHostPath: workspaceHostPath,
-                stableWorkspaceId: LXISHDefaultWorkspace.stableID(),
-                abi: "arm64",
-                rootfsVersion: runtimeMetadata.rootfsVersion,
-                archiveSha256: runtimeMetadata.archiveSha256,
-                authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path
+            let runtime = TerminalRuntimeDescriptor.make(
+                appSandboxRoot: ConversationSourceFactory.appSandboxRoot(),
+                project: project,
+                linuxRuntime: LinuxRuntimeState()
             )
-            let projectMountGrants = try MobileUserStorage.projectMountGrantPaths(for: project)
+            guard let mobileLinux = runtime.config else {
+                throw LocalAppServiceFailure("PROJECT_RUNTIME_UNAVAILABLE", "The production Mobile Linux runtime descriptor could not configure this Project.")
+            }
+            print("IOS_AGENT_RUNTIME_CONFIG managedRoot=\(mobileLinux.managedRoot) workspaceHost=\(mobileLinux.workspaceHostPath) stableWorkspaceId=\(mobileLinux.stableWorkspaceId) descriptorWorkspaceHost=\(runtime.workspace.hostPath) descriptorWorkspaceGuest=\(runtime.workspace.guestPath)")
             // Register an actual Code session for this dedicated source Project
             // before the test exercises the external-browser wake gate.
             stage = "start-code-session"
@@ -82,24 +104,27 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
                   workspace.cwd == guest else {
                 throw LocalAppServiceFailure("AUTHORING_CHANGED", "The test Code session did not confirm the app source directory.")
             }
+            print("IOS_AGENT_CODE_SESSION sessionId=\(sessionID) activeSessionId=\(activeEngine.model.activeSessionId) cwd=\(workspace.cwd) projectRoot=\(workspace.projectRoot) additionalDirectories=\(workspace.additionalDirectories.sorted())")
             stage = "record-code-session"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             try await projectStore.recordStartedSession(
                 projectId: project.record.id,
                 sessionId: sessionID,
-                title: "Agent wake acceptance",
+                title: projectName,
                 mode: .code
             )
             stage = "record-workspace"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
             try await projectStore.recordWorkspace(projectId: project.record.id, state: workspace)
-            stage = "verify-project-shell-cwd"
-            print("IOS_AGENT_WAKE_CHECKPOINT \(stage) model=\(codeModelID)")
-            try await verifyProjectMountWithConfiguredShell(
-                activeEngine,
-                guestSource: guest,
-                hostSource: source
-            )
+            if verifyProjectShell {
+                stage = "verify-project-shell-cwd"
+                print("IOS_AGENT_WAKE_CHECKPOINT \(stage) model=\(codeModelID)")
+                try await verifyProjectMountWithConfiguredShell(
+                    activeEngine,
+                    guestSource: guest,
+                    hostSource: source
+                )
+            }
             let authoring = LocalAppAuthoring(
                 sourceDirectory: guest,
                 workspaceId: project.record.id,
@@ -116,16 +141,13 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             ])
             engine = nil
             try? FileManager.default.removeItem(at: engineRoot)
-            return (result, source, project.record.id)
+            return PublishedAgentApp(result: result, source: source, projectID: project.record.id, sessionID: sessionID)
         } catch {
-            print("IOS_AGENT_WAKE_FAILURE stage=\(stage) error=\(String(describing: error))")
+            print("IOS_AGENT_PUBLISH_FAILURE stage=\(stage) type=\(String(reflecting: type(of: error))) error=\(String(describing: error))")
             engine = nil
             if let projectID { _ = try? projectRepository.deleteProject(projectId: projectID) }
             try? FileManager.default.removeItem(at: source)
             try? FileManager.default.removeItem(at: engineRoot)
-            if error is CancellationError {
-                throw LocalAppServiceFailure("TEST_SETUP_CANCELLED", "Agent wake acceptance canceled during \(stage).")
-            }
             throw error
         }
     }
@@ -169,21 +191,29 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             }
 
             if let completion = engine.model.turnCompletion, completion.token == token {
-                guard completion.outcome == .completed else {
-                    throw LocalAppServiceFailure("PROJECT_SHELL_TURN_FAILED", "The Code session's Project mount probe did not complete.")
-                }
-                let shell = engine.model.items.reversed().compactMap { item -> ConversationShellCard? in
+                let run = engine.model.items.reversed().compactMap { item -> ConversationExecutionRun? in
                     guard case let .run(run) = item, run.turnId == token.clientTurnId else { return nil }
-                    return run.shellCards.first { $0.command == command }
+                    return run
                 }.first
+                let shellCards = run?.shellCards ?? []
+                let shell = shellCards.first { $0.command == command } ?? shellCards.first
+                let shellDiagnostics = shell.map {
+                    "command=\($0.command.debugDescription) status=\($0.status.label) cwd=\($0.cwd ?? "<none>") exitCode=\($0.exitCode.map { String($0) } ?? "<none>") truncated=\($0.truncated) stdout=\(String($0.stdout.prefix(1500)).debugDescription) stderr=\(String($0.stderr.prefix(1500)).debugDescription)"
+                } ?? "no-shell-card toolCount=\(run?.tools.count ?? 0)"
+                if completion.outcome != .completed {
+                    print("IOS_AGENT_WAKE_PROJECT_MOUNT_RESULT outcome=\(String(describing: completion.outcome)) \(shellDiagnostics)")
+                    throw LocalAppServiceFailure("PROJECT_SHELL_TURN_FAILED", "The Code session's Project mount probe did not complete; \(shellDiagnostics)")
+                }
                 guard let shell else {
-                    throw LocalAppServiceFailure("PROJECT_SHELL_RESULT_MISSING", "The completed Code turn did not report its Bash tool result.")
+                    print("IOS_AGENT_WAKE_PROJECT_MOUNT_RESULT turnId=\(token.clientTurnId) \(shellDiagnostics)")
+                    throw LocalAppServiceFailure("PROJECT_SHELL_RESULT_MISSING", "The completed Code turn did not report a Bash tool result; \(shellDiagnostics)")
                 }
-                guard shell.status == .completed, shell.exitCode == 0,
+                print("IOS_AGENT_WAKE_PROJECT_MOUNT_RESULT \(shellDiagnostics)")
+                guard shell.command == command, shell.status == .completed, shell.exitCode == 0,
                       shell.stdout.contains(guestSource), shell.stdout.contains(marker) else {
-                    throw LocalAppServiceFailure("PROJECT_SHELL_RESULT_MISMATCH", "Bash output did not confirm the authorized guest source cwd and marker file.")
+                    throw LocalAppServiceFailure("PROJECT_SHELL_RESULT_MISMATCH", "Bash did not confirm the exact Project source probe; expectedCommand=\(command.debugDescription) \(shellDiagnostics)")
                 }
-                print("IOS_AGENT_WAKE_PROJECT_MOUNT PASS guest=\(guestSource) shell=\(command) exit=\(shell.exitCode ?? -1) stdout=\(shell.stdout.debugDescription)")
+                print("IOS_AGENT_WAKE_PROJECT_MOUNT PASS guest=\(guestSource) \(shellDiagnostics)")
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
@@ -192,26 +222,49 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         throw LocalAppServiceFailure("PROJECT_SHELL_TIMEOUT", "The Code session did not finish the Project mount probe within 120 seconds.")
     }
 
-    private func configureAgentForWakeGate(_ client: LocalAppServiceClient, appId: String) async throws {
+    private func configuredAgentModel(
+        _ client: LocalAppServiceClient,
+        requireImages: Bool,
+        requireTools: Bool,
+        requireStructuredOutput: Bool
+    ) async throws -> (providerId: String, modelId: String) {
         print("IOS_AGENT_WAKE_CHECKPOINT catalog")
         let catalog = try await client.agentHost(["op": .string("catalog")], as: LocalAppJSON.self)
         guard case .object(let fields) = catalog, case .array(let models)? = fields["models"],
               let model = models.first(where: { value in
                   guard case .object(let modelFields) = value else { return false }
                   return modelFields["canSelect"] == .bool(true)
+                      && (!requireImages || modelFields["supportsImages"] == .bool(true))
+                      && (!requireTools || modelFields["supportsTools"] == .bool(true))
+                      && (!requireStructuredOutput || modelFields["supportsStructuredOutput"] == .bool(true))
               }),
               case .object(let modelFields) = model,
               case .string(let providerId)? = modelFields["providerId"],
               case .string(let modelId)? = modelFields["modelId"] else {
-            throw XCTSkip("Configure a selectable model in the native host to exercise the iOS wake gate.")
+            let requirement = [
+                requireImages ? "image" : nil,
+                requireTools ? "tool" : nil,
+                requireStructuredOutput ? "structured-output" : nil,
+            ].compactMap { $0 }.joined(separator: " and ")
+            throw XCTSkip("Configure an available native model with \(requirement) support to exercise the iOS acceptance.")
         }
+        return (providerId, modelId)
+    }
+
+    private func configureAgentForWakeGate(_ client: LocalAppServiceClient, appId: String) async throws -> String {
+        let selectedModel = try await configuredAgentModel(
+            client,
+            requireImages: true,
+            requireTools: false,
+            requireStructuredOutput: true
+        )
         let settings = LocalAppJSON.object([
-            "model": .object(["providerId": .string(providerId), "modelId": .string(modelId)]),
+            "model": .object(["providerId": .string(selectedModel.providerId), "modelId": .string(selectedModel.modelId)]),
             "tools": .object([:]),
             "skills": .array([]),
             "background": .bool(false),
-            "maxTurns": .number(2),
-            "timeoutMs": .number(120_000),
+            "maxTurns": .number(8),
+            "timeoutMs": .number(180_000),
         ])
         print("IOS_AGENT_WAKE_CHECKPOINT configure")
         let _: LocalAppJSON = try await client.agentHost([
@@ -219,6 +272,8 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             "appId": .string(appId),
             "settings": settings,
         ], as: LocalAppJSON.self)
+        print("IOS_AGENT_WAKE_MODEL providerId=\(selectedModel.providerId) modelId=\(selectedModel.modelId) supportsImages=true supportsStructuredOutput=true")
+        return "\(selectedModel.providerId)/\(selectedModel.modelId)"
     }
 
     func testBrowserRunAgentRequiresAttachedNativeLeaseOnDevice() async throws {
@@ -229,10 +284,10 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         let app = try await publishAgentApp(client)
         var stage = "configure"
         do {
-            try await configureAgentForWakeGate(client, appId: app.0.record.appId)
+            _ = try await configureAgentForWakeGate(client, appId: app.result.record.appId)
             stage = "open-browser"
             print("IOS_AGENT_WAKE_CHECKPOINT \(stage)")
-            let launch = try await UnifiedLocalApps(client: client).openExternalBrowser(app.0.record.appId)
+            let launch = try await UnifiedLocalApps(client: client).openExternalBrowser(app.result.record.appId)
             XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
 
             let runID = "ios opaque run + \(UUID().uuidString)"
@@ -278,40 +333,93 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             XCTAssertEqual(error["code"] as? String, "host_wake_required")
             print("IOS_AGENT_WAKE_GATE PASS source Project and Code session; JSON RunAgentInput ContentPart-data; no native lease")
         } catch {
-            print("IOS_AGENT_WAKE_FAILURE stage=\(stage) error=\(String(describing: error))")
-            try? await UnifiedLocalApps(client: client).action("remove", id: app.0.record.appId)
-            try? FileManager.default.removeItem(at: app.1)
+            print("IOS_AGENT_WAKE_FAILURE stage=\(stage) type=\(String(reflecting: type(of: error))) error=\(String(describing: error))")
+            try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
+            try? FileManager.default.removeItem(at: app.source)
             _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
-                .deleteProject(projectId: app.2)
-            if error is CancellationError {
-                throw LocalAppServiceFailure("TEST_SETUP_CANCELLED", "Agent wake acceptance canceled during \(stage).")
-            }
+                .deleteProject(projectId: app.projectID)
             throw error
         }
-        try? await UnifiedLocalApps(client: client).action("remove", id: app.0.record.appId)
-        try? FileManager.default.removeItem(at: app.1)
+        try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
+        try? FileManager.default.removeItem(at: app.source)
         _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
-            .deleteProject(projectId: app.2)
+            .deleteProject(projectId: app.projectID)
         #endif
     }
 #endif
 
     func testStageCalorieAppForExternalBrowserAcceptance() async throws {
+#if canImport(harness_runtimeFFI)
         let client = LocalAppServiceClient()
-        let guest = MobileUserStorage.directories().appsGuestPath + "/browser-meal-" + UUID().uuidString.lowercased()
-        let source = try UnifiedLocalApps.hostSourceDirectory(guest)
-        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "UnifiedAppFixtures", withExtension: nil))
-        try FileManager.default.copyItem(at: fixture.appendingPathComponent("calorie-agent"), to: source)
-        let app: LocalAppPublishResult = try await client.request([
-            "op": .string("publish"), "sourcePath": .string(source.path), "expectedRevision": .number(0)
-        ])
-        let receipt = try JSONSerialization.data(withJSONObject: ["appId": app.record.appId, "sourcePath": source.path], options: [.prettyPrinted, .sortedKeys])
+        let app = try await publishAgentApp(
+            client,
+            fixtureName: "calorie-agent",
+            projectName: "Calorie browser acceptance",
+            verifyProjectShell: false
+        )
+        do {
+            let model = try await configureAgentForWakeGate(client, appId: app.result.record.appId)
+            try attachBrowserAcceptanceReceipt(app, fixtureName: "calorie-agent", model: model)
+        } catch {
+            try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
+            try? FileManager.default.removeItem(at: app.source)
+            _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
+                .deleteProject(projectId: app.projectID)
+            throw error
+        }
+#else
+        throw XCTSkip("FullDebug Mobile Linux is required to stage a real Project-backed Local App.")
+#endif
+    }
+
+    func testStageAGUIBrowserAppForExternalBrowserAcceptance() async throws {
+#if canImport(harness_runtimeFFI)
+        let client = LocalAppServiceClient()
+        let app = try await publishAgentApp(
+            client,
+            fixtureName: "agent",
+            projectName: "AG-UI browser acceptance",
+            verifyProjectShell: false
+        )
+        do {
+            let model = try await configureAgentForWakeGate(client, appId: app.result.record.appId)
+            let launch = try await UnifiedLocalApps(client: client).openExternalBrowser(app.result.record.appId)
+            XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
+            try attachBrowserAcceptanceReceipt(app, fixtureName: "agent", model: model)
+            print("IOS_AGUI_EXTERNAL_BROWSER_OPEN appId=\(app.result.record.appId) projectId=\(app.projectID) route=system-selected-external-browser")
+        } catch {
+            try? await UnifiedLocalApps(client: client).action("remove", id: app.result.record.appId)
+            try? FileManager.default.removeItem(at: app.source)
+            _ = try? ProjectRepository(projectsRoot: URL(fileURLWithPath: MobileUserStorage.directories().projects, isDirectory: true))
+                .deleteProject(projectId: app.projectID)
+            throw error
+        }
+#else
+        throw XCTSkip("FullDebug Mobile Linux is required to stage a real Project-backed Local App.")
+#endif
+    }
+
+#if canImport(harness_runtimeFFI)
+    private func attachBrowserAcceptanceReceipt(_ app: PublishedAgentApp, fixtureName: String, model: String) throws {
+        let appId = app.result.record.appId
+        let receiptObject: [String: Any] = [
+            "appId": appId,
+            "revision": NSNumber(value: app.result.record.currentRevision),
+            "fixture": fixtureName,
+            "sourcePath": app.source.path,
+            "projectId": app.projectID,
+            "authoringSessionId": app.sessionID,
+            "model": model,
+        ]
+        let receipt = try JSONSerialization.data(withJSONObject: receiptObject, options: [.prettyPrinted, .sortedKeys])
         let attachment = XCTAttachment(data: receipt, uniformTypeIdentifier: "public.json")
-        attachment.name = "external-browser-interactive-app"
+        attachment.name = "agui-browser-acceptance-\(appId)"
         attachment.lifetime = .keepAlways
         add(attachment)
-        try receipt.write(to: URL(fileURLWithPath: MobileUserStorage.directories().configHome)
-            .appendingPathComponent("external-browser-interactive-acceptance.json"))
-        print("IOS_BROWSER_INTERACTIVE appId=\(app.record.appId)")
+        let receiptURL = URL(fileURLWithPath: MobileUserStorage.directories().configHome, isDirectory: true)
+            .appendingPathComponent("agui-browser-acceptance-\(appId).json")
+        try receipt.write(to: receiptURL, options: .atomic)
+        print("IOS_BROWSER_ACCEPTANCE_STAGED appId=\(appId) projectId=\(app.projectID) fixture=\(fixtureName) model=\(model) receipt=\(receiptURL.path)")
     }
+#endif
 }

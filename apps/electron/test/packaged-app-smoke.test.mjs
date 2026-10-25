@@ -6,6 +6,7 @@ import { afterEach, test } from 'node:test';
 
 import {
   APP_USER_DATA_SUBPATH,
+  assertTemporaryBrokerLaunchdIdentity,
   unregisterCredentialBrokerForColdStart,
   assertCustomProviderTurn,
   assertPackagedLocalAppCatalogSession,
@@ -266,4 +267,49 @@ test('cold-start waits for asynchronous launchd removal and refuses unrelated fa
   await unregisterCredentialBrokerForColdStart('development', (_bin, args) => ({ status: args[0] === 'bootout' ? 3 : 113 }));
   await assert.rejects(unregisterCredentialBrokerForColdStart('development', () => ({ status: null })), /bootout failed/);
   await assert.rejects(unregisterCredentialBrokerForColdStart('development', (_bin, args) => ({ status: args[0] === 'bootout' ? 0 : 1 })), /launchctl failed/);
+});
+
+test('temporary Broker guard rejects foreign and replaced launchd identities', {
+  skip: typeof process.getuid !== 'function',
+}, () => {
+  const home = temporaryDirectory();
+  const label = 'com.lingxi.code.credential-broker.development';
+  const target = `gui/${process.getuid()}/${label}`;
+  const plistPath = join(home, 'Library', 'LaunchAgents', `${label}.plist`);
+  const programPath = join(home, 'Library', 'Application Support', 'LingXi', 'CredentialBroker',
+    'development', 'LingXiCredentialBroker.app', 'Contents', 'MacOS', 'LingXiCredentialBroker');
+  const replacementProgramPath = join(home, 'replacement', 'LingXiCredentialBroker');
+  const outsideHome = temporaryDirectory();
+  const outsideProgramPath = join(outsideHome, 'LingXiCredentialBroker');
+  mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+  mkdirSync(join(programPath, '..'), { recursive: true });
+  mkdirSync(join(replacementProgramPath, '..'), { recursive: true });
+  writeFileSync(plistPath, 'fixture plist');
+  writeFileSync(programPath, 'expected executable');
+  writeFileSync(replacementProgramPath, 'replacement executable');
+  writeFileSync(outsideProgramPath, 'outside executable');
+
+  const paths = {
+    target,
+    plistPath: realpathSync.native(plistPath),
+    programPath: realpathSync.native(programPath),
+  };
+  const output = (service, plist, program) => `${service} = {\n\tpath = ${plist}\n\tprogram = ${program}\n\tpid = 4242\n}\n`;
+
+  assert.deepEqual(assertTemporaryBrokerLaunchdIdentity(output(target, plistPath, programPath), paths), {
+    plistPath: paths.plistPath,
+    programPath: paths.programPath,
+    pid: 4242,
+  });
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(
+    output(target, plistPath, outsideProgramPath), paths,
+  ), /does not match this isolated smoke home/);
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(
+    output(target, plistPath, replacementProgramPath), paths,
+  ), /does not match this isolated smoke home/);
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(
+    output(`gui/${process.getuid()}/com.lingxi.code.credential-broker`, plistPath, programPath), paths,
+  ), /service label must match/);
+  const invalidPid = output(target, plistPath, programPath).replace('pid = 4242', 'pid = not-a-pid');
+  assert.throws(() => assertTemporaryBrokerLaunchdIdentity(invalidPid, paths), /PID must be valid/);
 });

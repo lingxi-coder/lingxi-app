@@ -5653,11 +5653,15 @@ final class EngineConversationSource: ConversationSource {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let handle = try await ensureHandle()
-                try await handle.changeWorkspace(path: path, expectedSessionId: expectedSessionID)
-                listSessions()
+                try await setWorkspaceDirectory(path, expectedSessionID: expectedSessionID)
             } catch { fail(.host, error.localizedDescription) }
         }
+    }
+
+    func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
+        let handle = try await ensureHandle()
+        try await handle.changeWorkspace(path: path, expectedSessionId: expectedSessionID)
+        listSessions()
     }
 
     func addWorkspaceDirectory(_ path: String, expectedSessionID: String) {

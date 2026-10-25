@@ -400,6 +400,17 @@ final class MockConversationSource: ConversationSource {
         model.clearAgentState()
     }
 
+    func setWorkspaceDirectory(_ path: String, expectedSessionID: String) async throws {
+        guard expectedSessionID.isEmpty || expectedSessionID == model.activeSessionId else {
+            throw WorkspaceDirectoryError.sessionChanged
+        }
+        let path = try await WorkspaceDirectoryRepository().canonicalDirectory(path)
+        model.workspaceState = SessionWorkspaceState(sessionId: model.activeSessionId, cwd: path,
+            projectRoot: model.workspaceState?.projectRoot ?? LXISHGuestPaths.workspaceRoot,
+            additionalDirectories: model.workspaceState?.additionalDirectories ?? [],
+            transcriptPath: model.workspaceState?.transcriptPath ?? "")
+    }
+
     @discardableResult
     func send(_ text: String) -> ConversationTurnToken? {
         send(text, images: [])

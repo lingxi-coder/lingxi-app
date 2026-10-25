@@ -139,6 +139,7 @@ struct RootView: View {
     @State private var sessionInspectorOpen = false
     @State private var sessionDetailsSheetOpen = false
     @State private var workspacePickerOpen = false
+    @State private var liveWorkspaceState: SessionWorkspaceState?
     @State private var workspacePickerSource: (any ConversationSource)?
     @State private var workspacePickerSessionID = ""
     @State private var openTerminalAfterSessionDetails = false
@@ -881,7 +882,8 @@ struct RootView: View {
                 onSessionChanged: adoptEngineSession,
                 onUnavailableSession: clearUnavailableSession,
                 onSessionTransitionFailed: rollbackFailedSession,
-                onRefreshSessions: { source.listSessions() }
+                onRefreshSessions: { source.listSessions() },
+                onWorkspaceChanged: { liveWorkspaceState = $0 }
             )
             .id(sourceGeneration)
 
@@ -925,29 +927,23 @@ struct RootView: View {
             workspacePickerSource = nil
             workspacePickerSessionID = ""
         }) {
-            WorkspacePickerSheet(
-                projects: RecentSessionsBuilder.sortedProjects(
-                    projectStore.projects,
-                    pinnedAt: workspacePinnedAt
-                ),
+            WorkspaceDirectoryPickerSheet(
+                projects: RecentSessionsBuilder.sortedProjects(projectStore.projects, pinnedAt: workspacePinnedAt),
                 activeScope: activeScope,
-                onSelect: { scope in startNewChat(in: scope, mode: activeMode) },
-                directories: activeScope.projectID.flatMap { id in projectStore.projects.first(where: { $0.id == id }) }
-                    .map { [$0.record.directory] + $0.record.additionalDirectories } ?? [],
-                activeDirectory: projectStore.activeProject?.record.activeDirectory,
+                currentDirectory: currentWorkspaceGuestPath,
+                contextDirectories: source.model.workspaceState?.additionalDirectories
+                    ?? projectStore.activeProject?.record.additionalDirectories ?? [],
+                protectedPaths: { workspaceProtectedDirectories },
+                canMutate: { !source.model.requiresBackgroundExecution && !source.model.isCancelling && !source.model.sessionTransitionPending },
+                runtimeStatus: settingsStore.linuxRuntime.rootfsState.label,
+                onSelectScope: { scope in startNewChat(in: scope, mode: activeMode) },
                 onPickDirectory: { path in
                     guard let pickerSource = workspacePickerSource, pickerSource === source else {
-                        source.model.error = ConversationError(kind: .host, message: String(localized: "workspace_session_changed"))
-                        return
+                        throw WorkspaceDirectoryError.sessionChanged
                     }
-                    pickerSource.changeWorkspace(path, expectedSessionID: workspacePickerSessionID)
-                },
-                onAddDirectory: { path in
-                    guard let pickerSource = workspacePickerSource, pickerSource === source else {
-                        source.model.error = ConversationError(kind: .host, message: String(localized: "workspace_session_changed"))
-                        return
-                    }
-                    pickerSource.addWorkspaceDirectory(path, expectedSessionID: workspacePickerSessionID)
+                    try await pickerSource.setWorkspaceDirectory(path, expectedSessionID: workspacePickerSessionID)
+                    guard pickerSource === source else { throw WorkspaceDirectoryError.sessionChanged }
+                    liveWorkspaceState = pickerSource.model.workspaceState
                 }
             )
             .environment(\.theme, theme)
@@ -960,17 +956,22 @@ struct RootView: View {
 
     /// The workspace's display name for the top bar and the new-chat strip.
     private var currentWorkspaceName: String {
-        switch activeScope {
-        case .remote:
-            return String(localized: "remote_title")
-        case .global:
-            return String(localized: "common_global")
-        case .scheduled:
-            return String(localized: "settings_title_cron")
-        case let .project(id):
-            return projectStore.projects.first { $0.id == id }?.record.name
-                ?? String(localized: "common_global")
-        }
+        if case .remote = activeScope { return String(localized: "remote_title") }
+        let path = currentWorkspaceGuestPath
+        if path == LXISHGuestPaths.home { return "~" }
+        if let project = projectStore.activeProject, path == project.record.directory { return project.record.name }
+        return (path as NSString).lastPathComponent
+    }
+
+    private var workspaceProtectedDirectories: [String] {
+        let state = source.model.workspaceState
+        return [currentWorkspaceGuestPath, state?.projectRoot].compactMap { $0 }
+            + (state?.additionalDirectories ?? [])
+            + projectStore.projects.flatMap { project in
+                [project.record.directory, project.record.activeDirectory, (project.record.directory as NSString).deletingLastPathComponent]
+                    + project.record.additionalDirectories + project.sessions.compactMap(\.workspaceDirectory)
+            }
+            + projectStore.globalSessions.compactMap(\.workspaceDirectory)
     }
 
     /// Start a fresh conversation in `scope` as `mode`, carrying what has been
@@ -1162,6 +1163,9 @@ struct RootView: View {
     }
 
     private var currentWorkspaceGuestPath: String {
+        if let liveWorkspaceState, liveWorkspaceState.sessionId == source.model.activeSessionId {
+            return liveWorkspaceState.cwd
+        }
         return source.model.workspaceState?.cwd ?? projectStore.activeProject?.workspace.guestPath ?? LXISHDefaultWorkspace.guestHome
     }
 
@@ -2466,6 +2470,7 @@ private struct ConversationProjectBridge: View {
     let onUnavailableSession: (String) -> Bool
     let onSessionTransitionFailed: (String) -> Bool
     let onRefreshSessions: () -> Void
+    var onWorkspaceChanged: (SessionWorkspaceState?) -> Void = { _ in }
     @State private var sessionSyncTask: Task<Void, Never>?
     @State private var workspaceSyncTask: Task<Void, Never>?
 
@@ -2526,6 +2531,7 @@ private struct ConversationProjectBridge: View {
     }
 
     private func synchronizeWorkspace() {
+        onWorkspaceChanged(model.workspaceState)
         guard let projectID, let state = model.workspaceState,
               state.sessionId == model.activeSessionId, !model.sessionTransitionPending else { return }
         workspaceSyncTask?.cancel()

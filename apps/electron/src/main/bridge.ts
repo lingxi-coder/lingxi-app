@@ -1641,6 +1641,14 @@ export class SessionRuntime {
     });
 
     const environment = { ...buildBridgeEnvironment(process.env, launch.apiBaseUrl), ...launch.settingsEnvironment };
+    // These paths belong to Desktop main, never a workspace or a remembered
+    // environment snapshot. Absence must also clear inherited integration flags.
+    delete environment.LINGXI_DESKTOP_COMPUTER_POLICY;
+    delete environment.LINGXI_DESKTOP_BROWSER_DESCRIPTOR;
+    if (launch.computerUseEnvironment) {
+      environment.LINGXI_DESKTOP_COMPUTER_POLICY = launch.computerUseEnvironment.LINGXI_DESKTOP_COMPUTER_POLICY;
+      environment.LINGXI_DESKTOP_BROWSER_DESCRIPTOR = launch.computerUseEnvironment.LINGXI_DESKTOP_BROWSER_DESCRIPTOR;
+    }
     // The packaged Electron executable has Node mode, so Mod workers do not
     // depend on a separate system Node installation.
     environment.LINGXI_MOD_NODE_EXECUTABLE = process.execPath;

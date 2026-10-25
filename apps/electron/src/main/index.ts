@@ -544,7 +544,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       }));
       return {
         workspace,
-        settingsEnvironment: {
+        computerUseEnvironment: {
           LINGXI_DESKTOP_COMPUTER_POLICY: computerSettings.executionPolicyPath,
           LINGXI_DESKTOP_BROWSER_DESCRIPTOR: browserDescriptor,
         },

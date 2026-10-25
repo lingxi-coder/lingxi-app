@@ -45,6 +45,11 @@ export interface BridgeLaunchConfig {
   additionalDirectories?: readonly string[];
   promptDirectories?: readonly string[];
   settingsEnvironment?: Readonly<Record<string, string>>;
+  /** Main-process authority, kept separate from user/workspace environment snapshots. */
+  computerUseEnvironment?: Readonly<{
+    LINGXI_DESKTOP_COMPUTER_POLICY: string;
+    LINGXI_DESKTOP_BROWSER_DESCRIPTOR: string;
+  }>;
   initialProjectRoot?: string;
   configHome?: string;
   globalConfigPath?: string;

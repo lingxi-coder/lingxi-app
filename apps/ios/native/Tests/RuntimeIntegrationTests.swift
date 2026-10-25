@@ -24,6 +24,77 @@ final class RuntimeIntegrationTests: XCTestCase {
         XCTAssertEqual(repository.load().projects.map(\.id), [created.id])
     }
 
+    func testProjectMountGrantUsesExactProjectSourceAndRejectsBroadPaths() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managedRoot = root.appendingPathComponent("runtime", isDirectory: true).path
+        let paths = MobileUserStorage.directories(managedRoot: managedRoot)
+        let sourceGuest = paths.appsGuestPath + "/calorie-a1b2c3d4"
+        let sourceHost = URL(fileURLWithPath: paths.apps, isDirectory: true)
+            .appendingPathComponent("calorie-a1b2c3d4", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHost, withIntermediateDirectories: true)
+
+        XCTAssertEqual(
+            try MobileUserStorage.projectMountGrantPaths(
+                activeDirectory: sourceGuest,
+                additionalDirectories: [sourceGuest],
+                managedRoot: managedRoot
+            ),
+            [sourceGuest]
+        )
+
+        for broadGuest in [
+            paths.guestHome,
+            paths.configGuestPath,
+            paths.appsGuestPath,
+            "/tmp/unapproved-project"
+        ] {
+            XCTAssertThrowsError(
+                try MobileUserStorage.projectMountGrantPaths(
+                    activeDirectory: broadGuest,
+                    additionalDirectories: [],
+                    managedRoot: managedRoot
+                ),
+                "broad path must not become a project bind mount: \(broadGuest)"
+            )
+        }
+
+        let aliasGuest = paths.appsGuestPath + "/alias"
+        let aliasHost = URL(fileURLWithPath: paths.apps, isDirectory: true)
+            .appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: aliasHost, withDestinationURL: sourceHost)
+        XCTAssertThrowsError(
+            try MobileUserStorage.projectMountGrantPaths(
+                activeDirectory: aliasGuest,
+                additionalDirectories: [],
+                managedRoot: managedRoot
+            ),
+            "symlink source must not become a bind mount"
+        )
+    }
+
+    func testProjectMountGrantsRejectDuplicateAndOverlappingDirectoryRecords() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managedRoot = root.appendingPathComponent("runtime", isDirectory: true).path
+        let paths = MobileUserStorage.directories(managedRoot: managedRoot)
+        let parentGuest = paths.appsGuestPath + "/team"
+        let childGuest = parentGuest + "/nested"
+        let appsHost = URL(fileURLWithPath: paths.apps, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: appsHost.appendingPathComponent("team/nested", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+
+        XCTAssertThrowsError(
+            try MobileUserStorage.projectMountGrantPaths(
+                activeDirectory: parentGuest,
+                additionalDirectories: [parentGuest, childGuest],
+                managedRoot: managedRoot
+            )
+        )
+    }
+
     func testExplicitResourceOverridesWinOverManagedResources() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

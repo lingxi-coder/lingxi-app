@@ -1850,6 +1850,8 @@ final class EngineConversationSource: ConversationSource {
             visionDelegationEnabled: config.visionDelegationEnabled,
             appSandboxRoot: config.appSandboxRoot,
             projectCwd: config.projectCwd,
+            projectAdditionalDirectories: config.additionalWorkspaceDirectories,
+            projectMountGrants: config.projectMountGrants,
             providerConfig: providerConfig,
             mobileLinux: config.mobileLinux.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)

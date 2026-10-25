@@ -51,6 +51,10 @@ struct EngineConfig {
     var visionDelegationEnabled: Bool
     var mobileLinux: TerminalRuntimeConfig?
     var additionalWorkspaceDirectories: [String] = []
+    /// Exact host-home directories authorized by the native Project store for
+    /// Mobile Linux bind mounts. This is separate from the file-tool trust
+    /// catalog in `additionalWorkspaceDirectories`.
+    var projectMountGrants: [String] = []
 
     /// Resolve the engine credentials. The API key (and optional base URL)
     /// come from the iOS Keychain FIRST (SHIP-BLOCKER #1 — a shipped app has no
@@ -65,7 +69,8 @@ struct EngineConfig {
                                 providerProfilesJson: String? = nil,
                                 providerRoutingJson: String? = nil,
                                 visionDelegationEnabled: Bool = true,
-                                mobileLinux: TerminalRuntimeConfig? = nil) -> EngineConfig {
+                                mobileLinux: TerminalRuntimeConfig? = nil,
+                                projectMountGrants: [String] = []) -> EngineConfig {
         let env = ProcessInfo.processInfo.environment
         // Key: env override (dev) > Keychain (shipped) > empty.
         let key = nonEmpty(env["ANTHROPIC_API_KEY"])
@@ -89,7 +94,8 @@ struct EngineConfig {
             providerProfilesJson: providerProfilesJson,
             providerRoutingJson: providerRoutingJson,
             visionDelegationEnabled: visionDelegationEnabled,
-            mobileLinux: mobileLinux
+            mobileLinux: mobileLinux,
+            projectMountGrants: projectMountGrants
         )
     }
 

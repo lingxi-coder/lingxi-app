@@ -32,6 +32,173 @@ fn user_storage_config(root: &std::path::Path) -> super::IosMobileLinuxConfigFfi
     }
 }
 
+fn launch_config_with_project_mounts(
+    linux: super::IosMobileLinuxConfigFfi,
+    project_cwd: Option<String>,
+    project_additional_directories: Vec<String>,
+    project_mount_grants: Vec<String>,
+) -> super::IosEngineLaunchConfigFfi {
+    super::IosEngineLaunchConfigFfi {
+        app_agent_host: false,
+        app_version: None,
+        brand_id: linux.brand_id.clone(),
+        linux_user: linux.linux_user.clone(),
+        config_dir_name: linux.config_dir_name.clone(),
+        native_config_home: harness_runtime::mobile::mobile_user_directories(
+            linux.managed_root.clone(),
+        )
+        .unwrap()
+        .config_home,
+        api_base: String::new(),
+        api_key: String::new(),
+        model: String::new(),
+        session_mode: harness_runtime::mobile::SessionModeDto::Code,
+        vision_delegation_enabled: false,
+        app_sandbox_root: linux.app_sandbox_root.clone(),
+        project_cwd,
+        project_additional_directories,
+        project_mount_grants,
+        provider_config: None,
+        mobile_linux: Some(linux),
+        physical_memory_bytes: 0,
+        host_environment: None,
+    }
+}
+
+#[test]
+fn ios_project_mount_grant_maps_one_registered_local_app_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let linux = user_storage_config(temp.path());
+    let paths = harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())
+        .expect("native directories");
+    let source = std::path::Path::new(&paths.apps).join("authorized-app");
+    std::fs::create_dir_all(&source).expect("create app source");
+    let guest = format!("{}/authorized-app", paths.apps_guest_path);
+    let config = launch_config_with_project_mounts(
+        linux,
+        Some(source.display().to_string()),
+        vec![guest.clone()],
+        vec![guest.clone()],
+    );
+
+    let mounts = super::configuration::ios_project_mount_grants(&config)
+        .expect("registered app source mount");
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].host_path, source.canonicalize().unwrap());
+    assert_eq!(mounts[0].guest_path, guest);
+    assert_eq!(mounts[0].purpose, mobile_linux_api::MountPurpose::External);
+    assert!(!mounts[0].read_only);
+}
+
+#[test]
+fn ios_project_mount_grants_reject_unregistered_and_private_config_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let linux = user_storage_config(temp.path());
+    let paths = harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())
+        .expect("native directories");
+    let app = std::path::Path::new(&paths.apps).join("unregistered");
+    std::fs::create_dir_all(&app).expect("create unregistered path");
+    let app_guest = format!("{}/unregistered", paths.apps_guest_path);
+    let unregistered = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.projects.clone()),
+        Vec::new(),
+        vec![app_guest],
+    );
+    assert!(
+        super::configuration::ios_project_mount_grants(&unregistered)
+            .unwrap_err()
+            .to_string()
+            .contains("not registered")
+    );
+
+    let mut legacy_mode = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.projects.clone()),
+        Vec::new(),
+        vec![format!("{}/unregistered", paths.apps_guest_path)],
+    );
+    legacy_mode
+        .mobile_linux
+        .as_mut()
+        .expect("Mobile Linux config")
+        .mode = super::MobileLinuxRuntimeModeFfi::Legacy;
+    assert!(super::configuration::ios_project_mount_grants(&legacy_mode)
+        .unwrap_err()
+        .to_string()
+        .contains("Mobile Linux mode"));
+
+    let outside_guest = "/tmp/outside-project".to_string();
+    let outside_home = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.projects.clone()),
+        vec![outside_guest.clone()],
+        vec![outside_guest],
+    );
+    assert!(super::configuration::ios_project_mount_grants(&outside_home).is_err());
+
+    let home_guest = paths.guest_home.clone();
+    let whole_home = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.home.clone()),
+        Vec::new(),
+        vec![home_guest],
+    );
+    assert!(super::configuration::ios_project_mount_grants(&whole_home).is_err());
+
+    let apps_root_guest = paths.apps_guest_path.clone();
+    let apps_root = launch_config_with_project_mounts(
+        linux.clone(),
+        Some(paths.apps.clone()),
+        Vec::new(),
+        vec![apps_root_guest],
+    );
+    assert!(super::configuration::ios_project_mount_grants(&apps_root).is_err());
+
+    let private = std::path::Path::new(&paths.config_home).join("private");
+    std::fs::create_dir_all(&private).expect("create private config path");
+    let private_guest = format!("{}/private", paths.config_guest_path);
+    let private_config = launch_config_with_project_mounts(
+        linux,
+        Some(private.display().to_string()),
+        vec![private_guest.clone()],
+        vec![private_guest],
+    );
+    assert!(super::configuration::ios_project_mount_grants(&private_config).is_err());
+}
+
+#[test]
+fn ios_project_mount_grants_are_brand_scoped_and_reject_symlink_sources() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let linux = user_storage_config(temp.path());
+    let paths = harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())
+        .expect("native directories");
+    let app = std::path::Path::new(&paths.apps).join("real-source");
+    std::fs::create_dir_all(&app).expect("create real app source");
+    #[cfg(unix)]
+    {
+        let alias = std::path::Path::new(&paths.apps).join("alias");
+        std::os::unix::fs::symlink(&app, &alias).expect("create source symlink");
+        let alias_guest = format!("{}/alias", paths.apps_guest_path);
+        let symlink_config = launch_config_with_project_mounts(
+            linux.clone(),
+            Some(alias.display().to_string()),
+            vec![alias_guest.clone()],
+            vec![alias_guest],
+        );
+        assert!(super::configuration::ios_project_mount_grants(&symlink_config).is_err());
+    }
+
+    let mut wrong_brand = launch_config_with_project_mounts(
+        linux,
+        Some(app.display().to_string()),
+        vec![format!("{}/real-source", paths.apps_guest_path)],
+        vec![format!("{}/real-source", paths.apps_guest_path)],
+    );
+    wrong_brand.brand_id = "other".into();
+    assert!(super::configuration::ios_project_mount_grants(&wrong_brand).is_err());
+}
+
 #[test]
 fn the_runtime_sandbox_root_is_the_engine_data_root_not_the_container() {
     // The literal shapes both sides produce on device, from
@@ -615,6 +782,8 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
         vision_delegation_enabled: false,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: Some(workspace.to_string_lossy().into_owned()),
+        project_additional_directories: Vec::new(),
+        project_mount_grants: Vec::new(),
         provider_config: Some(super::IosProviderConfigFfi {
             provider_profiles_json:
                 r#"{"openai":{"baseUrl":"https://api.openai.com/v1","wireApi":"responses"}}"#
@@ -688,6 +857,8 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         vision_delegation_enabled: true,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
+        project_additional_directories: Vec::new(),
+        project_mount_grants: Vec::new(),
         provider_config: None,
         mobile_linux: Some(linux),
         physical_memory_bytes: 0,
@@ -737,6 +908,8 @@ fn ios_provider_only_app_agent_uses_native_brand_config_without_mobile_linux_set
         vision_delegation_enabled: false,
         app_sandbox_root: temp.path().to_string_lossy().into_owned(),
         project_cwd: None,
+        project_additional_directories: Vec::new(),
+        project_mount_grants: Vec::new(),
         provider_config: None,
         mobile_linux: None,
         physical_memory_bytes: 0,

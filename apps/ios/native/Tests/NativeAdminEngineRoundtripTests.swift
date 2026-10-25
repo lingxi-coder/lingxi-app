@@ -39,6 +39,8 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
             configDirName: directories.configDirName, nativeConfigHome: directories.configHome,
             apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
+            projectAdditionalDirectories: [],
+            projectMountGrants: [],
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),

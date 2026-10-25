@@ -201,6 +201,8 @@ import XCTest
                 visionDelegationEnabled: snapshot.visionDelegationEnabled,
                 appSandboxRoot: sandbox.path,
                 projectCwd: nil,
+                projectAdditionalDirectories: [],
+                projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(
                     providerProfilesJson: snapshot.providerProfilesJSON,
                     routingJson: snapshot.routingJSON

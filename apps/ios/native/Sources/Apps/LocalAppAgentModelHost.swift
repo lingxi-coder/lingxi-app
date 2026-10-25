@@ -63,6 +63,8 @@ actor LocalAppAgentModelHost {
                 model: snapshot.defaultModelID ?? "", sessionMode: .code, visionDelegationEnabled: false,
                 appSandboxRoot: sandbox,
                 projectCwd: nil,
+                projectAdditionalDirectories: [],
+                projectMountGrants: [],
                 providerConfig: IosProviderConfigFfi(providerProfilesJson: snapshot.providerProfilesJSON, routingJson: snapshot.routingJSON),
                 mobileLinux: mobileLinux,
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory, hostEnvironment: nil)

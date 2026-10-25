@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BaseEvent } from '@ag-ui/core';
 import { EventSchema, MessageSchema } from '@lingxi/local-app-agui/client';
 import {
   LocalAppAgentBroker,
@@ -167,6 +168,67 @@ test('event cursors replay bounded official pages and reconnect after host resta
   assert.equal(replay.sequence, first.sequence);
   assert.ok(replay.events.some(event => event.type === 'RUN_FINISHED'));
   await assert.rejects(resumed.events(principal, input.runId, 10_000), { code: 'invalid_input' });
+});
+
+test('durable broker replays a long AG-UI journal in bounded pages after restart', async t => {
+  const structuredResult = Array.from({ length: 200 }, (_, index) => ({ index }));
+  const { root, broker, options } = await fixture(t, {
+    execute: async execution => ({
+      result: { text: 'done', output: structuredResult, attachments: [], messageId: 'assistant-' + execution.runId },
+      usage: { turns: 1 },
+    }),
+  });
+  const input = runInput('long-event-journal');
+  await broker.run(principal, input);
+  await terminal(broker, principal, input.runId);
+
+  const taskDirectory = join(root, 'apps', principal.appId, 'agent', 'tasks');
+  const taskFiles = await fs.readdir(taskDirectory);
+  assert.equal(taskFiles.length, 1);
+  const taskPath = join(taskDirectory, taskFiles[0]!);
+  const ledger = JSON.parse(await fs.readFile(taskPath, 'utf8'));
+  const startedEvent = ledger.events[0] as BaseEvent;
+  const terminalEvent = ledger.events.at(-1) as BaseEvent;
+  const messageEvents = Array.from({ length: 100 }, (_, index) => {
+    const messageId = 'assistant-stream-' + index;
+    return [
+      { type: 'TEXT_MESSAGE_START', messageId, role: 'assistant' },
+      { type: 'TEXT_MESSAGE_CONTENT', messageId, delta: 'chunk-' + index },
+      { type: 'TEXT_MESSAGE_END', messageId },
+    ];
+  }).flat() as BaseEvent[];
+  const expectedEvents = [
+    startedEvent,
+    ...messageEvents,
+    { ...terminalEvent, result: structuredResult },
+  ] as BaseEvent[];
+  for (const event of expectedEvents) EventSchema.parse(event);
+  ledger.events = expectedEvents;
+  ledger.eventSequence = expectedEvents.length;
+
+  await broker.dispose();
+  await fs.writeFile(taskPath, JSON.stringify(ledger), 'utf8');
+  const reopened = new LocalAppAgentBroker(options);
+  try {
+    assert.equal((await reopened.get(principal, input.runId)).state, 'succeeded');
+    const pages: Array<{ events: BaseEvent[]; sequence: number }> = [];
+    let afterSequence = 0;
+    while (afterSequence < expectedEvents.length) {
+      const page = await reopened.events(principal, input.runId, afterSequence);
+      assert.ok(page.events.length <= 128);
+      assert.equal(page.sequence, afterSequence + page.events.length);
+      for (const event of page.events) EventSchema.parse(event);
+      pages.push(page);
+      afterSequence = page.sequence;
+    }
+
+    assert.deepEqual(pages.map(page => page.events.length), [128, 128, 46]);
+    assert.deepEqual(pages.flatMap(page => page.events), expectedEvents);
+    assert.deepEqual((pages.at(-1)?.events.at(-1) as any).result, structuredResult);
+    assert.equal(pages.flatMap(page => page.events).filter(event => event.type === 'RUN_FINISHED').length, 1);
+  } finally {
+    await reopened.dispose();
+  }
 });
 
 test('durable chats persist standard Message content and accept exact terminal retries after history advances', async t => {

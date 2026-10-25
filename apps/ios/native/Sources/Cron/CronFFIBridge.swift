@@ -203,6 +203,8 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
             appSandboxRoot: appSandboxRoot,
             projectCwd: scope.projectCwd ?? (task == nil ? nil : directories.scheduledCwd),
+            projectAdditionalDirectories: [],
+            projectMountGrants: [],
             providerConfig: provider,
             mobileLinux: cronRuntime.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)

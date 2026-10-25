@@ -225,6 +225,14 @@ class LocalAppAgentAcceptanceTest {
                     {type:'text',text:'Identify the visible food in English in food and one visible detail in detail. Use the result tool; no business tools.'},
                     part
                 ]};
+                const inputSummary={
+                  threadId:'$threadId',runId:'$runId',messageCount:1,
+                  partTypes:message.content.map(item=>item.type),
+                  parts:message.content.map(item=>({
+                    type:item.type,sourceType:item.source?.type||null,mimeType:item.source?.mimeType||null,
+                    filename:item.metadata?.['com.lingxi.localApp']?.filename||null
+                  }))
+                };
                 client.addMessage(message);
                 const callbacks=[];
                 const run=await client.runAgent({
@@ -248,7 +256,7 @@ class LocalAppAgentAcceptanceTest {
                 if(!replay.result||!Array.isArray(replay.newMessages)||replayCallbacks[replayCallbacks.length-1]!=='RUN_FINISHED'){
                   throw new Error('AG-UI reconnect did not replay the recorded terminal event.');
                 }
-                output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',bootstrap,runId:'$runId',run,callbacks,replay,replayCallbacks});
+                output.textContent=JSON.stringify({acceptance:'CALLBACK_EVENT_ORDER_PASS',bootstrap,inputSummary,runId:'$runId',run,callbacks,replay,replayCallbacks});
               } catch(error) {
                 output.textContent='AGUI_PAGE_DIAGNOSTIC '+JSON.stringify({bootstrap,error:String(error),code:error.code||null});
               }
@@ -330,17 +338,22 @@ class LocalAppAgentAcceptanceTest {
                 assertEquals("1.0", firstEvent.getString("protocolVersion"))
                 assertEquals(threadId, firstEvent.getString("threadId"))
                 assertEquals(runId, firstEvent.getString("runId"))
-                assertEquals(threadId, firstEvent.getJSONObject("input").getString("threadId"))
-                assertEquals(runId, firstEvent.getJSONObject("input").getString("runId"))
-                val messageParts = firstEvent.getJSONObject("input").getJSONArray("messages")
-                    .getJSONObject(0).getJSONArray("content")
-                assertEquals("text", messageParts.getJSONObject(0).getString("type"))
-                val imagePart = messageParts.getJSONObject(1)
-                assertEquals("image", imagePart.getString("type"))
-                assertEquals("data", imagePart.getJSONObject("source").getString("type"))
-                assertEquals("image/jpeg", imagePart.getJSONObject("source").getString("mimeType"))
-                assertEquals("acceptance-photo.jpg",
-                    imagePart.getJSONObject("metadata").getJSONObject("com.lingxi.localApp").getString("filename"))
+                firstEvent.optJSONObject("input")?.let { startedInput ->
+                    assertEquals(threadId, startedInput.getString("threadId"))
+                    assertEquals(runId, startedInput.getString("runId"))
+                    val startedMessages = startedInput.getJSONArray("messages")
+                    assertEquals(1, startedMessages.length())
+                    val startedMessage = startedMessages.getJSONObject(0)
+                    assertEquals("message-$runId", startedMessage.getString("id"))
+                    val messageParts = startedMessage.getJSONArray("content")
+                    assertEquals("text", messageParts.getJSONObject(0).getString("type"))
+                    val imagePart = messageParts.getJSONObject(1)
+                    assertEquals("image", imagePart.getString("type"))
+                    assertEquals("data", imagePart.getJSONObject("source").getString("type"))
+                    assertEquals("image/jpeg", imagePart.getJSONObject("source").getString("mimeType"))
+                    assertEquals("acceptance-photo.jpg",
+                        imagePart.getJSONObject("metadata").getJSONObject("com.lingxi.localApp").getString("filename"))
+                }
                 assertEquals("RUN_FINISHED", lastEvent.getString("type"))
                 assertEquals(threadId, lastEvent.getString("threadId"))
                 assertEquals(runId, lastEvent.getString("runId"))
@@ -351,17 +364,36 @@ class LocalAppAgentAcceptanceTest {
                 assertFalse((0 until events.length()).any { events.getJSONObject(it).optString("type") == "RUN_ERROR" })
                 assertEquals("Reconnecting must not start a second run", 1,
                     (0 until events.length()).count { events.getJSONObject(it).optString("type") == "RUN_STARTED" })
+                var browserResult: JSONObject? = null
                 withTimeout(30_000) {
                     while (true) {
                         val root = instrumentation.uiAutomation.rootInActiveWindow
                         val callback = root?.findAccessibilityNodeInfosByText("CALLBACK_EVENT_ORDER_PASS")
                             ?.firstOrNull { it.text?.toString()?.contains("CALLBACK_EVENT_ORDER_PASS") == true }
-                        if (callback != null) break
+                        if (callback != null) {
+                            val callbackText = callback.text.toString()
+                            val parsed = runCatching { JSONObject(callbackText) }.getOrNull()
+                            checkNotNull(parsed) { "Browser success output is not JSON: $callbackText" }
+                            browserResult = parsed
+                            break
+                        }
                         delay(250)
                     }
                 }
+                val inputSummary = checkNotNull(browserResult).getJSONObject("inputSummary")
+                assertEquals(threadId, inputSummary.getString("threadId"))
+                assertEquals(runId, inputSummary.getString("runId"))
+                assertEquals(1, inputSummary.getInt("messageCount"))
+                assertEquals(JSONArray().put("text").put("image").toString(), inputSummary.getJSONArray("partTypes").toString())
+                val summaryParts = inputSummary.getJSONArray("parts")
+                assertEquals("text", summaryParts.getJSONObject(0).getString("type"))
+                assertEquals("image", summaryParts.getJSONObject(1).getString("type"))
+                assertEquals("data", summaryParts.getJSONObject(1).getString("sourceType"))
+                assertEquals("image/jpeg", summaryParts.getJSONObject(1).getString("mimeType"))
+                assertEquals("acceptance-photo.jpg", summaryParts.getJSONObject(1).getString("filename"))
                 File(context.filesDir, "external-browser-agent-acceptance.json").writeText(
-                    JSONObject().put("browserPackage", browserPackage).put("appId", app.id).put("task", task).toString(2))
+                    JSONObject().put("browserPackage", browserPackage).put("appId", app.id).put("task", task)
+                        .put("page", checkNotNull(browserResult)).toString(2))
                 instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
                     File(context.filesDir, "external-browser-agent-acceptance.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
                     bitmap.recycle()

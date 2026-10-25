@@ -4,6 +4,8 @@ use super::linux_types::MobileLinuxOperationFfiError;
 use super::linux_types::MobileLinuxRuntimeModeFfi;
 #[cfg(feature = "uniffi")]
 use harness_runtime::mobile::{MobileConfig, MobileEngineError, MobileSessionMode, SessionModeDto};
+#[cfg(feature = "uniffi")]
+use std::path::{Component, Path, PathBuf};
 
 /// FFI carrier for iOS mobile-linux configuration.
 #[cfg(feature = "uniffi")]
@@ -90,6 +92,15 @@ pub struct IosEngineLaunchConfigFfi {
     /// Optional cwd inside the Linux user HOME, in guest or native coordinates.
     /// Global configuration and transcripts use that same persistent account.
     pub project_cwd: Option<String>,
+    /// Directories registered by the selected native Project. They remain the
+    /// file-tool trust catalog; only entries duplicated in
+    /// `project_mount_grants` receive an iOS bind mount.
+    pub project_additional_directories: Vec<String>,
+    /// Exact guest directories the native Project store authorized for
+    /// additional iOS bind mounts. This is a separate capability from the
+    /// engine's workspace trust/catalog list and is never supplied by a Local
+    /// App page.
+    pub project_mount_grants: Vec<String>,
     pub provider_config: Option<IosProviderConfigFfi>,
     pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
     /// Device physical memory reported by the iOS host.
@@ -492,6 +503,201 @@ pub(super) fn validate_mobile_linux_workspace_config(
     }
 
     Ok((workspace_host_path, stable_workspace_id))
+}
+
+/// Resolve native Project-authorized extra guest directories to exact host
+/// mounts. The primary Projects mount is created separately by `platform-ios`;
+/// this adapter adds only individual directories under the selected brand's
+/// user home and keeps the app's config tree fenced except for an exact Local
+/// App source below `.apps/`.
+#[cfg(feature = "uniffi")]
+pub(super) fn ios_project_mount_grants(
+    config: &IosEngineLaunchConfigFfi,
+) -> Result<Vec<mobile_linux_api::MountSpec>, MobileEngineError> {
+    let Some(linux) = config.mobile_linux.as_ref() else {
+        if config.project_mount_grants.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(MobileEngineError::Internal(
+            "project mount grants require Mobile Linux".into(),
+        ));
+    };
+    if config.project_mount_grants.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !matches!(linux.mode, MobileLinuxRuntimeModeFfi::MobileLinux) {
+        return Err(MobileEngineError::Internal(
+            "project mount grants require Mobile Linux mode".into(),
+        ));
+    }
+    let directories = harness_runtime::mobile::mobile_user_directories(linux.managed_root.clone())?;
+    directories.prepare()?;
+    let profile = mobile_brand_profile_from_directories(
+        &directories,
+        &config.brand_id,
+        &config.linux_user,
+        &config.config_dir_name,
+    )?;
+    let primary_workspace_guest =
+        mobile_linux_api::guest_paths::workspace_for_profile(&profile, "projects");
+    let (_, project_cwd_guest) = directories.resolve_cwd(config.project_cwd.as_deref())?;
+    validate_project_mount_grants(
+        &directories,
+        &primary_workspace_guest,
+        &project_cwd_guest.to_string_lossy(),
+        &config.project_additional_directories,
+        &config.project_mount_grants,
+    )
+    .map_err(MobileEngineError::Internal)
+}
+
+#[cfg(feature = "uniffi")]
+fn validate_project_mount_grants(
+    directories: &harness_runtime::mobile::MobileUserDirectories,
+    primary_workspace_guest: &str,
+    project_cwd_guest: &str,
+    project_additional_directories: &[String],
+    grants: &[String],
+) -> Result<Vec<mobile_linux_api::MountSpec>, String> {
+    if grants.len() > 64 {
+        return Err("project mount grants exceed the directory limit".into());
+    }
+    let guest_home = Path::new(&directories.guest_home);
+    let config_guest = Path::new(&directories.config_guest_path);
+    let apps_guest = Path::new(&directories.apps_guest_path);
+    let primary_guest = Path::new(primary_workspace_guest);
+    let home_host = Path::new(&directories.home)
+        .canonicalize()
+        .map_err(|error| format!("resolve native user home: {error}"))?;
+    let config_host = Path::new(&directories.config_home)
+        .canonicalize()
+        .map_err(|error| format!("resolve native config home: {error}"))?;
+    let apps_host = Path::new(&directories.apps)
+        .canonicalize()
+        .map_err(|error| format!("resolve Local App source root: {error}"))?;
+    let primary_host = Path::new(&directories.projects)
+        .canonicalize()
+        .map_err(|error| format!("resolve primary Projects mount: {error}"))?;
+
+    let mut seen_guest = Vec::<PathBuf>::new();
+    let mut seen_host = Vec::<PathBuf>::new();
+    let mut mounts = Vec::with_capacity(grants.len());
+    let mut project_authorized = std::collections::HashSet::new();
+    project_authorized.insert(project_cwd_guest.to_string());
+    for directory in project_additional_directories {
+        if !is_normalized_absolute_guest_path(directory)
+            || !Path::new(directory).starts_with(guest_home)
+        {
+            return Err("native Project additional directory is outside its brand home".into());
+        }
+        project_authorized.insert(directory.clone());
+    }
+    for raw in grants {
+        if raw.len() > 4096 || !is_normalized_absolute_guest_path(raw) {
+            return Err("project mount grant must be a bounded normalized guest path".into());
+        }
+        let guest = Path::new(raw);
+        if !project_authorized.contains(raw) {
+            return Err("project mount grant is not registered in the native Project".into());
+        }
+        let relative = guest
+            .strip_prefix(guest_home)
+            .map_err(|_| "project mount grant is outside the selected brand's guest home")?;
+        if relative.as_os_str().is_empty() {
+            return Err("project mount grant may not expose the whole user home".into());
+        }
+        if paths_overlap(guest, primary_guest) {
+            return Err("project mount grant overlaps the primary Projects mount".into());
+        }
+
+        let under_apps = guest.starts_with(apps_guest) && guest != apps_guest;
+        if guest == apps_guest || apps_guest.starts_with(guest) {
+            return Err(
+                "project mount grant may not expose the Local App root or its parent".into(),
+            );
+        }
+        if paths_overlap(guest, config_guest) && !under_apps {
+            return Err("project mount grant overlaps the protected brand config tree".into());
+        }
+
+        let host = canonical_directory_without_symlinks(&home_host, relative)?;
+        if paths_overlap(&host, &primary_host) {
+            return Err("project mount grant overlaps the primary Projects mount".into());
+        }
+        let under_apps_host = host.starts_with(&apps_host) && host != apps_host;
+        if paths_overlap(&host, &config_host) && !under_apps_host {
+            return Err("project mount grant overlaps the protected native config tree".into());
+        }
+        if apps_host.starts_with(&host) {
+            return Err(
+                "project mount grant may not expose the Local App root or its parent".into(),
+            );
+        }
+        if seen_guest
+            .iter()
+            .any(|existing| paths_overlap(existing, guest))
+            || seen_host
+                .iter()
+                .any(|existing| paths_overlap(existing, &host))
+        {
+            return Err("project mount grants may not duplicate or overlap".into());
+        }
+        seen_guest.push(guest.to_path_buf());
+        seen_host.push(host.clone());
+        mounts.push(mobile_linux_api::MountSpec {
+            host_path: host,
+            guest_path: raw.clone(),
+            read_only: false,
+            purpose: mobile_linux_api::MountPurpose::External,
+        });
+    }
+    Ok(mounts)
+}
+
+#[cfg(feature = "uniffi")]
+fn is_normalized_absolute_guest_path(raw: &str) -> bool {
+    raw.starts_with('/')
+        && raw.len() > 1
+        && !raw.ends_with('/')
+        && !raw.contains('\0')
+        && raw
+            .split('/')
+            .skip(1)
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && Path::new(raw)
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
+#[cfg(feature = "uniffi")]
+fn canonical_directory_without_symlinks(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("resolve user-home root: {error}"))?;
+    let mut path = root.clone();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err("project mount grant contains a non-normal path component".into());
+        };
+        path.push(component);
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("resolve project mount directory: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("project mount path must be a real directory without symlinks".into());
+        }
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("resolve canonical project mount: {error}"))?;
+    if !canonical.starts_with(&root) {
+        return Err("project mount escaped the selected native user home".into());
+    }
+    Ok(canonical)
+}
+
+#[cfg(feature = "uniffi")]
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 #[cfg(feature = "uniffi")]

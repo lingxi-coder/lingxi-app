@@ -206,6 +206,12 @@ struct RootView: View {
         let activeProject = projects.activeProject
         let initialScope = ConversationScope(projectID: activeProject?.record.id)
         let initialMode: SessionMode = .code
+        let initialProjectMountGrants: [String]
+        if let activeProject {
+            initialProjectMountGrants = (try? MobileUserStorage.projectMountGrantPaths(for: activeProject)) ?? []
+        } else {
+            initialProjectMountGrants = []
+        }
         settings.mcpServers = MCPConfigurationRepository.shared.loadServers(
             projectCwd: activeProject?.workspace.hostURL.path
         )
@@ -223,7 +229,8 @@ struct RootView: View {
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            mobileLinux: runtime
+            mobileLinux: runtime,
+            projectMountGrants: initialProjectMountGrants
         )
 
         #if canImport(harness_runtimeFFI)
@@ -1261,7 +1268,7 @@ struct RootView: View {
         scope: ConversationScope,
         snapshot: ProviderLaunchSnapshot,
         mode: SessionMode
-    ) -> any ConversationSource {
+    ) throws -> any ConversationSource {
         let projectCwd: String?
         let project: ProjectSnapshot?
         switch scope {
@@ -1279,6 +1286,9 @@ struct RootView: View {
             project: project,
             linuxRuntime: settingsStore.linuxRuntime
         ).config
+        let projectMountGrants = try project.map {
+            try MobileUserStorage.projectMountGrantPaths(for: $0)
+        } ?? []
         return ConversationSourceFactory.make(
             projectCwd: projectCwd,
             additionalWorkspaceDirectories: project?.record.additionalDirectories ?? [],
@@ -1288,7 +1298,8 @@ struct RootView: View {
             providerRoutingJson: snapshot.routingJSON,
             defaultModelID: snapshot.defaultModelID,
             visionDelegationEnabled: snapshot.visionDelegationEnabled,
-            mobileLinux: runtime
+            mobileLinux: runtime,
+            projectMountGrants: projectMountGrants
         )
     }
 
@@ -1299,7 +1310,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         try requireSourceReplacementAllowed(old)
-        let replacement = makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
+        let replacement = try makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
@@ -1509,7 +1520,7 @@ struct RootView: View {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                let replacement = makeSource(
+                let replacement = try makeSource(
                     scope: scope,
                     snapshot: providerRepository.makeLaunchSnapshot(),
                     mode: targetMode

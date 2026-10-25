@@ -11,8 +11,8 @@ use super::callbacks::{
 };
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
 use super::configuration::{
-    ios_mobile_config_from_launch_config, mobile_brand_profile_from_directories,
-    validate_mobile_linux_workspace_config,
+    ios_mobile_config_from_launch_config, ios_project_mount_grants,
+    mobile_brand_profile_from_directories, validate_mobile_linux_workspace_config,
 };
 #[cfg(feature = "uniffi")]
 use super::configuration::{ios_project_cwd, IosEngineLaunchConfigFfi, IosMobileLinuxConfigFfi};
@@ -163,6 +163,7 @@ pub fn build_mobile_engine(
             mobile_linux: ios_mobile_linux_runtime(impls.mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
             stable_workspace_id: Some(stable_workspace_id),
+            additional_workspace_mounts: Vec::new(),
         }));
         harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -276,6 +277,7 @@ pub fn build_ios_engine_with_config(
             device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
+        let additional_workspace_mounts = ios_project_mount_grants(&config)?;
         let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
             Some(linux) => {
                 let (workspace, stable_id) =
@@ -316,6 +318,7 @@ pub fn build_ios_engine_with_config(
             mobile_linux: ios_mobile_linux_runtime(config.mobile_linux.as_ref()),
             workspace_host_path,
             stable_workspace_id,
+            additional_workspace_mounts,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(IosPermissionSinkBridge { inner: permissions });
@@ -403,6 +406,8 @@ pub fn build_ios_engine(
             session_mode: SessionModeDto::Code,
             app_sandbox_root,
             project_cwd: None,
+            project_additional_directories: Vec::new(),
+            project_mount_grants: Vec::new(),
             provider_config: None,
             mobile_linux,
             vision_delegation_enabled: true,

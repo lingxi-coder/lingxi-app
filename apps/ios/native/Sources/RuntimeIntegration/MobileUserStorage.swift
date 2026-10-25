@@ -26,6 +26,131 @@ enum MobileUserStorage {
         URL(fileURLWithPath: directories().projects, isDirectory: true)
     }
 
+    /// Selects exact, native Project-authorized guest paths for iOS Mobile
+    /// Linux bind mounts. The Project record is the authority; this method
+    /// never expands a grant to the whole home, `.lingxi`, or `.apps` tree.
+    static func projectMountGrantPaths(
+        activeDirectory: String,
+        additionalDirectories: [String],
+        managedRoot: String = LXISHDefaultWorkspace.managedRootPath()
+    ) throws -> [String] {
+        let paths = directories(managedRoot: managedRoot)
+        let homeGuest = paths.guestHome
+        let projectsGuest = paths.projectsGuestPath
+        let configGuest = paths.configGuestPath
+        let appsGuest = paths.appsGuestPath
+        let homeHost = URL(fileURLWithPath: paths.home, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        let configHost = URL(fileURLWithPath: paths.configHome, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        let appsHost = URL(fileURLWithPath: paths.apps, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        let primaryProjectsHost = URL(fileURLWithPath: paths.projects, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+
+        var candidates = additionalDirectories
+        if !activeDirectory.isEmpty, !candidates.contains(activeDirectory) {
+            candidates.append(activeDirectory)
+        }
+        guard Set(candidates).count == candidates.count else {
+            throw ProjectRepositoryError.escapedWorkspace
+        }
+        var grants: [String] = []
+        for guestPath in candidates.sorted() {
+            guard isNormalizedGuestPath(guestPath),
+                  guestPath.hasPrefix(homeGuest + "/") else {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            if guestPath == projectsGuest || guestPath.hasPrefix(projectsGuest + "/") {
+                // The primary Mobile Linux workspace mount already covers it.
+                continue
+            }
+            guard !projectsGuest.hasPrefix(guestPath + "/") else {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+
+            let isLocalAppSource = guestPath.hasPrefix(appsGuest + "/")
+            if guestPath == appsGuest || appsGuest.hasPrefix(guestPath + "/") {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            let overlapsConfigGuest = guestPath == configGuest
+                || guestPath.hasPrefix(configGuest + "/")
+                || configGuest.hasPrefix(guestPath + "/")
+            if overlapsConfigGuest && !isLocalAppSource {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+
+            let relative = String(guestPath.dropFirst(homeGuest.count + 1))
+            let hostPath = try canonicalUserHomeDirectory(homeHost, relative: relative)
+            guard hostPath != homeHost,
+                  hostPath.path.hasPrefix(homeHost.path + "/") else {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            if overlaps(hostPath, primaryProjectsHost) {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            let overlapsConfigHost = overlaps(hostPath, configHost)
+            if overlapsConfigHost && !(isLocalAppSource && hostPath.path.hasPrefix(appsHost.path + "/")) {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            if overlaps(hostPath, appsHost) && !isLocalAppSource {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            if grants.contains(where: { pathsOverlap($0, guestPath) }) {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            grants.append(guestPath)
+        }
+        return grants
+    }
+
+    static func projectMountGrantPaths(
+        for project: ProjectSnapshot,
+        managedRoot: String = LXISHDefaultWorkspace.managedRootPath()
+    ) throws -> [String] {
+        try projectMountGrantPaths(
+            activeDirectory: project.record.activeDirectory,
+            additionalDirectories: project.record.additionalDirectories,
+            managedRoot: managedRoot
+        )
+    }
+
+    private static func isNormalizedGuestPath(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path.count > 1, !path.hasSuffix("/"), !path.contains("\\") else {
+            return false
+        }
+        return path.split(separator: "/", omittingEmptySubsequences: false).dropFirst()
+            .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
+    private static func canonicalUserHomeDirectory(_ root: URL, relative: String) throws -> URL {
+        var current = root
+        for component in relative.split(separator: "/", omittingEmptySubsequences: false) {
+            guard !component.isEmpty, component != ".", component != ".." else {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+            current.appendPathComponent(String(component), isDirectory: true)
+            var info = stat()
+            let result = current.path.withCString { lstat($0, &info) }
+            guard result == 0, (info.st_mode & S_IFMT) == S_IFDIR else {
+                throw ProjectRepositoryError.escapedWorkspace
+            }
+        }
+        let canonical = current.resolvingSymlinksInPath().standardizedFileURL
+        guard canonical.path.hasPrefix(root.path + "/") else {
+            throw ProjectRepositoryError.escapedWorkspace
+        }
+        return canonical
+    }
+
+    private static func overlaps(_ left: URL, _ right: URL) -> Bool {
+        pathsOverlap(left.path, right.path)
+    }
+
+    private static func pathsOverlap(_ left: String, _ right: String) -> Bool {
+        left == right || left.hasPrefix(right + "/") || right.hasPrefix(left + "/")
+    }
+
     /// An app update can move the data container while preserving an absolute
     /// link left by the old native bind. Match only this runtime's managed
     /// projects location, never an arbitrary project or an external directory.

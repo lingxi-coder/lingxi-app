@@ -1,7 +1,6 @@
 import { OpenLinkPage } from '../pages/OpenLinkPage';
 import { lazy, Suspense, useEffect } from 'react';
 import { ConsoleLayout } from '../layouts/ConsoleLayout';
-import { DocsPage } from '../pages/DocsPage';
 import { PrivacyPage, DataDeletionPage } from '../pages/PrivacyPage';
 import { LoginPage } from '../pages/LoginPage';
 import {
@@ -18,6 +17,10 @@ import { isRemoteRoute, useRouter } from './router';
 import { useTheme } from './useTheme';
 
 const AdminModelsPage = lazy(() => import('../pages/AdminModelsPage'));
+const DocsPage = lazy(async () => {
+  const [page] = await Promise.all([import('../pages/DocsPage'), import('../docs.css')]);
+  return { default: page.DocsPage };
+});
 const RemotePage = lazy(() => import('../pages/RemotePage'));
 const RemoteSignInPage = lazy(() => import('../pages/RemoteSignInPage'));
 
@@ -77,12 +80,14 @@ export function App() {
 
   if (route === '/docs' || route.startsWith('/docs/')) {
     return (
-      <DocsPage
-        pageId={route === '/docs' ? 'overview' : route.slice('/docs/'.length)}
-        {...common}
-        theme={theme}
-        onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
-      />
+      <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载文档…' : 'Loading documentation…'}</main>}>
+        <DocsPage
+          pageId={route === '/docs' ? 'overview' : route.slice('/docs/'.length)}
+          {...common}
+          theme={theme}
+          onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+        />
+      </Suspense>
     );
   }
 

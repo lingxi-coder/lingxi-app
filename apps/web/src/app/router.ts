@@ -1,5 +1,7 @@
 import { startTransition, useEffect, useMemo, useState } from 'react';
-import { docPages } from '../data/docs';
+import { docPageIds } from './docRoutes';
+
+const docRoutes = new Set(docPageIds.map((id) => `/docs/${id}`));
 
 export const appRoutes = [
   '/',
@@ -82,7 +84,7 @@ export function resolveRoute(path: string): AppRoute {
   if ((appRoutes as readonly string[]).includes(normalized)) {
     return normalized as AppRoute;
   }
-  if (docPages.some((page) => normalized === `/docs/${page.id}`)) {
+  if (docRoutes.has(normalized)) {
     return normalized as AppRoute;
   }
   return '/';

@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isRemoteRoute, normalizePath, parseRemoteRoute, remoteSessionRoute, resolveRoute, securityZone } from '../src/app/router';
+import { docPageIds } from '../src/app/docRoutes';
+import { docPages } from '../src/data/docs';
+
+test('the lightweight documentation routes cover exactly the handbook pages', () => {
+  const ids = docPages.map((page) => page.id);
+  assert.equal(new Set(docPageIds).size, docPageIds.length, 'duplicate documentation routes');
+  assert.deepEqual([...docPageIds].sort(), ids.sort(), 'update docRoutes.ts when adding or removing handbook pages');
+  for (const id of docPageIds) {
+    assert.equal(resolveRoute(`/docs/${id}`), `/docs/${id}`);
+  }
+});
 
 test('normalizes duplicate slashes, query strings, casing, and trailing slashes', () => {
   assert.equal(normalizePath('CONSOLE//API-KEYS/?tab=all'), '/console/api-keys');

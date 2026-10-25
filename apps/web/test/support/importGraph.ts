@@ -46,7 +46,7 @@ function compilerOptionsFor(webRoot: string): ts.CompilerOptions {
 }
 
 /** The module specifiers a file loads at run time: static, dynamic and `require`, without type-only ones. */
-export function runtimeSpecifiers(fileName: string, text: string): string[] {
+export function runtimeSpecifiers(fileName: string, text: string, includeDynamicImports = true): string[] {
   const kind = /\.tsx$/u.test(fileName) ? ts.ScriptKind.TSX : /\.jsx$/u.test(fileName) ? ts.ScriptKind.JSX : /\.[cm]?js$/u.test(fileName) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, kind);
   const found: string[] = [];
@@ -61,7 +61,7 @@ export function runtimeSpecifiers(fileName: string, text: string): string[] {
       if (!node.isTypeOnly) found.push(node.moduleSpecifier.text);
     } else if (ts.isCallExpression(node) && node.arguments.length >= 1 && ts.isStringLiteralLike(node.arguments[0]!)) {
       const callee = node.expression;
-      if (callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === 'require')) found.push((node.arguments[0] as ts.StringLiteralLike).text);
+      if ((includeDynamicImports && callee.kind === ts.SyntaxKind.ImportKeyword) || (ts.isIdentifier(callee) && callee.text === 'require')) found.push((node.arguments[0] as ts.StringLiteralLike).text);
     }
     ts.forEachChild(node, visit);
   };
@@ -69,7 +69,7 @@ export function runtimeSpecifiers(fileName: string, text: string): string[] {
   return found;
 }
 
-export function collectImportGraph(options: { entries: string[]; webRoot: string; compilerOptions?: ts.CompilerOptions }): ImportGraph {
+export function collectImportGraph(options: { entries: string[]; webRoot: string; compilerOptions?: ts.CompilerOptions; followDynamicImports?: boolean }): ImportGraph {
   const compilerOptions = options.compilerOptions ?? compilerOptionsFor(options.webRoot);
   const files = new Set<string>();
   const bare: BareImport[] = [];
@@ -77,7 +77,7 @@ export function collectImportGraph(options: { entries: string[]; webRoot: string
   for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
     if (files.has(file)) continue;
     files.add(file);
-    for (const specifier of runtimeSpecifiers(file, readFileSync(file, 'utf8'))) {
+    for (const specifier of runtimeSpecifiers(file, readFileSync(file, 'utf8'), options.followDynamicImports ?? true)) {
       if (ASSET.test(specifier)) continue;
       const relative = specifier.startsWith('.') || path.isAbsolute(specifier);
       const resolved = ts.resolveModuleName(specifier, file, compilerOptions, ts.sys).resolvedModule;

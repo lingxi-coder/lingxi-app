@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { CodeTabs } from '../components/CodeTabs';
+import { HomeScenarios } from '../components/HomeScenarios';
 import {
   IconArrowRight,
   IconCheck,
@@ -61,7 +62,7 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
         <div className="landing-actions">
           <RouteLink href="/download" className="landing-entry landing-entry-primary">
             <IconDownload width={22} height={22} />
-            <span><strong>{t('Get LingXi', '获取灵犀')}</strong><small>{t('Desktop · Mobile · CLI', '桌面 · 移动端 · CLI')}</small></span>
+            <span><strong>{t('Explore downloads', '查看下载选项')}</strong><small>{t('Platform versions & availability', '各平台版本与开放状态')}</small></span>
             <IconArrowRight width={17} height={17} />
           </RouteLink>
           <RouteLink href="/docs" className="landing-entry">
@@ -72,6 +73,8 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
         </div>
         <div className="landing-platforms"><span>{t('On the devices you use every day', '在你日常使用的设备上')}</span><span>macOS · Windows · Linux · iOS · Android</span></div>
       </section>
+
+      <HomeScenarios locale={locale} />
 
       <section className="landing-sdks" aria-labelledby="landing-sdk-title">
         <div className="landing-sdk-heading">

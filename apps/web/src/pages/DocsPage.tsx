@@ -168,6 +168,16 @@ export function DocsPage(props: DocsPageProps) {
     const description = document.querySelector<HTMLMetaElement>('meta[name="description"]');
     if (description) description.content = page.description[locale];
   }, [page, locale]);
+  useEffect(() => {
+    // The route can commit before this deferred page has loaded; restore its fragment after the article exists.
+    if (!window.location.hash) return;
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        document.getElementById(decodeURIComponent(window.location.hash.slice(1)))?.scrollIntoView({ behavior: 'instant' });
+      } catch { /* Malformed fragments leave the page at the top. */ }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [page.id]);
   const tocItems = page.sections.map((section) => ({ id: section.id, label: section.title[locale] }));
   if (page.id === 'overview') tocItems.unshift({ id: 'quickstart', label: locale === 'zh' ? '快速开始' : 'Quickstart' });
   return <DocsLayout {...props} pageId={page.id} tocItems={tocItems} onSearch={() => setSearchOpen(true)}><DocArticle key={page.id} page={page} locale={locale} /><DocsSearch locale={locale} open={searchOpen} onClose={() => setSearchOpen(false)} /></DocsLayout>;

@@ -217,3 +217,12 @@ actual-module helper tests and independent SDK/ownership review pass. The
 [probe evidence](desktop-computer-use/evidence/accessibility-readonly-probe-2026-10-25.json)
 is supporting child-process evidence, not final sidecar acceptance. The system
 switch was restored on and all owned probe processes were cleaned up.
+
+The final hit-test package completed source-byte verification, release
+compilation, Flare development signing and ZIP/static verification. Its
+[signed package receipt](desktop-computer-use/evidence/hit-test-signed-package-2026-10-25.json)
+binds App `d65b8d6f2` and Harness `db5469ce`. Full runtime smoke is pending
+because another Remote Control test instance was running and was left untouched.
+The final sidecar Accessibility/Screen Recording roundtrip remains unrun.
+The driver additionally requires real keyboard text to change after Accessibility
+restoration, alongside its independent restored-click counter check.

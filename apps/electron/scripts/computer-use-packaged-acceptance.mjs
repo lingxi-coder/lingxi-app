@@ -664,6 +664,9 @@ print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sor
     assert.ok(sawMissing); requireSuccess(recheck, 'OS restored retry'); check('os-accessibility-restoration-rechecked');
     requireSuccess(await access(true, 'fresh grant after OS restoration'), 'OS restored app grant'); await activateFixture(); before = fixtureState();
     requireSuccess(await requestAction({ action: 'left_click', coordinate: before.button }, 'input after OS restoration'), 'restored input'); await waitFor(() => fixtureState().clicks === before.clicks + 1, 'restored click'); check('os-restoration-real-execution');
+    await activateFixture(); const restoredTextBefore=fixtureState().text; const restoredText='RESTORED_ACCESSIBILITY_INPUT';assert.ok(!restoredTextBefore.includes(restoredText));
+    requireSuccess(await requestAction({action:'type',text:restoredText},'typing after OS Accessibility restoration'),'restored typing');
+    await waitFor(()=>fixtureState().text!==restoredTextBefore && fixtureState().text.includes(restoredText),'restored keyboard input');check('os-restoration-real-typing');
   }
   if (options.tccScreenRoundtrip) {
     requireSuccess(await access(true,'grant before Screen Recording revocation'),'Screen Recording revoke preparation');await activateFixture();

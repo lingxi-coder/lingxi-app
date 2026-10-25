@@ -66,11 +66,11 @@ class UnifiedLocalApps private constructor(private val context: Context) {
     private val browserRuns = mutableMapOf<String, AppLaunch>()
     private val mutableBrowserReviewRequest = MutableStateFlow<BrowserReviewRequest?>(null)
     val browserReviewRequest: StateFlow<BrowserReviewRequest?> = mutableBrowserReviewRequest.asStateFlow()
-    fun setBrowserReviewRequest(appId: String, requestId: String?) {
-        mutableBrowserReviewRequest.value = BrowserReviewRequest(appId, requestId)
+    fun setBrowserReviewRequest(appId: String, runId: String?) {
+        mutableBrowserReviewRequest.value = BrowserReviewRequest(appId, runId)
     }
-    fun clearBrowserReviewRequest(appId: String, requestId: String?) {
-        if (mutableBrowserReviewRequest.value == BrowserReviewRequest(appId, requestId)) mutableBrowserReviewRequest.value = null
+    fun clearBrowserReviewRequest(appId: String, runId: String?) {
+        if (mutableBrowserReviewRequest.value == BrowserReviewRequest(appId, runId)) mutableBrowserReviewRequest.value = null
     }
     suspend fun openExternalBrowser(id: String): AppLaunch {
         val app = get(id)

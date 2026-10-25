@@ -1,51 +1,50 @@
 # Mobile Local Apps: Agent, authoring, and lifetime contract
 
+Protocol status: migration to the official AG-UI 1.0 Schema and SDK 1.0.3 is in
+progress. Desktop and Mobile share the [protocol contract](LOCAL_APP_AGENT_PROTOCOL.md).
+Existing prototype builds/tests do not establish current standard conformance;
+actual package and device results are recorded separately.
+
 This document describes the current Local App contract shared by Android, iOS, Desktop, the browser SDK, and Harness. It is a source/design contract, not evidence that a build or a device acceptance run passed. Physical Android and iOS verification remains a separate release gate; evidence and open cases are recorded in the task acceptance report at `acceptance/mobile-app-agent-20261023/report.html`.
 
 ## One-off tasks and persistent chats
 
-The public API has three distinct paths:
+Local Apps use the bundled official AG-UI client:
+`localApp.agent.createClient({threadId?})` returns an `AbstractAgent` subclass.
+Applications add official `Message` values and call `runAgent`; the official SDK
+returns `RunAgentResult` with `result` and `newMessages`. A selected browser file
+becomes an official image/document part through `await localApp.agent.file(file)`.
+The [shared contract](LOCAL_APP_AGENT_PROTOCOL.md#application-sdk) has the common
+Desktop/Mobile recipe.
 
-- `localApp.agent.run(input)` starts one independent request and resolves to its final `AgentReply`.
-- `localApp.agent.tasks.start(input)` returns a durable `runId` as soon as the host admits the request. `get`, `list`, `subscribe`, and `cancel` inspect, restore, observe, and stop tasks. Use this path when the app needs a run ID before completion or must recover task state after a page reload.
-- `localApp.agent.chats.create({title?})` and `.open(chatId)` return an App-owned Chat handle. A handle can `send`, page through `history`, `subscribe`, or `cancel`; the Chats collection can `list`, `archive`, and `delete`. Chats keep their own conversation history and Harness session across page reloads; they do not inherit the conversation that created the Local App.
+All thin run/send/start interfaces accept official `RunAgentInput`. Required
+`threadId`, `runId` and `messages` retain their standard meaning. Host options use
+`forwardedProps["com.lingxi.localApp"] = {version: 1, outputSchema?, tools?, skills?, maxTurns?, timeoutMs?}`.
+They cannot change native ownership, credentials, models or permission mode.
+An identical `runId` retry resolves to the same admission; changed input conflicts.
+There is no separate public prompt/attachments/requestId message format.
 
-`run` and `Chat.send` resolve to the final result. A JavaScript Promise belongs to the current page and does not survive reload. Durable recovery uses task listing/state or Chat history. A Chat send is admitted as a durable task before the SDK waits for its final reply. The host permits one active Chat turn per Chat and, by default, one active task per App.
+Plain one-off runs use fresh thread context. `agent.chats.create/open` manages a
+persistent App-owned thread mapped privately to a Harness Session. A handle ID
+is its stable `threadId`; each turn gets a fresh `runId`. Chat history uses
+official messages, with host-owned canonical parts and private assets kept
+separate from the Harness model transcript. Supplied historical messages must
+match canonical history; pages cannot forge assistant/tool history or approval.
 
-A Task keeps its `runId`, `requestId`, state (`queued`, `running`, `succeeded`, `failed`, `cancelled`, or `interrupted`), monotonic sequence, observed phase/progress, timestamps, model/limits, result, usage, and error. Phase and progress are omitted unless observed by the host. Progress is `{completedModelTurns, turnLimit}`; the count comes from completed Harness model turns, and the limit is not a forecast or percentage. Task listing is scoped to the owning App.
+Tasks/Chats CRUD and native task monitoring are host resources. Their metadata
+states do not replace AG-UI completion semantics. `tasks.events` returns ordered
+standard events plus a separate replay sequence. Subscribers receive standard
+`BaseEvent` values; the official SDK assembles messages/results. Read-only
+`connectAgent` never submits a new model request. A Promise does not survive
+reload; durable run/thread IDs and host replay restore observation.
 
-Inputs have this public shape:
-
-```ts
-type AgentInput = {
-  requestId?: string;
-  prompt: string;
-  attachments?: File[];
-  outputSchema?: unknown;
-  tools?: string[];
-  skills?: string[];
-  maxTurns?: number;
-  timeoutMs?: number;
-};
-```
-
-Applications use standard browser `File` objects in `attachments`. `localApp.files.pick({multiple?, accept?})` returns browser `File` objects; `accept` may be a MIME/type string or an array of them. The SDK creates a `requestId` when omitted. It accepts up to eight files, 25 MiB per file, and 50 MiB total; model or host limits may be lower. Unsupported media or model capabilities fail explicitly.
-
-Pages cannot submit filesystem paths, native file references, provider IDs, `images`, or base64 payload fields as Agent input. The browser sends file metadata and bytes together through one bounded, run-scoped upload. The trusted host converts bytes to its private execution DTO. Raw file contents and host model credentials are not written to the task or Chat ledger. Public Chat history includes attachment name, media type, and size only. Public result attachments are currently empty.
-
-Successful `AgentReply` values always include a `usage` object. Its known metrics—`inputTokens`, `outputTokens`, `costUsd`, `costEstimated`, and `turns`—are optional and appear only when the runtime reported them. Missing metrics are not zero. `Task.result` stores the reply text, optional structured output, empty result attachments, and Chat IDs where applicable; `Task.usage` is the authoritative usage object. Structured output is validated by the host. Text that merely resembles JSON is not a structured result.
-
-```ts
-type AgentReply = { runId: string; text: string; output?: unknown; attachments: []; usage: Usage };
-type ChatReply = AgentReply & { chatId: string; messageId: string };
-type Usage = {
-  inputTokens?: number;
-  outputTokens?: number;
-  costUsd?: number;
-  costEstimated?: boolean;
-  turns?: number;
-};
-```
+Supported file limits remain eight files, 25 MiB/file and 50 MiB/new user message.
+Bytes and MIME content are validated on the host; unsupported media or model
+capabilities fail explicitly. File helpers hide serialization from App authors.
+Public standard parts never contain native paths or credentials. Structured
+results are emitted through the standard result field after host Schema
+validation. A stream truncated before its terminal event is not success;
+cancellation uses the standard cancelled outcome, not a synthetic result.
 
 ## Isolation, tools, and Skills
 
@@ -57,7 +56,7 @@ Effective tool authority is the intersection of release-declared tools, native h
 
 An immutable release may declare runtime Skills as `manifest.agent.skills: {id, path}[]`; each path is exactly `skills/<id>/SKILL.md` within that release. Native settings approve a subset of those IDs, and a request may use only the intersection. A Skill supplies instructions; it does not grant tools or permission to install dependencies or run scripts outside existing task permissions.
 
-The host derives and revalidates the App, release, and invocation owner from the active run. Page-supplied owner, `appId`, release digest, native path, or session identifiers cannot select another App or invoke host administration. The host stores request fingerprints for idempotency, not prompts or file bytes. An identical retry under the same request ID resolves to the existing admission; conflicting input under that ID fails. Startup marks unfinished tasks and Chats interrupted and never replays side effects. Refresh restores state through task APIs and Chat history. Cancelling, stopping, revoking, deleting, or replacing a release cancels affected work after its tool cleanup; upgrade preserves Chat history, cancels active old-release tasks, and rechecks grants before new turns.
+The host derives and revalidates the App, release, and invocation owner from the active run. Page-supplied owner, `appId`, release digest, native path, or session identifiers cannot select another App or invoke host administration. The host stores run fingerprints for idempotency; task metadata remains separate from canonical Chat messages and their bounded private file assets. An identical retry under the same run ID resolves to the existing admission; conflicting input under that ID fails. Startup marks unfinished tasks and Chats interrupted and never replays side effects. Refresh restores state through task APIs and Chat history. Cancelling, stopping, revoking, deleting, or replacing a release cancels affected work after its tool cleanup; upgrade preserves Chat history, cancels active old-release tasks, and rechecks grants before new turns.
 
 ## Create and Modify authoring
 
@@ -102,11 +101,11 @@ Android and iOS open the app page in the operating system's resolved external HT
 
 On Android, a user-started foreground service owns the Local App runtime before the app hands off to the browser. Its persistent notification provides stop and view actions. Task records can be inspected after process death, but work is not replayed. Stop and cancellation target the App or named run and wait for cleanup before releasing admission.
 
-On iOS 26, browser Agent work starts with an explicit native foreground handoff. The app requests an immediate `BGContinuedProcessingTask` and waits up to 12 seconds for the actual OS task to attach before opening the browser. If the lease does not attach in that window, native UI reports failure and does not send the user into a waiting browser page. After attachment, native reserves the exact `(appId, revision, requestId)` with the host. The default receive lease is 60 seconds and the host caps it at 120 seconds; iOS requests 120 seconds. This window covers arrival and admission of that browser request only. The admitted task then has its own `timeoutMs`/turn limits and is monitored under the finite OS lease. Expiration or cancellation stops only the linked request, clears that reservation, and does not promise unattended or indefinite execution.
+On iOS 26, browser Agent work starts with an explicit native foreground handoff. The app requests an immediate `BGContinuedProcessingTask` and waits up to 12 seconds for the actual OS task to attach before opening the browser. If the lease does not attach in that window, native UI reports failure and does not send the user into a waiting browser page. After attachment, native reserves the exact `(appId, revision, runId)` with the host. The default receive lease is 60 seconds and the host caps it at 120 seconds; iOS requests 120 seconds. This window covers arrival and admission of that browser request only. The admitted task then has its own `timeoutMs`/turn limits and is monitored under the finite OS lease. Expiration or cancellation stops only the linked request, clears that reservation, and does not promise unattended or indefinite execution.
 
-The browser wake link is narrowly scoped to `lingxi://apps/<appId>?review=agent&requestId=<opaque>&revision=<revision>`. It carries no prompt, attachment, path, credential, or tool payload. Native validates the App, canonical positive revision, and opaque request ID (at most 128 UTF-8 bytes, no control characters); duplicate, unexpected, or malformed route/query values are rejected. The host allows one live pending or consumed reservation per App: the same tuple is idempotent, while a different request is busy. After the exact reservation is ready, the browser returns to the app page and the SDK submits the complete request and files together under the same request ID. `wake.clear` cancels only the run linked to that exact request. Retries with the same durable input can recover the admitted task. A request that misses the bounded receive deadline loses that reservation and must use a new foreground handoff; native does not hold a lease or UI waiting indefinitely.
+The browser wake link is narrowly scoped to `lingxi://apps/<appId>?review=agent&runId=<opaque>&revision=<revision>`. It carries no prompt, attachment, path, credential, or tool payload. Native validates the App, canonical positive revision, and opaque run ID (at most 128 UTF-8 bytes, no control characters); duplicate, unexpected, or malformed route/query values are rejected. The host allows one live pending or consumed reservation per App: the same tuple is idempotent, while a different request is busy. After the exact reservation is ready, the browser returns to the app page and the SDK submits the complete request and files together under the same run ID. `wake.clear` cancels only the run linked to that exact request. Retries with the same durable input can recover the admitted task. A request that misses the bounded receive deadline loses that reservation and must use a new foreground handoff; native does not hold a lease or UI waiting indefinitely.
 
-On iOS 27 and later, availability-guarded `LongRunningIntent`/`performBackgroundTask` support uses the same native broker for a user-invoked intent that already has its complete bounded input. The intent can return a result and run reference. It does not wait for a browser upload while the browser waits for intent completion, and it does not authorize arbitrary browser-triggered intent execution. iOS 26 remains the foreground browser-handoff path.
+On iOS 27 and later, availability-guarded `LongRunningIntent`/`performBackgroundTask` support uses the same native broker for a user-invoked intent that already has its complete bounded input. The intent returns the actual terminal AG-UI event JSON after host validation; it does not invent a separate Agent reply envelope. It does not wait for a browser upload while the browser waits for intent completion, and it does not authorize arbitrary browser-triggered intent execution. iOS 26 remains the foreground browser-handoff path.
 
 ## Verification boundaries
 

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -18,6 +19,8 @@ const model = { providerId: 'configured', modelId: 'vision', label: 'Vision', ca
 const builtin = { id: 'builtin:Read', kind: 'builtin' as const, name: 'Read', label: 'Read files' };
 const mcp = { id: 'mcp:stable', kind: 'mcp' as const, serverConfigId: 'server-one', configRevision: 'rev1', rawToolName: 'nutrition', definitionDigest: 'digest1', label: 'Nutrition' };
 const settings: LocalAppAgentSettings = { enabled: true, model, tools: [builtin, mcp], skills: ['nutrition'], background: false, maxTurns: 20, timeoutMs: 600000 };
+const AGUI_FIXTURE = JSON.parse(readFileSync(new URL('../vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json', import.meta.url), 'utf8')) as any;
+function runInput(runId: string, threadId = `thread-${runId}`) { const input = structuredClone(AGUI_FIXTURE); input.runId = runId; input.threadId = threadId; return input; }
 const bundledHost = build({ entryPoints: [new URL('../src/main/local-apps/host.ts', import.meta.url).pathname], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'] });
 async function until(check: () => boolean | Promise<boolean>) { for (let i = 0; i < 1000; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } throw new Error('Timed out waiting for test state'); }
 let windowSequence = 100;
@@ -91,7 +94,7 @@ test('host derives Agent identity from exact main frame and running invocation',
   const { host, owner, event, mainFrame } = await fixture(t);
   let received: unknown;
   host.setAgentBroker({ run: async (identity: unknown, input: unknown) => { received = { identity, input }; return { runId: 'run1' }; } });
-  const input = { requestId: 'req1', prompt: 'Inspect this image' };
+  const input = runInput('run-1');
   await host.native(event, { method: 'agent.tasks.start', args: { input, appId: 'forged', releaseDigest: 'forged', invocationId: 'forged' } });
   assert.deepEqual(JSON.parse(JSON.stringify(received)), { identity: owner, input });
   await assert.rejects(host.native({ ...event, senderFrame: { ...mainFrame } }, { method: 'agent.tasks.start', args: { input } }), /Unauthorized/);
@@ -194,12 +197,14 @@ test('closing and reopening an Agent-background app preserves its task and invoc
   let complete!: () => void;
   const held = new Promise<void>(resolve => { complete = resolve; });
   const broker = new LocalAppAgentBroker({ root: join(root, 'ledger'), authorize: owner => host.authorizeAgent(owner), revalidate: (owner, authorization) => host.revalidateAgent(owner, authorization),
-    execute: async execution => { await held; await execution.assertAuthorized(); return { result: { text: 'Finished after reopening', attachments: [] }, usage: { turns: 1 } }; } });
+    execute: async execution => { await held; await execution.assertAuthorized(); return { result: { text: 'Finished after reopening', output: { ok: true }, attachments: [], messageId: `assistant-${execution.runId}` }, usage: { turns: 1 } }; } });
   host.setAgentBroker(broker); t.after(async () => { complete(); await broker.dispose(); });
   await host.open(row.id);
   const first = host.windows.get(row.id), originalInvocation = host.runtime.invocationId(row.id);
   const eventFor = (window: any) => ({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
-  const { runId } = await host.native(eventFor(first), { method: 'agent.tasks.start', args: { input: { requestId: 'background-reopen', prompt: 'Finish this task' } } });
+  const input = runInput('background-reopen');
+  input.forwardedProps['com.lingxi.localApp'].skills = ['nutrition'];
+  const { runId } = await host.native(eventFor(first), { method: 'agent.tasks.start', args: { input } });
   first.close();
   await until(() => host.runtime.phase(row.id) === 'stopped');
   assert.equal(broker.hasActiveApp(row.id), true);
@@ -208,10 +213,14 @@ test('closing and reopening an Agent-background app preserves its task and invoc
   assert.notEqual(reopened.webContents.id, first.webContents.id);
   assert.equal(host.runtime.invocationId(row.id), originalInvocation);
   assert.ok(['queued', 'running'].includes((await host.native(eventFor(reopened), { method: 'agent.tasks.get', args: { runId } })).state));
-  await host.native(eventFor(reopened), { method: 'agent.tasks.subscribe', args: { runId, subscriptionId: '1' } });
+  const firstPage = await host.native(eventFor(reopened), { method: 'agent.tasks.events', args: { runId, afterSequence: 0 } });
+  assert.equal(firstPage.events[0].type, 'RUN_STARTED');
   complete();
   await until(async () => (await host.native(eventFor(reopened), { method: 'agent.tasks.get', args: { runId } })).state === 'succeeded');
-  assert.equal((await host.native(eventFor(reopened), { method: 'agent.tasks.get', args: { runId } })).result.text, 'Finished after reopening');
+  const finalPage = await host.native(eventFor(reopened), { method: 'agent.tasks.events', args: { runId, afterSequence: firstPage.sequence } });
+  assert.equal(finalPage.events.at(-1).type, 'RUN_FINISHED');
+  assert.equal(finalPage.events.at(-1).threadId, input.threadId);
+  assert.equal(finalPage.events.at(-1).runId, input.runId);
 });
 
 test('trusted host question supports text and multi-choice answers and cancellation clears pending prompt', async t => {
@@ -229,32 +238,32 @@ test('trusted host question supports text and multi-choice answers and cancellat
   assert.equal(await cancelled, null); assert.equal((await host.request({ action: 'agent-questions' })).length, 0);
 });
 
-test('subscription replies target the originating frame document and are dropped after navigation', async t => {
-  const { host, event, sent } = await fixture(t);
-  let listener!: (event: unknown) => void, unsubscribed = 0;
-  host.setAgentBroker({ subscribe: async (_owner: unknown, _runId: string, receive: typeof listener) => { listener = receive; receive({ type: 'state', runId: 'run1', sequence: 1, time: 2, task: { runId: 'run1', state: 'running', sequence: 1, updatedAt: 2 } }); return () => { unsubscribed++; }; } });
-  await host.native(event, { method: 'agent.tasks.subscribe', args: { runId: 'run1', subscriptionId: '1' } });
-  assert.equal(sent.length, 1);
-  host.navigationEpoch.set(event.sender.id, 2); host.clearAgentSubscriptions(event.sender.id);
-  listener({ type: 'state', runId: 'run1', sequence: 2, time: 3, task: { runId: 'run1', state: 'running', sequence: 2, updatedAt: 3 } });
-  assert.equal(sent.length, 1); assert.equal(unsubscribed, 1);
+test('host returns persisted standard BaseEvent pages and rejects a navigated application frame', async t => {
+  const { host, event, mainFrame, owner } = await fixture(t);
+  const officialEvent = { type: 'RUN_STARTED', threadId: 'thread-1', runId: 'run-1', protocolVersion: '1.0' };
+  host.setAgentBroker({ events: async (identity: unknown, runId: string, afterSequence: number) => {
+    assert.deepEqual(JSON.parse(JSON.stringify(identity)), owner); assert.equal(runId, 'run-1'); assert.equal(afterSequence, 0);
+    return { events: [officialEvent], sequence: 1 };
+  } });
+  const page = await host.native(event, { method: 'agent.tasks.events', args: { runId: 'run-1', afterSequence: 0 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(page)), { events: [officialEvent], sequence: 1 });
+  mainFrame.url = 'https://untrusted.example/';
+  await assert.rejects(host.native(event, { method: 'agent.tasks.events', args: { runId: 'run-1', afterSequence: 0 } }), /Unauthorized/);
 });
 
-test('preload exposes only narrow Agent methods and never forwards the Electron event', async () => {
+test('preload exposes only host-scoped AG-UI resource methods without event streaming IPC', async () => {
   const result = await build({ entryPoints: [new URL('../src/preload/localApp.ts', import.meta.url).pathname], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'] });
   let bridge: any;
   const requests: unknown[] = [];
-  const eventListeners = new Set<(...args: any[]) => void>();
   runInNewContext(result.outputFiles[0]!.text, { console, require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: unknown) => { bridge = value; } },
-    ipcRenderer: { invoke: async (...args: unknown[]) => { requests.push(args); }, on: (_name: string, callback: unknown) => { eventListeners.add(callback as (...args: any[]) => void); },
-      removeListener: (_name: string, callback: unknown) => { eventListeners.delete(callback as (...args: any[]) => void); } } }) });
+    ipcRenderer: { invoke: async (...args: unknown[]) => { requests.push(args); } } }) });
   assert.deepEqual(Object.keys(bridge.agent).sort(), ['chats', 'tasks']);
-  const seen: unknown[] = [];
-  const stop = bridge.agent.tasks.onEvent((value: unknown) => seen.push(value));
-  for (const callback of eventListeners) callback({ sender: 'privileged' }, { subscriptionId: '1', event: { type: 'state', runId: 'run1', sequence: 1, task: {} } });
-  assert.deepEqual(seen, [{ subscriptionId: '1', event: { type: 'state', runId: 'run1', sequence: 1, task: {} } }]);
-  stop(); for (const callback of eventListeners) callback({ sender: 'privileged' }, { subscriptionId: '1', event: { type: 'state', runId: 'run1', sequence: 2, task: {} } });
-  assert.equal(seen.length, 1); assert.equal(requests.length, 0);
+  assert.deepEqual(Object.keys(bridge.agent.tasks).sort(), ['cancel', 'events', 'get', 'list', 'start']);
+  await bridge.agent.tasks.events({ runId: 'run-1', afterSequence: 3 });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0][1].method, 'agent.tasks.events');
+  assert.equal(requests[0][1].args.runId, 'run-1');
+  assert.ok(!('subscribe' in bridge.agent.tasks));
 });
 
 test('creating chat can discover public tool IDs before a manifest exists, without granting them', async t => {
@@ -263,18 +272,4 @@ test('creating chat can discover public tool IDs before a manifest exists, witho
   assert.deepEqual(JSON.parse(JSON.stringify(await host.request({ action: 'agent_catalog' }))), catalog);
   assert.equal(JSON.stringify((await host.store.get(row.id)).agent), before);
   await assert.rejects(host.native(event, { method: 'agent_catalog' }), /Unknown/);
-});
-
-test('concurrent pending subscriptions consume slots and unsubscribe cannot be revived by a late replay', async t => {
-  const { host, event } = await fixture(t);
-  let release!: () => void, entered = 0, stopped = 0;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  host.setAgentBroker({ subscribe: async () => { entered++; await gate; return () => { stopped++; }; } });
-  const pending = Array.from({ length: 64 }, (_, index) => host.native(event, { method: 'agent.tasks.subscribe', args: { runId: 'run1', subscriptionId: String(index) } }));
-  while (entered < 64) await new Promise(resolve => setImmediate(resolve));
-  await assert.rejects(host.native(event, { method: 'agent.tasks.subscribe', args: { runId: 'run1', subscriptionId: '64' } }), /Too many/);
-  await host.native(event, { method: 'agent.tasks.unsubscribe', args: { subscriptionId: '0' } });
-  release(); await Promise.all(pending);
-  assert.equal(stopped, 1);
-  assert.equal(host.agentSubscriptions.get(event.sender.id).size, 63);
 });

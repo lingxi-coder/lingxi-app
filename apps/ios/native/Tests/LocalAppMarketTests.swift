@@ -25,15 +25,15 @@ final class LocalAppMarketTests: XCTestCase {
         let origin = "http://127.0.0.1:33001"
         let url = URL(string: origin + "/__run/test/index.html?photo=kept")!
         XCTAssertTrue(LocalAppExternalBrowserURL.matches(url, origin: origin))
-        let requestID = "request + exact/&unicode-灵犀"
-        let ready = try LocalAppAgentWakeURL.ready(url, origin: origin, requestID: requestID)
+        let runID = "run + exact/&unicode-灵犀"
+        let ready = try LocalAppAgentWakeURL.ready(url, origin: origin, runID: runID)
         let query = URLComponents(url: ready, resolvingAgainstBaseURL: false)?.queryItems
         XCTAssertEqual(query?.first(where: { $0.name == "photo" })?.value, "kept")
-        XCTAssertEqual(query?.first(where: { $0.name == "__lingxi_ready" })?.value, requestID)
+        XCTAssertEqual(query?.first(where: { $0.name == "__lingxi_ready" })?.value, runID)
         for value in ["http://127.0.0.1:33002/", "http://localhost:33001/", "https://127.0.0.1:33001/", "http://user@127.0.0.1:33001/"] {
             XCTAssertFalse(LocalAppExternalBrowserURL.matches(URL(string: value)!, origin: origin))
         }
-        XCTAssertThrowsError(try LocalAppAgentWakeURL.ready(url, origin: origin, requestID: "bad\nrequest"))
+        XCTAssertThrowsError(try LocalAppAgentWakeURL.ready(url, origin: origin, runID: "bad\nrun"))
     }
     @MainActor
     func testAgentHostRuntimeGateMatchesTheSelectedStoreOrFullTarget() {

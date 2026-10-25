@@ -127,17 +127,17 @@ internal fun LocalAppAgentSettingsDialog(apps: UnifiedLocalApps, release: AppRel
 
 /** Trusted UI proposal polling; application JavaScript cannot obtain/answer it. */
 @Composable
-internal fun LocalAppAgentInteractions(apps: UnifiedLocalApps, appId: String, reviewRequestId: String? = null) {
+internal fun LocalAppAgentInteractions(apps: UnifiedLocalApps, appId: String, reviewRunId: String? = null) {
     val scope = rememberCoroutineScope()
-    var pending by remember(appId, reviewRequestId) { mutableStateOf<JSONObject?>(null) }
+    var pending by remember(appId, reviewRunId) { mutableStateOf<JSONObject?>(null) }
     var error by remember(appId) { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
-    LaunchedEffect(appId, reviewRequestId) {
+    LaunchedEffect(appId, reviewRunId) {
         while (true) {
             try {
                 val requests = apps.agentHost(JSONObject().put("op", "interactions")) as org.json.JSONArray
                 val current = (0 until requests.length()).map { requests.getJSONObject(it) }.firstOrNull {
-                    it.optString("appId") == appId && (reviewRequestId == null || it.optString("requestId") == reviewRequestId)
+                    it.optString("appId") == appId && (reviewRunId == null || it.optString("runId") == reviewRunId)
                 }
                 if (current?.optString("requestId") != pending?.optString("requestId")) pending = current
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
@@ -168,7 +168,7 @@ internal fun LocalAppAgentInteractions(apps: UnifiedLocalApps, appId: String, re
                 answer.put("answers", values)
             }
             apps.agentHost(answer); pending = null
-            apps.clearBrowserReviewRequest(appId, reviewRequestId)
+            apps.clearBrowserReviewRequest(appId, reviewRunId)
         } catch (failure: Exception) { error = failure.message }
         finally { busy = false }
     } }

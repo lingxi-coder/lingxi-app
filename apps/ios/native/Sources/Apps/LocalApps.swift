@@ -95,8 +95,8 @@ final class UnifiedLocalApps {
         browserReviewAppID = nil
         return true
     }
-    func queueBrowserAgentWake(appID: String, revision: UInt64, requestID: String) {
-        let next = LocalAppAgentWakeRequest(appID: appID, revision: revision, requestID: requestID)
+    func queueBrowserAgentWake(appID: String, revision: UInt64, runID: String) {
+        let next = LocalAppAgentWakeRequest(appID: appID, revision: revision, runID: runID)
         if let previous = browserAgentWake, previous != next {
             Task { await agentBackground.cancel(previous, client: client) }
         }

@@ -1,101 +1,76 @@
 import AppIntents
 import Foundation
-import UniformTypeIdentifiers
 
 private struct LocalAppAgentNativeStart: Decodable, Sendable {
     let runId: String
 }
 
-private struct LocalAppAgentIntentReceipt: Encodable, Sendable {
-    let appId: String
-    let revision: UInt64
-    let runId: String
-    let text: String
-    let output: LocalAppJSON?
+struct LocalAppAgentNativeEvents: Decodable, Sendable {
+    let events: [LocalAppJSON]
+    let sequence: UInt64
 }
 
 enum LocalAppAgentIntentInput {
-    static let maximumFiles = 8
-    static let maximumFileBytes = 25 * 1024 * 1024
-    static let maximumTotalFileBytes = 50 * 1024 * 1024
-    static let maximumSchemaBytes = 256 * 1024
+    static let maximumInputBytes = 70 * 1024 * 1024
 
-    static func attachments(_ files: [IntentFile]) throws -> [LocalAppJSON] {
-        guard files.count <= maximumFiles else {
-            throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "The Agent accepts at most 8 files.")
-        }
-        var totalBytes = 0
-        return try files.map { file in
-            let name = file.filename
-            guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  name.utf8.count <= 255,
-                  !name.contains("/"), !name.contains("\\"),
-                  !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
-                throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "A file has an invalid name.")
-            }
-            let mediaType = file.type?.preferredMIMEType ?? "application/octet-stream"
-            guard !mediaType.isEmpty, mediaType.utf8.count <= 127,
-                  !mediaType.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
-                throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "A file has an invalid media type.")
-            }
-            let availableBytes = min(maximumFileBytes, maximumTotalFileBytes - totalBytes)
-            let bytes = try boundedData(for: file, maximumBytes: availableBytes)
-            guard bytes.count <= maximumFileBytes, totalBytes <= maximumTotalFileBytes - bytes.count else {
-                throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "Files must be at most 25 MiB each and 50 MiB total.")
-            }
-            totalBytes += bytes.count
-            return .object([
-                "name": .string(name),
-                "mediaType": .string(mediaType),
-                "base64": .string(bytes.base64EncodedString())
-            ])
-        }
+    static func isWithinInputLimit(_ byteCount: Int) -> Bool {
+        byteCount <= maximumInputBytes
     }
 
-    static func outputSchema(_ text: String?) throws -> LocalAppJSON? {
-        guard let text, !text.isEmpty else { return nil }
-        guard text.utf8.count <= maximumSchemaBytes else {
-            throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "Output schema must be a JSON object no larger than 256 KiB.")
+    static func runAgentInput(_ text: String) throws -> (value: LocalAppJSON, threadID: String, runID: String) {
+        guard isWithinInputLimit(text.utf8.count),
+              let value = try? JSONDecoder().decode(LocalAppJSON.self, from: Data(text.utf8)),
+              case let .object(fields) = value,
+              case let .string(threadID)? = fields["threadId"],
+              case let .string(runID)? = fields["runId"] else {
+            throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "Provide a RunAgentInput JSON object with threadId and runId fields.")
         }
-        do {
-            let value = try JSONDecoder().decode(LocalAppJSON.self, from: Data(text.utf8))
-            guard case .object = value else {
-                throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "Output schema must be a JSON object no larger than 256 KiB.")
-            }
-            return value
-        } catch {
-            throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "Output schema must be a JSON object no larger than 256 KiB.")
-        }
+        return (value, threadID, runID)
+    }
+}
+
+enum LocalAppAgentRunEvent {
+    static func type(_ event: LocalAppJSON) -> String? {
+        guard case let .object(fields) = event, case let .string(type)? = fields["type"] else { return nil }
+        return type
     }
 
-    private static func boundedData(for file: IntentFile, maximumBytes: Int) throws -> Data {
-        guard let url = file.fileURL else {
-            let data = file.data
-            guard data.count <= maximumBytes else {
-                throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "Files must be at most 25 MiB each and 50 MiB total.")
-            }
-            return data
-        }
-        let accessed = url.startAccessingSecurityScopedResource()
-        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let fileSize = attributes[.size] as? NSNumber,
-              fileSize.uint64Value <= UInt64(maximumBytes) else {
-            throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "Files must be at most 25 MiB each and 50 MiB total.")
-        }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var data = Data()
-        while data.count <= maximumBytes {
-            let remaining = maximumBytes + 1 - data.count
-            let chunk = try handle.read(upToCount: min(64 * 1024, remaining)) ?? Data()
-            if chunk.isEmpty { break }
-            data.append(chunk)
-        }
-        guard data.count <= maximumBytes else {
-            throw LocalAppServiceFailure("INVALID_AGENT_ATTACHMENTS", "Files must be at most 25 MiB each and 50 MiB total.")
-        }
-        return data
+    static func isTerminal(_ event: LocalAppJSON) -> Bool {
+        ["RUN_FINISHED", "RUN_ERROR"].contains(type(event) ?? "")
+    }
+
+    static func terminalEvent(in events: [LocalAppJSON]) -> LocalAppJSON? {
+        events.first(where: Self.isTerminal)
+    }
+
+    static func matches(_ event: LocalAppJSON, runID: String, threadID: String) -> Bool {
+        guard case let .object(fields) = event,
+              case let .string(eventThreadID)? = fields["threadId"] else { return false }
+        return matchesRun(event, runID: runID) && eventThreadID == threadID
+    }
+
+    static func matchesRun(_ event: LocalAppJSON, runID: String) -> Bool {
+        guard case let .object(fields) = event,
+              case let .string(eventRunID)? = fields["runId"] else { return false }
+        return eventRunID == runID
+    }
+
+    static func isSuccessful(_ event: LocalAppJSON) -> Bool {
+        guard type(event) == "RUN_FINISHED", case let .object(fields) = event else { return false }
+        guard let outcome = fields["outcome"] else { return true }
+        guard case let .object(outcomeFields) = outcome,
+              case let .string(type)? = outcomeFields["type"] else { return false }
+        return type == "success"
+    }
+
+    static func isSuccessfulTerminal(
+        _ event: LocalAppJSON?,
+        runID: String,
+        threadID: String? = nil
+    ) -> Bool {
+        guard let event, type(event) == "RUN_FINISHED", matchesRun(event, runID: runID) else { return false }
+        if let threadID, !matches(event, runID: runID, threadID: threadID) { return false }
+        return isSuccessful(event)
     }
 }
 
@@ -104,111 +79,64 @@ enum LocalAppAgentIntentInput {
 @available(iOS 27.0, *)
 struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
     static let title: LocalizedStringResource = "Run Local App Agent"
-    static let description = IntentDescription("Run a selected Local App Agent request with files, then return its result and run reference.")
+    static let description = IntentDescription("Run a selected Local App Agent request from a complete AG-UI RunAgentInput.")
     static var supportedModes: IntentModes { .background }
     static var authenticationPolicy: IntentAuthenticationPolicy { .requiresAuthentication }
     static var parameterSummary: some ParameterSummary {
         Summary("Run Local App Agent for app \(\.$appID)") {
             \.$revision
-            \.$prompt
-            \.$attachments
-            \.$outputSchema
-            \.$tools
-            \.$skills
-            \.$maxTurns
-            \.$timeLimitMinutes
+            \.$inputJSON
         }
     }
 
     @Parameter(title: "App ID") var appID: String
     @Parameter(title: "Release revision") var revision: Int
-    @Parameter(title: "Prompt") var prompt: String
-    @Parameter(title: "Files", default: []) var attachments: [IntentFile]
-    @Parameter(title: "Output schema JSON") var outputSchema: String?
-    @Parameter(title: "Requested tools", default: []) var tools: [String]
-    @Parameter(title: "Requested Skills", default: []) var skills: [String]
-    @Parameter(title: "Maximum model turns", default: 20) var maxTurns: Int
-    @Parameter(title: "Time limit in minutes", default: 10) var timeLimitMinutes: Int
+    @Parameter(title: "AG-UI RunAgentInput JSON") var inputJSON: String
 
     func perform() async throws -> some ReturnsValue<String> & ProvidesDialog {
-        guard revision > 0, let revisionValue = UInt64(exactly: revision),
-              maxTurns > 0, maxTurns <= 100, timeLimitMinutes > 0, timeLimitMinutes <= 60 else {
-            throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "Use a positive release revision, at most 100 turns, and a time limit up to 60 minutes.")
+        guard revision > 0, let revisionValue = UInt64(exactly: revision) else {
+            throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "Use a positive release revision.")
         }
         guard !appID.isEmpty, appID.utf8.count <= 128,
               !appID.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
             throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "The Local App ID is invalid.")
         }
-        let requestID = UUID().uuidString.lowercased()
+        let input = try LocalAppAgentIntentInput.runAgentInput(inputJSON)
         let client = LocalApps.library.client
         let cancellation = LocalAppAgentIntentCancellation(client: client, appID: appID, revision: revisionValue)
         let taskProgress = progress
 
-        let receipt = try await performBackgroundTask(operation: {
-            let input = try Self.nativeInput(
-                requestID: requestID,
-                prompt: self.prompt,
-                attachments: self.attachments,
-                outputSchema: self.outputSchema,
-                tools: self.tools,
-                skills: self.skills,
-                maxTurns: self.maxTurns,
-                timeoutMs: self.timeLimitMinutes * 60_000
-            )
-            let inputJSON = try LocalAppJSON.encode(input)
+        let terminalEvent = try await performBackgroundTask(operation: {
             let started = try await client.agentHost([
                 "op": .string("startNative"),
                 "appId": .string(self.appID),
                 "revision": .number(Double(revisionValue)),
-                "input": inputJSON
+                "input": input.value
             ], as: LocalAppAgentNativeStart.self)
+            guard started.runId == input.runID else {
+                throw LocalAppServiceFailure("INVALID_AGENT_TASK", "The Local App host changed this AG-UI runId.")
+            }
             try await cancellation.didStart(started.runId)
             return try await Self.waitForCompletion(
                 client: client,
                 cancellation: cancellation,
                 appID: self.appID,
                 revision: revisionValue,
-                requestID: requestID,
                 runID: started.runId,
+                threadID: input.threadID,
                 progress: taskProgress
             )
         }, onCancel: { _ in
             Task { await cancellation.cancel() }
         })
-        let data = try JSONEncoder().encode(receipt)
+        let data = try JSONEncoder().encode(terminalEvent)
         let value = String(decoding: data, as: UTF8.self)
-        return .result(value: value, dialog: IntentDialog("The Local App Agent task completed. Its run reference and result are ready."))
-    }
-
-    private static func nativeInput(
-        requestID: String,
-        prompt: String,
-        attachments: [IntentFile],
-        outputSchema: String?,
-        tools: [String],
-        skills: [String],
-        maxTurns: Int,
-        timeoutMs: Int
-    ) throws -> [String: LocalAppJSON] {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              prompt.utf8.count <= 256 * 1024,
-              tools.count <= 128, Set(tools).count == tools.count,
-              skills.count <= 128, Set(skills).count == skills.count else {
-            throw LocalAppServiceFailure("INVALID_AGENT_INPUT", "The prompt or file count is outside the Agent limits.")
-        }
-        var fields: [String: LocalAppJSON] = [
-            "requestId": .string(requestID),
-            "prompt": .string(prompt),
-            "attachments": .array(try LocalAppAgentIntentInput.attachments(attachments)),
-            "tools": .array(tools.map(LocalAppJSON.string)),
-            "skills": .array(skills.map(LocalAppJSON.string)),
-            "maxTurns": .number(Double(maxTurns)),
-            "timeoutMs": .number(Double(timeoutMs))
-        ]
-        if let outputSchema = try LocalAppAgentIntentInput.outputSchema(outputSchema) {
-            fields["outputSchema"] = outputSchema
-        }
-        return fields
+        let didSucceed = LocalAppAgentRunEvent.isSuccessfulTerminal(
+            terminalEvent,
+            runID: input.runID,
+            threadID: input.threadID
+        )
+        return .result(value: value, dialog: IntentDialog(didSucceed ? "The Local App Agent run finished." : "The Local App Agent run ended without success."))
     }
 
     private static func waitForCompletion(
@@ -216,11 +144,12 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
         cancellation: LocalAppAgentIntentCancellation,
         appID: String,
         revision: UInt64,
-        requestID: String,
         runID: String,
+        threadID: String,
         progress: Progress
-    ) async throws -> LocalAppAgentIntentReceipt {
+    ) async throws -> LocalAppJSON {
         var deadline = Date().addingTimeInterval(3_600)
+        var afterSequence: UInt64 = 0
         while Date() < deadline {
             try Task.checkCancellation()
             if await cancellation.isCancelled { throw CancellationError() }
@@ -228,10 +157,10 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
                 "op": .string("tasks.list"),
                 "appId": .string(appID),
                 "revision": .number(Double(revision)),
-                "requestId": .string(requestID)
+                "requestId": .string(runID)
             ], as: LocalAppAgentTaskListResponse.self)
             guard response.appId == appID, response.revision == revision,
-                  let task = response.tasks.first(where: { $0.requestId == requestID && $0.runId == runID }) else {
+                  let task = response.tasks.first(where: { $0.requestId == runID }) else {
                 throw LocalAppServiceFailure("AGENT_TASK_MISSING", "The Local App host did not return the admitted task.")
             }
             if let observed = task.progress, observed.turnLimit > 0 {
@@ -249,16 +178,49 @@ struct RunLocalAppAgentIntent: AppIntent, LongRunningIntent, CancellableIntent {
             deadline = Date(timeIntervalSince1970: TimeInterval(task.createdAt) / 1_000)
                 .addingTimeInterval(TimeInterval(min(task.limits.timeoutMs, 3_600_000)) / 1_000)
 
-            if task.state == "succeeded" {
-                guard let result = task.result else {
-                    throw LocalAppServiceFailure("INVALID_AGENT_RESULT", "The completed Agent task has no result.")
+            let batch = try await client.agentHost([
+                "op": .string("eventsNative"),
+                "appId": .string(appID),
+                "revision": .number(Double(revision)),
+                "runId": .string(runID),
+                "afterSequence": .number(Double(afterSequence))
+            ], as: LocalAppAgentNativeEvents.self)
+            guard batch.sequence >= afterSequence else {
+                throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence moved backwards.")
+            }
+            afterSequence = batch.sequence
+            for event in batch.events {
+                guard LocalAppAgentRunEvent.type(event) != nil else {
+                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI event.")
                 }
-                LocalAppAgentProgressReporting.finish(progress, success: true)
-                return LocalAppAgentIntentReceipt(appId: appID, revision: revision, runId: runID, text: result.text, output: result.output)
+            }
+            if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: batch.events),
+               let type = LocalAppAgentRunEvent.type(terminalEvent) {
+                if type == "RUN_FINISHED" {
+                    guard LocalAppAgentRunEvent.matches(terminalEvent, runID: runID, threadID: threadID) else {
+                        throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The AG-UI terminal event belongs to a different thread or run.")
+                    }
+                    LocalAppAgentProgressReporting.finish(
+                        progress,
+                        success: LocalAppAgentRunEvent.isSuccessfulTerminal(
+                            terminalEvent,
+                            runID: runID,
+                            threadID: threadID
+                        )
+                    )
+                    return terminalEvent
+                }
+                if type == "RUN_ERROR" {
+                    LocalAppAgentProgressReporting.finish(progress, success: false)
+                    return terminalEvent
+                }
             }
             if task.isTerminal {
                 LocalAppAgentProgressReporting.finish(progress, success: false)
-                throw LocalAppServiceFailure(task.error?.code ?? "AGENT_TASK_FAILED", task.error?.message ?? "The Agent task ended as \(task.state).")
+                throw LocalAppServiceFailure(
+                    task.error?.code ?? "AGENT_TERMINAL_EVENT_MISSING",
+                    "The Agent task ended as \(task.state) without a terminal AG-UI event."
+                )
             }
             do { try await Task.sleep(for: .seconds(1)) } catch { throw CancellationError() }
         }

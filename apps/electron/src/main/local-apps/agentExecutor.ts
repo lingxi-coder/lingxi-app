@@ -190,7 +190,7 @@ export class LocalAppAgentExecutor {
     const mcp = authorization.settings.tools.flatMap(grant => grant.kind === 'mcp'
       ? wire.mcpTools.filter(tool => toolId(tool) === grant.id) : []);
     const mcpConfigs = [...new Set(mcp.map(tool => tool.configIndex))].map(index => wire.mcpConfigs[index]);
-    const taskDirectory = join(this.options.root, 'apps', owner.appId, 'agent', 'tasks', runId);
+    const taskDirectory = join(this.options.root, 'apps', owner.appId, 'agent', 'tasks', execution.taskStorageId);
     const cwd = execution.chat?.sessionDirectory ?? taskDirectory;
     await fs.mkdir(taskDirectory, { recursive: true, mode: 0o700 });
     await fs.mkdir(cwd, { recursive: true, mode: 0o700 });
@@ -210,9 +210,10 @@ export class LocalAppAgentExecutor {
       credentials: credentialEnvelope(credentials), mcpConfigs, toolPolicy: {
         builtinTools: authorization.settings.tools.flatMap(grant => grant.kind === 'builtin' ? [grant.name] : []),
         mcpTools: mcp.map(({ serverConfigId, configRevision, rawToolName, definitionFingerprint }) => ({ serverConfigId, configRevision, rawToolName, definitionFingerprint })),
-      }, input: { ...input, ...(input.attachments ? { attachments: input.attachments.map(file => ({
-        name: file.name, media_type: file.mediaType, base64: file.base64,
-      })) } : {}) }, ...(execution.chat ? { appChat: execution.chat } : {}),
+      }, input: { ...input, contentParts: input.contentParts.map(part => part.kind === 'text'
+        ? { kind: 'text', text: part.text }
+        : { kind: 'attachment', name: part.name, mediaType: part.mediaType, base64: part.base64 }) },
+      ...(execution.chat ? { appChat: execution.chat } : {}),
       skillSourceDirectory: authorization.releaseSourceDirectory, releaseRevision: authorization.releaseRevision,
       skillSpecs: authorization.skillSpecs, grantedSkills: authorization.settings.skills, releaseFiles,
       modelCapabilities: { vision: model.supportsVision, structuredOutput: model.supportsStructuredOutput },
@@ -265,8 +266,12 @@ export class LocalAppAgentExecutor {
         }
         if (event.text !== undefined && typeof event.text !== 'string') throw protocolError();
         if (input.outputSchema && event.result === undefined) throw new LocalAppAgentError('invalid_result', 'The Agent did not produce a validated structured result.');
+        if (input.outputSchema && event.result === null) throw new LocalAppAgentError('structured_output_not_representable', 'The structured result cannot be represented as an AG-UI run result.');
+        if (typeof event.messageId !== 'string' || !bounded(event.messageId, 256)
+          || (execution.chat && event.chatId !== execution.chat.chatId)) throw protocolError();
         const usage = publicUsage(event.usage);
-        result = { result: { text: typeof event.text === 'string' ? event.text : '', attachments: [], ...(event.result === undefined ? {} : { output: event.result }) },
+        result = { result: { text: typeof event.text === 'string' ? event.text : '', attachments: [], messageId: event.messageId,
+          ...(execution.chat ? { chatId: execution.chat.chatId } : {}), ...(event.result === undefined || event.result === null ? {} : { output: event.result }) },
           ...(usage === undefined ? {} : { usage }) };
         return true;
       } else throw protocolError();

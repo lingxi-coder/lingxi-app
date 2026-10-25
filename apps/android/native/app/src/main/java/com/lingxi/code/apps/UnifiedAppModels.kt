@@ -63,7 +63,7 @@ data class AppAuthoringSessionContext(
         .put("sourceDirectory", sourceDirectory).put("projectRef", projectRef.toJson()).put("mode", mode)
 }
 data class AppAuthoringResolution(val action: String, val sourceDirectory: String, val authoring: AppAuthoring?)
-data class BrowserReviewRequest(val appId: String, val requestId: String?)
+data class BrowserReviewRequest(val appId: String, val runId: String?)
 data class AppLibraryState(val apps: List<AppRecord> = emptyList(), val loading: Boolean = true, val error: String? = null, val openedRevision: Long = 0)
 class AppServiceException(val code: String, message: String) : Exception(message)
 

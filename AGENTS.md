@@ -23,3 +23,11 @@
 - LingXi owns runtime services, independent Agent tasks, model credentials and trusted native permission/tool approval. Preserve Agent support using an authenticated browser-to-host interface scoped to the installed app and current run; never expose host-administration or approval APIs to app pages.
 - Use browser camera/file selection for the application UI. Verify external-browser navigation, photo return, host lifecycle, Agent requests, cancellation and recovery on physical Android and iOS. Historical WebView checks are not external-browser acceptance.
 - This is a product architecture requirement motivated by store distribution, not a guarantee of store approval. Do not switch back to WebView without an explicit user decision.
+
+## Local App Agent protocol standardization
+
+- Use an established protocol for public App-to-Agent messages and events; do not invent another cross-platform message or reply format. The current direction is AG-UI 1.0, recorded in [the shared protocol migration contract](docs/LOCAL_APP_AGENT_PROTOCOL.md).
+- Keep provider communication in `llm-client`, connected-tool communication in MCP, and Skill packages aligned with Agent Skills. Host authorization, durable resources, source Project bindings and mobile background leases remain host responsibilities.
+- Public Agent input, output and events use the pinned official AG-UI 1.0 Schema and SDK. Preserve historical prototype evidence separately; require official schema/behaviour checks and acceptance of freshly built affected platform packages before claiming completion.
+
+- First-release AG-UI migration is a clean replacement (user decision, 2026-10-24): remove the old public Agent API, old protocol fixtures and obsolete Agent task/chat/pending-store formats. Do not add compatibility aliases, fallback decoders or data conversion. Delete only known obsolete Agent storage; preserve source Projects, immutable releases and application business data.

@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOCAL_APP_SDK } from '../src/preload/localAppSdk.ts';
 
-test('Electron 43 transports File bytes through ArrayBuffer and reconstructs picker Files in the page world', async t => {
+test('Electron 43 serializes browser File as an official inline AG-UI DataSource before IPC', async t => {
   if (process.platform !== 'darwin') { t.skip('the isolated Electron 43 smoke runs on macOS'); return; }
   const testDirectory = dirname(fileURLToPath(import.meta.url));
   const electronBinary = join(testDirectory, '../node_modules/electron/dist/Electron.app/Contents/MacOS/Electron');
@@ -22,8 +22,8 @@ test('Electron 43 transports File bytes through ArrayBuffer and reconstructs pic
       process: { exec: async () => ({}) }, serviceSocketUrl: async () => '',
       files: { pick: async options => ipcRenderer.invoke('files-pick', options), pickDirectory: async () => null,
         read: async () => '', write: async () => {}, list: async () => [] },
-      agent: { tasks: { start: async input => ipcRenderer.invoke('agent-start', input), get: async () => ({}), list: async () => [],
-        cancel: async () => {}, subscribe: async () => {}, unsubscribe: async () => {}, onEvent: () => () => {} },
+    agent: { tasks: { start: async input => ipcRenderer.invoke('agent-start', input), get: async () => ({}), list: async () => ({ tasks: [] }),
+        events: async () => ({ events: [], sequence: 0 }), cancel: async () => {} },
         chats: { create: async () => ({}), open: async () => ({}), get: async () => ({}), list: async () => [], archive: async () => {},
           delete: async () => {}, history: async () => ({ messages: [] }), send: async () => ({}), cancel: async () => {} } }
     });
@@ -31,8 +31,12 @@ test('Electron 43 transports File bytes through ArrayBuffer and reconstructs pic
   await fs.writeFile(join(appDirectory, 'index.html'), `<!doctype html><html><head></head><body><script>${LOCAL_APP_SDK}</script><script>
     window.localAppTest = (async () => {
       const [file] = await localApp.files.pick({ multiple: false, accept: '.txt' });
-      const started = await localApp.agent.tasks.start({ prompt: 'inspect', attachments: [file] });
-      return { isFile: file instanceof File, fileBytes: Array.from(new Uint8Array(await file.arrayBuffer())), runId: started.runId };
+      const part = await localApp.agent.file(file);
+      part.id = 'file-part-one';
+      const started = await localApp.agent.tasks.start({ threadId: 'electron-thread', runId: 'electron-run',
+        messages: [{ id: 'user-one', role: 'user', content: [part] }] });
+      return { isFile: file instanceof File, fileBytes: Array.from(new Uint8Array(await file.arrayBuffer())),
+        contentType: part.type, sourceType: part.source.type, runId: started.runId };
     })();
   </script></body></html>`);
   await fs.writeFile(join(appDirectory, 'main.cjs'), `
@@ -44,12 +48,11 @@ test('Electron 43 transports File bytes through ArrayBuffer and reconstructs pic
     ipcMain.handle('files-pick', () => ({ files: [{ name: 'picked.txt', mediaType: 'text/plain', size: 3, lastModified: 7,
       bytes: new Uint8Array([4, 5, 6]).buffer }] }));
     ipcMain.handle('agent-start', (_event, input) => {
-      const attachment = input.attachments?.[0];
+      const part = input.messages?.[0]?.content?.[0];
       global.__submitted = input;
-      global.__fileWasSentDirectly = typeof File !== 'undefined' && attachment instanceof File;
-      return { runId: 'electron-run', isArrayBuffer: attachment?.bytes instanceof ArrayBuffer,
-        byteValues: attachment?.bytes instanceof ArrayBuffer ? Array.from(new Uint8Array(attachment.bytes)) : [],
-        fileWasSentDirectly: global.__fileWasSentDirectly };
+      global.__fileWasSentDirectly = typeof File !== 'undefined' && part instanceof File;
+      return { runId: input.runId, isArrayBuffer: part?.source?.value instanceof ArrayBuffer,
+        dataSource: part?.source, partType: part?.type, fileWasSentDirectly: global.__fileWasSentDirectly };
     });
     app.whenReady().then(async () => {
       const window = new BrowserWindow({ show: false, webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true } });
@@ -57,12 +60,16 @@ test('Electron 43 transports File bytes through ArrayBuffer and reconstructs pic
       try {
         const result = await window.webContents.executeJavaScript('window.localAppTest');
         const submitted = global.__submitted;
+        const part = submitted?.messages?.[0]?.content?.[0];
         const verified = result.isFile && JSON.stringify(result.fileBytes) === '[4,5,6]' && result.runId === 'electron-run'
-          && submitted?.attachments?.[0]?.bytes instanceof ArrayBuffer
-          && JSON.stringify(Array.from(new Uint8Array(submitted.attachments[0].bytes))) === '[4,5,6]'
+          && result.contentType === 'document' && result.sourceType === 'data'
+          && submitted?.protocolVersion === '1.0'
+          && part?.source?.value === 'BAUG' && part?.source?.mimeType === 'text/plain'
+          && part?.metadata?.['com.lingxi.localApp']?.filename === 'picked.txt'
+          && part?.source?.value instanceof ArrayBuffer === false
           && !global.__fileWasSentDirectly;
-        console.log('RESULT:' + JSON.stringify({ verified, result, submittedUsesArrayBuffer: submitted?.attachments?.[0]?.bytes instanceof ArrayBuffer,
-          fileWasSentDirectly: global.__fileWasSentDirectly }));
+        console.log('RESULT:' + JSON.stringify({ verified, result, contentPart: part,
+          sourceValueWasArrayBuffer: part?.source?.value instanceof ArrayBuffer, fileWasSentDirectly: global.__fileWasSentDirectly }));
         app.exit(verified ? 0 : 1);
       } catch (error) { console.error('SMOKE_ERROR:' + (error?.stack || error)); app.exit(1); }
     });
@@ -75,18 +82,21 @@ test('Electron 43 transports File bytes through ArrayBuffer and reconstructs pic
   let stdout = '', stderr = '';
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
   child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  let exitSignal: NodeJS.Signals | null = null;
   const exitCode = await new Promise<number>((resolve, reject) => {
     const timeout = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`Electron file bridge smoke timed out\n${stdout}\n${stderr}`)); }, 30_000);
     child.once('error', error => { clearTimeout(timeout); reject(error); });
-    child.once('close', code => { clearTimeout(timeout); resolve(code ?? -1); });
+    child.once('close', (code, signal) => { clearTimeout(timeout); exitSignal = signal; resolve(code ?? -1); });
   });
-  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+  assert.equal(exitCode, 0, `signal=${exitSignal}\n${stdout}\n${stderr}`);
   const resultLine = stdout.split('\n').find(line => line.startsWith('RESULT:'));
   assert.ok(resultLine, `${stdout}\n${stderr}`);
   assert.deepEqual(JSON.parse(resultLine.slice('RESULT:'.length)), {
     verified: true,
-    result: { isFile: true, fileBytes: [4, 5, 6], runId: 'electron-run' },
-    submittedUsesArrayBuffer: true,
+    result: { isFile: true, fileBytes: [4, 5, 6], contentType: 'document', sourceType: 'data', runId: 'electron-run' },
+    contentPart: { type: 'document', id: 'file-part-one', source: { type: 'data', value: 'BAUG', mimeType: 'text/plain' },
+      metadata: { 'com.lingxi.localApp': { version: 1, filename: 'picked.txt' } } },
+    sourceValueWasArrayBuffer: false,
     fileWasSentDirectly: false,
   });
 });

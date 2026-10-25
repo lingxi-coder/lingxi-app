@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import type { DesktopAppManifest, DesktopLocalApp, DesktopAuthoringRef, LocalAppCapability, LocalAppAgentQuestion, LocalAppEditRequest } from '../../shared/localApps.js';
 import { isDesktopAuthoringRef } from '../../shared/localApps.js';
 import type { AskQuestionDto } from '@lingxi/bridge-client';
-import { CH_LOCAL_APP_AGENT_EVENT, LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES, type LocalAppAgentCatalog, type LocalAppAgentSettings } from '../../shared/localAppAgent.js';
+import { LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES, type LocalAppAgentCatalog, type LocalAppAgentSettings } from '../../shared/localAppAgent.js';
 import type { LocalAppAgentBroker, LocalAppAgentOwner, LocalAppAgentAuthorization } from './agentBroker.js';
 import { canonicalJson, sameAgentGrant, validateAgentSettings } from './agentPolicy.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, LOCAL_APP_SCHEME } from '../../shared/localApps.js';
@@ -112,7 +112,6 @@ export class LocalAppHost {
   private readonly blockedAgentApps = new Set<string>();
   private readonly agentEpochs = new Map<string, number>();
   private readonly backgroundAgentOwners = new Map<string, { revision: number; invocationId: string }>();
-  private readonly agentSubscriptions = new Map<number, Map<string, () => void>>();
   private readonly navigationEpoch = new Map<number, number>();
   private readonly agentQuestions = new Map<string, { view: LocalAppAgentQuestion; appId: string; resolve: (answers: Record<string, string> | null) => void }>();
   private readonly pendingAuthoring = new Map<string, PendingAuthoringEntry>();
@@ -365,12 +364,6 @@ export class LocalAppHost {
       parent.show(); parent.focus(); this.changed();
     });
   }
-  private clearAgentSubscriptions(contentsId: number): void {
-    const subscriptions = this.agentSubscriptions.get(contentsId);
-    for (const unsubscribe of subscriptions?.values() ?? []) unsubscribe();
-    subscriptions?.clear();
-    this.agentSubscriptions.delete(contentsId);
-  }
   private async cancelAgentApp(id: string, reason: string): Promise<number> {
     const epoch = (this.agentEpochs.get(id) ?? 0) + 1;
     this.agentEpochs.set(id, epoch);
@@ -378,8 +371,6 @@ export class LocalAppHost {
     this.backgroundAgentOwners.delete(id);
     for (const pending of this.agentQuestions.values()) if (pending.appId === id) pending.resolve(null);
     await this.agentBroker?.cancelApp(id, reason);
-    const contentsId = this.windows.get(id)?.webContents.id;
-    if (contentsId !== undefined) this.clearAgentSubscriptions(contentsId);
     return epoch;
   }
   registerMainWindow(window: BrowserWindow, url: string): void {
@@ -783,7 +774,7 @@ export class LocalAppHost {
       webPreferences: { partition: `persist:local-app-${id}`, preload: this.options.preload, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, navigateOnDragDrop: false } });
     this.windows.set(id, window);
     this.windowRuns.set(window, invocation!);
-    window.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { this.navigationEpoch.set(window.webContents.id, (this.navigationEpoch.get(window.webContents.id) ?? 0) + 1); this.clearAgentSubscriptions(window.webContents.id); } });
+    window.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) this.navigationEpoch.set(window.webContents.id, (this.navigationEpoch.get(window.webContents.id) ?? 0) + 1); });
     const contentsId = window.webContents.id;
     const origin = `${LOCAL_APP_SCHEME}://${id}`;
     window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(origin + '/')) { event.preventDefault(); void this.external(url); } });
@@ -791,7 +782,6 @@ export class LocalAppHost {
     window.webContents.on('will-attach-webview', event => event.preventDefault());
     window.on('closed', () => {
       const closingInvocation = this.runtime.invocationId(id), closingRevision = this.runtime.revision(id);
-      this.clearAgentSubscriptions(contentsId);
       this.navigationEpoch.delete(contentsId);
       if (this.windows.get(id) === window) this.windows.delete(id);
       if (!this.shuttingDown) void this.store.get(id).then(async row => {
@@ -927,6 +917,7 @@ export class LocalAppHost {
       if (input.method === 'agent.tasks.start') return broker.run(owner, args.input);
       if (input.method === 'agent.tasks.get') return broker.get(owner, String(args.runId));
       if (input.method === 'agent.tasks.list') return broker.list(owner, args);
+      if (input.method === 'agent.tasks.events') return broker.events(owner, String(args.runId), args.afterSequence as number | undefined);
       if (input.method === 'agent.tasks.cancel') return broker.cancel(owner, String(args.runId));
       if (input.method === 'agent.chats.create') return broker.createChat(owner, args);
       if (input.method === 'agent.chats.get') return broker.getChat(owner, String(args.chatId));
@@ -936,33 +927,6 @@ export class LocalAppHost {
       if (input.method === 'agent.chats.history') return broker.chatHistory(owner, String(args.chatId), args);
       if (input.method === 'agent.chats.send') return broker.sendChat(owner, String(args.chatId), args.input);
       if (input.method === 'agent.chats.cancel') return broker.cancelChat(owner, String(args.chatId));
-      const subscriptionId = args.subscriptionId;
-      if (typeof subscriptionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(subscriptionId)) throw new Error('Invalid Agent subscription');
-      let subscriptions = this.agentSubscriptions.get(event.sender.id);
-      if (input.method === 'agent.tasks.unsubscribe') { subscriptions?.get(subscriptionId)?.(); subscriptions?.delete(subscriptionId); return; }
-      if (input.method === 'agent.tasks.subscribe') {
-        if (!subscriptions) { subscriptions = new Map(); this.agentSubscriptions.set(event.sender.id, subscriptions); }
-        if (subscriptions.size >= 64 && !subscriptions.has(subscriptionId)) throw new Error('Too many Agent subscriptions');
-        subscriptions.get(subscriptionId)?.();
-        // Reserve before the asynchronous replay so concurrent admissions share
-        // the same limit and a late reply cannot revive an unsubscribed slot.
-        const reservation = () => undefined;
-        subscriptions.set(subscriptionId, reservation);
-        try {
-          const unsubscribe = await broker.subscribe(owner, String(args.runId), eventValue => {
-            try { current(); if (!this.blockedAgentApps.has(id) && this.agentSubscriptions.get(event.sender.id) === subscriptions && subscriptions?.has(subscriptionId)) event.sender.send(CH_LOCAL_APP_AGENT_EVENT, { subscriptionId, event: eventValue }); } catch { /* A departed document never receives a task event. */ }
-          });
-          try {
-            current();
-            if (this.agentSubscriptions.get(event.sender.id) !== subscriptions || subscriptions.get(subscriptionId) !== reservation) { unsubscribe(); return; }
-            subscriptions.set(subscriptionId, unsubscribe);
-          } catch (error) { unsubscribe(); throw error; }
-        } catch (error) {
-          if (subscriptions.get(subscriptionId) === reservation) subscriptions.delete(subscriptionId);
-          throw error;
-        }
-        return;
-      }
       throw new Error('Unknown application Agent API');
     }
     if (input.method === 'serviceSocketUrl') {
@@ -1050,7 +1014,6 @@ export class LocalAppHost {
   async dispose(): Promise<void> {
     this.shuttingDown = true;
     for (const pending of this.agentQuestions.values()) pending.resolve(null);
-    for (const contentsId of this.agentSubscriptions.keys()) this.clearAgentSubscriptions(contentsId);
     await this.agentBroker?.dispose();
     for (const operation of this.opening.values()) operation.controller.abort();
     if (this.changeTimer) clearTimeout(this.changeTimer);

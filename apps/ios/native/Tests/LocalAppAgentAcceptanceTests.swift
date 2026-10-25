@@ -24,7 +24,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
         }
     }
 
-    func testBrowserTaskUsesMultipartFilesAndRequiresAttachedNativeLeaseOnDevice() async throws {
+    func testBrowserRunAgentRequiresAttachedNativeLeaseOnDevice() async throws {
         #if targetEnvironment(simulator)
         throw XCTSkip("The Local App loopback service and native task lease require a physical iPhone.")
         #else
@@ -35,23 +35,33 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             XCTAssertTrue(LocalAppExternalBrowserURL.matches(launch.url, origin: launch.origin))
 
             let boundary = "LingxiAgentTest-\(UUID().uuidString)"
-            let requestID = "ios opaque request + \(UUID().uuidString)"
+            let runID = "ios opaque run + \(UUID().uuidString)"
+            let attachment = Data("small public test attachment".utf8)
+            let runInput: [String: Any] = [
+                "threadId": "thread-\(UUID().uuidString)",
+                "runId": runID,
+                "messages": [[
+                    "id": "message-\(UUID().uuidString)",
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": "Read the attached note and summarize it."],
+                        ["type": "document", "source": [
+                            "type": "data",
+                            "value": attachment.base64EncodedString(),
+                            "mimeType": "text/plain"
+                        ], "metadata": ["com.lingxi.localApp": ["version": 1, "filename": "note.txt"]]]
+                    ]
+                ]],
+                "forwardedProps": ["com.lingxi.localApp": ["version": 1, "tools": []]]
+            ]
             let metadata = try JSONSerialization.data(withJSONObject: [
                 "method": "agent.tasks.start",
-                "args": ["input": [
-                    "requestId": requestID,
-                    "prompt": "Read the attached note and summarize it.",
-                    "tools": [],
-                    "skills": []
-                ]]
+                "args": ["input": runInput]
             ], options: [.sortedKeys])
-            let file = Data("small public test attachment".utf8)
             var body = Data()
             func append(_ text: String) { body.append(Data(text.utf8)) }
             append("--\(boundary)\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n")
             body.append(metadata)
-            append("\r\n--\(boundary)\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\n")
-            body.append(file)
             append("\r\n--\(boundary)--\r\n")
 
             let endpoint = try XCTUnwrap(URL(string: launch.origin + "/__run/\(launch.run.runId)/__host/agent"))
@@ -69,7 +79,7 @@ final class LocalAppAgentAcceptanceTests: XCTestCase {
             XCTAssertEqual(envelope["ok"] as? Bool, false)
             let error = try XCTUnwrap(envelope["error"] as? [String: Any])
             XCTAssertEqual(error["code"] as? String, "host_wake_required")
-            print("IOS_AGENT_WAKE_GATE PASS external-gateway tasks.start multipart generic-file opaque-request-id no-native-lease")
+            print("IOS_AGENT_WAKE_GATE PASS external-gateway tasks.start RunAgentInput ContentPart-data runId no-native-lease")
         } catch {
             try? await UnifiedLocalApps(client: client).action("remove", id: app.0.record.appId)
             try? FileManager.default.removeItem(at: app.1)

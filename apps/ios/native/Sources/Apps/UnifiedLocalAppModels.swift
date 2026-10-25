@@ -89,7 +89,7 @@ enum ProjectRef: Codable, Equatable, Sendable {
 struct LocalAppAgentWakeRequest: Equatable, Sendable {
     let appID: String
     let revision: UInt64
-    let requestID: String
+    let runID: String
 }
 struct LocalAppAgentTaskProgress: Decodable, Equatable, Sendable {
     let completedModelTurns: UInt64
@@ -132,7 +132,7 @@ struct LocalAppAgentTaskListResponse: Decodable, Sendable {
 struct LocalAppWakeReservation: Decodable, Sendable {
     let appId: String
     let revision: UInt64
-    let requestId: String
+    let runId: String
     let expiresAtMs: UInt64
 }
 struct LocalAppMarketOrigin: Codable, Equatable, Sendable {

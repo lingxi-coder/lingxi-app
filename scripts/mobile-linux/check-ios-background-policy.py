@@ -138,7 +138,7 @@ def validate_processing_sources(repo_root):
             r'BGTaskScheduler\.shared\.cancel\(taskRequestWithIdentifier:\s*context\.identifier\)',
             r'BGTaskScheduler\.shared\.cancel\(taskRequestWithIdentifier:\s*identifier\)',
             r'private\s+func\s+expire\(_\s+contextKey:\s*String\)\s+async\s*\{[\s\S]*?await\s+cancel\(context\.wake,\s*client:\s*context\.client\)',
-            r'private\s+func\s+clearReservation\(_\s+wake:\s*LocalAppAgentWakeRequest,\s*client:\s*LocalAppServiceClient\)\s+async\s+throws\s*\{[\s\S]*?"op":\s*\.string\("wake\.clear"\),[\s\S]*?"appId":\s*\.string\(wake\.appID\),[\s\S]*?"revision":\s*\.number\(Double\(wake\.revision\)\),[\s\S]*?"requestId":\s*\.string\(wake\.requestID\)',
+            r'private\s+func\s+clearReservation\(_\s+wake:\s*LocalAppAgentWakeRequest,\s*client:\s*LocalAppServiceClient\)\s+async\s+throws\s*\{[\s\S]*?"op":\s*\.string\("wake\.clear"\),[\s\S]*?"appId":\s*\.string\(wake\.appID\),[\s\S]*?"revision":\s*\.number\(Double\(wake\.revision\)\),[\s\S]*?"runId":\s*\.string\(wake\.runID\)',
             r'task\.setTaskCompleted\(success:\s*false\)',
             r'task\.setTaskCompleted\(success:\s*success\)',
             r'return\s+"\\\(bundleID\)\.local-app\.\\\(digest\)"'],

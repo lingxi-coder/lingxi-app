@@ -1584,7 +1584,7 @@ fun RootScreen(
                 check(expectedRevision == null || expectedRevision == app.currentRevision) {
                     "This Agent request belongs to a different application revision. Reopen the current app and retry."
                 }
-                localApps.setBrowserReviewRequest(appId, link.params["requestId"])
+                localApps.setBrowserReviewRequest(appId, link.params["runId"])
                 onDeepLinkHandled(link)
             } catch (error: Exception) {
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -1689,7 +1689,7 @@ fun RootScreen(
                                 check(expectedRevision == null || expectedRevision == app.currentRevision) {
                                     "This Agent request belongs to a different application revision. Reopen the current app and retry."
                                 }
-                                localApps.setBrowserReviewRequest(id, link.params["requestId"])
+                                localApps.setBrowserReviewRequest(id, link.params["runId"])
                             }
                             runtimeAppId = id
                         }

@@ -5,10 +5,10 @@ import XCTest
 @MainActor
 final class LocalAppAgentBackgroundContractTests: XCTestCase {
     func testWakeContextKeysIsolateSameRequestAcrossAppsAndRevisions() {
-        let appA = LocalAppAgentWakeRequest(appID: "app-a", revision: 7, requestID: "request-1")
-        let appB = LocalAppAgentWakeRequest(appID: "app-b", revision: 7, requestID: "request-1")
-        let nextRelease = LocalAppAgentWakeRequest(appID: "app-a", revision: 8, requestID: "request-1")
-        let retry = LocalAppAgentWakeRequest(appID: "app-a", revision: 7, requestID: "request-1")
+        let appA = LocalAppAgentWakeRequest(appID: "app-a", revision: 7, runID: "run-1")
+        let appB = LocalAppAgentWakeRequest(appID: "app-b", revision: 7, runID: "run-1")
+        let nextRelease = LocalAppAgentWakeRequest(appID: "app-a", revision: 8, runID: "run-1")
+        let retry = LocalAppAgentWakeRequest(appID: "app-a", revision: 7, runID: "run-1")
 
         XCTAssertNotEqual(appA.contextKey, appB.contextKey)
         XCTAssertNotEqual(appA.contextKey, nextRelease.contextKey)
@@ -26,6 +26,9 @@ final class LocalAppAgentBackgroundContractTests: XCTestCase {
         ))
         XCTAssertTrue(LocalAppAgentBackgroundController.isPermanentMonitorFailure(
             LocalAppServiceFailure("app_not_found", "app removed")
+        ))
+        XCTAssertTrue(LocalAppAgentBackgroundController.isPermanentMonitorFailure(
+            LocalAppServiceFailure("INVALID_AGENT_EVENT", "invalid terminal event")
         ))
         XCTAssertFalse(LocalAppAgentBackgroundController.isPermanentMonitorFailure(
             LocalAppServiceFailure("agent_storage_unavailable", "try again")

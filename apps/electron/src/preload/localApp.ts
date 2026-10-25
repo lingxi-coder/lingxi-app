@@ -1,6 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { CH_LOCAL_APP_NATIVE } from '../shared/localAppNative.js';
-import { CH_LOCAL_APP_AGENT_EVENT } from '../shared/localAppAgent.js';
+import type { RunAgentInput } from '@lingxi/local-app-agui';
+import type {
+  LocalAppAgentChatHistory,
+  LocalAppAgentChatHistoryOptions,
+  LocalAppAgentChatListOptions,
+  LocalAppAgentChatSummary,
+  LocalAppAgentTask,
+  LocalAppAgentTaskEventPage,
+  LocalAppAgentTaskListOptions,
+} from '../shared/localAppAgent.js';
 
 const invoke = (method: string, args?: Record<string, unknown>) => ipcRenderer.invoke(CH_LOCAL_APP_NATIVE, { method, args });
 
@@ -27,28 +36,29 @@ contextBridge.exposeInMainWorld('__lingxiLocalAppBridge', Object.freeze({
   serviceSocketUrl: (name: string, path?: string) => invoke('serviceSocketUrl', { name, path }),
   agent: Object.freeze({
     tasks: Object.freeze({
-      start: (input: unknown) => invoke('agent.tasks.start', { input }),
-      get: (runId: string) => invoke('agent.tasks.get', { runId }),
-      list: (options?: Record<string, unknown>) => invoke('agent.tasks.list', options ?? {}),
-      cancel: (runId: string) => invoke('agent.tasks.cancel', { runId }),
-      subscribe: (runId: string, subscriptionId: string) => invoke('agent.tasks.subscribe', { runId, subscriptionId }),
-      unsubscribe: (subscriptionId: string) => invoke('agent.tasks.unsubscribe', { subscriptionId }),
-      onEvent: (callback: (value: unknown) => void) => {
-        const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
-        ipcRenderer.on(CH_LOCAL_APP_AGENT_EVENT, listener);
-        return () => ipcRenderer.removeListener(CH_LOCAL_APP_AGENT_EVENT, listener);
-      },
+      start: (input: RunAgentInput): Promise<{ runId: string }> => invoke('agent.tasks.start', { input }),
+      get: (runId: string): Promise<LocalAppAgentTask> => invoke('agent.tasks.get', { runId }),
+      list: (options?: LocalAppAgentTaskListOptions): Promise<{ tasks: LocalAppAgentTask[]; nextCursor?: string }> => invoke('agent.tasks.list', {
+        ...(options?.cursor === undefined ? {} : { cursor: options.cursor }),
+        ...(options?.limit === undefined ? {} : { limit: options.limit }),
+      }),
+      events: (input: { runId: string; afterSequence?: number }): Promise<LocalAppAgentTaskEventPage> => invoke('agent.tasks.events', input),
+      cancel: (runId: string): Promise<void> => invoke('agent.tasks.cancel', { runId }),
     }),
     chats: Object.freeze({
-      create: (input?: Record<string, unknown>) => invoke('agent.chats.create', input ?? {}),
-      open: (chatId: string) => invoke('agent.chats.get', { chatId }),
-      get: (chatId: string) => invoke('agent.chats.get', { chatId }),
-      list: (options?: Record<string, unknown>) => invoke('agent.chats.list', options ?? {}),
-      archive: (chatId: string) => invoke('agent.chats.archive', { chatId }),
-      delete: (chatId: string) => invoke('agent.chats.delete', { chatId }),
-      history: (chatId: string, options?: Record<string, unknown>) => invoke('agent.chats.history', { chatId, ...(options ?? {}) }),
-      send: (chatId: string, input: unknown) => invoke('agent.chats.send', { chatId, input }),
-      cancel: (chatId: string) => invoke('agent.chats.cancel', { chatId }),
+      create: (input?: { title?: string }): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.create', input ?? {}),
+      open: (chatId: string): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.get', { chatId }),
+      get: (chatId: string): Promise<LocalAppAgentChatSummary> => invoke('agent.chats.get', { chatId }),
+      list: (options?: LocalAppAgentChatListOptions): Promise<{ chats: LocalAppAgentChatSummary[]; nextCursor?: string }> => invoke('agent.chats.list', {
+        ...(options?.cursor === undefined ? {} : { cursor: options.cursor }),
+        ...(options?.limit === undefined ? {} : { limit: options.limit }),
+        ...(options?.includeArchived === undefined ? {} : { includeArchived: options.includeArchived }),
+      }),
+      archive: (chatId: string): Promise<void> => invoke('agent.chats.archive', { chatId }),
+      delete: (chatId: string): Promise<void> => invoke('agent.chats.delete', { chatId }),
+      history: (chatId: string, options?: LocalAppAgentChatHistoryOptions): Promise<LocalAppAgentChatHistory> => invoke('agent.chats.history', { chatId, ...(options ?? {}) }),
+      send: (chatId: string, input: RunAgentInput): Promise<{ runId: string }> => invoke('agent.chats.send', { chatId, input }),
+      cancel: (chatId: string): Promise<void> => invoke('agent.chats.cancel', { chatId }),
     }),
   }),
 }));

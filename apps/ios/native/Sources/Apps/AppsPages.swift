@@ -356,7 +356,7 @@ struct AppRuntimeView: View {
             if busy { ProgressView() }
             if let error { Text(error).foregroundStyle(.red) }
             if let wake = library.browserAgentWake(for: appId) {
-                Text("浏览器 Agent 请求等待后台任务许可。请求：\(wake.requestID.prefix(8))")
+                Text("浏览器 Agent 请求等待后台任务许可。运行：\(wake.runID.prefix(8))")
                     .font(.footnote).foregroundStyle(.secondary)
                 Button("开始 Agent 并返回应用") {
                     guard let launch else { return }

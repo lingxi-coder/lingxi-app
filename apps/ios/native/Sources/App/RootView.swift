@@ -2107,12 +2107,12 @@ struct RootView: View {
                 if LocalApps.library.record(id) != nil {
                     if target.params["review"] == "agent" {
                         LocalApps.library.browserReviewAppID = id
-                        if let requestID = target.params["requestId"],
+                        if let runID = target.params["runId"],
                            let revision = target.params["revision"].flatMap(UInt64.init) {
                             LocalApps.library.queueBrowserAgentWake(
                                 appID: id,
                                 revision: revision,
-                                requestID: requestID
+                                runID: runID
                             )
                         }
                     }

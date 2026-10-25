@@ -12,23 +12,23 @@ final class AppIntegrationTests: XCTestCase {
         }
     }
 
-    func testBrowserAgentWakePreservesOpaqueRequestIDExactly() throws {
-        let requestID = "opaque request +/&-灵犀"
+    func testBrowserAgentWakePreservesRunIDExactly() throws {
+        let runID = "opaque run +/&-灵犀"
         var parts = URLComponents(string: "lingxi://apps/a123")!
         parts.queryItems = [
             URLQueryItem(name: "review", value: "agent"),
-            URLQueryItem(name: "requestId", value: requestID),
+            URLQueryItem(name: "runId", value: runID),
             URLQueryItem(name: "revision", value: "7")
         ]
         let route = try XCTUnwrap(parts.url.flatMap(CanonicalDeepLink.parse))
-        XCTAssertEqual(route.params["requestId"], requestID)
+        XCTAssertEqual(route.params["runId"], runID)
         XCTAssertEqual(route.params["revision"], "7")
         for query in [
-            "review=agent&requestId=request&revision=0",
-            "review=agent&requestId=request&revision=07",
-            "review=agent&requestId=request",
+            "review=agent&runId=run&revision=0",
+            "review=agent&runId=run&revision=07",
+            "review=agent&runId=run",
             "review=agent&revision=1",
-            "review=agent&requestId=\(String(repeating: "a", count: 129))&revision=1"
+            "review=agent&runId=\(String(repeating: "a", count: 129))&revision=1"
         ] {
             XCTAssertNil(CanonicalDeepLink.parse("lingxi://apps/a123?\(query)"), query)
         }

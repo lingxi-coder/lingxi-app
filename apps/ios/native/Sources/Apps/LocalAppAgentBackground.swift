@@ -32,9 +32,9 @@ final class LocalAppAgentBackgroundController {
         guard #available(iOS 26.0, *) else {
             throw LocalAppServiceFailure("BACKGROUND_UNAVAILABLE", "Browser Agent handoff requires iOS 26 or later.")
         }
-        guard !wake.requestID.isEmpty, wake.requestID.utf8.count <= 128,
-              !wake.requestID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
-            throw LocalAppServiceFailure("INVALID_AGENT_WAKE", "This Agent request has an invalid request id.")
+        guard !wake.runID.isEmpty, wake.runID.utf8.count <= 128,
+              !wake.runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw LocalAppServiceFailure("INVALID_AGENT_WAKE", "This Agent request has an invalid run id.")
         }
         guard LocalAppExternalBrowserURL.matches(returnURL, origin: origin) else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not its registered local origin.")
@@ -45,7 +45,7 @@ final class LocalAppAgentBackgroundController {
         let contextKey = wake.contextKey
         if let existing = contexts[contextKey], !existing.finished {
             if tasks[contextKey] != nil, existing.reservationExpiry.map({ $0 > Date() }) == true {
-                return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, requestID: wake.requestID)
+                return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
             }
             throw LocalAppServiceFailure("AGENT_WAKE_IN_PROGRESS", "This browser request is already being prepared. Wait briefly before returning to it.")
         }
@@ -79,12 +79,12 @@ final class LocalAppAgentBackgroundController {
                 "op": .string("wake.reserve"),
                 "appId": .string(wake.appID),
                 "revision": .number(Double(wake.revision)),
-                "requestId": .string(wake.requestID),
+                "runId": .string(wake.runID),
                 "receiveTimeoutMs": .number(120_000)
             ], as: LocalAppWakeReservation.self)
             guard reservation.appId == wake.appID,
                   reservation.revision == wake.revision,
-                  reservation.requestId == wake.requestID,
+                  reservation.runId == wake.runID,
                   reservation.expiresAtMs > UInt64(Date().timeIntervalSince1970 * 1_000) else {
                 throw LocalAppServiceFailure("INVALID_AGENT_WAKE", "The host did not confirm this app request.")
             }
@@ -99,7 +99,7 @@ final class LocalAppAgentBackgroundController {
             monitors[contextKey] = Task { @MainActor [weak self] in
                 await self?.monitor(contextKey, client: client)
             }
-            return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, requestID: wake.requestID)
+            return try LocalAppAgentWakeURL.ready(returnURL, origin: origin, runID: wake.runID)
         } catch {
             await cancel(wake, client: client)
             throw error
@@ -118,6 +118,12 @@ final class LocalAppAgentBackgroundController {
         monitors.removeValue(forKey: contextKey)?.cancel()
         attachmentWaiters.removeValue(forKey: contextKey)?.resume(throwing: CancellationError())
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: context.identifier)
+        try? await client.agentHost([
+            "op": .string("tasks.cancel"),
+            "appId": .string(wake.appID),
+            "revision": .number(Double(wake.revision)),
+            "runId": .string(wake.runID)
+        ], as: LocalAppJSON.self)
         try? await clearReservation(wake, client: client)
         finishTask(contextKey: contextKey, success: false)
         contexts.removeValue(forKey: contextKey)
@@ -185,8 +191,9 @@ final class LocalAppAgentBackgroundController {
     private func monitor(_ contextKey: String, client: LocalAppServiceClient) async {
         guard let context = contexts[contextKey], !context.finished,
               let receiveDeadline = context.reservationExpiry else { return }
-        let requestID = context.wake.requestID
+        let runID = context.wake.runID
         var runDeadline: Date?
+        var afterSequence: UInt64 = 0
 
         while !Task.isCancelled, Date() < (runDeadline ?? receiveDeadline) {
             do {
@@ -194,25 +201,60 @@ final class LocalAppAgentBackgroundController {
                     "op": .string("tasks.list"),
                     "appId": .string(context.wake.appID),
                     "revision": .number(Double(context.wake.revision)),
-                    "requestId": .string(requestID)
+                    "requestId": .string(runID)
                 ], as: LocalAppAgentTaskListResponse.self)
                 guard response.appId == context.wake.appID,
                       response.revision == context.wake.revision else {
                     throw LocalAppServiceFailure("INVALID_AGENT_TASK", "The host returned a task for another app version.")
                 }
-                if let agentTask = response.tasks.first(where: { $0.requestId == requestID }) {
+                if let agentTask = response.tasks.first(where: { $0.requestId == runID }) {
                     if runDeadline == nil {
                         let timeoutMs = min(agentTask.limits.timeoutMs, 3_600_000)
                         runDeadline = Date(timeIntervalSince1970: TimeInterval(agentTask.createdAt) / 1_000)
                             .addingTimeInterval(TimeInterval(timeoutMs) / 1_000)
                     }
                     report(agentTask, appName: context.appName, contextKey: contextKey)
-                    if agentTask.isTerminal {
-                        await complete(context.wake, success: agentTask.state == "succeeded", client: client)
-                        return
-                    }
                 } else if Date() >= receiveDeadline {
                     break
+                }
+
+                let batch = try await client.agentHost([
+                    "op": .string("eventsNative"),
+                    "appId": .string(context.wake.appID),
+                    "revision": .number(Double(context.wake.revision)),
+                    "runId": .string(runID),
+                    "afterSequence": .number(Double(afterSequence))
+                ], as: LocalAppAgentNativeEvents.self)
+                guard batch.sequence >= afterSequence else {
+                    throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App event sequence moved backwards.")
+                }
+                afterSequence = batch.sequence
+                for event in batch.events {
+                    guard LocalAppAgentRunEvent.type(event) != nil else {
+                        throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The Local App host returned an invalid AG-UI event.")
+                    }
+                }
+                if let terminalEvent = LocalAppAgentRunEvent.terminalEvent(in: batch.events),
+                   let type = LocalAppAgentRunEvent.type(terminalEvent) {
+                    if type == "RUN_FINISHED" {
+                        guard LocalAppAgentRunEvent.matchesRun(terminalEvent, runID: runID) else {
+                            throw LocalAppServiceFailure("INVALID_AGENT_EVENT", "The AG-UI terminal event belongs to a different run.")
+                        }
+                        await complete(
+                            context.wake,
+                            success: LocalAppAgentRunEvent.isSuccessfulTerminal(terminalEvent, runID: runID),
+                            client: client
+                        )
+                        return
+                    }
+                    if type == "RUN_ERROR" {
+                        await complete(context.wake, success: false, client: client)
+                        return
+                    }
+                }
+                if let agentTask = response.tasks.first(where: { $0.requestId == runID }), agentTask.isTerminal {
+                    await complete(context.wake, success: false, client: client)
+                    return
                 }
             } catch is CancellationError {
                 return
@@ -230,7 +272,7 @@ final class LocalAppAgentBackgroundController {
             "op": .string("tasks.cancel"),
             "appId": .string(context.wake.appID),
             "revision": .number(Double(context.wake.revision)),
-            "requestId": .string(requestID)
+            "runId": .string(runID)
         ], as: LocalAppJSON.self)
         await complete(context.wake, success: false, client: client)
     }
@@ -284,7 +326,7 @@ final class LocalAppAgentBackgroundController {
             "op": .string("wake.clear"),
             "appId": .string(wake.appID),
             "revision": .number(Double(wake.revision)),
-            "requestId": .string(wake.requestID)
+            "runId": .string(wake.runID)
         ], as: LocalAppJSON.self)
     }
 
@@ -306,18 +348,19 @@ final class LocalAppAgentBackgroundController {
             "agent_host_replaced",
             "invalid_revision",
             "INVALID_AGENT_TASK",
+            "INVALID_AGENT_EVENT",
         ].contains(failure.code)
     }
 
     private static func backgroundIdentifier(bundleID: String, wake: LocalAppAgentWakeRequest) -> String {
-        let identity = "\(wake.appID)\u{0}\(wake.revision)\u{0}\(wake.requestID)\u{0}\(UUID().uuidString)"
+        let identity = "\(wake.appID)\u{0}\(wake.revision)\u{0}\(wake.runID)\u{0}\(UUID().uuidString)"
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         return "\(bundleID).local-app.\(digest)"
     }
 }
 
 extension LocalAppAgentWakeRequest {
-    var contextKey: String { "\(appID)\u{0}\(revision)\u{0}\(requestID)" }
+    var contextKey: String { "\(appID)\u{0}\(revision)\u{0}\(runID)" }
 }
 
 enum LocalAppAgentProgressReporting {
@@ -363,12 +406,12 @@ enum LocalAppAgentProgressReporting {
 }
 
 enum LocalAppAgentWakeURL {
-    static func ready(_ url: URL, origin: String, requestID: String) throws -> URL {
+    static func ready(_ url: URL, origin: String, runID: String) throws -> URL {
         guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme?.lowercased() == "http", parts.host == "127.0.0.1",
               parts.user == nil, parts.password == nil, let port = parts.port, (1...65_535).contains(port),
-              !requestID.isEmpty, requestID.utf8.count <= 128,
-              !requestID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+              !runID.isEmpty, runID.utf8.count <= 128,
+              !runID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL is not a trusted local browser address.")
         }
         if !LocalAppExternalBrowserURL.matches(url, origin: origin) {
@@ -377,7 +420,7 @@ enum LocalAppAgentWakeURL {
         var updated = parts
         var query = updated.queryItems ?? []
         query.removeAll { $0.name == "__lingxi_ready" }
-        query.append(URLQueryItem(name: "__lingxi_ready", value: requestID))
+        query.append(URLQueryItem(name: "__lingxi_ready", value: runID))
         updated.queryItems = query
         guard let result = updated.url else {
             throw LocalAppServiceFailure("INVALID_APP_ORIGIN", "The app launch URL could not be prepared for return.")

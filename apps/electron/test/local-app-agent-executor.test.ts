@@ -10,9 +10,9 @@ import type { LocalAppAgentExecution } from '../src/main/local-apps/agentBroker.
 // Real child pipes exercise framing, cancellation and reaping; no provider access.
 const CHILD = String.raw`
 const readline = require('node:readline'), fs = require('node:fs');
-const mode = process.argv[1]; let runId, sequence=0;
+const mode = process.argv[1]; let runId, sequence=0, start;
 const out = x => process.stdout.write(JSON.stringify({protocolVersion:1,...(runId ? {runId,sequence:++sequence}:{}),...x})+'\n');
-const finish = () => out({type:'finished',status:'succeeded',text:'done',result:{color:'red'},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,turns:2,costEstimated:true,private:'secret'}});
+const finish = () => out({type:'finished',status:'succeeded',text:'done',result:{color:'red'},messageId:'native-message-id',...(start.appChat?{chatId:start.appChat.chatId}:{}),usage:{inputTokens:7,outputTokens:3,costUsd:0.02,turns:2,costEstimated:true,private:'secret'}});
 readline.createInterface({input:process.stdin}).on('line', raw => {
  const message=JSON.parse(raw);
  if(message.type==='catalog') {
@@ -23,7 +23,7 @@ readline.createInterface({input:process.stdin}).on('line', raw => {
    builtins:[{name:'Read'}],mcpTools:[{serverConfigId:'server',configRevision:mode==='changed'?'changed':'one',rawToolName:'search',definitionFingerprint:'definition',configIndex:0,label:'Nutrition'}],
    mcpConfigs:[{name:'nutrition',headers:{Authorization:'PRIVATE_MCP_HEADER'}}]});
  } else if(message.type==='start') {
-  runId=message.runId; fs.writeFileSync('start.json',JSON.stringify(message));
+  runId=message.runId; start=message; fs.writeFileSync('start.json',JSON.stringify(message));
   if(mode==='wrong_owner') return out({type:'started',runId:'other-app-run'});
   out({type:'started'});
   if(mode==='error') { process.stderr.write('PRIVATE_SECRET_IN_STDERR'); return out({type:'finished',status:'failed',error:{code:'model_execution_failed',message:'PRIVATE_SECRET_IN_ERROR'}}); }
@@ -46,7 +46,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, mode='succes
  const executor=new LocalAppAgentExecutor(options);
  t.after(async()=>{for(const child of children) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL');await fs.rm(root,{recursive:true,force:true});});
  const phases:string[]=[], controller=new AbortController();
-const execution:LocalAppAgentExecution={runId:'run-one',owner:{appId:'a11111111111111111111111111111111',releaseDigest:'1'.repeat(64),invocationId:'inv-one'},input:{requestId:'request-one',prompt:'Describe the test image.',outputSchema:{type:'object'}},
+const execution:LocalAppAgentExecution={runId:'run-one',taskStorageId:'11111111-1111-4111-8111-111111111111',owner:{appId:'a11111111111111111111111111111111',releaseDigest:'1'.repeat(64),invocationId:'inv-one'},input:{requestId:'run-one',protocolThreadId:'thread-one',protocolInputDigest:'a'.repeat(64),protocolMessageSha256:'b'.repeat(64),prompt:'Describe the test image.',contentParts:[{kind:'text',text:'Describe the test image.'},{kind:'attachment',name:'photo.png',mediaType:'image/png',base64:'iVBORw=='}],outputSchema:{type:'object'},tools:[],skills:[]},
   authorization:{settings:{enabled:true,model:{providerId:'test',modelId:'vision'},tools:[],skills:[],background:false,maxTurns:4,timeoutMs:10000},requestedTools:[],requestedSkills:[],releaseRevision:1,
     releaseSourceDirectory:'/release/source',skillSpecs:[],releaseFiles:[],model:{providerId:'test',modelId:'vision',label:'Test',canSelect:true,supportsAttachments:true,supportsVision:true,supportsStructuredOutput:true}},
   signal:controller.signal,assertAuthorized:async()=>controller.signal.throwIfAborted(),emit:async event=>{phases.push(event.phase);}};
@@ -56,27 +56,34 @@ const execution:LocalAppAgentExecution={runId:'run-one',owner:{appId:'a111111111
 test('catalog strips private config; execution preserves model, identity, limits and validated output',async t=>{
  const {root,executor,execution,phases}=await fixture(t);
  const catalog=await executor.catalog();assert.ok(!JSON.stringify(catalog).includes('PRIVATE_MCP_HEADER'));assert.equal(catalog.models[0].canSelect,true);
- assert.deepEqual(await executor.execute(execution),{result:{text:'done',attachments:[],output:{color:'red'}},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,costEstimated:true,turns:2}});
+ assert.deepEqual(await executor.execute(execution),{result:{text:'done',attachments:[],messageId:'native-message-id',output:{color:'red'}},usage:{inputTokens:7,outputTokens:3,costUsd:0.02,costEstimated:true,turns:2}});
  assert.ok(phases.includes('thinking') && phases.includes('tool'));
- const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/start.json'),'utf8'));
+ const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
  assert.equal(sent.model,'test/vision');assert.equal(sent.appId,'a11111111111111111111111111111111');assert.equal(sent.versionId,'1'.repeat(64));assert.equal(sent.invocationId,'inv-one');assert.equal(sent.maxTurns,4);assert.equal(sent.timeoutMs,10000);
  assert.deepEqual(sent.toolPolicy,{builtinTools:[],mcpTools:[]});assert.deepEqual(sent.mcpConfigs,[]);assert.deepEqual(sent.credentials.provider_keys,{test:'TEST_KEY'});
  assert.deepEqual(sent.modelCapabilities,{vision:true,structuredOutput:true});
+ assert.equal(sent.input.protocolThreadId,'thread-one');assert.equal(sent.input.protocolInputDigest,'a'.repeat(64));assert.equal(sent.input.protocolMessageSha256,'b'.repeat(64));
 });
 test('changed MCP configuration fails before starting a task',async t=>{
  const {executor,execution,children}=await fixture(t,'changed');const catalog=await executor.catalog();const tool=catalog.tools.find(tool=>tool.kind==='mcp')!;
  execution.authorization.settings.tools=[{...tool,configRevision:'one'} as typeof tool];
  await assert.rejects(executor.execute(execution),{code:'tool_changed'});assert.equal(children.length,2,'only catalogs launched');
 });
-test('File attachments use the strict Rust wire DTO without mutating host metadata', async t => {
+test('ordered AG-UI content parts use the private Rust DTO without mutating host metadata', async t => {
  const {root,executor,execution}=await fixture(t);
- execution.input.attachments=[{name:'notes.txt',mediaType:'text/plain',base64:Buffer.from('file text').toString('base64')}];
+ execution.input.contentParts=[{kind:'text',text:'Read this.'},{kind:'attachment',name:'notes.txt',mediaType:'text/plain',base64:Buffer.from('file text').toString('base64')}];
  const original=structuredClone(execution.input);
  await executor.execute(execution);
- const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/start.json'),'utf8'));
- assert.deepEqual(sent.input.attachments,[{name:'notes.txt',media_type:'text/plain',base64:Buffer.from('file text').toString('base64')}]);
- assert.equal('mediaType' in sent.input.attachments[0],false);
+ const sent=JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/11111111-1111-4111-8111-111111111111/start.json'),'utf8'));
+ assert.deepEqual(sent.input.contentParts,[{kind:'text',text:'Read this.'},{kind:'attachment',name:'notes.txt',mediaType:'text/plain',base64:Buffer.from('file text').toString('base64')}]);
  assert.deepEqual(execution.input,original,'the host and page-facing metadata retain camelCase');
+});
+test('persistent chat finished frames retain the host chat ID and actual Harness message ID',async t=>{
+ const {root,executor,execution}=await fixture(t);
+ execution.chat={chatId:'11111111-1111-4111-8111-111111111112',sessionId:'session-private',sessionDirectory:join(root,'app-chat')};
+ const result=await executor.execute(execution);
+ assert.equal(result.result.chatId,execution.chat.chatId);
+ assert.equal(result.result.messageId,'native-message-id');
 });
 test('cancellation aborts permission UI and waits for the child to close',async t=>{
  let shown!:()=>void;const prompt=new Promise<void>(resolve=>{shown=resolve;});let uiAborted=false;
@@ -86,13 +93,13 @@ test('cancellation aborts permission UI and waits for the child to close',async 
 });
 test('question dismissal sends typed cancellation',async t=>{
  const {root,executor,execution}=await fixture(t,'question');await executor.execute(execution);
- assert.deepEqual(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/control.json'),'utf8')),{type:'question_cancel',requestId:8});
+ assert.deepEqual(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')),{type:'question_cancel',requestId:8});
 });
 test('credential refresh keeps the selected provider and sends keys only over stdin',async t=>{
  const requests:unknown[]=[];
  const {root,executor,execution}=await fixture(t,'refresh',{credentials:async(providerId,refresh)=>{requests.push([providerId,refresh??false]);return {providerCredentials:{test:refresh?'NEW_TEST_KEY':'OLD_TEST_KEY'}};}});
  await executor.execute(execution);assert.deepEqual(requests,[['test',false],['test',true]]);
- assert.equal(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/run-one/control.json'),'utf8')).credentials.provider_keys.test,'NEW_TEST_KEY');
+ assert.equal(JSON.parse(await fs.readFile(join(root,'apps/a11111111111111111111111111111111/agent/tasks/11111111-1111-4111-8111-111111111111/control.json'),'utf8')).credentials.provider_keys.test,'NEW_TEST_KEY');
 });
 for(const [mode,code] of [['wrong_owner','executor_protocol'],['missing_result','invalid_result'],['error','model_execution_failed']] as const) {
  test(`rejects ${mode} without leaking diagnostics`,async t=>{

@@ -1,0 +1,3 @@
+# Generated, pinned SDK assets are source inputs for a standalone product build.
+!dist/
+!dist/**

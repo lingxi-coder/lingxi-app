@@ -5,18 +5,18 @@ class DeepLinkTest {
     @Test fun browserAgentReturnIsLimitedToAppReview() {
         assertEquals("agent", DeepLink.parse("lingxi://apps/a123?review=agent")!!.params["review"])
         assertEquals("apps/a123", DeepLink.parse(DeepLink.build("apps/a123", mapOf("review" to "agent")))!!.route)
-        val requestId = "opaque-MiXeD-req_123456789"
-        val returned = DeepLink.parse("lingxi://apps/a123?review=agent&requestId=$requestId&revision=42")!!
-        assertEquals(requestId, returned.params["requestId"])
+        val runId = "opaque-MiXeD-run_123456789"
+        val returned = DeepLink.parse("lingxi://apps/a123?review=agent&runId=$runId&revision=42")!!
+        assertEquals(runId, returned.params["runId"])
         assertEquals("42", returned.params["revision"])
         for (raw in listOf("lingxi://new?review=agent", "lingxi://session/a123?review=agent",
             "lingxi://apps/a123?review=approve", "lingxi://apps/a123?review=agent&review=agent",
-            "lingxi://apps/a123?requestId=$requestId", "lingxi://apps/a123?review=agent&revision=42",
-            "lingxi://apps/a123?review=agent&requestId=$requestId&requestId=$requestId",
-            "lingxi://apps/a123?review=agent&requestId=$requestId&revision=0",
-            "lingxi://apps/a123?review=agent&requestId=$requestId&revision=042",
-            "lingxi://apps/a123?review=agent&requestId=$requestId&revision=999999999999999999999999",
-            "lingxi://apps/a123?review=agent&requestId=${"x".repeat(129)}")) {
+            "lingxi://apps/a123?review=agent&revision=42",
+            "lingxi://apps/a123?review=agent&runId=$runId&runId=$runId",
+            "lingxi://apps/a123?review=agent&runId=$runId&revision=0",
+            "lingxi://apps/a123?review=agent&runId=$runId&revision=042",
+            "lingxi://apps/a123?review=agent&runId=$runId&revision=999999999999999999999999",
+            "lingxi://apps/a123?review=agent&runId=${"x".repeat(129)}")) {
             assertNull(raw, DeepLink.parse(raw))
         }
     }

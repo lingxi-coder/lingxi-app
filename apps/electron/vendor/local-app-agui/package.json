@@ -1,0 +1,24 @@
+{
+  "name": "@lingxi/local-app-agui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generated, product-local bundle of LingXi's pinned AG-UI 1.0 adapter.",
+  "files": ["dist/", "licenses/", "spec/", "README.md"],
+  "dependencies": {
+    "@ag-ui/client": "1.0.3",
+    "@ag-ui/core": "1.0.3",
+    "zod": "3.25.76"
+  },
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/types/index.d.ts", "import": "./dist/client.bundle.js" },
+    "./client": { "types": "./dist/types/client.d.ts", "import": "./dist/client.bundle.js" },
+    "./browser": { "types": "./dist/types/browser.d.ts", "import": "./dist/browser.entry.js" },
+    "./browser/global": "./dist/browser.global.js",
+    "./browser/source": { "types": "./dist/types/browser-source.d.ts", "import": "./dist/browser.source.js" },
+    "./schema": "./spec/ag-ui-1.0.schema.json",
+    "./provenance": "./spec/provenance.json",
+    "./package.json": "./package.json"
+  }
+}

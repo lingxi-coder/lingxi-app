@@ -369,6 +369,9 @@ impl client::adapter::PermissionRequestSink for NoPermissionSink {
 struct AppOutput {
     sink: Arc<EventSink>,
     text: Mutex<String>,
+    current_assistant_text: Mutex<String>,
+    last_assistant_text: Mutex<String>,
+    assistant_message_id: Mutex<Option<String>>,
     error: AtomicU8,
     cost_baseline: Mutex<Option<CostSnapshot>>,
     completed_model_turns: AtomicU32,
@@ -387,6 +390,14 @@ impl OutputStream for AppOutput {
         }
         accumulated.push_str(text);
         drop(accumulated);
+        let mut current = self.current_assistant_text.lock().await;
+        if current.len().saturating_add(text.len()) > MAX_OUTPUT_BYTES / 2 {
+            self.error.store(1, Ordering::Release);
+            self.sink.cancel.cancel();
+            return;
+        }
+        current.push_str(text);
+        drop(current);
         self.sink.emit(json!({"type":"text","delta":text})).await;
     }
     async fn emit_tool_call(&self, id: &ToolUseId, tool: &str, _: &Utf16JsonProjection) {
@@ -418,6 +429,14 @@ impl OutputStream for AppOutput {
     }
     async fn emit_terminal_api_error(&self, _: Option<u16>, _: &str, _: &str) {
         self.error.store(2, Ordering::Release);
+    }
+    async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
+        *self.assistant_message_id.lock().await = Some(message_id.to_string());
+        let text = {
+            let mut current = self.current_assistant_text.lock().await;
+            std::mem::take(&mut *current)
+        };
+        *self.last_assistant_text.lock().await = text;
     }
 }
 fn usage(cost: &CostSnapshot, baseline: &CostSnapshot, turns: u32) -> Value {
@@ -885,6 +904,7 @@ async fn execute(
     let result = execute_runtime(
         &runtime,
         &request.model,
+        request.app_chat.as_ref().map(|chat| chat.chat_id.as_str()),
         prepared.blocks,
         uses_vision,
         schema_required,
@@ -935,6 +955,7 @@ async fn execute_side_query(
         .emit(json!({"type":"started","model":request.model}))
         .await;
     let message = user_message(blocks);
+    let message_id = format!("msg_{}", uuid::Uuid::new_v4());
     let result = if let Some(schema) = request.input.output_schema.clone() {
         let query = harness_runtime::desktop::app_invocation::strict_side_query_request(
             model.to_owned(),
@@ -951,7 +972,7 @@ async fn execute_side_query(
                         let usage = side_query_usage(&response.usage, Some(1), model, profile);
                         state.sink.emit(json!({"type":"usage","usage":usage})).await;
                         if state.cancel.is_cancelled() { return Err("cancelled"); }
-                        json!({"type":"finished","status":"succeeded","text":"","result":response.value,"usage":usage})
+                        json!({"type":"finished","status":"succeeded","text":"","result":response.value,"messageId":message_id,"usage":usage})
                     }
                     Err(error) => {
                         if let Some(usage) = error.usage {
@@ -983,7 +1004,7 @@ async fn execute_side_query(
                         let usage = side_query_usage(&response.usage, Some(1), model, profile);
                         state.sink.emit(json!({"type":"usage","usage":usage})).await;
                         if state.cancel.is_cancelled() { return Err("cancelled"); }
-                        json!({"type":"finished","status":"succeeded","text":text,"usage":usage})
+                        json!({"type":"finished","status":"succeeded","text":text,"messageId":message_id,"usage":usage})
                     }
                     Err(error) => {
                         if let Some(usage) = error.usage {
@@ -1017,6 +1038,7 @@ fn user_message(blocks: Vec<ContentBlock>) -> ConversationMessage {
 async fn execute_runtime(
     runtime: &DesktopRuntime,
     model: &str,
+    chat_id: Option<&str>,
     blocks: Vec<ContentBlock>,
     uses_vision: bool,
     schema_required: bool,
@@ -1095,7 +1117,14 @@ async fn execute_runtime(
         .map(|value| value.try_to_serde_value_with_array_budget(100_000))
         .transpose()
         .map_err(|_| "result_too_large")?;
-    let terminal = json!({"type":"finished","status":"succeeded","text":output.text.lock().await.clone(),"result":result,"usage":usage});
+    if schema_required && result.as_ref().is_some_and(Value::is_null) {
+        return Err("structured_output_not_representable");
+    }
+    let message_id = output.assistant_message_id.lock().await.clone().ok_or("assistant_message_identity_missing")?;
+    let text = output.last_assistant_text.lock().await.clone();
+    let mut terminal = json!({"type":"finished","status":"succeeded","text":text,"messageId":message_id,"usage":usage});
+    if let Some(result) = result { terminal["result"] = result; }
+    if let Some(chat_id) = chat_id { terminal["chatId"] = json!(chat_id); }
     if serde_json::to_vec(&terminal)
         .map_err(|_| "invalid_result")?
         .len()
@@ -1138,6 +1167,9 @@ async fn catalog(request: CatalogRequest) -> Result<(), &'static str> {
     let output = Arc::new(AppOutput {
         sink,
         text: Mutex::new(String::new()),
+        current_assistant_text: Mutex::new(String::new()),
+        last_assistant_text: Mutex::new(String::new()),
+        assistant_message_id: Mutex::new(None),
         error: AtomicU8::new(0),
         cost_baseline: Mutex::new(None),
         completed_model_turns: AtomicU32::new(0),
@@ -1311,6 +1343,9 @@ pub async fn run() -> anyhow::Result<()> {
             let output = Arc::new(AppOutput {
                 sink: sink.clone(),
                 text: Mutex::new(String::new()),
+                current_assistant_text: Mutex::new(String::new()),
+                last_assistant_text: Mutex::new(String::new()),
+                assistant_message_id: Mutex::new(None),
                 error: AtomicU8::new(0),
                 cost_baseline: Mutex::new(None),
                 completed_model_turns: AtomicU32::new(0),
@@ -1397,8 +1432,13 @@ mod tests {
     fn input() -> local_app::v2::agent::Input {
         local_app::v2::agent::Input {
             request_id: "request-1".into(),
+            protocol_thread_id: None,
+            protocol_parent_run_id: None,
+            protocol_input_digest: None,
+            protocol_message_sha256: None,
             prompt: "Describe this".into(),
             attachments: Vec::new(),
+            content_parts: Vec::new(),
             output_schema: None,
             tools: Vec::new(),
             skills: Vec::new(),
@@ -1418,6 +1458,27 @@ mod tests {
         let mut value = input();
         value.output_schema = Some(json!({"$ref":"https://example.invalid/schema"}));
         assert!(validate_agent_input(&value).is_err());
+    }
+    #[tokio::test]
+    async fn output_sink_retains_the_actual_assistant_message_identity_for_the_private_terminal() {
+        let cancel = CancellationToken::new();
+        let sink = Arc::new(EventSink::new("run-1".into(), tokio::io::sink(), cancel));
+        let output = AppOutput {
+            sink,
+            text: Mutex::new(String::new()),
+            current_assistant_text: Mutex::new(String::new()),
+            last_assistant_text: Mutex::new(String::new()),
+            assistant_message_id: Mutex::new(None),
+            error: AtomicU8::new(0),
+            cost_baseline: Mutex::new(None),
+            completed_model_turns: AtomicU32::new(0),
+        };
+        let message_id = MessageId::new();
+        output.emit_text(&Utf16JsonProjection::plain("committed answer")).await;
+        output.emit_assistant_message_identity(&message_id).await;
+        let expected_id = message_id.to_string();
+        assert_eq!(output.assistant_message_id.lock().await.as_deref(), Some(expected_id.as_str()));
+        assert_eq!(&*output.last_assistant_text.lock().await, "committed answer");
     }
     #[test]
     fn credentials_fail_without_echoing_input() {
@@ -1477,14 +1538,22 @@ mod tests {
             .join("releases/1/source");
         std::fs::create_dir_all(&source).unwrap();
         let release_digest = "a".repeat(64);
+        let official: Value = serde_json::from_str(include_str!(
+            "../../electron/vendor/local-app-agui/spec/fixtures/run-agent-input.ag-ui-1.0.3.json"
+        ))
+        .unwrap();
+        let normalized = local_app::v2::agent::protocol::normalize_run_input(&official, &[]).unwrap();
+        let mut private_input = normalized.input;
+        private_input.tools.clear();
+        private_input.skills.clear();
         let start = json!({
-            "type":"start", "protocolVersion":1, "runId":"run-1",
+            "type":"start", "protocolVersion":1, "runId":"run-fixture-1",
             "appId":app_id.clone(), "versionId":release_digest.clone(), "invocationId":"window-1",
             "cwd":"/tmp/food-run", "configHome":config_home.to_string_lossy().to_string(),
             "skillSourceDirectory":source.to_string_lossy().to_string(), "releaseRevision":1, "skillSpecs":[], "grantedSkills":[], "releaseFiles":[],
-            "modelCapabilities":{"vision":false,"structuredOutput":true},
+            "modelCapabilities":{"vision":true,"structuredOutput":true},
             "model":"openai/example", "credentials":{}, "toolPolicy":{"builtinTools":[],"mcpTools":[]},
-            "input":{"requestId":"request-1","prompt":"Describe the food","outputSchema":{"type":"object"}}
+            "input":serde_json::to_value(private_input).unwrap()
         });
         let InitialRequest::Start(request) =
             parse_initial(&serde_json::to_vec(&start).unwrap()).unwrap()
@@ -1494,6 +1563,13 @@ mod tests {
         assert_eq!(request.max_turns, DEFAULT_MAX_TURNS);
         assert_eq!(request.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert!(validate_start(&request).is_ok());
+        assert_eq!(request.input.request_id, "run-fixture-1");
+        assert_eq!(request.input.protocol_thread_id.as_deref(), Some("thread-fixture-1"));
+        assert_eq!(request.input.content_parts.len(), 2);
+        let content_parts = serde_json::to_value(&request.input).unwrap();
+        assert_eq!(content_parts["contentParts"][1]["kind"], "attachment");
+        assert_eq!(content_parts["contentParts"][1]["mediaType"], "image/png");
+        assert!(content_parts["contentParts"][1].get("media_type").is_none());
         let mut foreign = start;
         foreign["sessionId"] = json!("creating-chat");
         assert!(parse_initial(&serde_json::to_vec(&foreign).unwrap()).is_err());

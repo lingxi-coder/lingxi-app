@@ -78,7 +78,7 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         TextButton(onClick = onClose) { Text("关闭管理页面") }
         Text("关闭此管理页面不会停止浏览器中的应用。可通过此处或运行通知停止应用。", style = MaterialTheme.typography.bodySmall)
     }
-    if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId, appReview?.requestId)
+    if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId, appReview?.runId)
     val selected = release
     if (needsBrowserConsent && selected != null) AlertDialog(
         onDismissRequest = { needsBrowserConsent = false; onClose() },

@@ -1,0 +1,47 @@
+{
+  "status": "passed-signed-package-static-and-full-runtime-smoke",
+  "verifiedAtUtc": "2026-10-25T10:57:05.002250+00:00",
+  "appSourceCommit": "aae0632bf3599584d10624cb56a50b448c0f67a2",
+  "harnessRevision": "366a23e6146d347be7190ce3a18c5767088198b9",
+  "buildEnvironment": {
+    "CARGO_PROFILE_RELEASE_LTO": "false",
+    "CARGO_BUILD_JOBS": "2"
+  },
+  "oldBinaryOverrideRemoved": true,
+  "releaseCompilationPassed": true,
+  "sourceByteVerificationPassed": true,
+  "portableBinarySha256": "8cf19aa70dfe89db50de2f2e512157c1e85cdaa4f4fdc15b1fbba149022fa8ef",
+  "signedSidecarSha256": "b8b83f459bdc6198e907f86be1e4e807e57ece1a23fc0c1c0290b1969f6f668d",
+  "machUuid": "54E48F18-EA6C-3C5C-A03A-412D1DD5F48E",
+  "signingTeam": "AZ4AX7J833",
+  "bundleId": "com.lingxi.code.development",
+  "codesignDeepStrictPassed": true,
+  "packageStaticPassed": true,
+  "zipSha256": "adf83f2d60ff9fba01b49b759571896aaa7e0be2a9a2b14cc956e9f0278df415",
+  "zipBytes": 275632520,
+  "fullRuntimeSmokePassed": true,
+  "runtimeSmokeBlocker": null,
+  "systemTccAcceptancePassed": false,
+  "buildLog": "lingxi-computer-use-effective-ax-build.log",
+  "limitations": [
+    "LTO=false/jobs2 acceptance build; not default thin-LTO artifact",
+    "System Accessibility/TCC and Screen Recording true LaunchServices roundtrip remains a separate pending acceptance gate"
+  ],
+  "normalFlareWrapperPassed": true,
+  "fullRuntimeSmokeVerifiedAtUtc": "2026-10-25T11:00:15.693805+00:00",
+  "verificationLog": "lingxi-computer-use-effective-ax-verify-final.log",
+  "zipUnchangedAcrossReverification": true,
+  "smokeChecks": [
+    "renderer bootstrap",
+    "renderer security",
+    "bundled sidecar event flow",
+    "terminal Unicode/cwd/hide/resume/close",
+    "Desktop Git init/branch/diff/stage/commit/local push/fetch/pull/Review watcher",
+    "custom provider Keychain persistence across app restart",
+    "authenticated localhost model request",
+    "credential deletion",
+    "live permission modes",
+    "Local App",
+    "exact temporary process/runtime cleanup"
+  ]
+}

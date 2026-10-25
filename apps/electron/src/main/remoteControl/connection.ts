@@ -183,6 +183,8 @@ export class HostConnection {
   private approved = false;
   private wasApproved = false;
   private closed = false;
+  /** Application traffic stops immediately, while a final denial may flush. */
+  private disconnecting = false;
   // Whether this connection's nodes in the database are to be removed once it ends.
   private removeNodes = false;
 
@@ -191,6 +193,7 @@ export class HostConnection {
     this.finished = new Promise<void>((resolve) => { this.resolveFinished = resolve; });
     this.channel = {
       notify: (method, params) => {
+        if (this.closed || this.disconnecting) return;
         this.rpc?.notify(method, params).catch((error: unknown) => {
           this.deps.diagnostics('warn', `a notification to a viewer could not be sent (${describeError(error)})`);
         });
@@ -269,7 +272,10 @@ export class HostConnection {
 
   /** Tell the viewer why (best effort, briefly), then end the connection. */
   async disconnect(reason: string, notice: string): Promise<void> {
-    if (this.closed) return;
+    if (this.closed || this.disconnecting) return;
+    this.disconnecting = true;
+    this.approved = false;
+    this.deps.onChange();
     const { rpc } = this;
     if (rpc !== undefined && this.transportIsUp) await within(this.deps.clock, NOTICE_WAIT_MS, rpc.notify('auth.denied', { reason: notice }));
     this.close(reason);
@@ -445,6 +451,7 @@ export class HostConnection {
   // ───────────────────────────────────────────────────────────────────────────
 
   private onRequest(method: string, params: unknown): Promise<unknown> | unknown {
+    if (this.closed || this.disconnecting) throw new RemoteRpcError('closed', 'the connection is closing');
     if (method === 'initialize') return this.initialize(params);
     if (method === 'ping') return {};
     const { viewer } = this;
@@ -457,8 +464,11 @@ export class HostConnection {
 
   private onNotification(method: string, params: unknown): void {
     const { viewer } = this;
-    if (!this.approved || viewer === undefined) return;
-    Promise.resolve().then(() => this.deps.gateway.handle(viewer, method, params, this.channel)).catch((error: unknown) => {
+    if (this.closed || this.disconnecting || !this.approved || viewer === undefined) return;
+    Promise.resolve().then(() => {
+      if (this.closed || this.disconnecting || !this.approved) return;
+      return this.deps.gateway.handle(viewer, method, params, this.channel);
+    }).catch((error: unknown) => {
       this.deps.diagnostics('warn', `a remote notification failed (${method}: ${describeError(error)})`);
     });
   }
@@ -468,6 +478,7 @@ export class HostConnection {
     // The first call does the work; a repeat (or a concurrent one) waits for it and gets the current answer.
     this.handshake ??= this.beginHandshake(request);
     await this.handshake;
+    if (this.closed || this.disconnecting) throw new RemoteRpcError('closed', 'the connection is closing');
     return this.approved
       ? { status: 'approved', host: this.deps.hostInfo }
       : { status: 'pending_approval', pairing_code: this.pairingCode! };
@@ -503,6 +514,7 @@ export class HostConnection {
 
   /** Ask the user, then tell the viewer. */
   private async pair(code: string): Promise<void> {
+    if (this.closed || this.disconnecting) return;
     const { uid, registry, approval } = this.deps;
     const offer = this.offer!;
     const outcome = await approval.request({
@@ -513,7 +525,7 @@ export class HostConnection {
       signal: this.abort.signal,
       alreadyApproved: () => registry.isApproved(uid, offer.device.id, offer.device.key),
     });
-    if (this.closed) return;
+    if (this.closed || this.disconnecting) return;
     if (outcome.allowed) {
       registry.approve(uid, { device_id: offer.device.id, key: offer.device.key, name: offer.device.name, platform: offer.device.platform });
       this.approve();

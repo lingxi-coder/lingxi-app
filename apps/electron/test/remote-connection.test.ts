@@ -12,6 +12,7 @@ import {
   OFFER_MAX_AGE_MS,
   answerPath,
   b64uEncode,
+  encodeMessage,
   offerPath,
   pairingCodeFor,
   randomBytes,
@@ -22,7 +23,7 @@ import {
   type InitializeResult,
 } from '@lingxi/bridge-client/remote';
 
-import { Harness, drive, elapse, settle, until, type SimViewer } from './remote-helpers.js';
+import { Harness, drive, elapse, settle, until, type FakePeerLink, type SimViewer } from './remote-helpers.js';
 
 const HOST_INFO = { name: 'Test Mac', platform: 'darwin', app_version: '9.9.9' };
 
@@ -42,6 +43,18 @@ const listed = (h: Harness, viewer: SimViewer) => h.service.status().connections
 async function nodesGone(h: Harness, connId: string): Promise<void> {
   await drive(h.clock, () => h.memory.read(toHostConnPath(h.uid, h.identity.hostId, connId)) === null
     && h.memory.read(toViewerConnPath(h.uid, h.identity.hostId, connId)) === null, `the nodes of ${connId} to be removed`);
+}
+
+async function approvedDirectViewer(h: Harness): Promise<{ viewer: SimViewer; host: FakePeerLink }> {
+  const viewer = await h.viewer();
+  h.approveDevice(viewer);
+  const connId = randomId();
+  const peers = h.peers;
+  await viewer.connect({ transport: 'webrtc', connId, get link() { return peers.pairs.get(connId)!.viewer; } });
+  const host = peers.pairs.get(connId)!.host;
+  host.open('host');
+  await viewer.initialize();
+  return { viewer, host };
 }
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
@@ -247,6 +260,29 @@ test('notifications from an approved device reach the gateway, and from an unapp
   });
 });
 
+test('a notification queued before link closure cannot recreate a released viewer', async () => {
+  await withHarness(async (h) => {
+    const { host } = await approvedDirectViewer(h);
+    for (const fragment of encodeMessage(JSON.stringify({ method: 'sessions.watch', params: {} }))) host.deliver(fragment);
+    host.close('revoked');
+    await settle();
+    assert.equal(h.gateway.closed.length, 1);
+    assert.equal(h.gateway.calls.length, 0, 'nothing reaches the gateway after viewerClosed');
+  });
+});
+
+test('stopping the service discards notifications that are still awaiting dispatch', async () => {
+  await withHarness(async (h) => {
+    const { host } = await approvedDirectViewer(h);
+    const stopped = h.service.setEnabled(false);
+    for (const fragment of encodeMessage(JSON.stringify({ method: 'session.attach', params: { session_id: 's1' } }))) host.deliver(fragment);
+    await stopped;
+    await settle();
+    assert.equal(h.gateway.closed.length, 1);
+    assert.equal(h.gateway.calls.length, 0);
+  });
+});
+
 test('the gateway can push notifications to the viewer through the channel it is given', async () => {
   await withHarness(async (h) => {
     const viewer = await h.viewer();
@@ -418,6 +454,25 @@ test('revoking one device leaves the others connected', async () => {
     await one.closed();
     assert.deepEqual(await two.call('ping'), {});
     assert.equal(h.service.status().connections.length, 1);
+  });
+});
+
+test('revocation blocks requests, notifications and session updates while its denial notice waits', async () => {
+  await withHarness(async (h) => {
+    const { viewer, host } = await approvedDirectViewer(h);
+    await viewer.call('sessions.watch', {});
+    const channel = h.gateway.calls[0]!.channel;
+    h.gateway.calls.length = 0;
+    const revoked = h.service.revokeDevice(viewer.deviceId);
+    for (const fragment of encodeMessage(JSON.stringify({ method: 'session.attach', params: { session_id: 's1' } }))) host.deliver(fragment);
+    for (const fragment of encodeMessage(JSON.stringify({ id: 'late', method: 'sessions.list', params: {} }))) host.deliver(fragment);
+    channel.notify('sessions.changed', { sessions: [{ title: 'must not leave' }] });
+    await settle();
+    await revoked;
+    await settle();
+    assert.equal(h.gateway.calls.length, 0, 'revocation applies before the denial notice finishes');
+    assert.equal(viewer.notifications.filter((item) => item.method === 'sessions.changed').length, 0);
+    assert.equal(h.gateway.closed.length, 1);
   });
 });
 

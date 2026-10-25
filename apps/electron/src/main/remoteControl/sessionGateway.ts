@@ -77,6 +77,8 @@ interface ViewerState {
   viewer: RemoteViewer;
   channel: RemoteViewerChannel;
   attached: Map<string, Attached>;
+  /** A pending attach reserves capacity and is invalidated by detach/replacement. */
+  attaching: Map<string, symbol>;
   watching: boolean;
   lastList?: string;
   closed: boolean;
@@ -154,6 +156,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const state = this.viewers.get(viewer.conn_id);
     if (state === undefined) return;
     state.closed = true;
+    state.attaching.clear();
     this.viewers.delete(viewer.conn_id);
     for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
     this.viewersChanged();
@@ -167,6 +170,8 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     this.watchers.clear();
     this.deps.clock.clearTimeout(this.listTimer);
     for (const state of [...this.viewers.values()]) {
+      state.closed = true;
+      state.attaching.clear();
       for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
     }
     this.viewers.clear();
@@ -177,7 +182,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private stateOf(viewer: RemoteViewer, channel: RemoteViewerChannel): ViewerState {
     let state = this.viewers.get(viewer.conn_id);
     if (state === undefined) {
-      state = { viewer, channel, attached: new Map(), watching: false, closed: false };
+      state = { viewer, channel, attached: new Map(), attaching: new Map(), watching: false, closed: false };
       this.viewers.set(viewer.conn_id, state);
     }
     return state;
@@ -249,33 +254,44 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const sessionId = this.sessionIdOf(rawParams);
     const resume = this.resumeOf(rawParams);
     const ref = this.requireEnabled(sessionId);
-    if (!state.attached.has(sessionId) && state.attached.size >= MAX_ATTACHMENTS_PER_VIEWER) {
+    const reserved = new Set([...state.attached.keys(), ...state.attaching.keys()]);
+    if (!reserved.has(sessionId) && reserved.size >= MAX_ATTACHMENTS_PER_VIEWER) {
       throw new RemoteRpcError('capacity', 'this device is attached to too many sessions');
     }
-    const { entry, runtime } = await this.acquire(ref);
-    // The viewer may have left, or the session been switched off, while the engine woke up.
-    if (state.closed || this.disposed || this.deps.policy.find(sessionId) === undefined) {
-      this.release(entry);
-      throw state.closed ? new RemoteRpcError('internal', 'the connection closed') : this.requireEnabledError(sessionId);
-    }
-    // Attaching again replaces the attachment; the session stays leased throughout.
-    this.dropAttachment(state, sessionId, true);
-    const attachment: SessionAttachment = new SessionAttachment({
-      runtime,
-      channel: state.channel,
-      clock: this.deps.clock,
-      onEnded: () => this.dropEnded(state, sessionId, attachment),
-    });
-    state.attached.set(sessionId, { attachment, lease: entry });
-    let result;
+    const attempt = Symbol();
+    state.attaching.set(sessionId, attempt);
     try {
-      result = attachment.attach(resume);
-    } catch (error) {
+      const { entry, runtime } = await this.acquire(ref);
+      // Detach, an unshare, or a newer attach may have superseded this request
+      // while the runtime opened. A re-enabled session must not revive it.
+      if (state.closed || this.disposed || this.deps.policy.find(sessionId) === undefined
+        || state.attaching.get(sessionId) !== attempt) {
+        this.release(entry);
+        if (state.closed || this.disposed) throw new RemoteRpcError('internal', 'the connection closed');
+        if (this.deps.policy.find(sessionId) === undefined) throw this.requireEnabledError(sessionId);
+        throw new RemoteRpcError('invalid_params', 'the session attachment was cancelled');
+      }
+      // Attaching again replaces the attachment; the session stays leased throughout.
       this.dropAttachment(state, sessionId, true);
-      throw new RemoteRpcError('internal', `could not attach (${describeError(error)})`);
+      const attachment: SessionAttachment = new SessionAttachment({
+        runtime,
+        channel: state.channel,
+        clock: this.deps.clock,
+        onEnded: () => this.dropEnded(state, sessionId, attachment),
+      });
+      state.attached.set(sessionId, { attachment, lease: entry });
+      let result;
+      try {
+        result = attachment.attach(resume);
+      } catch (error) {
+        this.dropAttachment(state, sessionId, true);
+        throw new RemoteRpcError('internal', `could not attach (${describeError(error)})`);
+      }
+      this.viewersChanged();
+      return result;
+    } finally {
+      if (state.attaching.get(sessionId) === attempt) state.attaching.delete(sessionId);
     }
-    this.viewersChanged();
-    return result;
   }
 
   private requireEnabledError(sessionId: string): RemoteRpcError {
@@ -300,6 +316,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   }
 
   private detach(state: ViewerState, sessionId: string): void {
+    state.attaching.delete(sessionId);
     this.dropAttachment(state, sessionId, true);
     this.viewersChanged();
   }
@@ -361,6 +378,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private release(entry: SessionLease): void {
     entry.refs -= 1;
     if (entry.refs > 0) return;
+    if (this.disposed) { this.releaseNow(entry); return; }
     this.deps.clock.clearTimeout(entry.timer);
     entry.timer = this.deps.clock.setTimeout(() => {
       entry.timer = undefined;
@@ -386,7 +404,16 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   // ───────────────────────────────────────────────────────────────────────────
 
   private async summaries(): Promise<RemoteSessionSummary[]> {
-    return Promise.all(this.deps.policy.enabledSessions().map(async (ref) => this.summary(ref, await this.titleFor(ref))));
+    const entries = await Promise.all(this.deps.policy.enabledSessions().map(async (ref) => ({
+      ref,
+      title: await this.titleFor(ref),
+    })));
+    // Title I/O may outlive sharing withdrawal. Recheck all references after
+    // every title has settled, before exposing the list to a viewer.
+    return entries.flatMap(({ ref, title }) => {
+      const current = this.deps.policy.find(ref.sessionId);
+      return current === undefined ? [] : [this.summary(current, title)];
+    });
   }
 
   private async titleFor(ref: SessionRef): Promise<string> {
@@ -434,6 +461,9 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   private policyChanged(): void {
     // A session switched off: its viewers are told and let go at once.
     for (const state of this.viewers.values()) {
+      for (const sessionId of state.attaching.keys()) {
+        if (this.deps.policy.find(sessionId) === undefined) state.attaching.delete(sessionId);
+      }
       for (const [sessionId, attached] of [...state.attached]) {
         if (this.deps.policy.find(sessionId) !== undefined) continue;
         state.attached.delete(sessionId);
@@ -445,7 +475,13 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   }
 
   private watchRuntime(runtime: RemoteRuntime): void {
-    const stop = runtime.observeRemote((observation) => this.runtimeChanged(runtime, observation));
+    const stop = runtime.observeRemote((observation) => {
+      this.runtimeChanged(runtime, observation);
+      if (observation.type === 'disposed') {
+        stop();
+        this.watchers.delete(stop);
+      }
+    });
     this.watchers.add(stop);
   }
 

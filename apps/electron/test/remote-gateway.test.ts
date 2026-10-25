@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import { RemoteRpcError } from '@lingxi/bridge-client/remote';
 
 import { LIVE_BATCH_MS } from '../src/main/remoteControl/sessionAttachment.js';
-import { LIST_DEBOUNCE_MS } from '../src/main/remoteControl/sessionGateway.js';
+import { LIST_DEBOUNCE_MS, SessionGateway } from '../src/main/remoteControl/sessionGateway.js';
+import { RemoteCommands } from '../src/main/remoteControl/remoteCommands.js';
 import { RemotePush } from '../src/main/remoteControl/pushRequests.js';
 import {
   FakeRuntime,
@@ -48,6 +49,26 @@ test('sessions.list shows only the sessions Remote Control is on for, never an a
   assert.deepEqual(a, { session_id: SESSION_A, title: 'Fix the build', project_label: 'project-one', status: 'dormant', viewers: 0, model: 'saved-model' });
   assert.equal(sessions.find((item: any) => item.session_id === SESSION_B).project_label, 'other');
   assert.equal(sessions.find((item: any) => item.session_id === SESSION_B).title, 'Untitled session');
+});
+
+test('a session unshared while its title loads is absent from the eventual list', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  let finishTitle!: (title: string) => void;
+  const gateway = new SessionGateway({
+    runtimes: f.runtimes,
+    policy: f.policy,
+    commands: new RemoteCommands({ allowAlwaysAllow: () => false, echo: () => undefined, clock: f.clock }),
+    titleOf: () => new Promise<string>((resolve) => { finishTitle = resolve; }),
+    clock: f.clock,
+    diagnostics: () => undefined,
+  });
+  const pending = gateway.handle(f.phone, 'sessions.list', {}, f.channel);
+  f.policy.setSessionEnabled({ projectPath: '/work/project-one', sessionId: SESSION_A }, false);
+  finishTitle('withdrawn session title');
+  assert.deepEqual(await pending, { sessions: [] });
+  gateway.dispose();
+  f.gateway.dispose();
 });
 
 test('the status of a session: dormant, idle, running, or requires action with the first pending kind', async () => {
@@ -121,6 +142,29 @@ test('one device may not attach to an unbounded number of sessions', async () =>
   for (const id of ids) results.push(await f.call('session.attach', { session_id: id }).then(() => 'ok', (error) => (error as RemoteRpcError).code));
   assert.ok(results.includes('capacity'));
   assert.equal(results[0], 'ok');
+});
+
+test('concurrent attaches reserve the per-viewer capacity before opening runtimes', async () => {
+  const f = gatewayFixture();
+  const ids = Array.from({ length: 9 }, (_, i) => `12121212-3434-4567-8899-0000000000${String(i).padStart(2, '0')}`);
+  for (const id of ids) { f.enable(id); f.runtimes.add(new FakeRuntime(id)).resume(); }
+  const results = await Promise.all(ids.map((id) => f.call('session.attach', { session_id: id })
+    .then(() => 'ok', (error) => (error as RemoteRpcError).code)));
+  assert.equal(results.filter((result) => result === 'ok').length, 8);
+  assert.equal(results.filter((result) => result === 'capacity').length, 1);
+  assert.equal(f.runtimes.opened.length, 8, 'rejected attaches never open a runtime');
+  f.gateway.dispose();
+});
+
+test('failed opens give back pending attachment capacity', async () => {
+  const f = gatewayFixture();
+  const ids = Array.from({ length: 9 }, (_, i) => `12121212-3434-4567-8899-0000000000${String(i).padStart(2, '0')}`);
+  for (const id of ids) f.enable(id);
+  f.runtimes.failOpen = new Error('unavailable');
+  assert.deepEqual(await Promise.all(ids.slice(0, 8).map((id) => rpcCode(f.call('session.attach', { session_id: id })))), Array(8).fill('internal'));
+  f.runtimes.failOpen = undefined;
+  assert.equal((await f.call('session.attach', { session_id: ids[8] })).mode, 'snapshot');
+  f.gateway.dispose();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +241,51 @@ test('a session switched off while it was waking up is not attached', async () =
   assert.equal(f.gateway.attachedViewers(), 0);
 });
 
+test('detaching while a session wakes cancels the attachment and releases its lease', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  let wake!: () => void;
+  f.runtimes.openDelay = new Promise<void>((resolve) => { wake = resolve; });
+  const pending = rpcCode(f.call('session.attach', { session_id: SESSION_A }));
+  await f.call('session.detach', { session_id: SESSION_A });
+  wake();
+  assert.equal(await pending, 'invalid_params');
+  assert.equal(f.gateway.attachedViewers(), 0);
+  assert.deepEqual(f.channel.of('session.snapshot'), [], 'the cancelled viewer receives no snapshot');
+  f.clock.advance(LEASE_GRACE_MS);
+  assert.deepEqual(f.runtimes.releases, [SESSION_A]);
+});
+
+test('the newest concurrent attach replaces an older pending attach without leaking a lease', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  let wake!: () => void;
+  f.runtimes.openDelay = new Promise<void>((resolve) => { wake = resolve; });
+  const first = rpcCode(f.call('session.attach', { session_id: SESSION_A }));
+  const second = f.call('session.attach', { session_id: SESSION_A });
+  wake();
+  assert.equal(await first, 'invalid_params');
+  assert.equal((await second).mode, 'snapshot');
+  assert.equal(f.gateway.attachedViewers(), 1);
+  await f.call('session.detach', { session_id: SESSION_A });
+  f.clock.advance(LEASE_GRACE_MS);
+  assert.deepEqual(f.runtimes.releases, [SESSION_A]);
+});
+
+test('withdrawing and restoring sharing does not resurrect an earlier pending attach', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  let wake!: () => void;
+  f.runtimes.openDelay = new Promise<void>((resolve) => { wake = resolve; });
+  const pending = rpcCode(f.call('session.attach', { session_id: SESSION_A }));
+  f.policy.setSessionEnabled({ projectPath: '/work/project-one', sessionId: SESSION_A }, false);
+  f.enable(SESSION_A);
+  wake();
+  assert.equal(await pending, 'invalid_params');
+  assert.equal(f.gateway.attachedViewers(), 0);
+  assert.deepEqual(f.channel.of('session.snapshot'), []);
+});
+
 test('a disposed runtime ends the attachment and the next attach opens the session again', async () => {
   const { f, runtime } = await attached();
   f.channel.clear();
@@ -208,11 +297,43 @@ test('a disposed runtime ends the attachment and the next attach opens the sessi
   assert.equal(f.runtimes.opened.length, 2);
 });
 
+test('disposed runtime observers are released instead of retained until gateway shutdown', () => {
+  const f = gatewayFixture();
+  let unsubscriptions = 0;
+  class TrackedRuntime extends FakeRuntime {
+    override observeRemote(observer: Parameters<FakeRuntime['observeRemote']>[0]): () => void {
+      const stop = super.observeRemote(observer);
+      return () => { unsubscriptions += 1; stop(); };
+    }
+  }
+  const runtime = f.runtimes.add(new TrackedRuntime(SESSION_A));
+  runtime.dispose();
+  assert.equal(unsubscriptions, 1, 'the gateway drops its closure that retains the disposed runtime');
+  f.gateway.dispose();
+  assert.equal(unsubscriptions, 1, 'a disposed runtime is no longer in the gateway cleanup set');
+});
+
 test('dispose closes everything and releases every lease', async () => {
   const { f } = await attached();
   f.gateway.dispose();
   assert.deepEqual(f.runtimes.releases, [SESSION_A]);
   assert.equal(await rpcCode(f.call('sessions.list', {})), 'internal');
+});
+
+test('disposing during a pending open releases the eventual lease without a grace timer', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  let wake!: () => void;
+  f.runtimes.openDelay = new Promise<void>((resolve) => { wake = resolve; });
+  const pending = rpcCode(f.call('session.attach', { session_id: SESSION_A }));
+  f.gateway.dispose();
+  wake();
+  assert.equal(await pending, 'internal');
+  assert.deepEqual(f.runtimes.releases, [SESSION_A]);
+  assert.equal(f.gateway.attachedViewers(), 0);
+  assert.deepEqual(f.channel.of('session.snapshot'), []);
+  f.clock.advance(LEASE_GRACE_MS * 2);
+  assert.deepEqual(f.runtimes.releases, [SESSION_A], 'the lease is released exactly once');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

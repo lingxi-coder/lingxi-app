@@ -88,6 +88,7 @@ export function createRemoteControl(bindings: RemoteControlBindings): RemoteCont
       getIdToken,
       fetch: (input, init) => net.fetch(input, init),
     }),
+    publicationDomain: JSON.stringify([config.rtdbUrl.replace(/\/+$/, ''), config.rtdbNamespace ?? '']),
     registry,
     approval,
     peers,

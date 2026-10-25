@@ -62,6 +62,8 @@ export interface RemoteControlServiceOptions {
   identity: () => Promise<HostIdentity>;
   /** The Realtime Database for the signed-in account; `getIdToken` is the service's own provider. */
   createRtdb: (getIdToken: (forceRefresh?: boolean) => Promise<string>) => Rtdb;
+  /** Shared backend identity across service instances; defaults to this service. */
+  publicationDomain?: object | string;
   registry: DeviceRegistry;
   approval: Pick<ApprovalDialog, 'request' | 'dispose'>;
   peers: Pick<PeerHost, 'answer' | 'link' | 'shutdown' | 'dispose'>;
@@ -245,6 +247,7 @@ export class RemoteControlService {
     const info: HostInfo = { ...this.options.host(), client_protocol_version: CLIENT_PROTOCOL_MAJOR };
     const signaling: HostSignaling = new HostSignaling({
       rtdb,
+      publicationDomain: this.options.publicationDomain ?? this,
       uid,
       identity,
       info,

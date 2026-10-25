@@ -7,7 +7,7 @@ Bilingual system and SDK documentation for the current working tree. Generated f
 ## Get started
 
 - [SDKs & libraries](overview.md) — Build with LingXi. Connect models, orchestrate agents, and bring a Linux runtime to mobile — with a toolkit that fits your application.
-- [API reference](api-reference.md) — Explore public source declarations across the LingXi SDKs. Search a symbol, filter by SDK, and open its implementation.
+- [API reference](api-reference.md) — Find the API for your task, follow a complete integration guide, and search the underlying public declarations.
 
 ## System internals
 
@@ -29,6 +29,13 @@ Bilingual system and SDK documentation for the current working tree. Generated f
 - [Tools & permissions](harness-tools.md) — Implement tools using the shared contract and register their capabilities.
 - [Plugins](harness-plugins.md) — Load plugin components, inspect their lifecycle, and handle unload failures.
 - [Client protocol & adapters](harness-client.md) — Share commands, events, presentation, and runtime adapters across clients.
+- [Choose an Agent integration](agent-sdk-guide.md) — Map familiar Agent SDK concepts to LingXi’s actual Rust runtime, model client and product protocol, then choose the smallest useful integration.
+- [Run your first Agent turn](agent-first-turn.md) — Go from an assembled Harness to a prompt, a terminal result, follow-up context and a clean shutdown.
+- [Connect streamed output to a UI](agent-ui-streaming.md) — Wire one event destination and render text, tool activity and interactive requests without confusing message completion with turn completion.
+- [Continue, resume, fork and cancel](agent-session-workflows.md) — Choose the right session operation and distinguish cancellation, saved history and active execution ownership.
+- [Add a tool and handle approval](agent-tool-workflows.md) — Take a tool from schema and host registration through a real permission round-trip, result presentation and teardown.
+- [Compose skills, hooks and MCP](agent-extension-recipes.md) — Choose the right extension, configure a scoped lifecycle check and verify an external capability is connected and callable.
+- [Observe parallel agents and tasks](agent-parallel-tasks.md) — Give independent work clear ownership and build progress/cancellation controls around authoritative agent and task state.
 
 ## LLM Client
 

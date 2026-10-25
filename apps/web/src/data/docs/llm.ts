@@ -1,8 +1,8 @@
-import type { DocPage } from './types';
+import type { DocPage, DocSection } from './types';
 
 const source = 'https://github.com/lingxi-coder/llm-client';
 
-export const llmPages: DocPage[] = [
+const referencePages: DocPage[] = [
   {
     id: 'llm-client',
     group: 'llm',
@@ -468,7 +468,7 @@ async fn stream_text(
           zh: 'collect_structured_json 与 collect_structured<T> 先重建最终响应，再校验 JSON、Schema 或反序列化。单个增量并不是独立 JSON 文档。ResponsesSession 提供连接复用与续接；准备阶段在宿主准入前建立连接，发送阶段仅发出一次 response.create。',
         }],
         apis: [
-          { name: 'ModelStream::collect_structured_json', signature: 'pub async fn collect_structured_json(self, format: &OutputFormat) -> Result<StructuredStreamResult<serde_json::Value>, StructuredStreamError>', description: { en: 'Consume and validate final JSON while retaining the reconstructed response and events.', zh: '消费并校验最终 JSON，同时保留重建的响应与事件。' } },
+          { name: 'ModelStream::collect_structured_json', signature: 'pub async fn collect_structured_json(self, format: &OutputFormat) -> Result<StructuredStreamResult<JsonPayload>, StructuredStreamError>', description: { en: 'Consume and validate final JSON while retaining the reconstructed response and events.', zh: '消费并校验最终 JSON，同时保留重建的响应与事件。' } },
           { name: 'ModelStream::continuation', signature: 'pub fn continuation(&self) -> Option<&ContinuationRef>', description: { en: 'Read account-bound state only after a complete stream.', zh: '完整读取流之后获取绑定账户的续接状态。' } },
         ],
         note: {
@@ -907,3 +907,931 @@ let background = openai.background();`,
     ],
   },
 ];
+
+// Task-oriented recipes supplement the detailed API reference above.
+const practicalGuides: Record<string, { sources: string[]; sections: DocSection[] }> = {
+  "llm-client": {
+    "sources": [
+      "src/client/chat.rs",
+      "src/client/options.rs",
+      "src/protocol/usage_report.rs"
+    ],
+    "sections": [
+      {
+        "id": "choose-call-pattern",
+        "title": {
+          "en": "Choose a call pattern",
+          "zh": "先选择调用方式"
+        },
+        "paragraphs": [
+          {
+            "en": "Start with complete_in when the application needs one final answer. Switch to stream_in when people need to see progress. Use a prepared call only when the host needs an admission checkpoint or one physical-attempt ledger; the same ChatRequest and credentials model applies to all three.",
+            "zh": "需要一次完整答案时先用 complete_in；需要向用户显示生成进度时用 stream_in。只有宿主需要准入检查点或逐次调用账本时才使用 prepared call。三种方式共享 ChatRequest 与请求级凭据模型。"
+          }
+        ],
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Entry",
+                "zh": "入口"
+              },
+              {
+                "en": "What you receive",
+                "zh": "返回什么"
+              },
+              {
+                "en": "Host action",
+                "zh": "宿主接下来做什么"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "chat().complete_in",
+                  "zh": "chat().complete_in"
+                },
+                {
+                  "en": "ChatResponse or LlmError",
+                  "zh": "ChatResponse 或 LlmError"
+                },
+                {
+                  "en": "Inspect stop_reason, preserve the assistant message and usage",
+                  "zh": "检查 stop_reason，保存完整助手消息与用量"
+                }
+              ],
+              [
+                {
+                  "en": "chat().stream_in",
+                  "zh": "chat().stream_in"
+                },
+                {
+                  "en": "ModelStream, then asynchronous events",
+                  "zh": "ModelStream，随后异步接收事件"
+                },
+                {
+                  "en": "Render deltas; retain native blocks; distinguish End, EOF and read errors",
+                  "zh": "显示增量，保留原生块，区分 End、EOF 与读取错误"
+                }
+              ],
+              [
+                {
+                  "en": "snapshot().prepare_on",
+                  "zh": "snapshot().prepare_on"
+                },
+                {
+                  "en": "PreparedCall for one exact connection",
+                  "zh": "精确连接上的 PreparedCall"
+                },
+                {
+                  "en": "Admit and dispatch once; capture accounting before decode; finish cleanup",
+                  "zh": "准入后发送一次，解码前记录结算事实，最后清理"
+                }
+              ],
+              [
+                {
+                  "en": "provider::<T>(profile)",
+                  "zh": "provider::<T>(profile)"
+                },
+                {
+                  "en": "Provider-specific resource handle",
+                  "zh": "供应商特定资源句柄"
+                },
+                {
+                  "en": "Use only that resource’s account scope and lifecycle",
+                  "zh": "遵守该资源独立的账户作用域与生命周期"
+                }
+              ]
+            ]
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Request parameters and tool round trips",
+              "zh": "请求参数与工具闭环"
+            },
+            "href": "/docs/llm-requests"
+          },
+          {
+            "label": {
+              "en": "Display a streaming response",
+              "zh": "显示流式响应"
+            },
+            "href": "/docs/llm-streaming"
+          }
+        ]
+      },
+      {
+        "id": "bounded-first-call",
+        "title": {
+          "en": "A bounded application call",
+          "zh": "为应用写一个有时限的调用"
+        },
+        "paragraphs": [
+          {
+            "en": "This function accepts a configured profile/model and a credential from its caller. It adds an output budget and a 45-second total deadline without changing the shared client. The caller still needs to choose a model present on that profile and handle the returned stop reason.",
+            "zh": "此函数由调用者提供已配置连接、模型与凭据，设置输出上限和 45 秒总时限，不改变共享客户端。调用者仍需选择该连接中的模型，并处理返回的终止原因。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Application helper · source-checked, not live-account acceptance",
+              "zh": "应用辅助函数 · 已核对源码，未代表真实账户验收"
+            },
+            "language": "rust",
+            "verification": "compile",
+            "exampleId": "llm-bounded-first-call",
+            "code": "use std::time::Duration;\nuse lingxi_llm_client::{LlmClient, RequestOptions};\nuse lingxi_llm_client::protocol::{ChatRequest, ChatResponse, ConversationMessage, LlmError, Secret};\n\npub async fn ask_once(\n    client: &LlmClient,\n    profile: &str,\n    model: &str,\n    credential: Secret<String>,\n    prompt: &str,\n) -> Result<ChatResponse, LlmError> {\n    let mut request = ChatRequest::new(model);\n    request.messages.push(ConversationMessage::user_text(prompt));\n    request.max_tokens = Some(512);\n    let options = RequestOptions {\n        credential: Some(credential),\n        total_timeout: Some(Duration::from_secs(45)),\n        ..Default::default()\n    };\n    client.chat().complete_in(profile, &request, &options).await\n}"
+          }
+        ],
+        "note": {
+          "en": "complete_in uses the configured high-level routing policy. If the host requires at most one generation dispatch, use prepare_on and dispatch_once rather than adding an outer retry loop.",
+          "zh": "complete_in 遵循已配置的高层路由策略。宿主若要求最多发送一次生成请求，应使用 prepare_on 与 dispatch_once，而不是外套重试循环。"
+        }
+      },
+      {
+        "id": "first-answer-checks",
+        "title": {
+          "en": "Read the answer as a result, not just text",
+          "zh": "读取结果，而不仅是文本"
+        },
+        "steps": [
+          {
+            "en": "Read response.stop_reason before presenting a success state. A token-limit result is partial; ToolUse asks for another host-controlled step; Refusal is an explicit outcome.",
+            "zh": "先读取 response.stop_reason 再显示成功状态。达到 token 上限表示输出不完整；ToolUse 要求宿主继续处理；Refusal 是明确的结果。"
+          },
+          {
+            "en": "Use response.message.text() for display, and persist response.message itself for conversation replay. The text convenience method omits thinking and tool blocks.",
+            "zh": "显示时可用 response.message.text()，重放对话时保存 response.message 本身。文本辅助方法不会保留 thinking 和工具块。"
+          },
+          {
+            "en": "Record executed_profile, model, response_id and usage alongside the host’s request ID. Missing usage is unknown, not free.",
+            "zh": "将 executed_profile、model、response_id 与 usage 和宿主请求 ID 一起记录。用量缺失表示未知，不能当作免费。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Handle failure and usage states",
+              "zh": "处理失败与用量状态"
+            },
+            "href": "/docs/llm-execution-accounting"
+          }
+        ]
+      }
+    ]
+  },
+  "llm-requests": {
+    "sources": [
+      "src/client/chat.rs",
+      "src/protocol/message.rs",
+      "src/protocol/json_payload.rs",
+      "src/protocol/continuation.rs"
+    ],
+    "sections": [
+      {
+        "id": "input-field-guide",
+        "title": {
+          "en": "Common input fields and defaults",
+          "zh": "常用输入字段与默认值"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Field",
+                "zh": "字段"
+              },
+              {
+                "en": "Meaning / default",
+                "zh": "含义 / 默认值"
+              },
+              {
+                "en": "When to set it",
+                "zh": "何时设置"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "model",
+                  "zh": "model"
+                },
+                {
+                  "en": "Configured model selector; ChatRequest::new requires it",
+                  "zh": "已配置模型选择器；ChatRequest::new 必须提供"
+                },
+                {
+                  "en": "Choose from the selected connection rather than passing a display label by guess",
+                  "zh": "从所选连接选择，不猜测显示名是否可用于请求"
+                }
+              ],
+              [
+                {
+                  "en": "messages",
+                  "zh": "messages"
+                },
+                {
+                  "en": "Empty ordered conversation input",
+                  "zh": "默认为空的有序对话输入"
+                },
+                {
+                  "en": "First user turn plus full assistant/tool turns for stateless replay",
+                  "zh": "首条用户消息，以及无状态重放所需的完整助手/工具轮次"
+                }
+              ],
+              [
+                {
+                  "en": "max_tokens",
+                  "zh": "max_tokens"
+                },
+                {
+                  "en": "Optional output ceiling, not an input context limit",
+                  "zh": "可选输出上限，不是输入上下文上限"
+                },
+                {
+                  "en": "Bound response size; allow enough room for reasoning where supported",
+                  "zh": "限制响应体量；支持推理时为推理输出留出空间"
+                }
+              ],
+              [
+                {
+                  "en": "tools / tool_choice",
+                  "zh": "tools / tool_choice"
+                },
+                {
+                  "en": "No functions; ToolChoice::Auto",
+                  "zh": "默认无函数；ToolChoice::Auto"
+                },
+                {
+                  "en": "Advertise host functions and choose Auto, Any, None or one named Tool",
+                  "zh": "声明宿主函数，并选择 Auto、Any、None 或指定 Tool"
+                }
+              ],
+              [
+                {
+                  "en": "output_format",
+                  "zh": "output_format"
+                },
+                {
+                  "en": "OutputFormat::Text",
+                  "zh": "默认为 OutputFormat::Text"
+                },
+                {
+                  "en": "Ask for a JSON object or schema-constrained final answer",
+                  "zh": "需要 JSON 对象或 Schema 约束的最终答案时设置"
+                }
+              ],
+              [
+                {
+                  "en": "continuation",
+                  "zh": "continuation"
+                },
+                {
+                  "en": "No provider state reference",
+                  "zh": "默认不带供应商状态引用"
+                },
+                {
+                  "en": "Use a completed, same-account ContinuationRef and send only new input",
+                  "zh": "使用已完成且账户匹配的 ContinuationRef，仅发送新输入"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "Optional controls are validated by the selected model and protocol. An explicitly unsupported option is an error; the client does not silently translate every provider feature into another wire format.",
+          "zh": "可选控制项由所选模型和协议校验。显式指定不支持的选项会报错，客户端不会把每个供应商特性静默转换为其他协议。"
+        }
+      },
+      {
+        "id": "request-option-guide",
+        "title": {
+          "en": "Options that should be request-scoped",
+          "zh": "应按请求传入的选项"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Option",
+                "zh": "选项"
+              },
+              {
+                "en": "Application contract",
+                "zh": "应用契约"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "credential",
+                  "zh": "credential"
+                },
+                {
+                  "en": "A valid secret for the primary connection; the host refreshes and stores it",
+                  "zh": "主连接的有效密钥；由宿主刷新与存储"
+                }
+              ],
+              [
+                {
+                  "en": "fallback_credentials",
+                  "zh": "fallback_credentials"
+                },
+                {
+                  "en": "Keys indexed by exact fallback profile; never an implicit copy of the primary key",
+                  "zh": "按精确备用连接名索引的密钥；不隐式复制主密钥"
+                }
+              ],
+              [
+                {
+                  "en": "total_timeout",
+                  "zh": "total_timeout"
+                },
+                {
+                  "en": "Whole-operation budget including reads. Streams need an explicit value for a total deadline",
+                  "zh": "包含响应读取的整次操作预算；流式请求需显式设置才有总时限"
+                }
+              ],
+              [
+                {
+                  "en": "account_scope",
+                  "zh": "account_scope"
+                },
+                {
+                  "en": "Stable non-secret identity for provider continuation; use the same account on the next turn",
+                  "zh": "供应商续接的稳定非敏感身份；下一轮须属于同一账户"
+                }
+              ],
+              [
+                {
+                  "en": "file_account_scope",
+                  "zh": "file_account_scope"
+                },
+                {
+                  "en": "Independent account identity for eligible provider upload reuse",
+                  "zh": "独立限定符合条件的供应商上传复用账户"
+                }
+              ],
+              [
+                {
+                  "en": "mcp_authorizations",
+                  "zh": "mcp_authorizations"
+                },
+                {
+                  "en": "Fresh remote-server credentials indexed by declared label/name; keep them out of history",
+                  "zh": "按声明 label/name 索引的新鲜远程凭据，不写入历史"
+                }
+              ]
+            ]
+          }
+        ],
+        "paragraphs": [
+          {
+            "en": "Changing a model request must not mutate a global key, timeout or reasoning setting shared by other sessions. Pass a fresh RequestOptions for each application request and reuse the long-lived client handle.",
+            "zh": "修改某次模型请求不应改变其他会话共用的全局密钥、超时或推理设置。每次应用请求传入新的 RequestOptions，复用长期存活的客户端句柄。"
+          }
+        ]
+      },
+      {
+        "id": "function-tool-roundtrip",
+        "title": {
+          "en": "Complete a function-tool round trip",
+          "zh": "完成一次函数工具闭环"
+        },
+        "paragraphs": [
+          {
+            "en": "A function definition describes what the model may request; it does not execute code. The host validates a completed ToolUse result, runs its registered implementation, adds a ToolResult with the original call ID, and makes the next request. Keep a round limit, cancellation path and permission decision in the host.",
+            "zh": "函数声明描述模型可以请求的能力，并不会执行代码。宿主校验完成的 ToolUse 结果，运行已登记实现，以原调用 ID 添加 ToolResult，再发起下一次请求。轮次上限、取消路径和权限决策由宿主负责。"
+          },
+          {
+            "en": "This source-checked example exposes one harmless in-memory article lookup. The request must already contain a user message, and the selected route must support strict tool input. It rejects unregistered/namespaced calls and malformed input rather than executing model-supplied names. It does not implement a general Agent runtime.",
+            "zh": "这个已核对源码的示例只提供无副作用的内存文章查询。传入 request 需已有用户消息，所选路由须支持严格工具输入。它拒绝未登记/带命名空间的调用和非法参数，不按模型提供的名称任意执行，也不承担通用 Agent 运行时。"
+          }
+        ],
+        "code": [
+          {
+            "label": {
+              "en": "Bounded tool loop · host-owned implementation",
+              "zh": "有界工具循环 · 宿主实现"
+            },
+            "language": "rust",
+            "verification": "compile",
+            "exampleId": "llm-function-tool-roundtrip",
+            "code": "use lingxi_llm_client::{LlmClient, RequestOptions};\nuse lingxi_llm_client::protocol::{\n    ChatRequest, ChatResponse, ContentBlock, ConversationMessage,\n    MessageRole, StopReason, ToolChoice, ToolSpec,\n};\n\npub async fn answer_with_lookup(\n    client: &LlmClient,\n    profile: &str,\n    mut request: ChatRequest,\n    options: &RequestOptions,\n) -> Result<ChatResponse, Box<dyn std::error::Error>> {\n    request.tools = vec![serde_json::from_str::<ToolSpec>(r#\"{\n        \"name\":\"lookup_article\", \"description\":\"Read one local help article by ID.\",\n        \"input_schema\":{\"type\":\"object\",\"properties\":{\"article\":{\"type\":\"string\"}},\n            \"required\":[\"article\"],\"additionalProperties\":false}, \"strict\":true\n    }\"#)?];\n    request.tool_choice = ToolChoice::Auto;\n    for _ in 0..3 {\n        let response = client.chat().complete_in(profile, &request, options).await?;\n        if !response.tool_input_issues.is_empty() {\n            return Err(\"tool input was not valid JSON\".into());\n        }\n        if response.stop_reason != StopReason::ToolUse { return Ok(response); }\n        let mut results = Vec::new();\n        for (id, namespace, name, input) in response.message.tool_uses() {\n            if namespace.is_some() || name != \"lookup_article\" {\n                return Err(\"tool is not registered by this host\".into());\n            }\n            let article = input.string_at(\"/article\").ok_or(\"article must be a string\")?;\n            let found = article == \"quickstart\";\n            results.push(ContentBlock::ToolResult {\n                tool_use_id: id.clone(),\n                content: if found { \"Use the LLM Client quickstart.\" } else { \"Article not found.\" }.into(),\n                is_error: Some(!found), blocks: None, cache_reference: None, toolset_name: None,\n            });\n        }\n        if results.is_empty() { return Err(\"tool-use response has no callable tool\".into()); }\n        request.messages.push(response.message);\n        request.messages.push(ConversationMessage {\n            role: MessageRole::User, content: results, native_options: Vec::new(),\n        });\n    }\n    Err(\"tool round limit reached\".into())\n}"
+          }
+        ],
+        "note": {
+          "en": "Preserve the complete assistant message before appending tool results: tool IDs, native provider content and reasoning signatures may be required by the next request. For permissions, tool scheduling and persistent sessions, integrate Harness instead.",
+          "zh": "添加工具结果前保留完整助手消息：下一请求可能依赖工具 ID、供应商原生内容和推理签名。需要权限、工具调度与持久会话时，应接入 Harness。"
+        },
+        "links": [
+          {
+            "label": {
+              "en": "Harness tools and permissions",
+              "zh": "Harness 工具与权限"
+            },
+            "href": "/docs/harness-tools"
+          },
+          {
+            "label": {
+              "en": "Structured tool and output contracts",
+              "zh": "工具与输出的结构化约定"
+            },
+            "href": "/docs/llm-controls"
+          }
+        ]
+      }
+    ]
+  },
+  "llm-streaming": {
+    "sources": [
+      "src/protocol/message.rs",
+      "src/protocol/usage_report.rs"
+    ],
+    "sections": [
+      {
+        "id": "event-handling-map",
+        "title": {
+          "en": "What to do with each event family",
+          "zh": "各类事件应该如何处理"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Event",
+                "zh": "事件"
+              },
+              {
+                "en": "Use",
+                "zh": "用途"
+              },
+              {
+                "en": "Do not infer",
+                "zh": "不能据此推断"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Start",
+                  "zh": "Start"
+                },
+                {
+                  "en": "Retain model and optional response identity",
+                  "zh": "保存模型与可用响应身份"
+                },
+                {
+                  "en": "A final answer or a reusable continuation",
+                  "zh": "已经生成最终答案或可复用续接"
+                }
+              ],
+              [
+                {
+                  "en": "TextDelta / TextDeltaJsUtf16",
+                  "zh": "TextDelta / TextDeltaJsUtf16"
+                },
+                {
+                  "en": "Update the displayed block; preserve exact UTF-16 sidecars when supplied",
+                  "zh": "更新显示块；有 UTF-16 sidecar 时保留精确内容"
+                },
+                {
+                  "en": "A complete response or parseable JSON document",
+                  "zh": "完整响应或可解析的 JSON 文档"
+                }
+              ],
+              [
+                {
+                  "en": "ToolCallDelta / BlockEnd",
+                  "zh": "ToolCallDelta / BlockEnd"
+                },
+                {
+                  "en": "Accumulate the original block and arguments; inspect terminal assembly before execution",
+                  "zh": "按原块累计参数；执行前检查终止装配结果"
+                },
+                {
+                  "en": "Permission to execute partial arguments",
+                  "zh": "可以执行尚未完整的参数"
+                }
+              ],
+              [
+                {
+                  "en": "ProviderContent / ThoughtSignature",
+                  "zh": "ProviderContent / ThoughtSignature"
+                },
+                {
+                  "en": "Retain replay data and signatures in the assistant transcript",
+                  "zh": "在助手历史中保存可重放内容与签名"
+                },
+                {
+                  "en": "That display-only reasoning text can replace native replay content",
+                  "zh": "仅用于显示的推理文本可以替换原生重放内容"
+                }
+              ],
+              [
+                {
+                  "en": "ProviderEvent / NativeControl",
+                  "zh": "ProviderEvent / NativeControl"
+                },
+                {
+                  "en": "Keep provider observation/control data separately",
+                  "zh": "单独保留供应商观测或控制数据"
+                },
+                {
+                  "en": "A local function call to dispatch",
+                  "zh": "应发送给本地函数执行的调用"
+                }
+              ],
+              [
+                {
+                  "en": "End",
+                  "zh": "End"
+                },
+                {
+                  "en": "Inspect stop_reason, usage and inference; then drain through None",
+                  "zh": "检查 stop_reason、usage 与 inference，随后继续读到 None"
+                },
+                {
+                  "en": "That every terminal response is a successful, untruncated final answer",
+                  "zh": "每个终止响应都是成功且完整的最终答案"
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "id": "stream-result-checklist",
+        "title": {
+          "en": "Build a final message safely",
+          "zh": "正确构造最终消息"
+        },
+        "steps": [
+          {
+            "en": "Use StreamAccumulator to retain events while the UI shows text. Key content by the original block index, because indices may be sparse and different output kinds may interleave.",
+            "zh": "界面显示文本时，用 StreamAccumulator 保留事件。按原始块索引保存内容，因为索引可能不连续，不同输出类型也可能交错出现。"
+          },
+          {
+            "en": "When reading ends, inspect StreamAssembly.terminal, unfinished_blocks and incomplete_tools. A MaxTokens stop is terminal but may still truncate the answer or a tool argument.",
+            "zh": "读取结束时检查 StreamAssembly.terminal、unfinished_blocks 与 incomplete_tools。MaxTokens 属于终止结果，但答案或工具参数仍可能被截断。"
+          },
+          {
+            "en": "Persist usage_report and inference_report before deciding whether to render an error, execute tools or schedule another attempt. Reading failed after output began is not the same as no request having been sent.",
+            "zh": "在决定显示错误、执行工具或安排下一次调用前，保存 usage_report 与 inference_report。已经输出内容后的读取失败，不等于请求从未发送。"
+          },
+          {
+            "en": "Keep the full reconstructed assistant message for the next request. If all you retained was the concatenated visible text, do not fabricate missing signatures, tool calls or provider-native blocks.",
+            "zh": "为下一请求保存完整重建的助手消息。如果只保存了拼接显示文本，不应补造缺失签名、工具调用或供应商原生块。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Lossless assembly and incomplete blocks",
+              "zh": "无损装配与未完成块"
+            },
+            "href": "/docs/llm-streaming#lossless-assembly"
+          },
+          {
+            "label": {
+              "en": "Per-attempt accounting on failure",
+              "zh": "失败后的逐次结算"
+            },
+            "href": "/docs/llm-execution-accounting"
+          }
+        ]
+      },
+      {
+        "id": "stream-ui-behavior",
+        "title": {
+          "en": "Keep the UI responsive without changing protocol semantics",
+          "zh": "保持界面响应，同时保留协议语义"
+        },
+        "paragraphs": [
+          {
+            "en": "Batch display updates in the UI instead of repainting for every token, but keep event ordering and accounting observations unchanged. If the UI falls behind, bound its queue rather than building an unbounded string/event buffer.",
+            "zh": "界面可合并更新，避免每个 token 都重绘，但应保留事件顺序与结算观测。界面消费滞后时限制队列长度，而不是无限累积字符串或事件。"
+          },
+          {
+            "en": "A user stop drops the stream and records the partial attempt. A later retry is a fresh request with a new application attempt identity; it is not a promise to resume exactly at the last displayed character. Provider-scoped continuation is available only after a completed response.",
+            "zh": "用户停止时丢弃流并记录本次部分结果。之后重试是带新应用尝试身份的新请求，不保证从最后一个显示字符精确续传。只有完成的响应才提供供应商作用域续接。"
+          }
+        ]
+      }
+    ]
+  },
+  "llm-providers": {
+    "sources": [
+      "src/client/live.rs",
+      "src/client/chat.rs",
+      "src/protocol/continuation.rs"
+    ],
+    "sections": [
+      {
+        "id": "route-diagnosis",
+        "title": {
+          "en": "Diagnose a missing model or wrong route",
+          "zh": "排查模型缺失或路由不符"
+        },
+        "steps": [
+          {
+            "en": "Confirm the profile was registered in the builder and build succeeded with the intended Region. A profile name, provider identity and protocol family are different selectors.",
+            "zh": "确认 builder 已登记该连接，并用预期 Region 成功构建。连接名、供应商身份和协议族是不同的选择器。"
+          },
+          {
+            "en": "Inspect chat().models() for chat choices, images().models() for image choices, or the specific service capability method. Do not reuse the Chat model list as a catalog for every resource.",
+            "zh": "Chat 用 chat().models()，图像用 images().models()，其他服务用各自能力查询。不要把 Chat 模型列表当作所有资源的统一目录。"
+          },
+          {
+            "en": "Resolve the configured model/profile before sending and check alias, wire model, region and visibility. A successful local resolution does not prove that the provider account has live model entitlement.",
+            "zh": "发送前解析已配置模型/连接，检查别名、协议模型、区域与可见性。本地解析成功不能证明供应商账户拥有真实模型权限。"
+          },
+          {
+            "en": "When the provider rejects the call, retain typed error classification, status and request ID. Repair credentials or the model mapping for that exact connection; do not silently send the same secret to another endpoint.",
+            "zh": "供应商拒绝调用时保留类型化分类、状态与请求 ID。应修复该精确连接的凭据或模型映射，不要把同一密钥静默发送到其他端点。"
+          }
+        ],
+        "links": [
+          {
+            "label": {
+              "en": "Request-local credential scopes",
+              "zh": "请求级凭据作用域"
+            },
+            "href": "/docs/llm-requests#request-option-guide"
+          },
+          {
+            "label": {
+              "en": "Error action reference",
+              "zh": "错误处理参考"
+            },
+            "href": "/docs/llm-execution-accounting#error-action-reference"
+          }
+        ]
+      },
+      {
+        "id": "capability-selection",
+        "title": {
+          "en": "Select capabilities before composing input",
+          "zh": "先选择能力，再构造输入"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Need",
+                "zh": "需求"
+              },
+              {
+                "en": "Inspect",
+                "zh": "查询入口"
+              },
+              {
+                "en": "Failure to handle",
+                "zh": "需要处理的失败"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "Text and function tools",
+                  "zh": "文本与函数工具"
+                },
+                {
+                  "en": "Selected model/profile and codec input support",
+                  "zh": "所选模型/连接与 codec 输入支持"
+                },
+                {
+                  "en": "Unsupported tool, reasoning or output control",
+                  "zh": "不支持的工具、推理或输出控制"
+                }
+              ],
+              [
+                {
+                  "en": "Image generation or editing",
+                  "zh": "图像生成或编辑"
+                },
+                {
+                  "en": "images().capabilities_in(profile, model)",
+                  "zh": "images().capabilities_in(profile, model)"
+                },
+                {
+                  "en": "Unsupported mask/reference/task option",
+                  "zh": "不支持的遮罩、参考图或任务选项"
+                }
+              ],
+              [
+                {
+                  "en": "Speech / transcription",
+                  "zh": "语音合成 / 转写"
+                },
+                {
+                  "en": "audio().capabilities(&AudioRoute)",
+                  "zh": "audio().capabilities(&AudioRoute)"
+                },
+                {
+                  "en": "Unavailable common adapter or unsupported voice/format",
+                  "zh": "统一适配器不可用或声音/格式不支持"
+                }
+              ],
+              [
+                {
+                  "en": "Provider files or cloud resources",
+                  "zh": "供应商文件或云端资源"
+                },
+                {
+                  "en": "A typed provider client and resource-specific capability/scope",
+                  "zh": "类型化供应商客户端及资源专属能力/作用域"
+                },
+                {
+                  "en": "Provider binding, endpoint, account or purpose mismatch",
+                  "zh": "供应商绑定、端点、账户或用途不符"
+                }
+              ]
+            ]
+          }
+        ],
+        "note": {
+          "en": "A compatible JSON chat wire is not a capability grant. Keep the unsupported state visible to callers so they can choose another supported workflow deliberately.",
+          "zh": "兼容 JSON Chat 协议不代表获得所有能力。应将不支持状态明确交给调用者，让其主动选择受支持的流程。"
+        }
+      }
+    ]
+  },
+  "llm-images": {
+    "sources": [
+      "src/images/mod.rs"
+    ],
+    "sections": [
+      {
+        "id": "image-workflow-choice",
+        "title": {
+          "en": "Choose immediate output or a durable task",
+          "zh": "选择即时结果或持久任务"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "Path",
+                "zh": "路径"
+              },
+              {
+                "en": "Use when",
+                "zh": "何时使用"
+              },
+              {
+                "en": "Persist",
+                "zh": "需要保存"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "generate_in / edit_in",
+                  "zh": "generate_in / edit_in"
+                },
+                {
+                  "en": "The configured route returns completed image output",
+                  "zh": "配置路由直接返回完成图像"
+                },
+                {
+                  "en": "Output source, request ID, executed profile and usage; save temporary media promptly",
+                  "zh": "输出来源、请求 ID、执行连接与用量，并及时保存临时媒体"
+                }
+              ],
+              [
+                {
+                  "en": "submit_in → get_task",
+                  "zh": "submit_in → get_task"
+                },
+                {
+                  "en": "The selected provider exposes native asynchronous tasks",
+                  "zh": "所选供应商提供原生异步任务"
+                },
+                {
+                  "en": "The exact ImageTaskRef before leaving the screen or restarting the process",
+                  "zh": "离开页面或重启进程前保存精确 ImageTaskRef"
+                }
+              ]
+            ]
+          }
+        ],
+        "steps": [
+          {
+            "en": "Call capabilities_in for the exact profile/model, then construct only supported size, reference, mask and task options.",
+            "zh": "先为精确连接/模型调用 capabilities_in，再填写受支持的尺寸、参考图、遮罩与任务选项。"
+          },
+          {
+            "en": "After submission, store the returned reference and poll at a host-chosen interval. Keep account_scope and credentials tied to that same account.",
+            "zh": "提交后存储返回引用，并按宿主设定间隔查询。account_scope 与凭据始终绑定同一账户。"
+          },
+          {
+            "en": "Treat an unknown submission outcome as reconciliation work. Do not create another image job simply because the first response was lost.",
+            "zh": "提交结果未知时应核对现有状态，不能仅因首个响应丢失就新建图像任务。"
+          }
+        ]
+      },
+      {
+        "id": "image-error-actions",
+        "title": {
+          "en": "Recover from image errors without duplicate generation",
+          "zh": "避免重复生成的错误恢复"
+        },
+        "tables": [
+          {
+            "headers": [
+              {
+                "en": "ImageError::dispatch()",
+                "zh": "ImageError::dispatch()"
+              },
+              {
+                "en": "What it establishes",
+                "zh": "已经确定的事实"
+              },
+              {
+                "en": "Host action",
+                "zh": "宿主动作"
+              }
+            ],
+            "rows": [
+              [
+                {
+                  "en": "NotSent",
+                  "zh": "NotSent"
+                },
+                {
+                  "en": "This image operation did not dispatch generation",
+                  "zh": "该图像操作未发送生成请求"
+                },
+                {
+                  "en": "Fix local input, capability or scope and make a new admitted call",
+                  "zh": "修正本地输入、能力或作用域后重新准入"
+                }
+              ],
+              [
+                {
+                  "en": "Rejected",
+                  "zh": "Rejected"
+                },
+                {
+                  "en": "The provider rejected the operation",
+                  "zh": "供应商拒绝操作"
+                },
+                {
+                  "en": "Use the underlying typed error to correct the request/account",
+                  "zh": "根据底层类型化错误修正请求或账户"
+                }
+              ],
+              [
+                {
+                  "en": "Unknown",
+                  "zh": "Unknown"
+                },
+                {
+                  "en": "The request may have been accepted",
+                  "zh": "请求可能已被接受"
+                },
+                {
+                  "en": "Retain attempt metadata and reconcile before resubmitting",
+                  "zh": "保留本次调用元数据，核对后再考虑重新提交"
+                }
+              ],
+              [
+                {
+                  "en": "Accepted",
+                  "zh": "Accepted"
+                },
+                {
+                  "en": "Provider acceptance is known even if result processing failed",
+                  "zh": "即使结果处理失败，仍已确认供应商接受"
+                },
+                {
+                  "en": "Recover the existing result/task where possible",
+                  "zh": "尽可能恢复现有结果或任务"
+                }
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  }
+};
+
+export const llmPages: DocPage[] = referencePages.map((page) => {
+  const guide = practicalGuides[page.id];
+  if (!guide) return page;
+  const sources = [...(page.sources ?? [])];
+  for (const path of guide.sources) {
+    if (!sources.some((source) => source.repo === 'llm-client' && source.path === path)) {
+      sources.push({ repo: 'llm-client', path });
+    }
+  }
+  const sections = page.id === 'llm-client'
+    ? [...guide.sections, ...page.sections]
+    : [page.sections[0]!, ...guide.sections, ...page.sections.slice(1)];
+  return { ...page, sources, sections };
+});

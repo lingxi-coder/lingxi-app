@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import contextmanager
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,13 @@ import tomllib
 
 SDKS = ("harness-runtime", "llm-client", "mobile-linux-runtime")
 WEB = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class SdkPackageIdentity:
+    version: str
+    manifest: Path
+    vendored: bool
 
 
 @contextmanager
@@ -151,14 +159,42 @@ class SdkSnapshot:
         cached_home = Path(self.previous_cargo_home or Path.home() / ".cargo")
         isolated_cargo_home(cached_home, self.root / "cargo-home")
         os.environ["CARGO_HOME"] = str(self.root / "cargo-home")
-        self.expected: dict[str, Path] = {}
+        self.expected = self._expected_packages()
+        self.overlay(self.root / "harness-runtime" / "Cargo.toml")
+
+    def _package_version(self, manifest: Path, package: dict) -> str:
+        version = package.get("version", "0.0.0")
+        if isinstance(version, str):
+            return version
+        if isinstance(version, dict) and version.get("workspace") is True:
+            explicit = package.get("workspace")
+            directories = [(manifest.parent / explicit).resolve()] if explicit else [manifest.parent, *manifest.parent.parents]
+            for directory in directories:
+                if not directory.is_relative_to(self.root):
+                    break
+                workspace_manifest = directory / "Cargo.toml"
+                if not workspace_manifest.is_file():
+                    continue
+                workspace = tomllib.loads(workspace_manifest.read_text()).get("workspace")
+                if workspace is not None:
+                    inherited = workspace.get("package", {}).get("version")
+                    if isinstance(inherited, str):
+                        return inherited
+                    break
+        raise RuntimeError(f"Cannot resolve SDK package version in {manifest}")
+
+    def _expected_packages(self) -> dict[str, list[SdkPackageIdentity]]:
+        expected: dict[str, list[SdkPackageIdentity]] = {}
         for name in SDKS:
-            for manifest in (self.root / name).rglob("Cargo.toml"):
+            for manifest in sorted((self.root / name).rglob("Cargo.toml")):
                 package = tomllib.loads(manifest.read_text()).get("package", {})
                 if "name" in package:
-                    # SDK public/workspace and vendored packages are all kept local.
-                    self.expected[package["name"]] = manifest.resolve()
-        self.overlay(self.root / "harness-runtime" / "Cargo.toml")
+                    relative = manifest.relative_to(self.root / name)
+                    vendored = any(part in {"vendor", "third_party"} for part in relative.parts[:-1])
+                    expected.setdefault(package["name"], []).append(SdkPackageIdentity(
+                        self._package_version(manifest, package), manifest.resolve(), vendored,
+                    ))
+        return expected
 
     def close(self) -> None:
         if self.previous_cargo_home is None:
@@ -206,13 +242,21 @@ class SdkSnapshot:
         identities = []
         resolved = {node["id"] for node in metadata["resolve"]["nodes"]}
         for package in metadata["packages"]:
-            expected = self.expected.get(package["name"])
-            if expected is None or package["id"] not in resolved:
+            candidates = self.expected.get(package["name"], [])
+            if not candidates or package["id"] not in resolved:
+                continue
+            first_party = [identity for identity in candidates if not identity.vendored]
+            expected = [identity.manifest for identity in (first_party or candidates)
+                        if identity.version == package["version"]]
+            # A generic vendored crate may coexist with other registry versions.
+            # First-party names remain strict, including their snapshot version.
+            if not expected and not first_party:
                 continue
             actual = Path(package["manifest_path"]).resolve()
-            if actual != expected or package["source"] is not None:
+            if actual not in expected or package["source"] is not None:
                 raise RuntimeError(
-                    f"Wrong SDK identity for {package['name']}: {actual}, {package['source']}; expected {expected}"
+                    f"Wrong SDK identity for {package['name']}@{package['version']}: {actual}, {package['source']}; "
+                    f"expected {expected or [(identity.version, identity.manifest) for identity in first_party]}"
                 )
             identities.append({"package": package["name"], "manifest": str(actual.relative_to(self.root)), "source": "working-tree"})
         if not identities:

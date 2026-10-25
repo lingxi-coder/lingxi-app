@@ -14,6 +14,28 @@ RealtimeTransport 提供拆分连接；RealtimeCodec 映射宿主输入与供应
 | RealtimeControl | 有界非阻塞发送；同步 QueueFull；显式中断、继续、关闭与 abort |
 | RealtimeEvents / RealtimeDriver | 宿主消费事件，driver 推进网络与生命周期事件 |
 
+<a id="realtime-application-loop"></a>
+
+## 实时会话的五个步骤
+
+1. 选择供应商连接器及宿主兼容的传输/执行器，确认连接器能力允许所需音频格式与对话特性。
+2. 连接 RealtimeSession，保留 control 句柄，在 driver 运行期间持续消费 event 句柄。套接字连接成功本身不会执行应用事件循环。
+3. 发送前将麦克风/音频输入拆成有界小帧。队列已满时暂停生产者，或执行明确的宿主策略。
+4. 收到工具请求时关联已完成调用的 ID，只执行已登记且已授权的宿主工具，发送结果，并在连接器要求时请求续接。
+5. 用户打断时使用 control 中断路径并同步本地播放。关闭时执行 close/abort，保留显式重连所需的宿主对话状态。
+
+<a id="realtime-limits-reference"></a>
+
+## 队列与帧大小限制
+
+| RealtimeLimits 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| outbound_capacity | 8 | 输入队列有界，send 可能返回背压错误 |
+| event_capacity | 32 | 解码事件队列有界，宿主必须持续消费 |
+| max_frame_bytes | 1 MiB | 单帧最大值，不是建议的麦克风分片大小 |
+
+历史导入、中断与续接是不同操作。不要假设重连会自动恢复供应商状态、开始响应或重放麦克风字节。
+
 <a id="agent-conversation"></a>
 
 ## 原生 Agent 音频连接器
@@ -78,16 +100,16 @@ realtime 与 audio_realtime_contract 测试使用模拟连接验证队列上限�
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/realtime/mod.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/mod.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/realtime/audio.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/audio.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/realtime/normalize.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/normalize.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/realtime/websocket.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/realtime/websocket.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/openai/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/openai/realtime.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/src/providers/google/live.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/src/providers/google/live.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/realtime.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/audio_realtime_contract.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/audio_realtime_contract.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
-- [llm-client/tests/provider_realtime_clients.rs](https://github.com/lingxi-coder/llm-client/blob/a363c5b3a237d53eea12c3abfb3b98648ef15d3e/tests/provider_realtime_clients.rs) — 已提交源码 (a363c5b3a237d53eea12c3abfb3b98648ef15d3e)
+- [llm-client/src/realtime/mod.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/mod.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/realtime/audio.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/audio.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/realtime/normalize.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/normalize.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/realtime/websocket.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/realtime/websocket.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/providers/openai/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/providers/openai/realtime.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/src/providers/google/live.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/src/providers/google/live.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/realtime.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/realtime.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/audio_realtime_contract.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/audio_realtime_contract.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
+- [llm-client/tests/provider_realtime_clients.rs](https://github.com/lingxi-coder/llm-client/blob/ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b/tests/provider_realtime_clients.rs) — 已提交源码 (ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b)
 
-- llm-client: HEAD a363c5b3a237d53eea12c3abfb3b98648ef15d3e; 所据文件指纹 sha256:fdc3f37adcc11c571e4db361c4ea665e8ee4d2644a8724745b22389fb43c41d7; 产品固定版本 a363c5b3a237d53eea12c3abfb3b98648ef15d3e
+- llm-client: HEAD ad8c60f7e4ffcbe4c0c0fedc20586df873254c0b; 所据文件指纹 sha256:c68d002b005c15c21681b54d3f7efe358c4c1be6ec7cb07501009d1d11938e38; 产品固定版本 ff71b2ec1139bc67cc8719d78b1735aca967bbe8
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

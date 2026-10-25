@@ -91,6 +91,57 @@ async fn run_streaming(&self, request: LinuxCommandRequest, sink: Arc<dyn Proces
 
 Deliver stdout lines and stderr byte chunks through the sink and return the final result.
 
+<a id="command-fields"></a>
+
+## Command parameters and result checks
+
+The request is an executable plus an argument vector. Shell operators, variable expansion and redirection are interpreted only when you explicitly invoke a shell, for example command=/bin/sh with args=[-c, script]. Keep user-selected arguments separate from shell source when the feature does not need a shell.
+
+| Parameter / result | Contract | Caller decision |
+| --- | --- | --- |
+| command, args | Non-empty command; arguments are individual values, not a joined command string. | Prefer an installed guest executable and a concrete argument list. |
+| cwd | Optional absolute guest path; it is not a native host path. | Use /home/lingxi for a first command or the configured guest project path. |
+| env | Rust BTreeMap; FFI uses key/value records. Environment keys must be non-empty and cannot contain = or NUL. | Supply values explicitly; do not assume shell expansion occurs inside a value. |
+| stdin, timeout_ms | Finite command input is optional text; a provided timeout must be positive. | Use raw stdio for binary or ongoing input, and set a budget appropriate to the operation. |
+| network, resource_limits, mounts | Requested policy and filesystem exposure; success still needs the matching enforcement receipt. | Choose the necessary policy before admission; a policy error is not permission to retry with weaker isolation. |
+| exit_code, timed_out, cancelled | A returned result can describe a failed or interrupted command. SDK errors are a separate result path. | Check all three before marking the operation successful; retain stderr for diagnosis. |
+
+<a id="stream-consumption"></a>
+
+## Consume live output without blocking execution
+
+ProcessStreamSink has separate stdout_line(String) and stderr_chunk(Vec<u8>) callbacks. Ordinary stdout line endings are removed; stderr chunks do not promise line boundaries or complete UTF-8 characters. The Android reader also emits bounded stdout fragments for an unusually long line, so a callback is not a general-purpose binary framing boundary.
+
+Drain stdout and stderr together. Forward output into a bounded host queue, then render on the UI executor. Returning a ProcessError from a sink stops delivery and causes the platform runner to tear down the owned command; a slow sink applies backpressure rather than producing unlimited host memory.
+
+The portable trait provides a run-then-replay fallback. Probe streaming_output and use the selected backend implementation when real-time output is part of your feature. Receiving some output does not establish successful completion; await the command result and check its terminal fields.
+
+### Reusable streaming helper · host supplies runtime and sink
+
+```rust
+use mobile_linux_api::{
+    LinuxCommandRequest, LinuxCommandResult, MobileLinuxError,
+    MobileLinuxRuntime, ProcessStreamSink,
+};
+use std::sync::Arc;
+
+pub async fn stream_command(
+    runtime: &dyn MobileLinuxRuntime,
+    request: LinuxCommandRequest,
+    sink: Arc<dyn ProcessStreamSink>,
+) -> Result<LinuxCommandResult, MobileLinuxError> {
+    let network = request.network;
+    let limits = request.resource_limits;
+    let result = runtime.run_streaming(request, sink).await?;
+    result.enforcement.ensure_for(network, limits)?;
+    Ok(result)
+}
+```
+
+Verification method: Compile check (mobile-stream-command)
+
+This helper assumes the host already owns and booted the runtime. Its caller still checks the command exit state and owns shutdown.
+
 <a id="task-lifecycle"></a>
 
 ## Runtime and background tasks
@@ -230,6 +281,18 @@ Close the session and synchronously reap its complete guest process tree.
 
 The FFI form takes MobileLinuxCommandRequestFfi, rejects any provided stdin or timeout_ms, and requires read max_bytes in 1..1048576. Control writes and lifetime through the returned session ID.
 
+<a id="raw-read-loop"></a>
+
+## Implement the raw stdio read loop
+
+1. Open a RawStdioOpenRequest with explicit command, arguments and policy. Retain the returned session handle with the runtime owner.
+2. Write complete protocol frames with write_raw_stdio. Keep framing independent of how the SDK splits later reads.
+3. Read a bounded amount, for example 65,536 bytes. Append stdout to the protocol parser and drain stderr to diagnostics; neither buffer is guaranteed to contain a complete message.
+4. A read with empty buffers and closed=false is not EOF. Yield or wait according to the host scheduling policy before polling again. Finish only when closed is true, handling the optional exit_code.
+5. On normal completion, protocol failure or user cancellation, await close_raw_stdio. Closing owns process-tree cleanup; dropping a screen or stopping a read loop does not replace it.
+
+FFI raw sessions reject command-request stdin and timeout_ms. Their input and lifetime are controlled through write/close calls. FFI max_bytes is 1..1048576; do not issue a zero-byte readiness probe.
+
 <a id="events"></a>
 
 ## Events and task snapshots
@@ -257,6 +320,19 @@ async fn task_status(&self, task_id: &str) -> Result<Option<MobileLinuxTaskSnaps
 ```
 
 Read one task by ID; None means no matching task.
+
+<a id="event-cursor"></a>
+
+## Resume monitoring with event cursors and task snapshots
+
+| Operation | Meaning | Host handling |
+| --- | --- | --- |
+| read_events(None, limit) | Read currently retained events after sequence zero. The maximum batch is 512. | Use a nonzero bounded limit and store the largest sequence you processed. |
+| read_events(Some(last), limit) | Returns events with sequence strictly greater than last. | Advance after processing the batch; do not add one to last before sending the cursor. |
+| TaskStatusChanged / PtyClosed | Terminal state and exit detail are distinct from output frames. | Stop the activity indicator from terminal state, not from an idle stdout channel. |
+| list_tasks / task_status | Current task snapshots; task_status can return None for an unknown ID. | Reconcile a recreated UI with these snapshots. Do not treat None as a successful command. |
+
+Streaming callbacks from RuntimeHandle.run_command_streaming use a separate per-call run-N identifier and sequence 0. Do not overwrite a backend read_events cursor with callback metadata. The runtime event buffer is not a durable transcript store.
 
 <a id="mounts"></a>
 
@@ -348,7 +424,7 @@ pub async fn execute_once(
     let execution = runtime.run(LinuxCommandRequest {
         command: "/bin/sh".into(),
         args: vec!["-c".into(), "printf 'ready\n'".into()],
-        cwd: Some("/root".into()),
+        cwd: Some("/home/lingxi".into()),
         env: BTreeMap::new(),
         stdin: None,
         timeout_ms: Some(10_000),
@@ -387,15 +463,18 @@ Managed background, PTY and raw handles own guest processes. Explicit kill/close
 
 [Source repository](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/crates/mobile-linux-api/src/mobile_linux.rs)
 
-- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/mobile_linux.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-api/src/execution.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/runtime.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/install.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/store/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-core/src/store/lifecycle.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-android/src/runtime/implementation.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/implementation.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/tests.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ios/src/runtime/tests.rs) — Committed source (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/execution.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/execution.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/runtime.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/install.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/install.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/store/lifecycle.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/store/lifecycle.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/implementation.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/implementation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/implementation.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/tests.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/tests.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/process.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/process.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/streaming.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/streaming.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/validation.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/validation.rs) — Committed source (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; Referenced input fingerprint sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; Product pin 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; Referenced input fingerprint sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; Product pin d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

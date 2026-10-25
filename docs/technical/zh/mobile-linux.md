@@ -19,6 +19,51 @@ Mobile Linux Runtime 是独立 SDK。应用负责提供路径、经过校验的 
 - 已嵌入 Rust 的应用使用同一个 Git 修订版本的 SDK Rust crates 与仅含原生支持的产物。Android 还需 mobile-linux-installer；iOS 选择 MobileLinuxNativeSupport。
 - 进程内保留一份 Rust 运行时。native-support 分发包含平台桥接与辅助程序，不包含第二份 Rust 库。
 
+<a id="first-execution"></a>
+
+## 从安装到第一个成功命令
+
+首次嵌入 SDK 时按以下顺序接入。创建包装对象只会得到句柄，不表示 rootfs 已安装，也不表示当前设备可以执行 Linux。应用应分别记录安装、就绪与命令执行的结果。
+
+1. 选择完整 Kotlin／Swift 分发，或供已有 Rust 宿主使用的 native-support 分发；绑定与资源必须来自同一源码版本。
+2. 校验并暂存平台镜像。Android 由 RootfsInstaller.stage 准备 staged 数据，再由 handle.repairRootfs 激活；iOS 提供转换后的 fakefs ZIP 与 overlay 的显式路径。
+3. 使用应用私有绝对路径创建并持有运行时。检查 capability；available 为 false 时展示 reason，不能把模拟器链接成功当作 guest 已就绪。
+4. 等待 boot 完成，再以明确的 guest 工作目录和网络策略执行一个有时间上限的小命令。
+5. 检查 exit_code、timed_out、cancelled 与执行回执后再接受结果。宿主不再需要运行时时，关闭其拥有的会话并等待 shutdown。
+
+- [完整可移植命令示例](mobile-rust.md#complete-command)
+- [Android 安装与激活](mobile-android.md#install-rootfs)
+- [Swift 会话生命周期](mobile-ios.md#ios-end-to-end)
+
+<a id="guest-identity"></a>
+
+## Guest 用户、主目录与项目路径
+
+命令 cwd 与 guest 工具使用 Linux guest 路径；运行时存储和挂载 host_path 使用原生宿主路径。同一项目具有两个坐标：宿主 backing 目录与挂载后可见的 guest 路径。不要把 Android filesDir 或 iOS 应用容器路径当作 Linux cwd。
+
+| 项目 | 默认值 | 使用方式 |
+| --- | --- | --- |
+| 账号／UID／GID | lingxi / 1000 / 1000 | 默认非特权 guest 身份；/root 是管理员主目录。 |
+| HOME | /home/lingxi | 存放用户配置；不需要项目挂载的首个命令可使用此 cwd。 |
+| 工作区根 | /home/lingxi/lingxi | guest_paths::workspace(id) 在此追加稳定的项目标识。 |
+| 项目路径 | /home/lingxi/lingxi/<stable-id> | 选择规范化 ID；执行项目命令前配置对应宿主目录。 |
+| 持久化宿主 HOME | managed_root/persistent/lingxi | 独立于可替换 rootfs 镜像；不要放入解压后的 active 镜像内部。 |
+| 临时目录 | /tmp、/var/tmp | 用于 guest 临时文件，不作为稳定项目身份。 |
+
+<a id="execution-selection"></a>
+
+## 按功能选择执行接口
+
+| 功能 | 入口 | 结果与清理 |
+| --- | --- | --- |
+| 运行格式化、构建步骤或有限命令 | run／run_command／Kotlin execute | 收集 stdout／stderr 与退出状态；主动设置 timeout_ms。 |
+| 执行中展示命令输出 | run_streaming／run_command_streaming | 通过有界 UI 队列消费 stdout 文本与 stderr 字节；仍需检查最终结果。 |
+| 在宿主管理下保持服务运行 | spawn_background | 保留进程句柄；使用 kill 并确认终态。 |
+| 构建终端 | open_pty／write_pty／resize_pty | 跨 chunk 解码终端字节、处理尺寸变化，并调用 close_pty。 |
+| 连接 LSP 或按字节分帧的子进程协议 | open_raw_stdio／read_raw_stdio／write_raw_stdio | 宿主维护分帧缓冲与读取循环；调用 close_raw_stdio 回收进程树。 |
+
+SDK 提供执行原语，不会自动创建 Agent、授予应用权限，或在操作系统挂起应用后保持宿主存活。
+
 <a id="prerequisites"></a>
 
 ## 构建前提
@@ -157,14 +202,18 @@ boot 建立可执行状态，verify 显式刷新完整性。status 读取是诊�
 
 [源码仓库](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/Cargo.toml)
 
-- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/Cargo.toml) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/rust-toolchain.toml) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/runtime.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/types.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/crates/mobile-linux-ffi/src/types.rs) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/android/runtime/build.gradle.kts](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/android/runtime/build.gradle.kts) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/ios/Package.swift) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
-- [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/6b033d41a2b6b736fda1e8f996f55a4b20bd885d/scripts/checks/check-resource-contracts.sh) — 已提交源码 (6b033d41a2b6b736fda1e8f996f55a4b20bd885d)
+- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/Cargo.toml) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/rust-toolchain.toml) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/runtime.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/types.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ffi/src/types.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/android/runtime/build.gradle.kts](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/android/runtime/build.gradle.kts) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/ios/Package.swift) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/scripts/checks/check-resource-contracts.sh) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-android/src/runtime/config.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-ios/src/runtime/config.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/user_workspace.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9/crates/mobile-linux-core/src/user_workspace.rs) — 已提交源码 (d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9)
 
-- mobile-linux-runtime: HEAD 6b033d41a2b6b736fda1e8f996f55a4b20bd885d; 所据文件指纹 sha256:435a888b1a310f357f18311df5f96418fa72b1a900d78e987af282bb3e91d7ca; 产品固定版本 6b033d41a2b6b736fda1e8f996f55a4b20bd885d
+- mobile-linux-runtime: HEAD d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9; 所据文件指纹 sha256:c85076a3035f8a036929b8e4a66cfae06a1e6eac952ef5315ba1cba3470d2139; 产品固定版本 d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

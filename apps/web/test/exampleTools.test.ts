@@ -7,6 +7,85 @@ import { docPages } from '../src/data/docs';
 
 const web = fileURLToPath(new URL('..', import.meta.url));
 
+const metadataIdentityFixture = String.raw`
+import json, pathlib, sys, tempfile, types
+sys.path.insert(0, str(pathlib.Path('examples').resolve()))
+import sdk_tools
+
+temporary = tempfile.TemporaryDirectory()
+root = pathlib.Path(temporary.name).resolve()
+sdk_root = root / 'harness-runtime'
+sdk_root.mkdir()
+(sdk_root / 'Cargo.toml').write_text('[workspace]\n[workspace.package]\nversion = "1.2.3"\n')
+core = sdk_root / 'crates/sdk-core/Cargo.toml'
+core.parent.mkdir(parents=True)
+core.write_text('[package]\nname = "sdk-core"\nversion.workspace = true\n')
+vendored = sdk_root / 'packages/webrtc/vendor/nix/Cargo.toml'
+vendored.parent.mkdir(parents=True)
+vendored.write_text('[package]\nname = "nix"\nversion = "0.31.3"\n')
+third_party = sdk_root / 'third_party/common/Cargo.toml'
+third_party.parent.mkdir(parents=True)
+third_party.write_text('[package]\nname = "common"\nversion = "1.0.0"\n')
+snapshot = sdk_tools.SdkSnapshot.__new__(sdk_tools.SdkSnapshot)
+snapshot.root = root
+snapshot.expected = snapshot._expected_packages()
+registry = 'registry+https://github.com/rust-lang/crates.io-index'
+
+def package(name, version, manifest, source=None):
+    return dict(name=name, version=version, manifest_path=str(manifest), source=source,
+                id=f'{name}@{version}:{manifest}:{source}')
+
+local_core = package('sdk-core', '1.2.3', core)
+local_nix = package('nix', '0.31.3', vendored)
+
+def registry_nix(version):
+    return package('nix', version, root / f'registry/nix-{version}/Cargo.toml', registry)
+
+def verify(packages):
+    metadata = dict(packages=packages, resolve=dict(nodes=[dict(id=p['id']) for p in packages]))
+    sdk_tools.command = lambda *args, **kwargs: types.SimpleNamespace(stdout=json.dumps(metadata))
+    return snapshot.verify_metadata(root / 'consumer/Cargo.toml')
+
+def rejected(packages, identity):
+    try:
+        verify(packages)
+    except RuntimeError as error:
+        assert f'Wrong SDK identity for {identity}' in str(error), str(error)
+    else:
+        raise AssertionError(f'{identity} escaped snapshot identity validation')
+`;
+
+function checkMetadataIdentity(source: string): void {
+  const result = spawnSync('python3', ['-c', `${metadataIdentityFixture}\n${source}`], { cwd: web, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+test('vendored crate identity does not capture a different registry version with the same name', () => {
+  checkMetadataIdentity(String.raw`
+identities = verify([local_core, registry_nix('0.27.1'), local_nix])
+assert {entry['package'] for entry in identities} == {'sdk-core', 'nix'}
+assert next(entry for entry in identities if entry['package'] == 'nix')['manifest'] == str(vendored.relative_to(root))
+`);
+});
+
+test('the vendored version still requires its local path and no external source', () => {
+  checkMetadataIdentity(String.raw`
+rejected([local_core, registry_nix('0.31.3')], 'nix@0.31.3')
+rejected([local_core, dict(local_nix, source=registry)], 'nix@0.31.3')
+rejected([local_core, dict(local_nix, manifest_path=str(root / 'other/nix/Cargo.toml'))], 'nix@0.31.3')
+rejected([local_core, package('common', '1.0.0', root / 'registry/common/Cargo.toml', registry)], 'common@1.0.0')
+`);
+});
+
+test('first-party SDK identities reject an external source, wrong path or different version', () => {
+  checkMetadataIdentity(String.raw`
+assert verify([local_core])[0]['package'] == 'sdk-core'
+rejected([dict(local_core, source='git+https://example.invalid/sdk')], 'sdk-core@1.2.3')
+rejected([dict(local_core, manifest_path=str(root / 'registry/sdk-core/Cargo.toml'))], 'sdk-core@1.2.3')
+rejected([dict(local_core, version='1.2.4')], 'sdk-core@1.2.4')
+`);
+});
+
 test('copyable reader manifests match the isolated consumer inputs exactly', () => {
   const blocks = docPages.flatMap((page) => page.sections.flatMap((section) => section.code ?? []));
   for (const sdk of ['harness', 'llm', 'mobile']) {

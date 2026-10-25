@@ -21,7 +21,7 @@ fn name(&self) -> &str
 ### Tool::input_schema
 
 ```text
-fn input_schema(&self) -> &serde_json::Value
+fn input_schema(&self) -> &Utf16JsonProjection
 ```
 
 声明工具输入的 JSON Schema。
@@ -29,7 +29,7 @@ fn input_schema(&self) -> &serde_json::Value
 ### Tool::validate_input
 
 ```text
-async fn validate_input(&self, input: &serde_json::Value, ctx: &ToolUseContext) -> Result<(), ValidationError>
+async fn validate_input(&self, input: &Utf16JsonProjection, ctx: &ToolUseContext) -> Result<(), ValidationError>
 ```
 
 在副作用前校验工具专用条件；默认实现通过校验。
@@ -37,7 +37,7 @@ async fn validate_input(&self, input: &serde_json::Value, ctx: &ToolUseContext) 
 ### Tool::check_permissions
 
 ```text
-async fn check_permissions(&self, input: &serde_json::Value, ctx: &ToolUseContext) -> permission::PermissionResult
+async fn check_permissions(&self, input: &Utf16JsonProjection, ctx: &ToolUseContext) -> permission::PermissionResult
 ```
 
 在调度前计算本次调用的权限决策。
@@ -45,7 +45,7 @@ async fn check_permissions(&self, input: &serde_json::Value, ctx: &ToolUseContex
 ### Tool::call
 
 ```text
-async fn call(&self, input: serde_json::Value, ctx: ToolUseContext, progress_tx: ToolProgressSender) -> Result<ToolCallResult, ToolError>
+async fn call(&self, input: Utf16JsonProjection, ctx: ToolUseContext, progress_tx: ToolProgressSender) -> Result<ToolCallResult, ToolError>
 ```
 
 执行已校验并经权限检查的输入，返回模型可见结果。
@@ -120,7 +120,7 @@ pub fn progress_channel() -> (ToolProgressSender, ToolProgressReceiver)
 ### ToolProgress
 
 ```text
-pub struct ToolProgress { pub tool_use_id: lingxi_core::types::ToolUseId, pub data: serde_json::Value }
+pub struct ToolProgress { pub tool_use_id: lingxi_core::types::ToolUseId, pub data: Utf16JsonProjection }
 ```
 
 将一个进度载荷与来源工具调用关联。
@@ -160,16 +160,80 @@ cargo test --locked -p test-harness --test tools_hooks_e2e
 
 这些命令是可重复检查，不代表每个注册工具在所有设备上都已验收。设备输入、shell 隔离与外部服务需要在各自宿主验证。
 
+<a id="custom-tool-checklist"></a>
+
+## 实现可用的自定义工具
+
+自定义工具需要完整的 Tool 实现，以及负责注册它的宿主组合。从一个能向模型和用户解释清楚输入、结果与副作用的小操作开始。
+
+| 实现项 | 契约 | 常见错误 |
+| --- | --- | --- |
+| name、input_schema 与 input_repair_metadata | 规范标识、保留源信息的 schema，以及明确的输入修复事实。 | 把别名注册为独立能力，或声明未知的修复契约。 |
+| is_enabled、is_read_only 与 is_concurrency_safe | 本次实际调用的可见性与调度事实。 | 为了绕过授权或串行执行，把修改操作标为只读。 |
+| description、prompt 与 max_result_size_chars | 模型可见说明与明确的结果大小策略。 | 返回无界原始输出，不考虑模型最终看到的结果。 |
+| validate_input 与 check_permissions | 在副作用前执行工具专用校验与权限决策。 | 在校验或权限检查过程中提前执行网络／文件系统操作。 |
+| call 与 ToolCallResult | 在调度器控制下执行，并提供明确的模型结果。 | 从传输层或供应商适配器直接调用工具主体。 |
+
+当前工具输入与 schema 使用 lingxi_core::types::utf16_json::Utf16JsonProjection。数据格式仍然是 JSON，但任意外部 schema 与字符串应保留其源 projection，不能一概按普通 serde_json::Value 处理。
+
+<a id="tool-results-and-errors"></a>
+
+## 返回模型可以继续使用的结果
+
+ToolCallResult 区分 data、可选的保真模型字符串与错误状态。调度器可以从 data 推导模型文本，或使用提供的 model_content。MCP 的逻辑错误结果可以作为 is_error 为真的已接收结果返回；传输失败仍是调用失败。
+
+| 失败 | 含义 | 处理方式 |
+| --- | --- | --- |
+| InvalidInput／ValidationError | 请求不符合工具契约。 | 返回可操作的校验信息，修正输入后再重试。 |
+| PermissionDenied | 策略或用户拒绝本次调用。 | 展示拒绝原因，让 Agent 选择被允许的替代操作。 |
+| InteractionRequired | 当前宿主无法提供所需实时交互通道。 | 接入预期宿主交互，或选择合适的非交互操作。 |
+| Aborted／Io | 执行被中断，或底层操作失败。 | 保留部分状态，重新执行副作用操作前检查幂等性。 |
+| EditWithoutRead | 会话没有该编辑目标的有效读取状态。 | 在已挂载会话中读取当前目标，再构造新的编辑。 |
+
+### Rust · 构造结果摘录
+
+```rust
+use tool_api::{source_text_projection, ToolCallResult};
+
+fn completed_summary() -> ToolCallResult {
+    ToolCallResult::from_data(source_text_projection("Saved the report."))
+}
+```
+
+验证方式: 接口摘录
+
+<a id="hooks-and-mcp"></a>
+
+## 通过调度路径接入 hooks 与 MCP
+
+hooks 用于观察或控制生命周期边界，MCP 用于增加由外部服务器连接持有的工具。这是两种不同扩展机制：hook 不替代工具注册表，连接服务器也不代表授权其全部工具调用。
+
+| 需求 | 源码提供的接口 | 生命周期规则 |
+| --- | --- | --- |
+| 校验或注解工具调用 | HookEventType::PreToolUse／PostToolUse／PostToolUseFailure | 选择正确事件并遵循其控制结果；不要从观察 hook 直接执行原副作用。 |
+| 更新用户／项目 hooks | HookRegistry::replace_source_hooks | 校验后替换单一来源分区，保留插件与会话 hook 的归属。 |
+| 增加服务器工具 | McpRegistry::connect 与 ToolRegistry::register_mcp_tools | 为更新／断开保留连接标识，由生产组合协调连接与工具注册。 |
+| 移除服务器 | ToolRegistry::unregister_mcp_tools | 只删除该连接分区，并完成其传输清理。 |
+
+- [Hook 与扩展生命周期](extensions-lifecycle.md)
+
+HookDefinition 包含 blocking、timeout、priority 与 source。阻塞 hook 会被等待，非阻塞 hook 使用异步注册表。超时或 hook 失败不能当作成功策略决策；应在支持的事件边界配置失败行为。
+
 ## 源码与文档基线
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/tool-api/src/tool_trait.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/tool_trait.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/tool-api/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/context.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/registry.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/tool-api/src/progress.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/tool-api/src/progress.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/orchestrator/src/turn_loop/tool_dispatch.rs) — 已提交源码 (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/tool-api/src/tool_trait.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tool-api/src/tool_trait.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tool-api/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tool-api/src/context.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tool-api/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tool-api/src/registry.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/tool-api/src/progress.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/tool-api/src/progress.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/orchestrator/src/turn_loop/tool_dispatch.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/core/src/host/permission_gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/core/src/host/permission_gate.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/hooks/src/definition.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/hooks/src/definition.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/hooks/src/events.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/hooks/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/hooks/src/registry.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/mcp/src/registry.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/mcp/src/registry.rs) — 已提交源码 (f975ab5804bb3af0e72beb3974e5c911ece44d53)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; 所据文件指纹 sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; 产品固定版本 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; 所据文件指纹 sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; 产品固定版本 e04c1837508014d68ea042d5c9fe3c8c15af5aa0
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

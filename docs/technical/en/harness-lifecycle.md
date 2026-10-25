@@ -228,24 +228,64 @@ Verification method: Mock run (harness-lifecycle-mock)
 
 In production, stop new admissions and await every active run future before shutdown. A failed durability barrier keeps ShutdownReport.complete false; retry the same owner sequentially. Do not replace the live runtime just to hide an incomplete report.
 
+<a id="headless-options"></a>
+
+## Configure a batch or streaming worker
+
+headless::run is an embeddable application entry point with injected I/O. Set the input/output contract before handing readers and writers to the runtime; closing an input stream and cancelling a turn are different operations.
+
+| HeadlessOptions field | Default | Use it for |
+| --- | --- | --- |
+| prompt / prompt_images | None / empty | Initial text and images supplied directly by the host. |
+| input_format / output_format | Text / Text | Choose plain text or the supported structured stream formats; use the corresponding reader/writer. |
+| no_stream | false | Select the batched provider path for a one-shot prompt. |
+| include_partial_messages / include_hook_events | false / false | Opt into partial assistant frames or hook frames in stream-json output. |
+| max_budget_usd / json_schema | None / None | Set an invocation budget or a source-preserving structured-output schema. |
+| permission_prompts_none | false | Disable interactive prompts when the host intentionally has no prompt transport; this is not a blanket permission grant. |
+
+<a id="shutdown-result"></a>
+
+## Treat execution, persistence and delivery separately
+
+| Inspect | What it establishes | What to retain on failure |
+| --- | --- | --- |
+| HeadlessExit.execution | Whether model/runtime execution started and how it ended. | reason, errors and session_id when available. |
+| HeadlessExit.shutdown | Whether resource drain and persistence barriers completed. | shutdown_errors and the optional cleanup handle. |
+| HeadlessExit.delivery | Whether final output and writer shutdown completed. | delivery_errors; do not report missing output as successful delivery. |
+| ShutdownReport.complete | Whether the injected lifecycle service finished every required barrier. | errors and durable publications, then retry shutdown sequentially. |
+
+A successful model response can coexist with failed output delivery. An incomplete shutdown is also meaningful even when the final text was delivered. Keep those states visible to the embedding application.
+
+<a id="resume-checklist"></a>
+
+## Resume a conversation after restarting the host
+
+1. Select the session through the host’s existing resume path, not by changing the value returned from SessionHandle::id.
+2. Restore the durable ordered transcript and its message identities. Reattach the model service, output destination, permission policy and extension owners for this new host lifetime.
+3. Treat historical file reads according to the selected resume implementation. The lower-level SessionResumer documented above starts with an empty cache; do not copy a cache from another workspace to make an edit pass.
+4. Mount the restored session before admitting the next prompt. A new transcript snapshot should come from that mounted runtime.
+
+- [Session snapshots](harness-sessions.md#snapshots)
+
 ## Sources and documentation baseline
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/api.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/desktop/sdk.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/desktop/session_state.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/desktop/session_state.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/mobile/host.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/mobile/host/assembly.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/mobile/host/assembly.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/headless/mod.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/headless/config.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/headless/config.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/headless/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/headless/host.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/headless/io.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/headless/io.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/runtime/src/headless/session.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/runtime/src/headless/session.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/permission/src/gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/permission/src/gate.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/session/src/storage.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/session/src/storage.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
-- [harness-runtime/crates/session/src/resumer.rs](https://github.com/lingxi-coder/harness-runtime/blob/6548b9d5e702f8e9d42772412cd65b72881e24b4/crates/session/src/resumer.rs) — Committed source (6548b9d5e702f8e9d42772412cd65b72881e24b4)
+- [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/api.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/sdk.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/sdk.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/session_state.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/session_state.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/mobile/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/mobile/host/assembly.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/mobile/host/assembly.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/headless/mod.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/headless/mod.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/headless/config.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/headless/config.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/headless/host.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/headless/host.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/headless/io.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/headless/io.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/headless/session.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/headless/session.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/runtime/src/desktop/configuration.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/runtime/src/desktop/configuration.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/permission/src/gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/permission/src/gate.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/session/src/storage.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/session/src/storage.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
+- [harness-runtime/crates/session/src/resumer.rs](https://github.com/lingxi-coder/harness-runtime/blob/f975ab5804bb3af0e72beb3974e5c911ece44d53/crates/session/src/resumer.rs) — Committed source (f975ab5804bb3af0e72beb3974e5c911ece44d53)
 
-- harness-runtime: HEAD 6548b9d5e702f8e9d42772412cd65b72881e24b4; Referenced input fingerprint sha256:92c43ec1558ef6090bd3e0c28f21110761b7855079f22272b843555f562fe25b; Product pin 6548b9d5e702f8e9d42772412cd65b72881e24b4
+- harness-runtime: HEAD f975ab5804bb3af0e72beb3974e5c911ece44d53; Referenced input fingerprint sha256:92c2108dc63215bc69ea9c11ea081795da883fdcb1c9c28b060aa9221a1b95a2; Product pin e04c1837508014d68ea042d5c9fe3c8c15af5aa0
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

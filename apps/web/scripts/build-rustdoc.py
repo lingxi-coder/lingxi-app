@@ -29,6 +29,10 @@ PROFILES = [
 ]
 
 
+def safe_build_reason(error: Exception | str, snapshot: Path, target: Path) -> str:
+    return str(error).replace(str(snapshot), "<snapshot>").replace(str(target), "<cargo-target>").replace(str(Path.home()), "<home>")
+
+
 def build_profile(snapshot: SdkSnapshot, profile: dict, offline: bool, target: Path, output: Path) -> dict:
     manifest = snapshot.root / profile["repo"] / "Cargo.toml"
     feature_args = ["--no-default-features"]
@@ -116,7 +120,7 @@ def main() -> int:
             except (RuntimeError, OSError) as error:
                 if (output / profile["id"]).exists():
                     shutil.rmtree(output / profile["id"])
-                results.append({"id": profile["id"], "label": profile["label"], "state": "unavailable", "reason": str(error).replace(str(snapshot.root), "<snapshot>")})
+                results.append({"id": profile["id"], "label": profile["label"], "state": "unavailable", "reason": safe_build_reason(error, snapshot.root, target)})
                 print(f"UNAVAILABLE {profile['id']}: {error}", file=sys.stderr, flush=True)
     finally:
         snapshot.close()

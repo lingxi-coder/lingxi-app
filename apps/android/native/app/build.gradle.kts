@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 import groovy.json.JsonSlurper
 import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
@@ -44,6 +45,12 @@ val targetAbis = providers.gradleProperty("lingxiTargetAbis").orNull
 require(targetAbis.isNotEmpty() && targetAbis.all { it in setOf("arm64-v8a", "x86_64") }) {
     "lingxiTargetAbis must contain arm64-v8a, x86_64, or both"
 }
+val mobileLinuxRootfsEvidenceDir = providers.gradleProperty("lingxiRootfsEvidenceDir")
+    .map { rootProject.file(it) }
+    .orElse(layout.buildDirectory.dir("mobileLinuxRootfs").map { it.asFile })
+val mobileLinuxSdkRoot = providers.exec {
+    commandLine("python3", rootProject.file("../../../scripts/lib/mobile_linux_source.py").absolutePath, "--root")
+}.standardOutput.asText.map { sdkPath -> File(sdkPath.trim()) }
 
 android {
     namespace = "com.lingxi.code"
@@ -196,6 +203,62 @@ android {
 
 listOf("play", "direct").forEach { distribution ->
     val capitalized = distribution.replaceFirstChar(Char::uppercaseChar)
+    val stageAssets = tasks.register<Exec>("stage${capitalized}MobileLinuxAssets") {
+        group = "build"
+        description = "Stage verified two-ABI Mobile Linux rootfs and native provenance assets ($distribution)."
+
+        val nativeRoot = layout.buildDirectory.dir("mobileLinuxNative/$distribution/native-support")
+        val sdkSource = layout.buildDirectory.file("mobileLinuxNative/$distribution/sdk-source.json")
+        val assetsRoot = layout.buildDirectory.dir("generated/mobileLinux/$distribution/assets/mobile-linux")
+
+        inputs.dir(mobileLinuxRootfsEvidenceDir)
+            .withPropertyName("rootfsReleaseEvidence")
+            .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+            .optional()
+        inputs.dir(nativeRoot)
+            .withPropertyName("nativeSupportArtifacts")
+            .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        inputs.file(sdkSource)
+            .withPropertyName("nativeSdkSource")
+            .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        inputs.files(
+            rootProject.files(
+                rootProject.file("../../../Cargo.toml"),
+                rootProject.file("../../../Cargo.lock"),
+                rootProject.file("../../../scripts/lib/mobile_linux_source.py"),
+                rootProject.file("../../../scripts/lib/runtime_source.py"),
+                rootProject.file("../../../scripts/lib/mobile-linux-packages.json"),
+                rootProject.file("scripts/stage-mobile-linux-assets.sh"),
+                rootProject.file("scripts/stage-mobile-linux-assets.py"),
+                rootProject.file("scripts/verify-mobile-linux-native.sh"),
+                rootProject.file("scripts/mobile-linux-native.py"),
+            )
+        ).withPropertyName("assetStagingScriptsAndCargoPins")
+            .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        inputs.files(mobileLinuxSdkRoot.map { sdk: File ->
+            listOf(
+                sdk.resolve("docs/toolchains/runtime-pins.json"),
+                sdk.resolve("docs/mobile-linux/releases"),
+                sdk.resolve("scripts/rootfs/verify-evidence.py"),
+                sdk.resolve("scripts/rootfs/rootfs_tool.py"),
+                sdk.resolve("scripts/rootfs/guest_user.py"),
+                sdk.resolve("scripts/rootfs/source_contract.py"),
+            )
+        }).withPropertyName("lockedSdkRootfsProducerInputs")
+            .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        outputs.dir(assetsRoot)
+            .withPropertyName("stagedMobileLinuxAssets")
+
+        dependsOn("verify${capitalized}MobileLinuxNative")
+        commandLine(
+            rootProject.file("scripts/stage-mobile-linux-assets.sh").absolutePath,
+            "--variant", distribution,
+            "--input", mobileLinuxRootfsEvidenceDir.get().absolutePath,
+            "--apk-dir", layout.buildDirectory.get().asFile.absolutePath,
+            "--abis", targetAbis.joinToString(","),
+        )
+    }
+
     tasks.register<Exec>("verify${capitalized}MobileLinuxNative") {
         group = "verification"
         description = "Verify MobileLinux ELF artifacts for both supported ABIs ($distribution)."
@@ -209,6 +272,9 @@ listOf("play", "direct").forEach { distribution ->
     }
     listOf("debug", "release").forEach { buildType ->
         val variantName = capitalized + buildType.replaceFirstChar(Char::uppercaseChar)
+        tasks.matching { it.name == "merge${variantName}Assets" }.configureEach {
+            dependsOn(stageAssets)
+        }
         val verifyApk = tasks.register<Exec>("verify${variantName}MobileLinuxApk") {
             group = "verification"
             description = "Check the final APK's native bytes and extraction packaging ($variantName)."

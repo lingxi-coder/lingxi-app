@@ -87,12 +87,26 @@ def verify_maven(root, revision):
             raise ValueError(f"SDK Maven artifact digest mismatch: {relative}")
 
 
+def verify_sdk_source(sidecar, source, revision):
+    """Reject provenance metadata left behind by a different locked SDK."""
+    if sidecar.is_symlink() or not sidecar.is_file():
+        raise ValueError("SDK source identity sidecar is missing or unsafe")
+    try:
+        recorded = json.loads(sidecar.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("SDK source identity sidecar is unreadable") from error
+    expected = {"source": source, "revision": revision}
+    if recorded != expected:
+        raise ValueError("SDK source identity sidecar differs from the Cargo-locked SDK; rebuild native artifacts from the locked source")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("verify",))
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--jni-root", type=Path, required=True)
     parser.add_argument("--maven-dir", type=Path)
+    parser.add_argument("--expected-source")
     parser.add_argument("--expected-revision")
     parser.add_argument("--abis", default=",".join(ABIS))
     args = parser.parse_args()
@@ -101,6 +115,10 @@ def main():
         if not abis or len(set(abis)) != len(abis) or any(abi not in ABIS for abi in abis):
             raise ValueError("--abis must select arm64-v8a, x86_64, or both")
         verify(args.source, args.jni_root, abis)
+        if args.expected_source is not None:
+            if args.expected_revision is None:
+                raise ValueError("--expected-revision is required with --expected-source")
+            verify_sdk_source(args.source.parent / "sdk-source.json", args.expected_source, args.expected_revision)
         if args.maven_dir:
             verify_maven(args.maven_dir, args.expected_revision)
     except (OSError, ValueError, KeyError) as error:

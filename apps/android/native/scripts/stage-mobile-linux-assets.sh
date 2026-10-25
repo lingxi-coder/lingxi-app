@@ -4,20 +4,27 @@ set -euo pipefail
 VARIANT=""
 INPUT_DIR=""
 APK_DIR=""
+ABIS="arm64-v8a,x86_64"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --variant) VARIANT="${2:-}"; shift 2 ;;
     --input) INPUT_DIR="${2:-}"; shift 2 ;;
     --apk-dir) APK_DIR="${2:-}"; shift 2 ;;
+    --abis) ABIS="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 case "${VARIANT}" in
   play|direct) ;;
-  *) echo "usage: $0 --variant <play|direct> --input <release-evidence-dir> --apk-dir <apk-closure-dir>" >&2; exit 2 ;;
+  *) echo "usage: $0 --variant <play|direct> --input <release-evidence-dir> --apk-dir <apk-closure-dir> [--abis <abi-list>]" >&2; exit 2 ;;
 esac
-[[ -d "${INPUT_DIR}" ]] || { echo "input directory not found: ${INPUT_DIR}" >&2; exit 1; }
+[[ -d "${INPUT_DIR}" ]] || {
+  echo "Mobile Linux rootfs release evidence not found: ${INPUT_DIR}" >&2
+  echo "Run scripts/mobile-linux/prepare-sdk-release.py --platform android from the product root, or pass -PlingxiRootfsEvidenceDir=<release-evidence-dir>." >&2
+  exit 1
+}
 [[ -d "${APK_DIR}" ]] || { echo "APK closure directory not found: ${APK_DIR}" >&2; exit 1; }
+[[ -n "${ABIS}" ]] || { echo "ABI list must not be empty" >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -27,7 +34,7 @@ SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 NATIVE_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}/native-support"
 OUTPUT="${ANDROID_DIR}/app/build/generated/mobileLinux/${VARIANT}/assets/mobile-linux"
 
-"${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}"
+"${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --abis "${ABIS}"
 
 exec python3 "${SCRIPT_DIR}/stage-mobile-linux-assets.py" \
   --input "${INPUT_DIR}" --output "${OUTPUT}" --sdk-root "${SDK_ROOT}" \

@@ -223,23 +223,38 @@
       return makeInput(threadId, [{id: newId(), role: 'user', content}], outputSchema);
     }
 
+    function validateStructuredOutput(kind, value) {
+      const schema = {image: imageSchema, document: documentSchema, chat: chatSchema}[kind];
+      const fail = () => { throw new Error(`${kind} result did not match its declared outputSchema.`); };
+      if (!schema || schema.type !== 'object' || !isRecord(value)) fail();
+
+      const properties = schema.properties ?? {};
+      const allowed = new Set(Object.keys(properties));
+      if (schema.additionalProperties === false
+          && Object.keys(value).some(key => !allowed.has(key))) fail();
+      if ((schema.required ?? []).some(key => !Object.prototype.hasOwnProperty.call(value, key))) fail();
+
+      for (const [key, property] of Object.entries(properties)) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        const actual = value[key];
+        if (property.type === 'string') {
+          if (typeof actual !== 'string' || Array.from(actual).length < (property.minLength ?? 0)) fail();
+        } else if (property.type === 'integer') {
+          if (!Number.isInteger(actual) || actual < (property.minimum ?? Number.NEGATIVE_INFINITY)) fail();
+        } else {
+          fail();
+        }
+      }
+    }
+
     function validateResult(kind, runResult) {
       if (!isRecord(runResult) || !Array.isArray(runResult.newMessages) || !isRecord(runResult.result)) {
         throw new Error('The official RunAgentResult did not contain the expected structured object and messages.');
       }
-      if (!runResult.newMessages.some(message => message?.role === 'assistant')) {
-        throw new Error('The RunAgentResult did not contain an assistant Message.');
-      }
-      const value = runResult.result;
       if (typeof window.LingxiLocalAppAGUI?.validateMessage === 'function') {
         runResult.newMessages.forEach(message => window.LingxiLocalAppAGUI.validateMessage(message));
       }
-      if (kind === 'image' && (typeof value.food !== 'string' || typeof value.description !== 'string'
-          || !Number.isInteger(value.visibleCount))) throw new Error('Image result did not match its declared outputSchema.');
-      if (kind === 'document' && (typeof value.item !== 'string' || !Number.isInteger(value.count))) {
-        throw new Error('Document result did not match its declared outputSchema.');
-      }
-      if (kind === 'chat' && typeof value.answer !== 'string') throw new Error('Chat result did not match its declared outputSchema.');
+      validateStructuredOutput(kind, runResult.result);
     }
 
     async function readTask(runId, threadId) {

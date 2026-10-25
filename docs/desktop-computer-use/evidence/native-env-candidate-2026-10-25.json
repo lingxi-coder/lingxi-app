@@ -1,0 +1,138 @@
+{
+  "startedAtUtc": "2026-10-25T10:03:36.011Z",
+  "sidecarSha256": "c6cea2cfb444f15573035d787262b4eca3b9afe8fa9d5397f70869f7796a9c26",
+  "scriptSha256": "ca9a4c1844de56c4b0d213706e643963567f0ec0d4085cc4bad11fdf2729f6bd",
+  "permissionMode": "default",
+  "genericToolRule": {
+    "behavior": "allow",
+    "tool": "computer",
+    "scope": "disposable test profile only; not default-pipeline acceptance"
+  },
+  "checks": [
+    {
+      "name": "fixture-bundle-identity-and-open-by-id",
+      "passed": true,
+      "fixtureId": "org.lingxi.permission-target.8bde80ab-ccd6-4693-88b3-1f0515914f79",
+      "shadowId": "org.lingxi.permission-shadow.8bde80ab-ccd6-4693-88b3-1f0515914f79",
+      "separatePids": true
+    },
+    {
+      "name": "master-disabled-no-effects",
+      "passed": true
+    },
+    {
+      "name": "dedicated-approval-denial",
+      "passed": true
+    },
+    {
+      "name": "dedicated-approval-grant",
+      "passed": true
+    },
+    {
+      "name": "unauthorized-visible-application-masked",
+      "passed": true,
+      "bundleId": "org.lingxi.permission-shadow.8bde80ab-ccd6-4693-88b3-1f0515914f79",
+      "sourceRect": [
+        1744,
+        1084,
+        1200,
+        520
+      ],
+      "region": {
+        "rect": [
+          1157,
+          720,
+          787,
+          338
+        ],
+        "nonBlackPixels": 0,
+        "allBlack": true,
+        "pixels": 266006
+      },
+      "visible": true
+    },
+    {
+      "name": "authorized-real-screenshot",
+      "passed": true,
+      "imageSha256": "d5c340594e3944fe139119dd2a1b122974554d4388d279f2d2b3d1288a2d9c77",
+      "filtering": "mask",
+      "pixels": {
+        "blackSamples": 254666,
+        "height": 1299,
+        "width": 2000,
+        "nonBlackSamples": 34145,
+        "sampleRGB": [
+          0.888800323009491,
+          0.3483395576477051,
+          0.7061576843261719
+        ]
+      },
+      "originalWidth": 3024,
+      "originalHeight": 1964
+    },
+    {
+      "name": "native-click-effect",
+      "passed": true
+    },
+    {
+      "name": "native-type-effect",
+      "passed": true
+    },
+    {
+      "name": "permanent-grant-effective",
+      "passed": true
+    },
+    {
+      "name": "permanent-revocation-no-effects",
+      "passed": true
+    },
+    {
+      "name": "ask-reset-does-not-revive",
+      "passed": true
+    },
+    {
+      "name": "active-batch-revocation-stops-next-effect",
+      "passed": true
+    },
+    {
+      "name": "re-enable-no-old-grants",
+      "passed": true
+    }
+  ],
+  "tcc": [
+    {
+      "label": "dedicated access deny",
+      "at": "2026-10-25T10:03:53.656Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    },
+    {
+      "label": "dedicated application grant",
+      "at": "2026-10-25T10:03:55.198Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    },
+    {
+      "label": "fresh grant before active revocation",
+      "at": "2026-10-25T10:04:10.764Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    },
+    {
+      "label": "grant before OS revocation",
+      "at": "2026-10-25T10:04:18.605Z",
+      "accessibility": true,
+      "screen_recording": true,
+      "source": "Real request_access passed both OS probes before delivering the application approval panel."
+    }
+  ],
+  "status": "core-native-passed-system-roundtrip-pending",
+  "candidate": true,
+  "defaultPipelineAccepted": false,
+  "systemRevocationAccepted": false,
+  "scope": "Real signed development Desktop, native macOS backend and independent disposable target effects. Existing OS grants used. Explicit generic allow rule in disposable profile.",
+  "pending": "Operator Accessibility revocation, restoration and Screen Recording roundtrip; final e19b7ebc package default-pipeline rerun."
+}

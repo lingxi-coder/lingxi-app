@@ -120,7 +120,7 @@ real OS or Chrome acceptance test.
 Cross-repository validation uses an isolated product snapshot with only the
 feature's source overlays. The canonical checkout's unrelated staged/unstaged
 files are preserved. The App pins Harness commit
-`a39da75f0985d61d90fffa255f7b4d90901b0e27`.
+`e19b7ebcffd5c2122f312f7ec6e778a23680fdb6`.
 
 Final focused validation includes 151 Rust Computer Use library tests, 43
 Electron policy/Browser/extension/interaction tests, two forced-sidecar-stop
@@ -136,3 +136,41 @@ navigation denial, revocation and removal. The compact sanitized receipt is
 [evidence/browser-real-2026-10-24.json](desktop-computer-use/evidence/browser-real-2026-10-24.json).
 Its source hashes bind the implementation under test. Signed Desktop package
 and OS Accessibility/TCC end-to-end acceptance remain separate, unrun gates.
+
+## Signed native acceptance follow-up (2026-10-25)
+
+Real packaging exposed two integration gaps that mocked tests did not cover:
+workspace environment composition discarded the Desktop authority paths, and
+Desktop tools had no generic preauthorization before their dedicated resolver.
+App `37c7c0a7f` now passes the two reserved paths through a separate host-owned
+field, overriding inherited/workspace copies immediately before spawn. Its
+regression records actual child environments through startup and two restarts.
+Harness `e19b7ebc` adds exact `computer`/`browser` generic allow rules only for
+Transport sessions with the dedicated resolver and corresponding host/backend
+integration. Explicit ask/deny, managed-only rules and dispatcher ceilings
+remain in effect. Four real policy-gate regressions and independent review pass.
+
+The Flare-signed environment-fix candidate passed full package smoke and 13
+native checks using an explicit generic allow rule in its disposable profile:
+authorized/denied application requests, device master switch, actual click and
+typing effects, Retina screenshot coordinates, an independent unauthorized
+visible window masked across its whole sampled content region, permanent-grant
+removal, ask reset, active-batch revocation and no revival on re-enable.
+Candidate receipts are deliberately marked as candidate evidence. Existing
+system grants were used; this is not a fresh TCC grant or OS-revocation pass.
+
+The opt-in `computer-use-packaged-acceptance.mjs` drives the signed application,
+real bundled sidecar and native macOS backend through public IPC and a local
+synthetic vision/tool provider. It never writes TCC databases or grants system
+permissions. Its private status/control files coordinate operator actions for
+Accessibility and Screen Recording roundtrips. `--fixture-root` must be a new
+non-temporary workspace directory: this macOS does not resolve `/tmp` bundles
+through LaunchServices. Each fixture has a unique bundle ID, and remains on
+disk as a diagnostic artifact after its process is stopped and registration is
+removed. `--explicit-computer-rule` is for candidate isolation only and must be
+omitted for final default-pipeline acceptance.
+
+Final package and system roundtrip results will be recorded separately after
+the new pinned build and operator steps complete. The development acceptance
+build uses release optimization with LTO disabled due to constrained disk;
+it is not default thin-LTO, Developer ID notarization or distribution acceptance.

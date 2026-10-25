@@ -805,16 +805,27 @@ test('session interaction prompts stay inline where requested and do not install
   const permissionHtml = render(React.createElement(PermissionPrompt, { request: permission, onApprove: () => {}, onDeny: () => {} }));
   const computerHtml = render(React.createElement(ComputerAccessPrompt, { request: computer, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {} }));
   const questionHtml = render(React.createElement(AskUserQuestionPrompt, { request: question, onSubmit: () => {}, onCancel: () => {} }));
-  for (const html of [permissionHtml, questionHtml]) {
+  for (const html of [permissionHtml, computerHtml, questionHtml]) {
     assert.match(html, /role="region"/);
     assert.match(html, /class="inline-interaction-card/);
     assert.doesNotMatch(html, /class="desktop-dialog-overlay"/);
     assert.match(html, /class="desktop-dialog-actions"/);
   }
-  assert.match(computerHtml, /role="dialog"/);
-  assert.match(computerHtml, /class="desktop-dialog-overlay"/);
-  assert.match(computerHtml, /class="desktop-dialog-panel desktop-dialog-panel--/);
-  assert.doesNotMatch(computerHtml, /aria-modal=/);
+  assert.match(computerHtml, /Allow LingXi to use Preview/);
+  assert.match(computerHtml, /Elevated Risk/);
+  assert.match(computerHtml, /prompt injection attacks/);
+  assert.match(computerHtml, /Allow for this session/);
+  assert.match(computerHtml, /<kbd aria-hidden="true">Esc<\/kbd>/);
+  assert.doesNotMatch(computerHtml, /Always allow/);
+  const tccHtml = render(React.createElement(ComputerAccessPrompt, {
+    request: { ...computer, tcc_state: { accessibility: true, screen_recording: false } },
+    onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {},
+  }));
+  assert.match(tccHtml, /role="dialog"/);
+  assert.match(tccHtml, /class="desktop-dialog-overlay"/);
+  assert.match(tccHtml, /Open System Settings → Screen Recording/);
+  assert.match(tccHtml, /Try again/);
+  assert.doesNotMatch(tccHtml, /Elevated Risk/);
 
   for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
     const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');

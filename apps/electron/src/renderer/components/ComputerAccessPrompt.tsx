@@ -4,7 +4,7 @@
  * `ComputerAccessExchange` round-trip the TUI's `ComputerAccessView` resolves
  * (`tui-core/src/computer_access_bridge.rs`).
  *
- * Two-panel contract, matching the TUI byte-for-byte:
+ * Two-panel contract, preserving the TUI permission choices:
  *  - When `request.tcc_state` is present, a required macOS permission
  *    (Accessibility / Screen Recording) is missing — render the TCC panel:
  *    granted/not-granted per permission, an "Open System Settings" action per
@@ -14,7 +14,7 @@
  *  - Otherwise render the app-allowlist panel: one pre-checked checkbox per
  *    requested app, a checkbox per requested capability flag
  *    (clipboardRead/clipboardWrite/systemKeyCombos), and a submit button
- *    ("Allow for this session (N apps)").
+ *    ("Allow for this session").
  *
  * Escape while this panel is focused denies (matching the TUI and
  * {@link PermissionPrompt}). Local
@@ -28,6 +28,7 @@ import type { ComputerAccessRequestDto, ComputerAccessResponseDto } from '@lingx
 import type { SystemSettingsPane } from '../bridge/lingxi';
 import { useT } from '../theme/ThemeContext';
 import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
+import { Icon } from './Icon';
 
 export interface ComputerAccessPromptProps {
   /** The head request to render, or `null` to render nothing. */
@@ -76,7 +77,6 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
   if (!request) return null;
 
   const tcc = request.tcc_state;
-  const grantedCount = checkedApps.size;
 
   const toggleApp = (label: string): void => {
     setCheckedApps((previous) => {
@@ -96,18 +96,78 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     });
   };
 
-  const title = tcc ? 'macOS permissions required' : 'Allow computer access?';
-
   const checkboxRowStyle: CSSProperties = {
     display: 'flex', alignItems: 'center', gap: 10,
     padding: '7px 2px', fontSize: 13, color: t.text,
   };
 
+  if (!tcc) {
+    const appName = request.apps.length === 1 ? request.apps[0]!.label : 'these apps';
+    const variables = {
+      '--dialog-window': t.windowBg,
+      '--dialog-surface': t.surface,
+      '--dialog-surface-hover': t.surfaceHover,
+      '--dialog-border': t.border,
+      '--dialog-text': t.text,
+      '--dialog-text-2': t.text2,
+      '--computer-risk': t.dark ? '#ff9f66' : '#c74300',
+    } as CSSProperties;
+    return (
+      <section
+        className="inline-interaction-card computer-access-prompt"
+        style={variables}
+        role="region"
+        aria-labelledby="lingxi-computer-access-title"
+        aria-describedby="lingxi-computer-access-risk lingxi-computer-access-detail"
+        onFocusCapture={() => { promptHasFocus.current = true; }}
+        onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape' || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onDeny(request.request_id);
+        }}
+      >
+        <div className="computer-access-content">
+          <p className="computer-access-risk-label"><Icon name="shieldAlert" size={19} stroke={1.7} />Elevated Risk</p>
+          <h2 id="lingxi-computer-access-title">{`Allow LingXi to use ${appName}?`}</h2>
+          <p id="lingxi-computer-access-risk" className="computer-access-copy">
+            Allowing LingXi to use {request.apps.length === 1 ? 'this app' : 'these apps'} introduces new risks, including those related to prompt injection attacks, such as data theft or loss. Carefully monitor LingXi while it uses {request.apps.length === 1 ? 'this app' : 'these apps'}.
+          </p>
+          <p id="lingxi-computer-access-detail" className="computer-access-reason">{request.reason}</p>
+          <AppAllowlistPanel
+            request={request}
+            checkedApps={checkedApps}
+            onToggleApp={toggleApp}
+            clipboardRead={clipboardRead}
+            onClipboardRead={setClipboardRead}
+            clipboardWrite={clipboardWrite}
+            onClipboardWrite={setClipboardWrite}
+            systemKeyCombos={systemKeyCombos}
+            onSystemKeyCombos={setSystemKeyCombos}
+            checkboxRowStyle={checkboxRowStyle}
+          />
+        </div>
+        <footer className="computer-access-footer">
+          <span className="computer-access-scope">{`This session only · ${request.tier === 'read' ? 'Read access' : request.tier === 'click' ? 'Click access' : 'Full access'}`}</span>
+          <DesktopDialogActions>
+            <DesktopDialogButton variant="cancel" onClick={() => onDeny(request.request_id)}>
+              Deny <kbd aria-hidden="true">Esc</kbd>
+            </DesktopDialogButton>
+            <DesktopDialogButton ref={primaryRef} variant="primary" onClick={submit}>
+              Allow for this session <kbd aria-hidden="true">↵</kbd>
+            </DesktopDialogButton>
+          </DesktopDialogActions>
+        </footer>
+      </section>
+    );
+  }
+
   return (
     <DesktopDialog
-      title={title}
+      title="macOS permissions required"
       summary={request.reason}
-      icon={tcc ? 'shieldAlert' : 'hand'}
+      icon="shieldAlert"
       size="regular"
       titleId="lingxi-computer-access-title"
       summaryId="lingxi-computer-access-detail"
@@ -125,42 +185,13 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
           >
             Deny
           </DesktopDialogButton>
-          {tcc ? (
-            <DesktopDialogButton
-              ref={primaryRef}
-              variant="primary"
-              onClick={() => onDeny(request.request_id)}
-            >
-              Try again
-            </DesktopDialogButton>
-          ) : (
-            <DesktopDialogButton
-              ref={primaryRef}
-              variant="primary"
-              onClick={submit}
-            >
-              {`Allow for this session (${grantedCount} apps)`}
-            </DesktopDialogButton>
-          )}
+          <DesktopDialogButton ref={primaryRef} variant="primary" onClick={() => onDeny(request.request_id)}>
+            Try again
+          </DesktopDialogButton>
         </DesktopDialogActions>
       )}
     >
-      {tcc ? (
-        <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
-      ) : (
-        <AppAllowlistPanel
-          request={request}
-          checkedApps={checkedApps}
-          onToggleApp={toggleApp}
-          clipboardRead={clipboardRead}
-          onClipboardRead={setClipboardRead}
-          clipboardWrite={clipboardWrite}
-          onClipboardWrite={setClipboardWrite}
-          systemKeyCombos={systemKeyCombos}
-          onSystemKeyCombos={setSystemKeyCombos}
-          checkboxRowStyle={checkboxRowStyle}
-        />
-      )}
+      <TccPanel tcc={tcc} onOpenSystemSettings={onOpenSystemSettings} />
     </DesktopDialog>
   );
 }
